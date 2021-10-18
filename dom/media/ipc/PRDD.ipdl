@@ -11,11 +11,18 @@ include protocol PProfiler;
 include protocol PRemoteDecoderManager;
 include protocol PVideoBridge;
 
+#if defined(MOZ_SANDBOX) && defined(MOZ_DEBUG) && defined(ENABLE_TESTS)
+include protocol PSandboxTesting;
+#endif
+
 using mozilla::dom::NativeThreadId from "mozilla/dom/NativeThreadId.h";
-using moveonly mozilla::UntrustedModulesData from "mozilla/UntrustedModulesData.h";
-using moveonly mozilla::ModulePaths from "mozilla/UntrustedModulesData.h";
-using moveonly mozilla::ModulesMapResult from "mozilla/UntrustedModulesData.h";
 using mozilla::PDMFactory::MediaCodecsSupported from "PDMFactory.h";
+
+#if defined(XP_WIN)
+[MoveOnly] using mozilla::UntrustedModulesData from "mozilla/UntrustedModulesData.h";
+[MoveOnly] using mozilla::ModulePaths from "mozilla/UntrustedModulesData.h";
+[MoveOnly] using mozilla::ModulesMapResult from "mozilla/UntrustedModulesData.h";
+#endif  // defined(XP_WIN)
 
 namespace mozilla {
 
@@ -49,7 +56,13 @@ parent:
                         bool createHardwareDevice,
                         ContentDeviceData contentDeviceData);
 
+#if defined(XP_WIN)
   async GetUntrustedModulesData() returns (UntrustedModulesData? data);
+#endif  // defined(XP_WIN)
+
+#if defined(MOZ_SANDBOX) && defined(MOZ_DEBUG) && defined(ENABLE_TESTS)
+  async InitSandboxTesting(Endpoint<PSandboxTestingChild> aEndpoint);
+#endif
 
 child:
 
@@ -57,8 +70,10 @@ child:
 
   async AddMemoryReport(MemoryReport aReport);
 
+#if defined(XP_WIN)
   async GetModulesTrust(ModulePaths aModPaths, bool aRunAtNormalPriority)
       returns (ModulesMapResult? modMapResult);
+#endif  // defined(XP_WIN)
 
   // Update the cached list of codec supported following a check in the
   // RDD parent.

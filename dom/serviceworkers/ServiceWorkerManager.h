@@ -76,8 +76,7 @@ class ServiceWorkerUpdateFinishCallback {
  * installation, querying and event dispatch of ServiceWorkers for all the
  * origins in the process.
  *
- * NOTE: the following documentation is a WIP and only applies with
- * dom.serviceWorkers.parent_intercept=true:
+ * NOTE: the following documentation is a WIP:
  *
  * The ServiceWorkerManager (SWM) is a main-thread, parent-process singleton
  * that encapsulates the browser-global state of service workers. This state
@@ -140,13 +139,6 @@ class ServiceWorkerManager final : public nsIServiceWorkerManager,
                           const nsACString& aScope,
                           ServiceWorkerUpdateFinishCallback* aCallback);
 
-  void PropagateSoftUpdate(const OriginAttributes& aOriginAttributes,
-                           const nsAString& aScope);
-
-  void Remove(const nsACString& aHost);
-
-  void RemoveAll();
-
   RefPtr<ServiceWorkerRegistrationPromise> Register(
       const ClientInfo& aClientInfo, const nsACString& aScopeURL,
       const nsACString& aScriptURL,
@@ -167,7 +159,9 @@ class ServiceWorkerManager final : public nsIServiceWorkerManager,
 
   already_AddRefed<ServiceWorkerRegistrationInfo> CreateNewRegistration(
       const nsCString& aScope, nsIPrincipal* aPrincipal,
-      ServiceWorkerUpdateViaCache aUpdateViaCache);
+      ServiceWorkerUpdateViaCache aUpdateViaCache,
+      IPCNavigationPreloadState aNavigationPreloadState =
+          IPCNavigationPreloadState(false, "true"_ns));
 
   void RemoveRegistration(ServiceWorkerRegistrationInfo* aRegistration);
 
@@ -226,9 +220,6 @@ class ServiceWorkerManager final : public nsIServiceWorkerManager,
       const ClientInfo& aClientInfo,
       const ServiceWorkerDescriptor& aServiceWorker);
 
-  void SetSkipWaitingFlag(nsIPrincipal* aPrincipal, const nsCString& aScope,
-                          uint64_t aServiceWorkerID);
-
   static already_AddRefed<ServiceWorkerManager> GetInstance();
 
   void LoadRegistration(const ServiceWorkerRegistrationData& aRegistration);
@@ -246,8 +237,6 @@ class ServiceWorkerManager final : public nsIServiceWorkerManager,
       const nsACString& aOriginAttributes, const nsACString& aScope,
       const nsAString& aMessageName,
       RefPtr<ServiceWorkerCloneData>&& aMessageData);
-
-  nsresult NotifyUnregister(nsIPrincipal* aPrincipal, const nsAString& aScope);
 
   void WorkerIsIdle(ServiceWorkerInfo* aWorker);
 
@@ -267,6 +256,11 @@ class ServiceWorkerManager final : public nsIServiceWorkerManager,
   nsresult GetClientRegistration(
       const ClientInfo& aClientInfo,
       ServiceWorkerRegistrationInfo** aRegistrationInfo);
+
+  int32_t GetPrincipalQuotaUsageCheckCount(nsIPrincipal* aPrincipal);
+
+  void CheckPrincipalQuotaUsage(nsIPrincipal* aPrincipal,
+                                const nsACString& aScope);
 
   // Returns the shutdown state ID (may be an invalid ID if an
   // nsIAsyncShutdownBlocker is not used).
@@ -362,6 +356,9 @@ class ServiceWorkerManager final : public nsIServiceWorkerManager,
       nsIServiceWorkerRegistrationInfo* aRegistration);
 
   void NotifyListenersOnUnregister(
+      nsIServiceWorkerRegistrationInfo* aRegistration);
+
+  void NotifyListenersOnQuotaUsageCheckFinish(
       nsIServiceWorkerRegistrationInfo* aRegistration);
 
   void ScheduleUpdateTimer(nsIPrincipal* aPrincipal, const nsACString& aScope);

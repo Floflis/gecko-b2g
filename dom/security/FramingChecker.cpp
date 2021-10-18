@@ -190,12 +190,6 @@ bool FramingChecker::CheckFrameOptions(nsIChannel* aChannel,
     return true;
   }
 
-  // xfo checks are ignored in case CSP frame-ancestors is present,
-  // if so, there is nothing to do here.
-  if (ShouldIgnoreFrameOptions(aChannel, aCsp)) {
-    return true;
-  }
-
   nsCOMPtr<nsIHttpChannel> httpChannel;
   nsresult rv = nsContentSecurityUtils::GetHttpChannelFromPotentialMultiPart(
       aChannel, getter_AddRefs(httpChannel));
@@ -212,7 +206,9 @@ bool FramingChecker::CheckFrameOptions(nsIChannel* aChannel,
   // ignore XFO checks on channels that will be redirected
   uint32_t responseStatus;
   rv = httpChannel->GetResponseStatus(&responseStatus);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
+  // GetResponseStatus returning failure is expected in several situations, so
+  // do not warn if it fails.
+  if (NS_FAILED(rv)) {
     return true;
   }
   if (mozilla::net::nsHttpChannel::IsRedirectStatus(responseStatus)) {
@@ -226,6 +222,12 @@ bool FramingChecker::CheckFrameOptions(nsIChannel* aChannel,
 
   // if no header value, there's nothing to do.
   if (xfoHeaderValue.IsEmpty()) {
+    return true;
+  }
+
+  // xfo checks are ignored in case CSP frame-ancestors is present,
+  // if so, there is nothing to do here.
+  if (ShouldIgnoreFrameOptions(aChannel, aCsp)) {
     return true;
   }
 

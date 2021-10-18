@@ -4,13 +4,15 @@
 
 "use strict";
 
+/* globals Services */
+
+const { OS } = ChromeUtils.import("resource://gre/modules/osfile.jsm");
 const { E10SUtils } = ChromeUtils.import(
   "resource://gre/modules/E10SUtils.jsm"
 );
 const { Preferences } = ChromeUtils.import(
   "resource://gre/modules/Preferences.jsm"
 );
-const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 
 function linkColorFrameScript() {
   addMessageListener("HistoryDelegateTest:GetLinkColor", function onMessage(
@@ -56,6 +58,12 @@ this.test = class extends ExtensionAPI {
       },
       allFrames: true,
     });
+    ChromeUtils.registerProcessActor("TestSupportProcess", {
+      child: {
+        moduleURI:
+          "resource://android/assets/web_extensions/test-support/TestSupportProcessChild.jsm",
+      },
+    });
   }
 
   onShutdown(isAppShutdown) {
@@ -63,6 +71,7 @@ this.test = class extends ExtensionAPI {
       return;
     }
     ChromeUtils.unregisterWindowActor("TestSupport");
+    ChromeUtils.unregisterProcessActor("TestSupportProcess");
   }
 
   getAPI(context) {
@@ -140,15 +149,37 @@ this.test = class extends ExtensionAPI {
           return pids[0];
         },
 
+        async getAllBrowserPids() {
+          const pids = [];
+          const processes = ChromeUtils.getAllDOMProcesses();
+          for (const process of processes) {
+            if (process.remoteType && process.remoteType.startsWith("web")) {
+              pids.push(process.osPid);
+            }
+          }
+          return pids;
+        },
+
+        async killContentProcess(pid) {
+          const procs = ChromeUtils.getAllDOMProcesses();
+          for (const proc of procs) {
+            if (pid === proc.osPid) {
+              proc
+                .getActor("TestSupportProcess")
+                .sendAsyncMessage("KillContentProcess");
+            }
+          }
+        },
+
         async addHistogram(id, value) {
           return Services.telemetry.getHistogramById(id).add(value);
         },
 
-        removeCertOverride(host, port) {
+        removeAllCertOverrides() {
           const overrideService = Cc[
             "@mozilla.org/security/certoverride;1"
           ].getService(Ci.nsICertOverrideService);
-          overrideService.clearValidityOverride(host, port);
+          overrideService.clearAllOverrides();
         },
 
         async setScalar(id, value) {
@@ -185,6 +216,10 @@ this.test = class extends ExtensionAPI {
           return tab.browser.docShellIsActive;
         },
 
+        async getProfilePath() {
+          return OS.Constants.Path.profileDir;
+        },
+
         async flushApzRepaints(tabId) {
           const tab = context.extension.tabManager.get(tabId);
           const { browsingContext } = tab.browser;
@@ -198,6 +233,15 @@ this.test = class extends ExtensionAPI {
           await browsingContext.currentWindowGlobal
             .getActor("TestSupport")
             .sendQuery("FlushApzRepaints");
+        },
+
+        async promiseAllPaintsDone(tabId) {
+          const tab = context.extension.tabManager.get(tabId);
+          const { browsingContext } = tab.browser;
+
+          await browsingContext.currentWindowGlobal
+            .getActor("TestSupport")
+            .sendQuery("PromiseAllPaintsDone");
         },
       },
     };

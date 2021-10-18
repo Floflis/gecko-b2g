@@ -10,7 +10,9 @@
 #include "jsfriendapi.h"
 #include "js/Array.h"  // JS::IsArrayObject
 #include "js/ArrayBuffer.h"
+#include "js/Exception.h"
 #include "js/JSON.h"
+#include "js/PropertyAndElement.h"  // JS_GetProperty, JS_SetProperty
 #include "js/TracingAPI.h"
 #include "xpcpublic.h"
 
@@ -21,7 +23,6 @@
 #include "mozilla/LinkedList.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/ResultExtensions.h"
-#include "mozilla/Services.h"
 #include "mozilla/URLPreloader.h"
 #include "mozilla/Unused.h"
 #include "mozilla/ErrorResult.h"
@@ -226,7 +227,7 @@ static bool ParseJSON(JSContext* cx, nsACString& jsonData,
 }
 
 static Result<nsCOMPtr<nsIZipReaderCache>, nsresult> GetJarCache() {
-  nsCOMPtr<nsIIOService> ios = services::GetIOService();
+  nsCOMPtr<nsIIOService> ios = components::IO::Service();
   NS_ENSURE_TRUE(ios, Err(NS_ERROR_FAILURE));
 
   nsCOMPtr<nsIProtocolHandler> jarProto;
@@ -576,9 +577,11 @@ nsresult AddonManagerStartup::DecodeBlob(JS::HandleValue value, JSContext* cx,
     auto obj = &value.toObject();
     bool isShared;
 
+    size_t len = JS::GetArrayBufferByteLength(obj);
+    NS_ENSURE_TRUE(len <= INT32_MAX, NS_ERROR_INVALID_ARG);
     nsDependentCSubstring lz4(
         reinterpret_cast<char*>(JS::GetArrayBufferData(obj, &isShared, nogc)),
-        JS::GetArrayBufferByteLength(obj));
+        uint32_t(len));
 
     MOZ_TRY_VAR(data, DecodeLZ4(lz4, STRUCTURED_CLONE_MAGIC));
   }

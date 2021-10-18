@@ -35,16 +35,10 @@ const MODEM_RESTART_TIMEOUT_MS = 15000; // 15 seconds
 
 const PDU_HEX_OCTET_SIZE = 2;
 
-//TODO: Find better place
 const EARTH_RADIUS_METER = 6371 * 1000;
-const GEO_FENCING_MAXIMUM_WAIT_TIME_NOT_SET = 255;
 const GEO_FENCING_MAXIMUM_WAIT_TIME = 0x01;
 const GEO_FENCING_POLYGON = 0x02;
 const GEO_FENCING_CIRCLE = 0x03;
-
-const GEOMETRY_TYPE_UNKNOW = 0;
-const GEOMETRY_TYPE_POLYGON = 1;
-const GEOMETRY_TYPE_CIRCLE = 2;
 
 var RILQUIRKS_CALLSTATE_EXTRA_UINT32;
 var RILQUIRKS_REQUEST_USE_DIAL_EMERGENCY_CALL;
@@ -87,13 +81,15 @@ function updateDebugFlag() {
 updateDebugFlag();
 
 //TODO: Find better place
-function LatLng(alat, alng) {
+function LatLng(alat, alng, aAccuracyInMeters = 0) {
   this.lat = alat;
   this.lng = alng;
+  this.accuracyInMeters = aAccuracyInMeters;
 }
 LatLng.prototype = {
   lat: 0,
   lng: 0,
+  accuracyInMeters: 0,
 
   toRadians(aDegree) {
     return aDegree * (Math.PI / 180);
@@ -115,7 +111,7 @@ LatLng.prototype = {
 function Geometry() {}
 Geometry.prototype = {
   type: GEOMETRY_TYPE_UNKNOW,
-  contains(aLatLng) {
+  contains(aLatLng, _aThresholdInMeters = 0) {
     if (DEBUG) {
       debug("Non-implemented geometry method");
     }
@@ -130,10 +126,57 @@ Point.prototype = {
   subtract(aPoint) {
     return new Point(this.x - aPoint.x, this.y - aPoint.y);
   },
+
+  distance(aPoint) {
+    return Math.sqrt(Math.pow(this.x - aPoint.x, 2) + Math.pow(this.y - aPoint.y, 2));
+  },
+
+  equals(aPoint) {
+    if (this == aPoint){
+      return true;
+    }
+    return (this.x == aPoint.x && this.y == aPoint.y);
+  },
+};
+
+function LineSegment(aPointA, aPointB) {
+  this.pointA = aPointA;
+  this.pointB = aPointB;
+}
+LineSegment.prototype = {
+  length() {
+    return this.pointA.distance(this.pointB);
+  },
+
+  distance(aPoint) {
+    if (this.pointA.equals(this.pointB)) {
+      return aPoint.distance(this.pointA);
+    }
+
+    let sub1 = aPoint.subtract(this.pointA);
+    let sub2 = this.pointB.subtract(this.pointA);
+    let dot = sub1.x * sub2.x + sub1.y * sub2.y;
+
+    let magnitude = dot / (Math.pow(this.length(), 2));
+
+    if (magnitude > 1.0) {
+      magnitude = 1.0;
+    } else if (magnitude < 0.0) {
+      magnitude = 0.0;
+    }
+
+    let projectX = this.pointA.x + ((this.pointB.x - this.pointA.x) * magnitude);
+    let projectY = this.pointA.y + ((this.pointB.y - this.pointA.y) * magnitude);
+
+    return aPoint.distance(new Point(projectX, projectY));
+    },
 };
 
 function Polygon(aLatLngs) {
-  this._vertices = aLatLngs;
+  this._vertices = [];
+  this._scaledVertices = [];
+  aLatLngs.forEach(latlng => {this._vertices.push(new LatLng(latlng.lat, latlng.lng));});
+  this.type = GEOMETRY_TYPE_POLYGON;
 
   // Find the point with smallest longitude as the mOrigin point.
   let idx = 0;
@@ -177,12 +220,45 @@ Polygon.prototype = {
     return aPointA.x * aPointB.y - aPointA.y * aPointB.x;
   },
 
+  _convertToDistanceFromOrigin(aLatLng) {
+    let x = new LatLng(aLatLng.lat, _origin.lng).distance(new LatLng(_origin.lat, _origin.lng));
+    let y = new LatLng(_origin.lat, aLatLng.lng).distance(new LatLng(_origin.lat, _origin.lng));
+
+    x = aLatLng.lat > _origin.lat ? x : -x;
+    y = aLatLng.lng > _origin.lng ? y : -y;
+    return new Point(x,y);
+  },
+
+  distance(aLatLng) {
+    let minDistance = Number.MAX_VALUE;
+    let verticesLength = this._vertices.length;
+
+    for (let i = 0; i < verticesLength; i++) {
+      let verticeA = this._vertices[i];
+      let verticeB = this._vertices[(i+1) % verticesLength];
+
+      let pointSA = _convertToDistanceFromOrigin(verticeA);
+      let pointSB = _convertToDistanceFromOrigin(verticeB);
+      let pointSP = _convertToDistanceFromOrigin(aLatLng);
+
+      let line = new LineSegment(pointSA, pointSB);
+      let distance = line.distance(pointSP);
+
+      minDistance = Math.min(distance, minDistance);
+    }
+      return minDistance;
+  },
+
   /**
    * Check if the given point is inside the polygon.
    * Winding Number Algorithm.
    * The winding number would be zero if the point inside the polygon.
    */
-  contains(aLatLng) {
+  contains(aLatLng, aThresholdInMeters = 0) {
+    if(aThresholdInMeters > 0) {
+      //TODO: Handle accuracy > threshold
+      return this.distance(aLatLng) <= aThresholdInMeters;
+    }
     let scaledPoint = this._convertAndScaleLatLng(aLatLng);
 
     let verticesLength = this._scaledVertices.length;
@@ -223,8 +299,9 @@ Polygon.prototype = {
 };
 
 function Circle(aCenter, aRadiusInMeters) {
-  this._center = aCenter;
+  this._center = new LatLng(aCenter.lat, aCenter.lng);
   this._radius = aRadiusInMeters;
+  this.type = GEOMETRY_TYPE_CIRCLE;
 }
 Circle.prototype = {
   __proto__: Geometry.prototype,
@@ -232,9 +309,11 @@ Circle.prototype = {
   _center: null,
   _radius: 0,
 
-  contains(aLatLng) {
-    return this._center.distance(aLatLng) <= this._radius;
+  contains(aLatLng, aThresholdInMeters = 0) {
+    //TODO: Handle accuracy > threshold
+    return this._center.distance(aLatLng) <= (this._radius + aThresholdInMeters);
   },
+
 };
 
 function Context(aRadioInterfcae) {
@@ -2973,6 +3052,10 @@ GsmPDUHelperObject.prototype = {
    */
   readCbMessageIdentifier(msg) {
     msg.messageId = (this.readHexOctet() << 8) | this.readHexOctet();
+    if (DEBUG) {
+      this.context.debug("readCbMessageIdentifier messageId: " + msg.messageId);
+    }
+
   },
 
   /**
@@ -3204,16 +3287,20 @@ GsmPDUHelperObject.prototype = {
    */
   readWacData(msg) {
     let waePduLength = this.getReadAvailable(); // nibbles
-    let readWACLatLng = function() {
+    let readWACLatLng = () => {
       // lat: 22 bist, lng: 22 bits
       let wacLat = (this.readHexOctet() << 14) | (this.readHexOctet() << 6);
       let thirdByte = this.readHexOctet();
       wacLat = wacLat | (thirdByte >> 2);
       let wacLng =
-        ((thirdByte & 0xc0) << 20) |
+        ((thirdByte & 0x03) << 20) |
         (this.readHexOctet() << 12) |
         (this.readHexOctet() << 4) |
         this.readHexNibble();
+
+      if (DEBUG) {
+        this.context.debug("readWACLatLng wacLng: " + wacLng + " wacLat: " + wacLat);
+      }
 
       // latitude = wacLatitude * 180 / 2^22 - 90
       // longitude = wacLongitude * 360 / 2^22 -180
@@ -3224,6 +3311,13 @@ GsmPDUHelperObject.prototype = {
     };
 
     let wacDataLength = this.readHexOctet() | (this.readHexOctet() << 8);
+    if (DEBUG) {
+      this.context.debug("readWacData wacDataLength: " + wacDataLength);
+    }
+    if (DEBUG) {
+      this.context.debug("readWacData pdu: " + this.pdu);
+    }
+
     if (wacDataLength > this.getReadAvailable() / PDU_HEX_OCTET_SIZE) {
       // Seek back as no validate WAC data
       this.seekIncoming(-2 * PDU_HEX_OCTET_SIZE);
@@ -3236,18 +3330,31 @@ GsmPDUHelperObject.prototype = {
         // Type: 4bits
         // Length: 10 bits and skip 2 remained bits
         let geoType = this.readHexNibble();
+        if (DEBUG) {
+          this.context.debug("readWacData geoType: " + geoType);
+        }
+
         let geoLength =
           (this.readHexNibble() << 6) | (this.readHexOctet() >> 2);
+        if (DEBUG) {
+          this.context.debug("readWacData geoLength: " + geoLength);
+        }
         remain = remain - geoLength;
         switch (geoType) {
           case GEO_FENCING_MAXIMUM_WAIT_TIME:
             maxWaitTimeSec = this.readHexOctet();
+            if (DEBUG) {
+              this.context.debug("maxWaitTimeSec: " + maxWaitTimeSec);
+            }
             break;
           case GEO_FENCING_POLYGON:
             let latLngs = [];
             // Each coordinate is represented by 44 bits integer.
             // ATIS-0700041 5.2.4 Coordinate coding
-            let n = ((geoLength - 2) * 8) / 44;
+            let n = Math.floor(((geoLength - 2) * 8) / 44);
+            if (DEBUG) {
+              this.context.debug("readWacData n: " + n);
+            }
             for (let i = 0; i < n; i++) {
               latLngs.push(readWACLatLng());
             }
@@ -3272,12 +3379,16 @@ GsmPDUHelperObject.prototype = {
             geo.push(new Circle(center, radius));
             break;
           default:
-            throw "Unsupported geoType" + geoType;
+            throw "Unsupported geoType " + geoType;
             break;
         }
       }
       msg.geometries = geo;
       msg.maximumWaitingTimeSec = maxWaitTimeSec;
+
+      if (DEBUG) {
+        this.context.debug("readWacData done msg: " + JSON.stringify(msg));
+      }
 
       // Seek back to beginning of WAC data
       let remainPduLength = this.getReadAvailable();
@@ -3321,7 +3432,13 @@ GsmPDUHelperObject.prototype = {
    * @see 3GPP TS 23.041 section 9.4.2.2.5
    */
   readUmtsCbData(msg) {
+    if (DEBUG) {
+      this.context.debug("readUmtsCbData msg: " + JSON.stringify(msg));
+    }
     let numOfPages = this.readHexOctet();
+    if (DEBUG) {
+      this.context.debug("readUmtsCbData numOfPages: " + numOfPages);
+    }
     if (numOfPages < 0 || numOfPages > 15) {
       throw new Error("Invalid numOfPages: " + numOfPages);
     }
@@ -3353,6 +3470,9 @@ GsmPDUHelperObject.prototype = {
     for (let i = 0; i < numOfPages; i++) {
       this.seekIncoming(CB_MSG_PAGE_INFO_SIZE * PDU_HEX_OCTET_SIZE);
       length = this.readHexOctet();
+      if (DEBUG) {
+        this.context.debug("readUmtsCbData page length: " +length);
+      }
       totalLength += length;
       pageLengths.push(length);
     }
@@ -3705,9 +3825,7 @@ ICCRecordHelperObject.prototype = {
         //this.context.RuimRecordHelper.fetchRuimRecords();
         break;
     }
-    //Cameron mark first.
-    //console.log("Cameron, fetchICCRecords fetchISimRecords");
-    //this.context.ISimRecordHelper.fetchISimRecords();
+    this.context.ISimRecordHelper.fetchISimRecords();
   },
 
   /**
@@ -4487,6 +4605,64 @@ SimRecordHelperObject.prototype = {
         this.readSST();
       }
     );
+  },
+
+  // Sim refresh file updated.
+  handleFileUpdate(aEfId) {
+    switch (aEfId) {
+      case ICC_EF_MSISDN:
+        if (DEBUG) this.context.debug("File refresh for EF_MSISDN.");
+        if (ICCUtilsHelper.isICCServiceAvailable("MSISDN")) {
+          if (DEBUG) {
+            this.context.debug("MSISDN: MSISDN is available");
+          }
+          this.readMSISDN();
+        } else if (DEBUG) {
+          this.context.debug("MSISDN: MSISDN service is not available");
+        }
+        break;
+      case ICC_EF_AD:
+        if (DEBUG) this.context.debug("File refresh for EF_AD.");
+        this.readAD();
+        break;
+      case ICC_EF_MBDN:
+        if (DEBUG) this.context.debug("File refresh for EF_MBDN.");
+        if (ICCUtilsHelper.isICCServiceAvailable("MDN")) {
+          if (DEBUG) {
+            this.context.debug("MDN: MDN available.");
+          }
+          this.readMBDN();
+        } else {
+          if (DEBUG) {
+            this.context.debug("MDN: MDN service is not available");
+          }
+
+          if (ICCUtilsHelper.isCphsServiceAvailable("MBN")) {
+            // read CPHS_MBN in advance if MBDN is not available.
+            this.readCphsMBN();
+          } else if (DEBUG) {
+            this.context.debug("CPHS_MBN: CPHS_MBN service is not available");
+          }
+        }
+        break;
+      case ICC_EF_SPDI:
+        if (DEBUG) this.context.debug("File refresh for EF_SPDI.");
+        if (ICCUtilsHelper.isICCServiceAvailable("SPDI")) {
+          if (DEBUG) {
+            this.context.debug("SPDI: SPDI available.");
+          }
+          this.readSPDI();
+        } else if (DEBUG) {
+          this.context.debug("SPDI: SPDI service is not available");
+        }
+        break;
+      default:
+        // No one knew how to handle this particular file, so to be safe just
+        // fetch all records.
+        if (DEBUG) this.context.debug("SIM Refresh for all.");
+        this.fetchSimRecords();
+        break;
+    }
   },
 
   /**
@@ -6030,36 +6206,45 @@ ISimRecordHelperObject.prototype = {
     this.readIMPU();
   },
 
+  // Sim refresh file updated.
+  handleFileUpdate(aEfId) {
+    switch (aEfId) {
+      case ICC_EF_ISIM_IMPI:
+        if (DEBUG) this.context.debug("File refresh for EF_ISIM_IMPI.");
+        this.readIMPI();
+        break;
+      case ICC_EF_ISIM_IMPU:
+        if (DEBUG) this.context.debug("File refresh for ISIM_IMPU.");
+        this.readIMPU();
+        break;
+      default:
+        // No one knew how to handle this particular file, so to be safe just
+        // fetch all records.
+        if (DEBUG) this.context.debug("ISIM Refresh for all.");
+        this.fetchISimRecords();
+        break;
+    }
+  },
+
   readIMPI() {
     let ICCFileHelper = this.context.ICCFileHelper;
     let ICCIOHelper = this.context.ICCIOHelper;
 
-    function callback() {
-      let Buf = this.context.Buf;
-      let strLen = Buf.readInt32();
-      let octetLen = strLen / PDU_HEX_OCTET_SIZE;
-      let readLen = 0;
-
+    function callback(options) {
       let GsmPDUHelper = this.context.GsmPDUHelper;
+      GsmPDUHelper.initWith(options.simResponse);
       let tlvTag = GsmPDUHelper.readHexOctet();
       let tlvLen = GsmPDUHelper.readHexOctet();
-      readLen += 2; // For tag and length fields.
       if (tlvTag === ICC_ISIM_NAI_TLV_DATA_OBJECT_TAG) {
         let str = "";
         for (let i = 0; i < tlvLen; i++) {
           str += String.fromCharCode(GsmPDUHelper.readHexOctet());
         }
-        readLen += tlvLen;
         if (DEBUG) {
           this.context.debug("impi : " + str);
         }
         this.impi = str;
       }
-
-      // Consume unread octets.
-      Buf.seekIncoming((octetLen - readLen) * Buf.PDU_HEX_OCTET_SIZE);
-      Buf.readStringDelimiter(strLen);
-
       this._handleIsimInfoChange();
     }
 
@@ -6078,22 +6263,18 @@ ISimRecordHelperObject.prototype = {
     let ICCIOHelper = this.context.ICCIOHelper;
 
     function callback(options) {
-      let Buf = this.context.Buf;
       let GsmPDUHelper = this.context.GsmPDUHelper;
+      GsmPDUHelper.initWith(options.simResponse);
+
       let ICCIOHelper = this.context.ICCIOHelper;
-      let strLen = Buf.readInt32();
-      let octetLen = strLen / PDU_HEX_OCTET_SIZE;
-      let readLen = 0;
 
       let tlvTag = GsmPDUHelper.readHexOctet();
       let tlvLen = GsmPDUHelper.readHexOctet();
-      readLen += 2; // For tag and length fields.
       if (tlvTag === ICC_ISIM_URI_TLV_DATA_OBJECTTAG) {
         let str = "";
         for (let i = 0; i < tlvLen; i++) {
           str += String.fromCharCode(GsmPDUHelper.readHexOctet());
         }
-        readLen += tlvLen;
         if (str.length) {
           if (DEBUG) {
             this.context.debug("impu : " + str);
@@ -6101,10 +6282,6 @@ ISimRecordHelperObject.prototype = {
           this.impus.push(str);
         }
       }
-
-      // Consume unread octets.
-      Buf.seekIncoming((octetLen - readLen) * Buf.PDU_HEX_OCTET_SIZE);
-      Buf.readStringDelimiter(strLen);
 
       if (options.p1 < options.totalRecords) {
         ICCIOHelper.loadNextRecord(options);

@@ -8,7 +8,7 @@ def _assign_slots(obj, args):
 
 
 class Longhand(object):
-    __slots__ = ["name", "method", "id", "flags", "pref"]
+    __slots__ = ["name", "method", "id", "rules", "flags", "pref"]
 
     def __init__(self, *args):
         _assign_slots(self, args)
@@ -19,7 +19,7 @@ class Longhand(object):
 
 
 class Shorthand(object):
-    __slots__ = ["name", "method", "id", "flags", "pref", "subprops"]
+    __slots__ = ["name", "method", "id", "rules", "flags", "pref", "subprops"]
 
     def __init__(self, *args):
         _assign_slots(self, args)
@@ -30,7 +30,7 @@ class Shorthand(object):
 
 
 class Alias(object):
-    __slots__ = ["name", "method", "alias_id", "prop_id", "flags", "pref"]
+    __slots__ = ["name", "method", "alias_id", "prop_id", "rules", "flags", "pref"]
 
     def __init__(self, *args):
         _assign_slots(self, args)
@@ -44,14 +44,7 @@ class Alias(object):
 def is_internal(prop):
     # A property which is not controlled by pref and not enabled in
     # content by default is an internal property.
-    if not prop.gecko_pref and not prop.enabled_in_content():
-        return True
-    # There are some special cases we may want to remove eventually.
-    OTHER_INTERNALS = [
-        "-moz-context-properties",
-        "-moz-control-character-visibility",
-    ]
-    return prop.name in OTHER_INTERNALS
+    return not prop.gecko_pref and not prop.enabled_in_content()
 
 def method(prop):
     if prop.name == "float":
@@ -117,11 +110,16 @@ def serialized_by_servo(prop):
     return prop.name not in LONGHANDS_NOT_SERIALIZED_WITH_SERVO
 
 def exposed_on_getcs(prop):
+    if "Style" not in prop.rule_types_allowed_names():
+        return False
     if prop.type() == "longhand":
         return not is_internal(prop)
     # TODO: bug 137688 / https://github.com/w3c/csswg-drafts/issues/2529
     if prop.type() == "shorthand":
         return "SHORTHAND_IN_GETCS" in prop.flags
+
+def rules(prop):
+    return ", ".join('"{}"'.format(rule) for rule in prop.rule_types_allowed_names())
 
 def flags(prop):
     result = []
@@ -154,15 +152,15 @@ def sub_properties(prop):
 
 data = [
     % for prop in data.longhands:
-    Longhand("${prop.name}", "${method(prop)}", "${prop.ident}", [${flags(prop)}], ${pref(prop)}),
+    Longhand("${prop.name}", "${method(prop)}", "${prop.ident}", [${rules(prop)}], [${flags(prop)}], ${pref(prop)}),
     % endfor
 
     % for prop in data.shorthands:
-    Shorthand("${prop.name}", "${prop.camel_case}", "${prop.ident}", [${flags(prop)}], ${pref(prop)},
+    Shorthand("${prop.name}", "${prop.camel_case}", "${prop.ident}", [${rules(prop)}], [${flags(prop)}], ${pref(prop)},
               [${sub_properties(prop)}]),
     % endfor
 
     % for prop in data.all_aliases():
-    Alias("${prop.name}", "${prop.camel_case}", "${prop.ident}", "${prop.original.ident}", [], ${pref(prop)}),
+    Alias("${prop.name}", "${prop.camel_case}", "${prop.ident}", "${prop.original.ident}", [${rules(prop)}], [], ${pref(prop)}),
     % endfor
 ]

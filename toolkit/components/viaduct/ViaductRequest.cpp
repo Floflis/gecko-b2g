@@ -4,6 +4,7 @@
 
 #include "mozilla/ViaductRequest.h"
 
+#include "mozilla/ClearOnShutdown.h"
 #include "mozilla/ErrorNames.h"
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/ScopeExit.h"
@@ -96,6 +97,9 @@ ViaductByteBuffer ViaductRequest::MakeRequest(ViaductByteBuffer reqBuf) {
 
 nsresult ViaductRequest::LaunchRequest(
     appservices::httpconfig::protobuf::Request& request) {
+  if (PastShutdownPhase(ShutdownPhase::AppShutdownNetTeardown)) {
+    return NS_ERROR_FAILURE;
+  }
   nsCOMPtr<nsIURI> uri;
   nsresult rv = NS_NewURI(getter_AddRefs(uri), request.url().c_str());
   NS_ENSURE_SUCCESS(rv, rv);
@@ -211,7 +215,7 @@ ViaductRequest::~ViaductRequest() {
   NotifyMonitor();
 }
 
-NS_IMPL_ISUPPORTS(ViaductRequest, nsIStreamListener, nsITimerCallback,
+NS_IMPL_ISUPPORTS(ViaductRequest, nsIStreamListener, nsITimerCallback, nsINamed,
                   nsIChannelEventSink)
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -313,6 +317,15 @@ ViaductRequest::Notify(nsITimer* timer) {
     mChannel->Cancel(NS_ERROR_ABORT);
     mChannel = nullptr;
   }
+  return NS_OK;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// nsINamed implementation
+
+NS_IMETHODIMP
+ViaductRequest::GetName(nsACString& aName) {
+  aName.AssignLiteral("ViaductRequest");
   return NS_OK;
 }
 

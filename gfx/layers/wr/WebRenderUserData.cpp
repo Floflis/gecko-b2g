@@ -6,7 +6,6 @@
 
 #include "WebRenderUserData.h"
 
-#include "BasicLayers.h"
 #include "mozilla/layers/AnimationHelper.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
 #include "mozilla/layers/ImageClient.h"
@@ -88,7 +87,7 @@ WebRenderUserData::WebRenderUserData(RenderRootStateManager* aManager,
 
 WebRenderUserData::~WebRenderUserData() = default;
 
-void WebRenderUserData::RemoveFromTable() { mTable->RemoveEntry(this); }
+void WebRenderUserData::RemoveFromTable() { mTable->Remove(this); }
 
 WebRenderBridgeChild* WebRenderUserData::WrBridge() const {
   return mManager->WrBridge();
@@ -282,9 +281,38 @@ void WebRenderImageData::CreateImageClientIfNeeded() {
   }
 }
 
+WebRenderBlobImageData::WebRenderBlobImageData(RenderRootStateManager* aManager,
+                                               nsDisplayItem* aItem)
+    : WebRenderUserData(aManager, aItem) {}
+
+WebRenderBlobImageData::WebRenderBlobImageData(RenderRootStateManager* aManager,
+                                               uint32_t aDisplayItemKey,
+                                               nsIFrame* aFrame)
+    : WebRenderUserData(aManager, aDisplayItemKey, aFrame) {}
+
+Maybe<wr::BlobImageKey> WebRenderBlobImageData::UpdateImageKey(
+    ImageContainer* aContainer, wr::IpcResourceUpdateQueue& aResources) {
+  MOZ_ASSERT(aContainer);
+
+  if (mContainer != aContainer) {
+    mContainer = aContainer;
+  }
+
+  wr::BlobImageKey key = {};
+  nsresult rv =
+      SharedSurfacesChild::ShareBlob(aContainer, mManager, aResources, key);
+  if (NS_SUCCEEDED(rv)) {
+    mKey = Some(key);
+  } else {
+    mKey.reset();
+  }
+
+  return mKey;
+}
+
 WebRenderFallbackData::WebRenderFallbackData(RenderRootStateManager* aManager,
                                              nsDisplayItem* aItem)
-    : WebRenderUserData(aManager, aItem), mInvalid(false) {}
+    : WebRenderUserData(aManager, aItem), mOpacity(1.0f), mInvalid(false) {}
 
 WebRenderFallbackData::~WebRenderFallbackData() { ClearImageKey(); }
 
@@ -380,7 +408,7 @@ void WebRenderCanvasData::SetImageContainer(ImageContainer* aImageContainer) {
 
 ImageContainer* WebRenderCanvasData::GetImageContainer() {
   if (!mContainer) {
-    mContainer = LayerManager::CreateImageContainer();
+    mContainer = MakeAndAddRef<ImageContainer>();
   }
   return mContainer;
 }
@@ -422,8 +450,8 @@ WebRenderRemoteData::~WebRenderRemoteData() {
 }
 
 void DestroyWebRenderUserDataTable(WebRenderUserDataTable* aTable) {
-  for (auto iter = aTable->Iter(); !iter.Done(); iter.Next()) {
-    iter.UserData()->RemoveFromTable();
+  for (const auto& value : aTable->Values()) {
+    value->RemoveFromTable();
   }
   delete aTable;
 }

@@ -34,6 +34,8 @@ pub struct Timer<T> {
 
 impl<T> Timer<T> {
     /// Construct a new wheel at the given granularity, starting at the given time.
+    /// # Panics
+    /// When `capacity` is too large to fit in `u32` or `granularity` is zero.
     pub fn new(now: Instant, granularity: Duration, capacity: usize) -> Self {
         assert!(u32::try_from(capacity).is_ok());
         assert!(granularity.as_nanos() > 0);
@@ -89,7 +91,6 @@ impl<T> Timer<T> {
     }
 
     /// Slide forward in time by `n * self.granularity`.
-    #[allow(clippy::unknown_clippy_lints)] // Until we require rust 1.45.
     #[allow(clippy::cast_possible_truncation, clippy::reversed_empty_ranges)]
     // cast_possible_truncation is ok because we have an assertion guard.
     // reversed_empty_ranges is to avoid different types on the if/else.
@@ -108,6 +109,8 @@ impl<T> Timer<T> {
     }
 
     /// Asserts if the time given is in the past or too far in the future.
+    /// # Panics
+    /// When `time` is in the past relative to previous calls.
     pub fn add(&mut self, time: Instant, item: T) {
         assert!(time >= self.now);
         // Skip forward quickly if there is too large a gap.
@@ -115,7 +118,7 @@ impl<T> Timer<T> {
         if time >= (self.now + self.span() + short_span) {
             // Assert that there aren't any items.
             for i in &self.items {
-                assert!(i.is_empty());
+                debug_assert!(i.is_empty());
             }
             self.now = time - short_span;
             self.cursor = 0;
@@ -283,14 +286,13 @@ mod test {
         let v = 9;
         t.add(near_future, v);
         assert_eq!(near_future, t.next_time().expect("should return a value"));
-        let values: Vec<_> = t
-            .take_until(near_future - Duration::from_millis(1))
-            .collect();
-        assert!(values.is_empty());
-        let values: Vec<_> = t
+        assert_eq!(
+            t.take_until(near_future - Duration::from_millis(1)).count(),
+            0
+        );
+        assert!(t
             .take_until(near_future + Duration::from_millis(1))
-            .collect();
-        assert!(values.contains(&v));
+            .any(|x| x == v));
     }
 
     #[test]
@@ -300,8 +302,7 @@ mod test {
         let v = 9;
         t.add(future, v);
         assert_eq!(future, t.next_time().expect("should return a value"));
-        let values: Vec<_> = t.take_until(future).collect();
-        assert!(values.contains(&v));
+        assert!(t.take_until(future).any(|x| x == v));
     }
 
     #[test]
@@ -311,8 +312,7 @@ mod test {
         let v = 9;
         t.add(far_future, v);
         assert_eq!(far_future, t.next_time().expect("should return a value"));
-        let values: Vec<_> = t.take_until(far_future).collect();
-        assert!(values.contains(&v));
+        assert!(t.take_until(far_future).any(|x| x == v));
     }
 
     const TIMES: &[Duration] = &[
@@ -337,6 +337,7 @@ mod test {
     }
 
     #[test]
+    #[allow(clippy::needless_collect)] // false positive
     fn multiple_values() {
         let mut t = with_times();
         let values: Vec<_> = t.take_until(*NOW + *TIMES.iter().max().unwrap()).collect();
@@ -346,6 +347,7 @@ mod test {
     }
 
     #[test]
+    #[allow(clippy::needless_collect)] // false positive
     fn take_far_future() {
         let mut t = with_times();
         let values: Vec<_> = t.take_until(*NOW + Duration::from_secs(100)).collect();

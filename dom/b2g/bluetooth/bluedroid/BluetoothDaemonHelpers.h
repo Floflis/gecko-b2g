@@ -7,8 +7,8 @@
 #ifndef mozilla_dom_bluetooth_bluedroid_BluetoothDaemonHelpers_h
 #define mozilla_dom_bluetooth_bluedroid_BluetoothDaemonHelpers_h
 
-#include "BluetoothCommon.h"
 #include "mozilla/ArrayUtils.h"
+#include "mozilla/dom/bluetooth/BluetoothCommon.h"
 #include "mozilla/dom/bluetooth/BluetoothTypes.h"
 #include "mozilla/ipc/DaemonSocketPDU.h"
 #include "mozilla/ipc/DaemonSocketPDUHelpers.h"
@@ -75,6 +75,13 @@ struct BluetoothAvrcpEventParamPair {
         size = (sizeof(mParam.mIds[0]) + sizeof(mParam.mValues[0])) *
                mParam.mNumAttr;
         break;
+      case AVRCP_EVENT_AVAL_PLAYER_CHANGE:
+        /* no data to pack */
+        size = 0;
+        break;
+      case AVRCP_EVENT_ADDR_PLAYER_CHANGE:
+        size = sizeof(mParam.mPlayerId) + sizeof(mParam.mUidCounter);
+        break;
       default:
         size = 0;
         break;
@@ -124,6 +131,8 @@ nsresult Convert(uint8_t aIn, BluetoothHandsfreeVoiceRecognitionState& aOut);
 nsresult Convert(uint8_t aIn, BluetoothHandsfreeVolumeType& aOut);
 
 nsresult Convert(uint8_t aIn, BluetoothHandsfreeWbsConfig& aOut);
+
+nsresult Convert(uint8_t aIn, BluetoothHandsfreeHfIndType& aOut);
 
 nsresult Convert(uint8_t aIn, BluetoothBondState& aOut);
 
@@ -232,6 +241,9 @@ nsresult PackPDU(BluetoothAvrcpNotification aIn, DaemonSocketPDU& aPDU);
 nsresult PackPDU(BluetoothAvrcpPlayerAttribute aIn, DaemonSocketPDU& aPDU);
 
 nsresult PackPDU(BluetoothAvrcpStatus aIn, DaemonSocketPDU& aPDU);
+
+nsresult PackPDU(const nsTArray<BluetoothAvrcpItemPlayer>& aIn,
+                 DaemonSocketPDU& aPDU);
 
 nsresult PackPDU(const BluetoothConfigurationParameter& aIn,
                  DaemonSocketPDU& aPDU);
@@ -357,6 +369,8 @@ nsresult UnpackPDU(DaemonSocketPDU& aPDU,
 nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHandsfreeNRECState& aOut);
 
 nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHandsfreeWbsConfig& aOut);
+
+nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHandsfreeHfIndType& aOut);
 
 nsresult UnpackPDU(DaemonSocketPDU& aPDU,
                    BluetoothHandsfreeVoiceRecognitionState& aOut);

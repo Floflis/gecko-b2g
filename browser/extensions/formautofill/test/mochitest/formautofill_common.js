@@ -10,7 +10,7 @@ let defaultTextColor;
 let expectingPopup = null;
 
 const { FormAutofillUtils } = SpecialPowers.Cu.import(
-  "resource://formautofill/FormAutofillUtils.jsm"
+  "resource://autofill/FormAutofillUtils.jsm"
 );
 
 async function sleep(ms = 500, reason = "Intentionally wait for UI ready") {
@@ -93,13 +93,10 @@ function _getAdaptedProfile(profile) {
   return adaptedProfile;
 }
 
-// We could not get ManuallyManagedState of element now, so directly check if
-// filter and text color style are applied.
 async function checkFieldHighlighted(elem, expectedValue) {
   let isHighlightApplied;
   await SimpleTest.promiseWaitForCondition(function checkHighlight() {
-    const computedStyle = window.getComputedStyle(elem);
-    isHighlightApplied = computedStyle.getPropertyValue("filter") !== "none";
+    isHighlightApplied = elem.matches(":autofill");
     return isHighlightApplied === expectedValue;
   }, `Checking #${elem.id} highlight style`);
 
@@ -123,6 +120,18 @@ async function checkFieldPreview(elem, expectedValue) {
   is(isTextColorApplied, !!expectedValue, `Checking #${elem.id} preview style`);
 }
 
+async function checkFormFieldsStyle(profile, isPreviewing = true) {
+  const elems = document.querySelectorAll("input, select");
+
+  for (const elem of elems) {
+    const fillableValue = profile && profile[elem.id];
+    const previewValue = (isPreviewing && fillableValue) || "";
+
+    await checkFieldHighlighted(elem, !!fillableValue);
+    await checkFieldPreview(elem, previewValue);
+  }
+}
+
 function checkFieldValue(elem, expectedValue) {
   if (typeof elem === "string") {
     elem = document.querySelector(elem);
@@ -131,13 +140,8 @@ function checkFieldValue(elem, expectedValue) {
 }
 
 async function triggerAutofillAndCheckProfile(profile) {
-  const adaptedProfile = _getAdaptedProfile(profile);
+  let adaptedProfile = _getAdaptedProfile(profile);
   const promises = [];
-
-  await SpecialPowers.pushPrefEnv({
-    set: [["dom.input_events.beforeinput.enabled", true]],
-  });
-
   for (const [fieldName, value] of Object.entries(adaptedProfile)) {
     info(`triggerAutofillAndCheckProfile: ${fieldName}`);
     const element = document.getElementById(fieldName);

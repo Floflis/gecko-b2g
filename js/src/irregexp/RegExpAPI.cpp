@@ -44,7 +44,7 @@ using mozilla::Some;
 using frontend::DummyTokenStream;
 using frontend::TokenStreamAnyChars;
 
-using v8::internal::DisallowHeapAllocation;
+using v8::internal::DisallowGarbageCollection;
 using v8::internal::FlatStringReader;
 using v8::internal::HandleScope;
 using v8::internal::InputOutputData;
@@ -110,6 +110,10 @@ static uint32_t ErrorNumber(RegExpError err) {
       // and off in the middle of a regular expression. Unless it
       // becomes standardized, SM does not support this feature.
       MOZ_CRASH("Mode modifiers not supported");
+    case RegExpError::kNotLinear:
+      // V8 has an experimental non-backtracking engine. We do not
+      // support it yet.
+      MOZ_CRASH("Non-backtracking execution not supported");
     case RegExpError::kTooManyCaptures:
       return JSMSG_TOO_MANY_PARENS;
     case RegExpError::kInvalidCaptureGroupName:
@@ -278,7 +282,7 @@ static bool CheckPatternSyntaxImpl(JSContext* cx, FlatStringReader* pattern,
   Zone zone(allocScope.alloc());
 
   HandleScope handleScope(cx->isolate);
-  DisallowHeapAllocation no_gc;
+  DisallowGarbageCollection no_gc;
   return RegExpParser::VerifyRegExpSyntax(cx->isolate, &zone, pattern, flags,
                                           result, no_gc);
 }
@@ -380,7 +384,8 @@ class RegExpDepthCheck final : public v8::internal::RegExpVisitor {
   void* Visit##Kind(v8::internal::RegExp##Kind* node, void*) override { \
     uint8_t padding[FRAME_PADDING];                                     \
     dummy_ = padding; /* Prevent padding from being optimized away.*/   \
-    return (void*)CheckRecursionLimitDontReport(cx_);                   \
+    AutoCheckRecursionLimit recursion(cx_);                             \
+    return (void*)recursion.checkDontReport(cx_);                       \
   }
 
   LEAF_DEPTH(Assertion)
@@ -396,7 +401,8 @@ class RegExpDepthCheck final : public v8::internal::RegExpVisitor {
   void* Visit##Kind(v8::internal::RegExp##Kind* node, void*) override { \
     uint8_t padding[FRAME_PADDING];                                     \
     dummy_ = padding; /* Prevent padding from being optimized away.*/   \
-    if (!CheckRecursionLimitDontReport(cx_)) {                          \
+    AutoCheckRecursionLimit recursion(cx_);                             \
+    if (!recursion.checkDontReport(cx_)) {                              \
       return nullptr;                                                   \
     }                                                                   \
     return node->body()->Accept(this, nullptr);                         \
@@ -412,7 +418,8 @@ class RegExpDepthCheck final : public v8::internal::RegExpVisitor {
                          void*) override {
     uint8_t padding[FRAME_PADDING];
     dummy_ = padding; /* Prevent padding from being optimized away.*/
-    if (!CheckRecursionLimitDontReport(cx_)) {
+    AutoCheckRecursionLimit recursion(cx_);
+    if (!recursion.checkDontReport(cx_)) {
       return nullptr;
     }
     for (auto* child : *node->nodes()) {
@@ -426,7 +433,8 @@ class RegExpDepthCheck final : public v8::internal::RegExpVisitor {
                          void*) override {
     uint8_t padding[FRAME_PADDING];
     dummy_ = padding; /* Prevent padding from being optimized away.*/
-    if (!CheckRecursionLimitDontReport(cx_)) {
+    AutoCheckRecursionLimit recursion(cx_);
+    if (!recursion.checkDontReport(cx_)) {
       return nullptr;
     }
     for (auto* child : *node->alternatives()) {
@@ -452,12 +460,10 @@ enum class AssembleResult {
   OutOfMemory,
 };
 
-static MOZ_MUST_USE AssembleResult Assemble(JSContext* cx,
-                                            RegExpCompiler* compiler,
-                                            RegExpCompileData* data,
-                                            MutableHandleRegExpShared re,
-                                            HandleAtom pattern, Zone* zone,
-                                            bool useNativeCode, bool isLatin1) {
+[[nodiscard]] static AssembleResult Assemble(
+    JSContext* cx, RegExpCompiler* compiler, RegExpCompileData* data,
+    MutableHandleRegExpShared re, HandleAtom pattern, Zone* zone,
+    bool useNativeCode, bool isLatin1) {
   // Because we create a StackMacroAssembler, this function is not allowed
   // to GC. If needed, we allocate and throw errors in the caller.
   Maybe<jit::JitContext> jctx;
@@ -471,6 +477,12 @@ static MOZ_MUST_USE AssembleResult Assemble(JSContext* cx,
     // which needs a jit context.
     jctx.emplace(cx, nullptr);
     stack_masm.emplace();
+#ifdef DEBUG
+    // It would be much preferable to use `class AutoCreatedBy` here, but we
+    // may be operating without an assembler at all if `useNativeCode` is
+    // `false`, so there's no place to put such a call.
+    stack_masm.ref().pushCreator("Assemble() in RegExpAPI.cpp");
+#endif
     uint32_t num_capture_registers = re->pairCount() * 2;
     masm = MakeUnique<SMRegExpMacroAssembler>(cx, stack_masm.ref(), zone, mode,
                                               num_capture_registers);
@@ -478,6 +490,7 @@ static MOZ_MUST_USE AssembleResult Assemble(JSContext* cx,
     masm = MakeUnique<RegExpBytecodeGenerator>(cx->isolate, zone);
   }
   if (!masm) {
+    ReportOutOfMemory(cx);
     return AssembleResult::OutOfMemory;
   }
 
@@ -526,6 +539,14 @@ static MOZ_MUST_USE AssembleResult Assemble(JSContext* cx,
   V8HandleString wrappedPattern(v8::internal::String(pattern), cx->isolate);
   RegExpCompiler::CompilationResult result = compiler->Assemble(
       cx->isolate, masm_ptr, data->node, data->capture_count, wrappedPattern);
+
+  if (useNativeCode) {
+#ifdef DEBUG
+    // See comment referencing `pushCreator` above.
+    stack_masm.ref().popCreator();
+#endif
+  }
+
   if (!result.Succeeded()) {
     MOZ_ASSERT(result.error == RegExpError::kTooLarge);
     return AssembleResult::TooLarge;
@@ -544,6 +565,7 @@ static MOZ_MUST_USE AssembleResult Assemble(JSContext* cx,
         static_cast<SMRegExpMacroAssembler*>(masm.get())->tables();
     for (uint32_t i = 0; i < tables.length(); i++) {
       if (!re->addTable(std::move(tables[i]))) {
+        ReportOutOfMemory(cx);
         return AssembleResult::OutOfMemory;
       }
     }
@@ -650,7 +672,7 @@ bool CompilePattern(JSContext* cx, MutableHandleRegExpShared re,
       JS_ReportErrorASCII(cx, "regexp too big");
       return false;
     case AssembleResult::OutOfMemory:
-      ReportOutOfMemory(cx);
+      MOZ_ASSERT(cx->isThrowingOutOfMemory());
       return false;
     case AssembleResult::Success:
       break;
@@ -682,6 +704,8 @@ RegExpRunStatus ExecuteRaw(jit::JitCode* code, const CharT* chars,
 RegExpRunStatus Interpret(JSContext* cx, MutableHandleRegExpShared re,
                           HandleLinearString input, size_t startIndex,
                           VectorMatchPairs* matches) {
+  MOZ_ASSERT(re->getByteCode(input->hasLatin1Chars()));
+
   HandleScope handleScope(cx->isolate);
   V8HandleRegExp wrappedRegExp(v8::internal::JSRegExp(re), cx->isolate);
   V8HandleString wrappedInput(v8::internal::String(input), cx->isolate);
@@ -757,6 +781,19 @@ uint32_t CaseInsensitiveCompareUnicode(const char16_t* substring1,
   return SMRegExpMacroAssembler::CaseInsensitiveCompareUnicode(
       substring1, substring2, byteLength);
 }
+
+#ifdef DEBUG
+bool IsolateShouldSimulateInterrupt(Isolate* isolate) {
+  return isolate->shouldSimulateInterrupt_ != 0;
+}
+
+void IsolateSetShouldSimulateInterrupt(Isolate* isolate) {
+  isolate->shouldSimulateInterrupt_ = 1;
+}
+void IsolateClearShouldSimulateInterrupt(Isolate* isolate) {
+  isolate->shouldSimulateInterrupt_ = 0;
+}
+#endif
 
 }  // namespace irregexp
 }  // namespace js

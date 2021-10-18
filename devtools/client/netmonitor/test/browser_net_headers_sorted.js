@@ -12,7 +12,7 @@
  * order and not sorted.
  */
 add_task(async function() {
-  const { tab, monitor } = await initNetMonitor(SIMPLE_SJS, {
+  const { monitor } = await initNetMonitor(SIMPLE_SJS, {
     requestCount: 1,
   });
   info("Starting test... ");
@@ -22,7 +22,7 @@ add_task(async function() {
   store.dispatch(Actions.batchEnable(false));
 
   const wait = waitForNetworkEvents(monitor, 1);
-  tab.linkedBrowser.reload();
+  await reloadBrowser();
   await wait;
 
   // Verify request and response headers.
@@ -39,7 +39,7 @@ async function verifyHeaders(monitor) {
   info("Check if Request-Headers and Response-Headers are sorted");
 
   const wait = waitForDOM(document, ".headers-overview");
-  await EventUtils.sendMouseEvent(
+  EventUtils.sendMouseEvent(
     { type: "mousedown" },
     document.querySelectorAll(".request-list-item")[0]
   );

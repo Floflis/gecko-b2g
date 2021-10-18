@@ -125,13 +125,49 @@ void AudioSink::Shutdown() {
     mAudioStream->Shutdown();
     mAudioStream = nullptr;
   }
-  mProcessedQueue.Reset();
+  // Shutdown audio sink doesn't mean the playback is going to stop, so if we
+  // simply discard these data, then we will no longer be able to play them.
+  // Eg. we change to sink to capture-based sink that will need to continue play
+  // remaining data from the audio queue.
+  {
+    MonitorAutoLock mon(mMonitor);
+    while (mProcessedQueue.GetSize() > 0) {
+      RefPtr<AudioData> audio = mProcessedQueue.PopBack();
+      if (audio == mCurrentData) {
+        break;
+      }
+      mAudioQueue.PushFront(audio);
+    }
+    if (mCurrentData) {
+      uint32_t unplayedFrames = mCursor->Available();
+      // If we've consumed some partial content from the first audio data, then
+      // we have to adjust its data offset and frames number in order not to
+      // play the same content again.
+      if (unplayedFrames > 0 && unplayedFrames < mCurrentData->Frames()) {
+        const uint32_t orginalFrames = mCurrentData->Frames();
+        const uint32_t offsetFrames = mCurrentData->Frames() - unplayedFrames;
+        Unused << mCurrentData->SetTrimWindow(
+            {mCurrentData->mTime + FramesToTimeUnit(offsetFrames, mOutputRate),
+             mCurrentData->GetEndTime()});
+        SINK_LOG_V("After adjustment, audio frame from %u to %u", orginalFrames,
+                   mCurrentData->Frames());
+      }
+      mAudioQueue.PushFront(mCurrentData);
+    }
+    MOZ_ASSERT(mProcessedQueue.GetSize() == 0);
+  }
   mProcessedQueue.Finish();
 }
 
 void AudioSink::SetVolume(double aVolume) {
   if (mAudioStream) {
     mAudioStream->SetVolume(aVolume);
+  }
+}
+
+void AudioSink::SetStreamName(const nsAString& aStreamName) {
+  if (mAudioStream) {
+    mAudioStream->SetStreamName(aStreamName);
   }
 }
 
@@ -239,9 +275,9 @@ UniquePtr<AudioStream::Chunk> AudioSink::PopFrames(uint32_t aFrames) {
     // to incorrectly return true during the time interval betweeen the
     // when mProcessedQueue is read and mWritten is updated.
     needPopping = true;
-    mCurrentData = mProcessedQueue.PeekFront();
     {
       MonitorAutoLock mon(mMonitor);
+      mCurrentData = mProcessedQueue.PeekFront();
       mCursor = MakeUnique<AudioBufferCursor>(mCurrentData->Data(),
                                               mCurrentData->mChannels,
                                               mCurrentData->Frames());
@@ -257,15 +293,15 @@ UniquePtr<AudioStream::Chunk> AudioSink::PopFrames(uint32_t aFrames) {
              mCurrentData->mTime.ToMicroseconds(),
              mCurrentData->Frames() - mCursor->Available(), framesToPop);
 
-#ifdef MOZ_GECKO_PROFILER
-  mOwnerThread->Dispatch(NS_NewRunnableFunction(
-      "AudioSink:AddMarker",
-      [startTime = mCurrentData->mTime.ToMicroseconds(),
-       endTime = mCurrentData->GetEndTime().ToMicroseconds()] {
-        PROFILER_MARKER("PlayAudio", MEDIA_PLAYBACK, {}, MediaSampleMarker,
-                        startTime, endTime);
-      }));
-#endif  // MOZ_GECKO_PROFILER
+  if (profiler_can_accept_markers()) {
+    mOwnerThread->Dispatch(NS_NewRunnableFunction(
+        "AudioSink:AddMarker",
+        [startTime = mCurrentData->mTime.ToMicroseconds(),
+         endTime = mCurrentData->GetEndTime().ToMicroseconds()] {
+          PROFILER_MARKER("PlayAudio", MEDIA_PLAYBACK, {}, MediaSampleMarker,
+                          startTime, endTime);
+        }));
+  }
 
   UniquePtr<AudioStream::Chunk> chunk =
       MakeUnique<Chunk>(mCurrentData, framesToPop, mCursor->Ptr());
@@ -274,12 +310,11 @@ UniquePtr<AudioStream::Chunk> AudioSink::PopFrames(uint32_t aFrames) {
     MonitorAutoLock mon(mMonitor);
     mWritten += framesToPop;
     mCursor->Advance(framesToPop);
-  }
-
-  // All frames are popped. Reset mCurrentData so we can pop new elements from
-  // the audio queue in next calls to PopFrames().
-  if (!mCursor->Available()) {
-    mCurrentData = nullptr;
+    // All frames are popped. Reset mCurrentData so we can pop new elements from
+    // the audio queue in next calls to PopFrames().
+    if (!mCursor->Available()) {
+      mCurrentData = nullptr;
+    }
   }
 
   if (needPopping) {

@@ -9,33 +9,27 @@
 #include "nsITheme.h"
 #include "nsCOMPtr.h"
 #include "nsAtom.h"
-#include "nsIObserver.h"
 #include "nsNativeTheme.h"
 #include "nsStyleConsts.h"
+#include "nsNativeBasicThemeGTK.h"
 
 #include <gtk/gtk.h>
 #include "gtkdrawing.h"
 
-class nsNativeThemeGTK final : private nsNativeTheme,
-                               public nsITheme,
-                               public nsIObserver {
+class nsNativeThemeGTK final : public nsNativeBasicThemeGTK {
  public:
-  NS_DECL_ISUPPORTS_INHERITED
-
-  NS_DECL_NSIOBSERVER
-
   // The nsITheme interface.
   NS_IMETHOD DrawWidgetBackground(gfxContext* aContext, nsIFrame* aFrame,
                                   StyleAppearance aAppearance,
-                                  const nsRect& aRect,
-                                  const nsRect& aDirtyRect) override;
+                                  const nsRect& aRect, const nsRect& aDirtyRect,
+                                  DrawOverflow) override;
 
   bool CreateWebRenderCommandsForWidget(
       mozilla::wr::DisplayListBuilder& aBuilder,
       mozilla::wr::IpcResourceUpdateQueue& aResources,
       const mozilla::layers::StackingContextHelper& aSc,
-      mozilla::layers::RenderRootStateManager* aManager, nsIFrame* aFrame,
-      StyleAppearance aAppearance, const nsRect& aRect) override;
+      mozilla::layers::RenderRootStateManager* aManager, nsIFrame*,
+      StyleAppearance, const nsRect& aRect) override;
 
   [[nodiscard]] LayoutDeviceIntMargin GetWidgetBorder(
       nsDeviceContext* aContext, nsIFrame* aFrame,
@@ -48,6 +42,22 @@ class nsNativeThemeGTK final : private nsNativeTheme,
   bool GetWidgetOverflow(nsDeviceContext* aContext, nsIFrame* aFrame,
                          StyleAppearance aAppearance,
                          nsRect* aOverflowRect) override;
+
+  // Whether we draw a non-native widget.
+  //
+  // We always draw scrollbars as non-native so that all of Firefox has
+  // consistent scrollbar styles both in chrome and content (plus, the
+  // non-native scrollbars support scrollbar-width, auto-darkening...).
+  //
+  // We draw other widgets as non-native when their color-scheme doesn't match
+  // the current GTK theme's color-scheme. We do that because frequently
+  // switching GTK themes at runtime is prohibitively expensive. In that case
+  // (`BecauseColorMismatch`) we don't call into the non-native theme for sizing
+  // information (GetWidgetPadding/Border and GetMinimumWidgetSize), to avoid
+  // subtle sizing changes. The non-native theme can basically draw at any size,
+  // so we prefer to have consistent sizing information.
+  enum class NonNative { No, Always, BecauseColorMismatch };
+  NonNative IsWidgetNonNative(nsIFrame*, StyleAppearance);
 
   NS_IMETHOD GetMinimumWidgetSize(nsPresContext* aPresContext, nsIFrame* aFrame,
                                   StyleAppearance aAppearance,
@@ -71,9 +81,10 @@ class nsNativeThemeGTK final : private nsNativeTheme,
 
   bool ThemeNeedsComboboxDropmarker() override;
   Transparency GetWidgetTransparency(nsIFrame*, StyleAppearance) override;
-  bool WidgetAppearanceDependsOnWindowFocus(StyleAppearance) override;
   ScrollbarSizes GetScrollbarSizes(nsPresContext*, StyleScrollbarWidth,
                                    Overlay) override;
+
+  bool ThemeSupportsScrollbarButtons() override;
 
   nsNativeThemeGTK();
 

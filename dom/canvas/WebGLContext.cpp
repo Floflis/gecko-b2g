@@ -6,6 +6,7 @@
 #include "WebGLContext.h"
 
 #include <algorithm>
+#include <bitset>
 #include <queue>
 #include <regex>
 
@@ -38,6 +39,7 @@
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/ProcessPriorityManager.h"
+#include "mozilla/ResultVariant.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPrefs_webgl.h"
@@ -248,16 +250,6 @@ bool WebGLContext::CreateAndInitGL(
     bool forceEnabled, std::vector<FailureReason>* const out_failReasons) {
   const FuncScope funcScope(*this, "<Create>");
 
-  // Can't use WebGL in headless mode.
-  if (gfxPlatform::IsHeadless()) {
-    FailureReason reason;
-    reason.info =
-        "Can't use WebGL in headless mode (https://bugzil.la/1375585).";
-    out_failReasons->push_back(reason);
-    GenerateWarning("%s", reason.info.BeginReading());
-    return false;
-  }
-
   // WebGL2 is separately blocked:
   if (IsWebGL2() && !forceEnabled) {
     FailureReason reason;
@@ -353,7 +345,7 @@ bool WebGLContext::CreateAndInitGL(
 
   // --
 
-  typedef decltype(gl::GLContextProviderEGL::CreateHeadless) fnCreateT;
+  using fnCreateT = decltype(gl::GLContextProviderEGL::CreateHeadless);
   const auto fnCreate = [&](fnCreateT* const pfnCreate,
                             const char* const info) {
     nsCString failureId;
@@ -532,8 +524,9 @@ RefPtr<WebGLContext> WebGLContext::Create(HostWebGLContext& host,
           Telemetry::Accumulate(Telemetry::CANVAS_WEBGL_FAILURE_ID, cur.key);
         }
 
-        text.AppendLiteral("\n* ");
-        text.Append(cur.info);
+        const auto str = nsPrintfCString("\n* %s (%s)", cur.info.BeginReading(),
+                                         cur.key.BeginReading());
+        text.Append(str);
       }
       failureId = "FEATURE_FAILURE_REASON"_ns;
       return Err(text.BeginReading());
@@ -644,6 +637,7 @@ void WebGLContext::FinishInit() {
   // Initial setup.
 
   gl->mImplicitMakeCurrent = true;
+  gl->mElideDuplicateBindFramebuffers = true;
 
   const auto& size = mDefaultFB->mSize;
 
@@ -958,9 +952,14 @@ Maybe<layers::SurfaceDescriptor> WebGLContext::GetFrontBuffer(
   return front->ToSurfaceDescriptor();
 }
 
-bool WebGLContext::FrontBufferSnapshotInto(Range<uint8_t> dest) {
+Maybe<uvec2> WebGLContext::FrontBufferSnapshotInto(
+    const Maybe<Range<uint8_t>> maybeDest) {
   const auto& front = mSwapChain.FrontBuffer();
-  if (!front) return false;
+  if (!front) return {};
+  const auto& size = front->mDesc.size;
+  const auto ret = Some(*uvec2::FromSize(size));
+  if (!maybeDest) return ret;
+  const auto& dest = *maybeDest;
 
   // -
 
@@ -990,13 +989,6 @@ bool WebGLContext::FrontBufferSnapshotInto(Range<uint8_t> dest) {
   if (!IsWebGL2()) {
     fbTarget = LOCAL_GL_FRAMEBUFFER;
   }
-
-  gl->fBindFramebuffer(fbTarget,
-                       front->mFb ? front->mFb->mFB : mDefaultFB->mFB);
-  if (pboWas) {
-    BindBuffer(LOCAL_GL_PIXEL_PACK_BUFFER, nullptr);
-  }
-
   auto reset2 = MakeScopeExit([&] {
     DoBindFB(readFbWas, fbTarget);
     if (pboWas) {
@@ -1004,14 +996,26 @@ bool WebGLContext::FrontBufferSnapshotInto(Range<uint8_t> dest) {
     }
   });
 
-  const auto& size = front->mDesc.size;
+  gl->fBindFramebuffer(fbTarget, front->mFb ? front->mFb->mFB : 0);
+  if (pboWas) {
+    BindBuffer(LOCAL_GL_PIXEL_PACK_BUFFER, nullptr);
+  }
+
+  // -
+
   const size_t stride = size.width * 4;
-  MOZ_ASSERT(dest.length() == stride * size.height);
+  const size_t srcByteCount = stride * size.height;
+  const auto dstByteCount = dest.length();
+  if (srcByteCount != dstByteCount) {
+    gfxCriticalError() << "FrontBufferSnapshotInto: srcByteCount:"
+                       << srcByteCount << " != dstByteCount:" << dstByteCount;
+    return {};
+  }
   gl->fReadPixels(0, 0, size.width, size.height, LOCAL_GL_RGBA,
                   LOCAL_GL_UNSIGNED_BYTE, dest.begin().get());
-  gfxUtils::ConvertBGRAtoRGBA(dest.begin().get(), stride * size.height);
+  gfxUtils::ConvertBGRAtoRGBA(dest.begin().get(), dstByteCount);
 
-  return true;
+  return ret;
 }
 
 void WebGLContext::ClearVRSwapChain() { mWebVRSwapChain.ClearPool(); }
@@ -1238,11 +1242,14 @@ bool WebGLContext::BindDefaultFBForRead() {
 }
 
 void WebGLContext::DoColorMask(const uint8_t bitmask) const {
-  if (mDriverColorMask != bitmask) {
-    mDriverColorMask = bitmask;
-    gl->fColorMask(
-        bool(mDriverColorMask & (1 << 0)), bool(mDriverColorMask & (1 << 1)),
-        bool(mDriverColorMask & (1 << 2)), bool(mDriverColorMask & (1 << 3)));
+  if (mDriverColorMask0 != bitmask) {
+    mDriverColorMask0 = bitmask;
+    const auto bs = std::bitset<4>(bitmask);
+    if (gl->IsSupported(gl::GLFeature::draw_buffers_indexed)) {
+      gl->fColorMaski(0, bs[0], bs[1], bs[2], bs[3]);
+    } else {
+      gl->fColorMask(bs[0], bs[1], bs[2], bs[3]);
+    }
   }
 }
 
@@ -1250,16 +1257,16 @@ void WebGLContext::DoColorMask(const uint8_t bitmask) const {
 
 ScopedDrawCallWrapper::ScopedDrawCallWrapper(WebGLContext& webgl)
     : mWebGL(webgl) {
-  uint8_t driverColorMask = mWebGL.mColorWriteMask;
+  uint8_t driverColorMask0 = mWebGL.mColorWriteMask0;
   bool driverDepthTest = mWebGL.mDepthTestEnabled;
   bool driverStencilTest = mWebGL.mStencilTestEnabled;
   const auto& fb = mWebGL.mBoundDrawFramebuffer;
   if (!fb) {
     if (mWebGL.mDefaultFB_DrawBuffer0 == LOCAL_GL_NONE) {
-      driverColorMask = 0;  // Is this well-optimized enough for depth-first
+      driverColorMask0 = 0;  // Is this well-optimized enough for depth-first
                             // rendering?
     } else {
-      driverColorMask &= ~(uint8_t(mWebGL.mNeedsFakeNoAlpha) << 3);
+      driverColorMask0 &= ~(uint8_t(mWebGL.mNeedsFakeNoAlpha) << 3);
     }
     driverDepthTest &= !mWebGL.mNeedsFakeNoDepth;
     driverStencilTest &= !mWebGL.mNeedsFakeNoStencil;
@@ -1272,7 +1279,7 @@ ScopedDrawCallWrapper::ScopedDrawCallWrapper(WebGLContext& webgl)
   }
 
   const auto& gl = mWebGL.gl;
-  mWebGL.DoColorMask(driverColorMask);
+  mWebGL.DoColorMask(driverColorMask0);
   if (mWebGL.mDriverDepthTest != driverDepthTest) {
     // "When disabled, the depth comparison and subsequent possible updates to
     // the
@@ -2003,6 +2010,13 @@ GLint WebGLContext::GetFragDataLocation(const WebGLProgram& prog,
     }
   }
   const auto mappedName = ret.str();
+
+  if (gl->WorkAroundDriverBugs() && gl->IsMesa()) {
+    // Mesa incorrectly generates INVALID_OPERATION for gl_ prefixes here.
+    if (mappedName.find("gl_") == 0) {
+      return -1;
+    }
+  }
 
   return gl->fGetFragDataLocation(prog.mGLName, mappedName.c_str());
 }

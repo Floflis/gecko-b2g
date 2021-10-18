@@ -18,7 +18,6 @@
 #include "mozilla/MathAlgorithms.h"
 #include "mozilla/Range.h"
 #include "mozilla/RefCounted.h"
-#include "mozilla/ResultVariant.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/BuildConstants.h"
 #include "mozilla/gfx/Point.h"
@@ -34,9 +33,9 @@
 
 // Manual reflection of WebIDL typedefs that are different from their
 // OpenGL counterparts.
-typedef int64_t WebGLsizeiptr;
-typedef int64_t WebGLintptr;
-typedef bool WebGLboolean;
+using WebGLsizeiptr = int64_t;
+using WebGLintptr = int64_t;
+using WebGLboolean = bool;
 
 // -
 
@@ -228,6 +227,7 @@ enum class WebGLExtensionID : uint8_t {
   EXT_texture_filter_anisotropic,
   EXT_texture_norm16,
   MOZ_debug,
+  OES_draw_buffers_indexed,
   OES_element_index_uint,
   OES_fbo_render_mipmap,
   OES_standard_derivatives,
@@ -326,7 +326,7 @@ enum class UniformBaseType : uint8_t {
 };
 const char* ToString(UniformBaseType);
 
-typedef uint64_t ObjectId;
+using ObjectId = uint64_t;
 
 enum class BufferKind : uint8_t {
   Undefined,
@@ -353,13 +353,6 @@ struct FloatOrInt final  // For TexParameter[fi] and friends.
     return *this;
   }
 };
-
-using WebGLTexUnpackVariant =
-    Variant<UniquePtr<webgl::TexUnpackBytes>,
-            UniquePtr<webgl::TexUnpackSurface>,
-            UniquePtr<webgl::TexUnpackImage>, WebGLTexPboOffset>;
-
-using MaybeWebGLTexUnpackVariant = Maybe<WebGLTexUnpackVariant>;
 
 struct WebGLContextOptions {
   bool alpha = true;
@@ -491,10 +484,10 @@ struct avec3 {
   bool operator!=(const avec3& rhs) const { return !(*this == rhs); }
 };
 
-typedef avec2<int32_t> ivec2;
-typedef avec3<int32_t> ivec3;
-typedef avec2<uint32_t> uvec2;
-typedef avec3<uint32_t> uvec3;
+using ivec2 = avec2<int32_t>;
+using ivec3 = avec3<int32_t>;
+using uvec2 = avec2<uint32_t>;
+using uvec3 = avec3<uint32_t>;
 
 inline ivec2 AsVec(const gfx::IntSize& s) { return {s.width, s.height}; }
 
@@ -601,6 +594,8 @@ struct InitContextDesc final {
   uint32_t principalKey = 0;
 };
 
+constexpr uint32_t kMaxTransformFeedbackSeparateAttribs = 4;
+
 struct Limits final {
   ExtensionBits supportedExtensions;
 
@@ -609,14 +604,13 @@ struct Limits final {
   uint32_t maxTex2dSize = 0;
   uint32_t maxTexCubeSize = 0;
   uint32_t maxVertexAttribs = 0;
-  std::array<uint32_t, 2> maxViewportDims = {};
+  uint32_t maxViewportDim = 0;
   std::array<float, 2> pointSizeRange = {{1, 1}};
   std::array<float, 2> lineWidthRange = {{1, 1}};
 
   // WebGL 2
   uint32_t maxTexArrayLayers = 0;
   uint32_t maxTex3dSize = 0;
-  uint32_t maxTransformFeedbackSeparateAttribs = 0;
   uint32_t maxUniformBufferBindings = 0;
   uint32_t uniformBufferOffsetAlignment = 0;
 
@@ -739,7 +733,7 @@ struct GetUniformData final {
 
 struct FrontBufferSnapshotIpc final {
   uvec2 surfSize = {};
-  mozilla::ipc::Shmem shmem = {};
+  Maybe<mozilla::ipc::Shmem> shmem = {};
 };
 
 struct ReadPixelsResult {
@@ -1060,6 +1054,7 @@ struct TexUnpackBlobDesc final {
   RefPtr<gfx::DataSourceSurface> dataSurf;
 
   WebGLPixelStore unpacking;
+  bool applyUnpackTransforms = true;
 
   void Shrink(const webgl::PackingInfo&);
 };
@@ -1154,6 +1149,15 @@ inline void Memcpy(const RangedPtr<uint8_t>& destBytes,
 }
 
 // -
+
+namespace webgl {
+
+// In theory, this number can be unbounded based on the driver. However, no
+// driver appears to expose more than 8. We might as well stop there too, for
+// now.
+// (http://opengl.gpuinfo.org/gl_stats_caps_single.php?listreportsbycap=GL_MAX_COLOR_ATTACHMENTS)
+inline constexpr size_t kMaxDrawBuffers = 8;
+}  // namespace webgl
 
 }  // namespace mozilla
 

@@ -4,15 +4,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::connection::{HandleReadableOutput, Http3Connection, Http3State};
+use crate::connection::{Http3Connection, Http3State};
 use crate::hframe::HFrame;
 use crate::recv_message::{MessageType, RecvMessage};
 use crate::send_message::SendMessage;
 use crate::server_connection_events::{Http3ServerConnEvent, Http3ServerConnEvents};
-use crate::{Error, Header, Res};
-use neqo_common::{event::Provider, qdebug, qinfo, qtrace};
+use crate::{Error, Header, Priority, PriorityHandler, ReceiveOutput, Res};
+use neqo_common::{event::Provider, qdebug, qinfo, qtrace, Role};
 use neqo_qpack::QpackSettings;
-use neqo_transport::{AppError, Connection, ConnectionEvent, StreamType};
+use neqo_transport::{AppError, Connection, ConnectionEvent, StreamId, StreamType};
+use std::rc::Rc;
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -128,21 +129,18 @@ impl Http3ServerHandler {
                         Box::new(RecvMessage::new(
                             MessageType::Request,
                             stream_id.as_u64(),
+                            Rc::clone(&self.base_handler.qpack_decoder),
                             Box::new(self.events.clone()),
                             None,
+                            PriorityHandler::new(false, Priority::default()),
                         )),
                     ),
-                    StreamType::UniDi => {
-                        if self
-                            .base_handler
-                            .handle_new_unidi_stream(conn, stream_id.as_u64())?
-                        {
-                            return Err(Error::HttpStreamCreation);
-                        }
-                    }
+                    StreamType::UniDi => self
+                        .base_handler
+                        .handle_new_unidi_stream(stream_id.as_u64(), Role::Server),
                 },
                 ConnectionEvent::RecvStreamReadable { stream_id } => {
-                    self.handle_stream_readable(conn, stream_id)?
+                    self.handle_stream_readable(conn, stream_id)?;
                 }
                 ConnectionEvent::RecvStreamReset {
                     stream_id,
@@ -168,11 +166,15 @@ impl Http3ServerHandler {
                     }
                 }
                 ConnectionEvent::AuthenticationNeeded
+                | ConnectionEvent::EchFallbackAuthenticationNeeded { .. }
                 | ConnectionEvent::ZeroRttRejected
                 | ConnectionEvent::ResumptionToken(..) => return Err(Error::HttpInternal(4)),
                 ConnectionEvent::SendStreamWritable { .. }
                 | ConnectionEvent::SendStreamComplete { .. }
-                | ConnectionEvent::SendStreamCreatable { .. } => {}
+                | ConnectionEvent::SendStreamCreatable { .. }
+                | ConnectionEvent::Datagram { .. }
+                | ConnectionEvent::OutgoingDatagramOutcome { .. }
+                | ConnectionEvent::IncomingDatagramDropped => {}
             }
         }
         Ok(())
@@ -180,8 +182,8 @@ impl Http3ServerHandler {
 
     fn handle_stream_readable(&mut self, conn: &mut Connection, stream_id: u64) -> Res<()> {
         match self.base_handler.handle_stream_readable(conn, stream_id)? {
-            HandleReadableOutput::PushStream => Err(Error::HttpStreamCreation),
-            HandleReadableOutput::ControlFrames(control_frames) => {
+            ReceiveOutput::PushStream => Err(Error::HttpStreamCreation),
+            ReceiveOutput::ControlFrames(control_frames) => {
                 for f in control_frames {
                     match f {
                         HFrame::MaxPushId { .. } => {
@@ -191,8 +193,28 @@ impl Http3ServerHandler {
                         HFrame::Goaway { .. } | HFrame::CancelPush { .. } => {
                             Err(Error::HttpFrameUnexpected)
                         }
+                        HFrame::PriorityUpdatePush { element_id, priority } => {
+                            // TODO: check if the element_id references a promised push stream or
+                            //       is greater than the maximum Push ID.
+                            self.events.priority_update(element_id, priority);
+                            Ok(())
+                        }
+                        HFrame::PriorityUpdateRequest { element_id, priority } => {
+                            // check that the element_id references a request stream
+                            // within the client-sided bidirectional stream limit
+                            let element_stream_id = StreamId::new(element_id);
+                            if !element_stream_id.is_bidi()
+                                || !element_stream_id.is_client_initiated()
+                                || !conn.is_stream_id_allowed(element_stream_id)
+                            {
+                                return Err(Error::HttpId)
+                            }
+
+                            self.events.priority_update(element_id, priority);
+                            Ok(())
+                        }
                         _ => unreachable!(
-                            "we should only put MaxPushId and Goaway into control_frames."
+                            "we should only put MaxPushId, Goaway and PriorityUpdates into control_frames."
                         ),
                     }?;
                 }
@@ -215,25 +237,20 @@ impl Http3ServerHandler {
         buf: &mut [u8],
     ) -> Res<(usize, bool)> {
         qinfo!([self], "read_data from stream {}.", stream_id);
-        match self.base_handler.recv_streams.get_mut(&stream_id) {
-            None => {
-                self.close(conn, now, &Error::Internal);
-                Err(Error::Internal)
-            }
-            Some(recv_stream) => {
-                match recv_stream.read_data(conn, &mut self.base_handler.qpack_decoder, buf) {
-                    Ok((amount, fin)) => {
-                        if recv_stream.done() {
-                            self.base_handler.recv_streams.remove(&stream_id);
-                        }
-                        Ok((amount, fin))
-                    }
-                    Err(e) => {
-                        self.close(conn, now, &e);
-                        Err(e)
-                    }
-                }
-            }
+        let recv_stream = self
+            .base_handler
+            .recv_streams
+            .get_mut(&stream_id)
+            .ok_or(Error::InvalidStreamId)?
+            .http_stream()
+            .ok_or(Error::InvalidStreamId)?;
+
+        let res = recv_stream.read_data(conn, buf);
+        if let Err(e) = &res {
+            self.close(conn, now, e);
+        } else if recv_stream.done() {
+            self.base_handler.recv_streams.remove(&stream_id);
         }
+        res
     }
 }

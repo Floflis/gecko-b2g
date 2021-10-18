@@ -92,11 +92,6 @@ ApplicationBuildID:
     Product application's build ID.
   type: string
 
-AsyncShutdownModule:
-  description: >
-    Holds the contents of the AsyncShutdown.js script
-  type: string
-
 AsyncShutdownTimeout:
   description: >
     This annotation is present if a shutdown blocker was not released in time
@@ -148,11 +143,6 @@ AvailableVirtualMemory:
   type: string
   ping: true
 
-BIOS_Manufacturer:
-  description: >
-    Name of the BIOS manufacturer.
-  type: string
-
 BlockedDllList:
   description: >
     Comma-separated list of blocked DLLS, Windows-only
@@ -169,27 +159,6 @@ Breadcrumbs:
   description: >
     Trail of events that occurred before a report. this will consist of multiple breadcrumbs with
     timestamp, message, category, level, type and data in JSON format.
-  type: string
-
-BreakpadReserveAddress:
-  description: >
-    Address of the buffer reserved by Breakpad.
-  type: string
-
-BreakpadReserveSize:
-  description: >
-    Size of the buffer reserved by Breakpad.
-  type: string
-
-Bug_1086977:
-  description: >
-    Mac-only annotation which should be present only if Firefox crashed when
-    loading a facebook plugin.
-  type: string
-
-Bug_1541161:
-  description: >
-    Dump JS Stack in case loadinfo is null within NewChannelFromURIWithProxyFlagsInternal().
   type: string
 
 BuildID:
@@ -240,6 +209,11 @@ ContentSandboxLevel:
     Content sandbox level.
   type: integer
 
+ContentSandboxWin32kState:
+  description: >
+    Content sandbox Win32k state
+  type: string
+
 CoUnmarshalInterfaceResult:
   description: >
     Annotation describing the error returned by trying to unmarshal an object
@@ -249,16 +223,6 @@ CoUnmarshalInterfaceResult:
 CPUMicrocodeVersion:
   description: >
     Version of the CPU microcode.
-  type: string
-
-CpuUsageFlashProcess1:
-  description: >
-    CPU usage of the first Adobe Flash plugin process.
-  type: string
-
-CpuUsageFlashProcess2:
-  description: >
-    CPU usage of the second Adobe Flash plugin process.
   type: string
 
 CrashAddressLikelyWrong:
@@ -306,6 +270,11 @@ DOMIPCEnabled:
     Set to 1 when a tab is running in a content process
   type: boolean
 
+DumperError:
+  description: >
+    Error message of the minidump writer, in case there was an error during dumping.
+  type: string
+
 EMCheckCompatibility:
   description: >
     Set to 1 if add-on compatibility checking is enabled.
@@ -329,24 +298,6 @@ ExperimentalFeatures:
   type: string
   ping: true
 
-FlashProcessDump:
-  description: >
-    Type of process the flash plugin is running in, can be either "Broker" or
-    "Sandbox".
-  type: string
-
-FramePoisonBase:
-  description: >
-    Base pointer of the memory area used for the poison value we place in freed
-    memory.
-  type: string
-
-FramePoisonSize:
-  description: >
-    Size of the memory area used for the poison value we place in freed
-    memory.
-  type: integer
-
 GetHGlobalFromStreamFailure:
   description: >
     Error returned when invoking GetHGlobalFromStreamFailure() during the
@@ -367,6 +318,7 @@ GPUProcessLaunchCount:
   description: >
     Number of times the GPU process was launched.
   type: integer
+  ping: true
 
 GPUProcessStatus:
   description: >
@@ -384,9 +336,10 @@ GraphicsCriticalError:
     Information of a critical error that occurred within the graphics code.
   type: string
 
-GraphicsSanityTest:
+GraphicsDrawShader:
   description: >
-    Annotation used in tests.
+    Name of the shader that is currently bound for a draw call, if applicable.
+    See file names in gfx/wr/webrender/res/* for the possible values.
   type: string
 
 GraphicsStartupTest:
@@ -426,11 +379,6 @@ PHCFreeStack:
     The allocation's free stack trace, if the crash involved a bad access
     of a special PHC allocation. Encoded as a comma-separated list of decimal
     addresses.
-  type: string
-
-HangMonitorDescription:
-  description: >
-    Name of the hang monitor that generated the crash.
   type: string
 
 HasDeviceTouchScreen:
@@ -548,11 +496,6 @@ IsWayland:
     If true then the Wayland windowing system was in use.
   type: boolean
 
-IsWaylandDRM:
-  description: >
-    If true then the Wayland DRM backend was in use.
-  type: boolean
-
 IsWebRenderResourcePathOverridden:
   description: >
     If true then the WebRender resources (i.e. shaders) are loaded from a user specified path.
@@ -588,6 +531,11 @@ JSLargeAllocationFailure:
     description for the possible values of this annotation.
   type: string
 
+JSModuleLoadError:
+  description: >
+    The error raised when attempting to import a critical JS module from C++
+  type: string
+
 JSOutOfMemory:
   description: >
     A small allocation couldn't be satisfied, the annotation may contain the
@@ -598,6 +546,54 @@ JSOutOfMemory:
     to satisfy the allocation.
   type: string
 
+LastInteractionDuration:
+  description: >
+    How long the user had been inactive in seconds if the user was inactive
+    at crash.  The value is not set if the user state was active.
+  type: integer
+  ping: true
+
+MacMemoryPressure:
+  description: >
+    The current memory pressure state as provided by the macOS memory pressure
+    dispatch source. The annotation value is one of "Normal" for no memory
+    pressure, "Unset" indicating a memory pressure event has not been received,
+    "Warning" or "Critical" mapping to the system memory pressure levels,
+    or "Unexpected" for an unexpected level. This is a Mac-specific annotation.
+  type: string
+
+MacMemoryPressureNormalTime:
+  description: >
+    The time when the memory pressure state last transitioned to 'Normal'
+    expressed as seconds since the Epoch.
+  type: string
+
+MacMemoryPressureWarningTime:
+  description: >
+    The time when the memory pressure state last transitioned to 'Warning'
+    expressed as seconds since the Epoch.
+  type: string
+
+MacMemoryPressureCriticalTime:
+  description: >
+    The time when the memory pressure state last transitioned to 'Critical'
+    expressed as seconds since the Epoch.
+  type: string
+
+MacMemoryPressureSysctl:
+  description: >
+    The value of the memory pressure sysctl
+    'kern.memorystatus_vm_pressure_level'. Indicates which memory
+    pressure level the system is in at the time of the crash. The expected
+    values are one of 4 (Critical), 2 (Warning), or 1 (Normal).
+  type: integer
+
+MacAvailableMemorySysctl:
+  description: >
+    The value of the available memory sysctl 'kern.memorystatus_level'.
+    Expected to be a percentage integer value.
+  type: integer
+
 LauncherProcessState:
   description: >
     Launcher process enabled state. The integer value of this annotation must
@@ -605,10 +601,10 @@ LauncherProcessState:
     mozilla::LauncherRegistryInfo::EnableState enum
   type: integer
 
-LowCommitSpaceEvents:
+LowPhysicalMemoryEvents:
   description: >
-    Number of times the available memory tracker has detected a that
-    commit-space was running low. This is a Windows-specific annotation.
+    Number of times the available memory tracker has detected that free
+    physical memory is running low. This is a Windows-specific annotation.
   type: integer
   ping: true
 
@@ -623,14 +619,6 @@ MarshalActCtxManifestPath:
     Proxy stream marshalling current activation context manifest path.
   type: string
 
-MemoryErrorCorrection:
-  description: >
-    Windows only, type of error correction used by system memory.  See
-    documentation for MemoryErrorCorrection property of
-    Win32_PhysicalMemoryArray WMI class.
-  type: string
-  ping: true
-
 MozCrashReason:
   description: >
     Plaintext description of why Firefox crashed, this is usually set by
@@ -643,37 +631,16 @@ Notes:
     Miscellaneous notes that can be appended to a crash.
   type: string
 
-nsAsyncShutdownComponent:
-  description: >
-    Holds the contents of the nsAsyncShutdown.js script
-  type: string
-
 OOMAllocationSize:
   description: >
     Size of the allocation that caused an out-of-memory condition.
   type: string
   ping: true
 
-PluginCpuUsage:
-  description: >
-    CPU usage of the plugin process.
-  type: string
-
 PluginFilename:
   description: >
     Plugin filename, only the process holding the plugin has this annotation.
   type: string
-
-PluginHang:
-  description: >
-    The presence of this annotation indicates that this crash was generated in
-    response to a plugin hanging.
-  type: boolean
-
-PluginHangUIDuration:
-  description: >
-    Duration in milliseconds of the plugin hang that caused this crash.
-  type: integer
 
 PluginName:
   description: >
@@ -702,6 +669,13 @@ ProductName:
 ProductID:
   description: >
     Application UUID (e.g. ec8030f7-c20a-464f-9b0e-13a3a9e97384).
+  type: string
+  ping: true
+
+ProfilerChildShutdownPhase:
+  description: >
+    When a child process shuts down, this describes if the profiler is running,
+    and the point the profiler shutdown sequence has reached.
   type: string
   ping: true
 
@@ -947,6 +921,11 @@ URL:
     URL being loaded.
   type: string
 
+URLSegments:
+  description: >
+    The offsets of the nsStandardURL segments that fail a sanity check
+  type: string
+
 User32BeforeBlocklist:
   description: >
     Set to 1 if user32.dll was loaded before we could install the DLL blocklist.
@@ -973,7 +952,20 @@ VRProcessStatus:
     Status of the VR process, can be set to "Running" or "Destroyed"
   type: string
 
+WindowsErrorReporting:
+  description: >
+    Set to 1 if this crash was intercepted via the Windows Error Reporting
+    runtime exception module.
+  type: boolean
+  ping: true
+
 Winsock_LSP:
   description: >
     Information on winsock LSPs injected in our networking stack.
+  type: string
+
+XPCOMSpinEventLoopStack:
+  description: >
+    If we crash while some code is spinning manually the event
+    loop, we will see the stack of nested annotations here.
   type: string

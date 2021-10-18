@@ -13,6 +13,8 @@
 
 class nsWindowSizes;
 
+namespace mozilla {
+
 /**
  * RetainedDisplayListData contains frame invalidation information. It is stored
  * in root frames, and used by RetainedDisplayListBuilder.
@@ -48,7 +50,7 @@ struct RetainedDisplayListData {
    * frame does not exist in this RetainedDisplayListData, it is added with
    * default constructible flags FrameFlags::None.
    */
-  FrameFlags& Flags(nsIFrame* aFrame) { return mFrames.GetOrInsert(aFrame); }
+  FrameFlags& Flags(nsIFrame* aFrame) { return mFrames.LookupOrInsert(aFrame); }
 
   /**
    * Returns flags set for the given |aFrame|, or FrameFlags::None if the frame
@@ -59,7 +61,7 @@ struct RetainedDisplayListData {
   /**
    * Returns an iterator to the underlying frame storage.
    */
-  auto Iterator() { return mFrames.Iter(); }
+  auto ConstIterator() { return mFrames.ConstIter(); }
 
   /**
    * Returns the count of modified frames in this RetainedDisplayListData.
@@ -72,7 +74,7 @@ struct RetainedDisplayListData {
   bool Remove(nsIFrame* aFrame) { return mFrames.Remove(aFrame); }
 
  private:
-  nsDataHashtable<nsPtrHashKey<nsIFrame>, FrameFlags> mFrames;
+  nsTHashMap<nsPtrHashKey<nsIFrame>, FrameFlags> mFrames;
   uint32_t mModifiedFramesCount;
 };
 
@@ -213,13 +215,11 @@ struct RetainedDisplayListBuilder {
    * aKeepLinked=true internally for sub-lists that can't be changed to keep the
    * original list structure linked for fast re-use.
    */
-  bool PreProcessDisplayList(RetainedDisplayList* aList,
-                             AnimatedGeometryRoot* aAGR,
-                             PartialUpdateResult& aUpdated,
-                             nsIFrame* aOuterFrame = nullptr,
-                             uint32_t aCallerKey = 0,
-                             uint32_t aNestingDepth = 0,
-                             bool aKeepLinked = false);
+  bool PreProcessDisplayList(
+      RetainedDisplayList* aList, nsIFrame* aAGR, PartialUpdateResult& aUpdated,
+      nsIFrame* aAsyncAncestor, const ActiveScrolledRoot* aAsyncAncestorASR,
+      nsIFrame* aOuterFrame = nullptr, uint32_t aCallerKey = 0,
+      uint32_t aNestingDepth = 0, bool aKeepLinked = false);
 
   /**
    * Merges items from aNewList into non-invalidated items from aOldList and
@@ -239,15 +239,14 @@ struct RetainedDisplayListBuilder {
       nsDisplayItem* aOuterItem = nullptr);
 
   bool ComputeRebuildRegion(nsTArray<nsIFrame*>& aModifiedFrames,
-                            nsRect* aOutDirty,
-                            AnimatedGeometryRoot** aOutModifiedAGR,
+                            nsRect* aOutDirty, nsIFrame** aOutModifiedAGR,
                             nsTArray<nsIFrame*>& aOutFramesWithProps);
 
   bool ProcessFrame(nsIFrame* aFrame, nsDisplayListBuilder* aBuilder,
                     nsIFrame* aStopAtFrame,
                     nsTArray<nsIFrame*>& aOutFramesWithProps,
                     const bool aStopAtStackingContext, nsRect* aOutDirty,
-                    AnimatedGeometryRoot** aOutModifiedAGR);
+                    nsIFrame** aOutModifiedAGR);
 
   friend class MergeState;
 
@@ -257,5 +256,7 @@ struct RetainedDisplayListBuilder {
   WeakFrame mPreviousCaret;
   RetainedDisplayListMetrics mMetrics;
 };
+
+}  // namespace mozilla
 
 #endif  // RETAINEDDISPLAYLISTBUILDER_H_

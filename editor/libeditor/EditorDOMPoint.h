@@ -10,6 +10,7 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/RangeBoundary.h"
+#include "mozilla/ToString.h"
 #include "mozilla/dom/AbstractRange.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/Text.h"
@@ -75,6 +76,12 @@ typedef EditorDOMPointBase<nsINode*, nsIContent*> EditorRawDOMPoint;
 typedef EditorDOMPointBase<RefPtr<dom::Text>, nsIContent*> EditorDOMPointInText;
 typedef EditorDOMPointBase<dom::Text*, nsIContent*> EditorRawDOMPointInText;
 
+#define NS_INSTANTIATE_EDITOR_DOM_POINT_METHOD(aResultType, aMethodName) \
+  template aResultType EditorDOMPoint::aMethodName;                      \
+  template aResultType EditorRawDOMPoint::aMethodName;                   \
+  template aResultType EditorDOMPointInText::aMethodName;                \
+  template aResultType EditorRawDOMPointInText::aMethodName;
+
 template <typename ParentType, typename ChildType>
 class EditorDOMPointBase final {
   typedef EditorDOMPointBase<ParentType, ChildType> SelfType;
@@ -84,8 +91,8 @@ class EditorDOMPointBase final {
       : mParent(nullptr), mChild(nullptr), mIsChildInitialized(false) {}
 
   template <typename ContainerType>
-  EditorDOMPointBase(ContainerType* aContainer, int32_t aOffset)
-      : mParent(aContainer),
+  EditorDOMPointBase(const ContainerType* aContainer, uint32_t aOffset)
+      : mParent(const_cast<ContainerType*>(aContainer)),
         mChild(nullptr),
         mOffset(mozilla::Some(aOffset)),
         mIsChildInitialized(false) {
@@ -99,19 +106,24 @@ class EditorDOMPointBase final {
 
   template <typename ContainerType, template <typename> typename StrongPtr>
   EditorDOMPointBase(const StrongPtr<ContainerType>& aContainer,
-                     int32_t aOffset)
+                     uint32_t aOffset)
+      : EditorDOMPointBase(aContainer.get(), aOffset) {}
+
+  template <typename ContainerType, template <typename> typename StrongPtr>
+  EditorDOMPointBase(const StrongPtr<const ContainerType>& aContainer,
+                     uint32_t aOffset)
       : EditorDOMPointBase(aContainer.get(), aOffset) {}
 
   /**
    * Different from RangeBoundary, aPointedNode should be a child node
    * which you want to refer.
    */
-  explicit EditorDOMPointBase(nsINode* aPointedNode)
+  explicit EditorDOMPointBase(const nsINode* aPointedNode)
       : mParent(aPointedNode && aPointedNode->IsContent()
                     ? aPointedNode->GetParentNode()
                     : nullptr),
         mChild(aPointedNode && aPointedNode->IsContent()
-                   ? aPointedNode->AsContent()
+                   ? const_cast<nsIContent*>(aPointedNode->AsContent())
                    : nullptr),
         mIsChildInitialized(false) {
     mIsChildInitialized = aPointedNode && mChild;
@@ -122,7 +134,7 @@ class EditorDOMPointBase final {
   }
 
   EditorDOMPointBase(nsINode* aContainer, nsIContent* aPointedNode,
-                     int32_t aOffset)
+                     uint32_t aOffset)
       : mParent(aContainer),
         mChild(aPointedNode),
         mOffset(mozilla::Some(aOffset)),
@@ -282,6 +294,17 @@ class EditorDOMPointBase final {
   }
 
   /**
+   * GetChildOrContainerIfDataNode() returns the child content node,
+   * or container content node if the container is a data node.
+   */
+  nsIContent* GetChildOrContainerIfDataNode() const {
+    if (IsInDataNode()) {
+      return ContainerAsContent();
+    }
+    return GetChild();
+  }
+
+  /**
    * GetNextSiblingOfChild() returns next sibling of the child node.
    * If this refers after the last child or the container cannot have children,
    * this returns nullptr with warning.
@@ -348,6 +371,19 @@ class EditorDOMPointBase final {
     char16_t ch = Char();
     return nsCRT::IsAsciiSpace(ch) || ch == 0x00A0;
   }
+  MOZ_NEVER_INLINE_DEBUG bool IsCharNewLine() const { return Char() == '\n'; }
+  MOZ_NEVER_INLINE_DEBUG bool IsCharPreformattedNewLine() const;
+  MOZ_NEVER_INLINE_DEBUG bool
+  IsCharPreformattedNewLineCollapsedWithWhiteSpaces() const;
+  /**
+   * IsCharCollapsibleASCIISpace(), IsCharCollapsibleNBSP() and
+   * IsCharCollapsibleASCIISpaceOrNBSP() checks whether the white-space is
+   * preformatted or collapsible with the style of the container text node
+   * without flushing pending notifications.
+   */
+  bool IsCharCollapsibleASCIISpace() const;
+  bool IsCharCollapsibleNBSP() const;
+  bool IsCharCollapsibleASCIISpaceOrNBSP() const;
 
   MOZ_NEVER_INLINE_DEBUG bool IsCharHighSurrogateFollowedByLowSurrogate()
       const {
@@ -380,6 +416,21 @@ class EditorDOMPointBase final {
     char16_t ch = PreviousChar();
     return nsCRT::IsAsciiSpace(ch) || ch == 0x00A0;
   }
+  MOZ_NEVER_INLINE_DEBUG bool IsPreviousCharNewLine() const {
+    return PreviousChar() == '\n';
+  }
+  MOZ_NEVER_INLINE_DEBUG bool IsPreviousCharPreformattedNewLine() const;
+  MOZ_NEVER_INLINE_DEBUG bool
+  IsPreviousCharPreformattedNewLineCollapsedWithWhiteSpaces() const;
+  /**
+   * IsPreviousCharCollapsibleASCIISpace(), IsPreviousCharCollapsibleNBSP() and
+   * IsPreviousCharCollapsibleASCIISpaceOrNBSP() checks whether the white-space
+   * is preformatted or collapsible with the style of the container text node
+   * without flushing pending notifications.
+   */
+  bool IsPreviousCharCollapsibleASCIISpace() const;
+  bool IsPreviousCharCollapsibleNBSP() const;
+  bool IsPreviousCharCollapsibleASCIISpaceOrNBSP() const;
 
   MOZ_NEVER_INLINE_DEBUG char16_t NextChar() const {
     MOZ_ASSERT(IsSetAndValid());
@@ -396,6 +447,21 @@ class EditorDOMPointBase final {
     char16_t ch = NextChar();
     return nsCRT::IsAsciiSpace(ch) || ch == 0x00A0;
   }
+  MOZ_NEVER_INLINE_DEBUG bool IsNextCharNewLine() const {
+    return NextChar() == '\n';
+  }
+  MOZ_NEVER_INLINE_DEBUG bool IsNextCharPreformattedNewLine() const;
+  MOZ_NEVER_INLINE_DEBUG bool
+  IsNextCharPreformattedNewLineCollapsedWithWhiteSpaces() const;
+  /**
+   * IsNextCharCollapsibleASCIISpace(), IsNextCharCollapsibleNBSP() and
+   * IsNextCharCollapsibleASCIISpaceOrNBSP() checks whether the white-space is
+   * preformatted or collapsible with the style of the container text node
+   * without flushing pending notifications.
+   */
+  bool IsNextCharCollapsibleASCIISpace() const;
+  bool IsNextCharCollapsibleNBSP() const;
+  bool IsNextCharCollapsibleASCIISpaceOrNBSP() const;
 
   uint32_t Offset() const {
     if (mOffset.isSome()) {
@@ -431,7 +497,7 @@ class EditorDOMPointBase final {
    * mOffset may be invalidated.
    */
   template <typename ContainerType>
-  void Set(ContainerType* aContainer, int32_t aOffset) {
+  void Set(ContainerType* aContainer, uint32_t aOffset) {
     mParent = aContainer;
     mChild = nullptr;
     mOffset = mozilla::Some(aOffset);
@@ -440,7 +506,7 @@ class EditorDOMPointBase final {
                  "The offset is out of bounds");
   }
   template <typename ContainerType, template <typename> typename StrongPtr>
-  void Set(const StrongPtr<ContainerType>& aContainer, int32_t aOffset) {
+  void Set(const StrongPtr<ContainerType>& aContainer, uint32_t aOffset) {
     Set(aContainer.get(), aOffset);
   }
   void Set(const nsINode* aChild) {
@@ -959,6 +1025,21 @@ class EditorDOMPointBase final {
     return comp.isSome() && comp.value() <= 0;
   }
 
+  friend std::ostream& operator<<(std::ostream& aStream,
+                                  const SelfType& aDOMPoint) {
+    aStream << "{ mParent=" << aDOMPoint.mParent.get();
+    if (aDOMPoint.mParent) {
+      aStream << " (" << *aDOMPoint.mParent << ")";
+    }
+    aStream << ", mChild=" << aDOMPoint.mChild.get();
+    if (aDOMPoint.mChild) {
+      aStream << " (" << *aDOMPoint.mChild << ")";
+    }
+    aStream << ", mOffset=" << aDOMPoint.mOffset << ", mIsChildInitialized="
+            << (aDOMPoint.mIsChildInitialized ? "true" : "false") << " }";
+    return aStream;
+  }
+
  private:
   void EnsureChild() {
     if (mIsChildInitialized) {
@@ -1023,6 +1104,8 @@ typedef EditorDOMRangeBase<EditorRawDOMPointInText> EditorRawDOMRangeInTexts;
 template <typename EditorDOMPointType>
 class EditorDOMRangeBase final {
  public:
+  using PointType = EditorDOMPointType;
+
   EditorDOMRangeBase() = default;
   template <typename PT, typename CT>
   explicit EditorDOMRangeBase(const EditorDOMPointBase<PT, CT>& aStart)

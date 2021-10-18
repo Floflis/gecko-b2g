@@ -81,6 +81,26 @@ class GonkGPSGeolocationProvider : public nsIGeolocationProvider,
   virtual ~GonkGPSGeolocationProvider();
 
   static GonkGPSGeolocationProvider* sSingleton;
+#ifdef MOZ_B2G_RIL
+  // APN setting key, could either be "ril.data.apn.sim1" or "ril.data.apn.sim2"
+  static nsString sSettingRilDataApn;
+  // APN setting key, could either be "ril.supl.apn.sim1" or "ril.supl.apn.sim2"
+  static nsString sSettingRilSuplApn;
+  // APN setting key, "ril.emergency.apn.sim1" or "..sim2"
+  static nsString sSettingRilSuplEsApn;
+  // APN setting key, "ril.supl.protocol.sim1" or "..sim2"
+  static nsString sSettingRilSuplProtocol;
+  // APN setting key, "ril.emergency.protocol.sim1" or "..sim2"
+  static nsString sSettingRilSuplEsProtocol;
+  // APN setting key, "ril.supl.roaming_protocol.sim1" or "..sim2"
+  static nsString sSettingRilSuplRoamingProtocol;
+  // APN setting key, "ril.emergency.roaming_protocol.sim1" or "..sim2"
+  static nsString sSettingRilSuplEsRoamingProtocol;
+  static nsCString sRilDataApn;
+  static nsCString sRilSuplApn;
+  static nsCString sRilSuplEsApn;
+#endif
+
   void Init();
   void SetupGnssHal();
   void CleanupGnssHal();
@@ -94,14 +114,18 @@ class GonkGPSGeolocationProvider : public nsIGeolocationProvider,
   NS_IMETHOD HandleSettings(nsISettingInfo* const info, bool isObserved);
 
 #ifdef MOZ_B2G_RIL
+  void UpdateApnObservers(uint32_t aServiceId);
   void UpdateRadioInterface();
   bool IsValidRilServiceId(uint32_t aServiceId);
   void SetupAGPS();
-  int32_t GetDataConnectionState();
-  void AGpsDataConnectionOpen();
+  int32_t GetDataConnectionState(bool isEmergencySupl = false);
+  void AGpsDataConnectionOpen(bool isEmergencySupl = false);
   void HandleAGpsDataConnection(nsISupports* aNetworkInfo);
-  void RequestDataConnection();
-  void ReleaseDataConnection();
+  void RequestDataConnection(bool isEmergencySupl = false);
+  void ReleaseDataConnection(bool isEmergencySupl = false);
+  static android::hardware::gnss::V2_0::IAGnss::ApnIpType GetApnIpType(
+      nsAString& protocol);
+  bool IsRoaming();
   void ListenTelephonyService(bool aStart);
   // Update network state to HAL either when the network state changed or when
   // the HAL want to know the state.
@@ -150,7 +174,7 @@ class GonkGPSGeolocationProvider : public nsIGeolocationProvider,
                                       const nsAString& message) override {
     return NS_OK;
   }
-  NS_IMETHOD NotifySrvccState(uint32_t clientId, int32_t state) {
+  NS_IMETHOD NotifySrvccState(uint32_t clientId, int32_t state) override {
     return NS_OK;
   }
 #endif  // MOZ_B2G_RIL
@@ -185,6 +209,7 @@ class GonkGPSGeolocationProvider : public nsIGeolocationProvider,
   uint32_t mNumberOfRilServices;
   nsCOMPtr<nsIRadioInterface> mRadioInterface;
   int32_t mSuplNetId;
+  int32_t mSuplEsNetId;
   int32_t mActiveNetId;
   int32_t mActiveType;
   uint16_t mActiveCapabilities;

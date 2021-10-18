@@ -47,7 +47,7 @@ HTMLFormElement* HTMLLabelElement::GetForm() const {
     return nullptr;
   }
 
-  return formControl->GetFormElement();
+  return formControl->GetForm();
 }
 
 void HTMLLabelElement::Focus(const FocusOptions& aOptions,
@@ -162,8 +162,8 @@ nsresult HTMLLabelElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
         // will actually create a new event.
         EventFlags eventFlags;
         eventFlags.mMultipleActionsPrevented = true;
-        DispatchClickEvent(MOZ_KnownLive(aVisitor.mPresContext), mouseEvent,
-                           content, false, &eventFlags, &status);
+        DispatchClickEvent(aVisitor.mPresContext, mouseEvent, content, false,
+                           &eventFlags, &status);
         // Do we care about the status this returned?  I don't think we do...
         // Don't run another <label> off of this click
         mouseEvent->mFlags.mMultipleActionsPrevented = true;
@@ -177,32 +177,28 @@ nsresult HTMLLabelElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
   return NS_OK;
 }
 
-bool HTMLLabelElement::PerformAccesskey(bool aKeyCausesActivation,
-                                        bool aIsTrustedEvent) {
+Result<bool, nsresult> HTMLLabelElement::PerformAccesskey(
+    bool aKeyCausesActivation, bool aIsTrustedEvent) {
   if (!aKeyCausesActivation) {
     RefPtr<Element> element = GetLabeledElement();
     if (element) {
       return element->PerformAccesskey(aKeyCausesActivation, aIsTrustedEvent);
     }
-  } else {
-    nsPresContext* presContext = GetPresContext(eForUncomposedDoc);
-    if (!presContext) {
-      return false;
-    }
-
-    // Click on it if the users prefs indicate to do so.
-    WidgetMouseEvent event(aIsTrustedEvent, eMouseClick, nullptr,
-                           WidgetMouseEvent::eReal);
-    event.mInputSource = MouseEvent_Binding::MOZ_SOURCE_KEYBOARD;
-
-    AutoPopupStatePusher popupStatePusher(
-        aIsTrustedEvent ? PopupBlocker::openAllowed : PopupBlocker::openAbused);
-
-    EventDispatcher::Dispatch(static_cast<nsIContent*>(this), presContext,
-                              &event);
+    return Err(NS_ERROR_ABORT);
   }
 
-  return aKeyCausesActivation;
+  nsPresContext* presContext = GetPresContext(eForUncomposedDoc);
+  if (!presContext) {
+    return Err(NS_ERROR_UNEXPECTED);
+  }
+
+  // Click on it if the users prefs indicate to do so.
+  AutoPopupStatePusher popupStatePusher(
+      aIsTrustedEvent ? PopupBlocker::openAllowed : PopupBlocker::openAbused);
+  DispatchSimulatedClick(this, aIsTrustedEvent, presContext);
+
+  // XXXedgar, do we need to check whether the focus is really changed?
+  return true;
 }
 
 nsGenericHTMLElement* HTMLLabelElement::GetLabeledElement() const {

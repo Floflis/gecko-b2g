@@ -28,6 +28,7 @@
 #include "nsIObserverService.h"
 #include "nsNetCID.h"
 #include "mozilla/Services.h"
+#include "mozilla/dom/Promise.h"
 
 #ifdef XP_MACOSX
 #  include "nsILocalFileMac.h"
@@ -45,6 +46,8 @@
 #  include <strsafe.h>
 #  include "commonupdatedir.h"
 #  include "nsWindowsHelpers.h"
+#  include "pathhash.h"
+#  include "WinUtils.h"
 #  define getcwd(path, size) _getcwd(path, size)
 #  define getpid() GetCurrentProcessId()
 #elif defined(XP_UNIX)
@@ -60,16 +63,6 @@ static LazyLogModule sUpdateLog("updatedriver");
 #  undef LOG
 #endif
 #define LOG(args) MOZ_LOG(sUpdateLog, mozilla::LogLevel::Debug, args)
-
-#ifdef XP_WIN
-#  define UPDATER_BIN "updater.exe"
-#  define MAINTENANCE_SVC_NAME L"MozillaMaintenance"
-#elif XP_MACOSX
-#  define UPDATER_APP "updater.app"
-#  define UPDATER_BIN "org.mozilla.updater"
-#else
-#  define UPDATER_BIN "updater"
-#endif
 
 #ifdef XP_MACOSX
 static void UpdateDriverSetupMacCommandLine(int& argc, char**& argv,
@@ -438,6 +431,35 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
     return;
   }
 
+#if defined(XP_MACOSX)
+  // We need to detect whether elevation is required for this update. This can
+  // occur when an admin user installs the application, but another admin
+  // user attempts to update (see bug 394984).
+  // We only check if we need elevation if we are restarting. We don't attempt
+  // to stage if elevation is required. Staging happens without the user knowing
+  // about it, and we don't want to ask for elevation for seemingly no reason.
+  bool needElevation = false;
+  if (restart) {
+    needElevation = !IsRecursivelyWritable(installDirPath.get());
+    if (needElevation) {
+      // Normally we would check this via nsIAppStartup::wasSilentlyStarted,
+      // but nsIAppStartup isn't available yet.
+      char* mozAppSilentStart = PR_GetEnv("MOZ_APP_SILENT_START");
+      bool wasSilentlyStarted =
+          mozAppSilentStart && (strcmp(mozAppSilentStart, "") != 0);
+      if (wasSilentlyStarted) {
+        // Elevation always requires prompting for credentials on macOS. If we
+        // are trying to restart silently, we must not display UI such as this
+        // prompt.
+        // We make this check here rather than in the updater, because it is
+        // actually Firefox that shows the elevation prompt (via
+        // InstallPrivilegedHelper), not the updater.
+        return;
+      }
+    }
+  }
+#endif
+
   nsAutoCString applyToDirPath;
   nsCOMPtr<nsIFile> updatedDir;
   if (restart && !isStaged) {
@@ -579,10 +601,7 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
   }
 #elif defined(XP_MACOSX)
 UpdateDriverSetupMacCommandLine(argc, argv, restart);
-// We need to detect whether elevation is required for this update. This can
-// occur when an admin user installs the application, but another admin
-// user attempts to update (see bug 394984).
-if (restart && !IsRecursivelyWritable(installDirPath.get())) {
+if (restart && needElevation) {
   bool hasLaunched = LaunchElevatedUpdate(argc, argv, outpid);
   free(argv);
   if (!hasLaunched) {
@@ -662,6 +681,13 @@ nsresult ProcessUpdates(nsIFile* greDir, nsIFile* appDir, nsIFile* updRootDir,
                         int argc, char** argv, const char* appVersion,
                         bool restart, ProcessType* pid) {
   nsresult rv;
+
+#ifdef XP_WIN
+  // If we're in a package, we know any updates that we find are not for us.
+  if (mozilla::widget::WinUtils::HasPackageIdentity()) {
+    return NS_OK;
+  }
+#endif
 
   nsCOMPtr<nsIFile> updatesDir;
   rv = updRootDir->Clone(getter_AddRefs(updatesDir));
@@ -871,12 +897,6 @@ nsUpdateProcessor::FixUpdateDirectoryPerms(bool aUseServiceOnFailure) {
         mStartServiceArgCount = mInstallPath ? 3 : 2;
         mStartServiceArgs =
             mozilla::MakeUnique<LPCWSTR[]>(mStartServiceArgCount);
-        if (!mStartServiceArgs) {
-          LOG(
-              ("Error: Unable to allocate memory for argument pointers. Cannot "
-               "fix permissions.\n"));
-          return NS_ERROR_FAILURE;
-        }
         mStartServiceArgs[0] = L"MozillaMaintenance";
         mStartServiceArgs[1] = L"fix-update-directory-perms";
         if (mInstallPath) {
@@ -1074,8 +1094,55 @@ void nsUpdateProcessor::UpdateDone() {
   nsCOMPtr<nsIUpdateManager> um =
       do_GetService("@mozilla.org/updates/update-manager;1");
   if (um) {
-    um->RefreshUpdateStatus();
+    // This completes asynchronously, but nothing else that we are doing in this
+    // function requires waiting for this to complete.
+    RefPtr<mozilla::dom::Promise> outPromise;
+    um->RefreshUpdateStatus(getter_AddRefs(outPromise));
   }
 
   ShutdownWatcherThread();
+}
+
+NS_IMETHODIMP
+nsUpdateProcessor::GetServiceRegKeyExists(bool* aResult) {
+#ifndef XP_WIN
+  return NS_ERROR_NOT_IMPLEMENTED;
+#else   // #ifdef XP_WIN
+  nsCOMPtr<nsIProperties> dirSvc(
+      do_GetService("@mozilla.org/file/directory_service;1"));
+  NS_ENSURE_TRUE(dirSvc, NS_ERROR_SERVICE_NOT_AVAILABLE);
+
+  nsCOMPtr<nsIFile> installBin;
+  nsresult rv = dirSvc->Get(XRE_EXECUTABLE_FILE, NS_GET_IID(nsIFile),
+                            getter_AddRefs(installBin));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIFile> installDir;
+  rv = installBin->GetParent(getter_AddRefs(installDir));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsAutoString installPath;
+  rv = installDir->GetPath(installPath);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  wchar_t maintenanceServiceKey[MAX_PATH + 1];
+  BOOL success = CalculateRegistryPathFromFilePath(
+      PromiseFlatString(installPath).get(), maintenanceServiceKey);
+  NS_ENSURE_TRUE(success, NS_ERROR_FAILURE);
+
+  HKEY regHandle;
+  LSTATUS ls = RegOpenKeyExW(HKEY_LOCAL_MACHINE, maintenanceServiceKey, 0,
+                             KEY_QUERY_VALUE | KEY_WOW64_64KEY, &regHandle);
+  if (ls == ERROR_SUCCESS) {
+    RegCloseKey(regHandle);
+    *aResult = true;
+    return NS_OK;
+  }
+  if (ls == ERROR_FILE_NOT_FOUND) {
+    *aResult = false;
+    return NS_OK;
+  }
+  // We got an error we weren't expecting reading the registry.
+  return NS_ERROR_NOT_AVAILABLE;
+#endif  // #ifdef XP_WIN
 }

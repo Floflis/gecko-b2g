@@ -25,7 +25,9 @@
 #include "jsfriendapi.h"
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/ContextOptions.h"
+#include "js/Initialization.h"
 #include "js/LocaleSensitive.h"
+#include "js/WasmFeatures.h"
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/Attributes.h"
@@ -63,6 +65,7 @@
 #include "nsXPCOMPrivate.h"
 #include "OSFileConstants.h"
 #include "xpcpublic.h"
+#include "XPCSelfHostedShmem.h"
 
 #if defined(XP_MACOSX)
 #  include "nsMacUtilsImpl.h"
@@ -164,7 +167,7 @@ struct PrefTraits;
 
 template <>
 struct PrefTraits<bool> {
-  typedef bool PrefValueType;
+  using PrefValueType = bool;
 
   static const PrefValueType kDefaultValue = false;
 
@@ -181,7 +184,7 @@ struct PrefTraits<bool> {
 
 template <>
 struct PrefTraits<int32_t> {
-  typedef int32_t PrefValueType;
+  using PrefValueType = int32_t;
 
   static inline PrefValueType Get(const char* aPref) {
     AssertIsOnMainThread();
@@ -200,7 +203,7 @@ T GetWorkerPref(const nsACString& aPref,
                 bool* aPresent = nullptr) {
   AssertIsOnMainThread();
 
-  typedef PrefTraits<T> PrefHelper;
+  using PrefHelper = PrefTraits<T>;
 
   T result;
   bool present = true;
@@ -274,21 +277,20 @@ void LoadContextOptions(const char* aPrefName, void* /* aClosure */) {
 #else
       .setWasmIon(GetWorkerPref<bool>("wasm_optimizingjit"_ns))
 #endif
-      .setWasmReftypes(GetWorkerPref<bool>("wasm_reftypes"_ns))
-#ifdef ENABLE_WASM_MULTI_VALUE
-      .setWasmMultiValue(GetWorkerPref<bool>("wasm_multi_value"_ns))
-#endif
-#ifdef ENABLE_WASM_SIMD
-      .setWasmSimd(GetWorkerPref<bool>("wasm_simd"_ns))
-#endif
-#ifdef ENABLE_WASM_FUNCTION_REFERENCES
-      .setWasmFunctionReferences(
-          GetWorkerPref<bool>("wasm_function_references"_ns))
-#endif
-#ifdef ENABLE_WASM_GC
-      .setWasmGc(GetWorkerPref<bool>("wasm_gc"_ns))
-#endif
+      .setWasmBaseline(GetWorkerPref<bool>("wasm_baselinejit"_ns))
       .setWasmVerbose(GetWorkerPref<bool>("wasm_verbose"_ns))
+#define WASM_FEATURE(NAME, LOWER_NAME, COMPILE_PRED, COMPILER_PRED, FLAG_PRED, \
+                     SHELL, PREF)                                              \
+  .setWasm##NAME(GetWorkerPref<bool>("wasm_" PREF ""_ns))
+          JS_FOR_WASM_FEATURES(WASM_FEATURE, WASM_FEATURE)
+#undef WASM_FEATURE
+#ifdef ENABLE_WASM_SIMD_WORMHOLE
+#  ifdef EARLY_BETA_OR_EARLIER
+      .setWasmSimdWormhole(GetWorkerPref<bool>("wasm_simd_wormhole"_ns))
+#  else
+      .setWasmSimdWormhole(false)
+#  endif
+#endif
       .setThrowOnAsmJSValidationFailure(
           GetWorkerPref<bool>("throw_on_asmjs_validation_failure"_ns))
       .setSourcePragmas(GetWorkerPref<bool>("source_pragmas"_ns))
@@ -297,9 +299,12 @@ void LoadContextOptions(const char* aPrefName, void* /* aClosure */) {
           GetWorkerPref<bool>("asyncstack_capture_debuggee_only"_ns))
       .setPrivateClassFields(
           GetWorkerPref<bool>("experimental.private_fields"_ns))
+      .setClassStaticBlocks(
+          GetWorkerPref<bool>("experimental.class_static_blocks"_ns))
       .setPrivateClassMethods(
           GetWorkerPref<bool>("experimental.private_methods"_ns))
-      .setTopLevelAwait(GetWorkerPref<bool>("experimental.top_level_await"_ns));
+      .setErgnomicBrandChecks(
+          GetWorkerPref<bool>("experimental.ergonomic_brand_checks"_ns));
 
   nsCOMPtr<nsIXULRuntime> xr = do_GetService("@mozilla.org/xre/runtime;1");
   if (xr) {
@@ -419,6 +424,12 @@ void LoadJSGCMemoryOptions(const char* aPrefName, void* /* aClosure */) {
       PREF("gc_small_heap_size_max_mb", JSGC_SMALL_HEAP_SIZE_MAX),
       PREF("gc_large_heap_size_min_mb", JSGC_LARGE_HEAP_SIZE_MIN),
       PREF("gc_allocation_threshold_mb", JSGC_ALLOCATION_THRESHOLD),
+      PREF("gc_malloc_threshold_base_mb", JSGC_MALLOC_THRESHOLD_BASE),
+      PREF("gc_small_heap_incremental_limit",
+           JSGC_SMALL_HEAP_INCREMENTAL_LIMIT),
+      PREF("gc_large_heap_incremental_limit",
+           JSGC_LARGE_HEAP_INCREMENTAL_LIMIT),
+      PREF("gc_urgent_threshold_mb", JSGC_URGENT_THRESHOLD_MB),
       PREF("gc_incremental_slice_ms", JSGC_SLICE_TIME_BUDGET_MS),
       PREF("gc_min_empty_chunk_count", JSGC_MIN_EMPTY_CHUNK_COUNT),
       PREF("gc_max_empty_chunk_count", JSGC_MAX_EMPTY_CHUNK_COUNT),
@@ -484,6 +495,10 @@ void LoadJSGCMemoryOptions(const char* aPrefName, void* /* aClosure */) {
       case JSGC_SMALL_HEAP_SIZE_MAX:
       case JSGC_LARGE_HEAP_SIZE_MIN:
       case JSGC_ALLOCATION_THRESHOLD:
+      case JSGC_MALLOC_THRESHOLD_BASE:
+      case JSGC_SMALL_HEAP_INCREMENTAL_LIMIT:
+      case JSGC_LARGE_HEAP_INCREMENTAL_LIMIT:
+      case JSGC_URGENT_THRESHOLD_MB:
       case JSGC_MIN_EMPTY_CHUNK_COUNT:
       case JSGC_MAX_EMPTY_CHUNK_COUNT:
         UpdateCommonJSGCMemoryOption(rts, pref->name, pref->key);
@@ -729,7 +744,12 @@ bool InitJSContextForWorker(WorkerPrivate* aWorkerPrivate,
   JS::InitConsumeStreamCallback(aWorkerCx, ConsumeStream,
                                 FetchUtil::ReportJSStreamError);
 
-  if (!JS::InitSelfHostedCode(aWorkerCx)) {
+  // When available, set the self-hosted shared memory to be read, so that we
+  // can decode the self-hosted content instead of parsing it.
+  auto& shm = xpc::SelfHostedShmem::GetSingleton();
+  JS::SelfHostedCache selfHostedContent = shm.Content();
+
+  if (!JS::InitSelfHostedCode(aWorkerCx, selfHostedContent)) {
     NS_WARNING("Could not init self-hosted code!");
     return false;
   }
@@ -817,7 +837,8 @@ class WorkerJSRuntime final : public mozilla::CycleCollectedJSRuntime {
 
   virtual void PrepareForForgetSkippable() override {}
 
-  virtual void BeginCycleCollectionCallback() override {}
+  virtual void BeginCycleCollectionCallback(
+      mozilla::CCReason aReason) override {}
 
   virtual void EndCycleCollectionCallback(
       CycleCollectorResults& aResults) override {}
@@ -838,7 +859,8 @@ class WorkerJSRuntime final : public mozilla::CycleCollectedJSRuntime {
     mWorkerPrivate->AssertIsOnWorkerThread();
 
     if (aStatus == JSGC_END) {
-      bool collectedAnything = nsCycleCollector_collect(nullptr);
+      bool collectedAnything =
+          nsCycleCollector_collect(CCReason::GC_FINISHED, nullptr);
       mWorkerPrivate->SetCCCollectedAnything(collectedAnything);
     }
   }
@@ -918,7 +940,7 @@ class WorkerJSContext final : public mozilla::CycleCollectedJSContext {
     MOZ_ASSERT(!NS_IsMainThread());
     MOZ_ASSERT(runnable);
 
-    std::queue<RefPtr<MicroTaskRunnable>>* microTaskQueue = nullptr;
+    std::deque<RefPtr<MicroTaskRunnable>>* microTaskQueue = nullptr;
 
     JSContext* cx = Context();
     NS_ASSERTION(cx, "This should never be null!");
@@ -940,7 +962,7 @@ class WorkerJSContext final : public mozilla::CycleCollectedJSContext {
     }
 
     JS::JobQueueMayNotBeEmpty(cx);
-    microTaskQueue->push(std::move(runnable));
+    microTaskQueue->push_back(std::move(runnable));
   }
 
   bool IsSystemCaller() const override {
@@ -1149,15 +1171,19 @@ bool RuntimeService::RegisterWorker(WorkerPrivate& aWorkerPrivate) {
   {
     MutexAutoLock lock(mMutex);
 
-    const auto& domainInfo =
-        mDomainMap.LookupForAdd(domain).OrInsert([&domain, parent]() {
-          NS_ASSERTION(!parent, "Shouldn't have a parent here!");
-          Unused
-              << parent;  // silence clang -Wunused-lambda-capture in opt builds
-          WorkerDomainInfo* wdi = new WorkerDomainInfo();
-          wdi->mDomain = domain;
-          return wdi;
-        });
+    auto* const domainInfo =
+        mDomainMap
+            .LookupOrInsertWith(
+                domain,
+                [&domain, parent] {
+                  NS_ASSERTION(!parent, "Shouldn't have a parent here!");
+                  Unused << parent;  // silence clang -Wunused-lambda-capture in
+                                     // opt builds
+                  auto wdi = MakeUnique<WorkerDomainInfo>();
+                  wdi->mDomain = domain;
+                  return wdi;
+                })
+            .get();
 
     queued = gMaxWorkersPerDomain &&
              domainInfo->ActiveWorkerCount() >= gMaxWorkersPerDomain &&
@@ -1218,9 +1244,8 @@ bool RuntimeService::RegisterWorker(WorkerPrivate& aWorkerPrivate) {
     if (!isServiceWorker) {
       // Service workers are excluded since their lifetime is separate from
       // that of dom windows.
-      const auto& windowArray = mWindowMap.LookupForAdd(window).OrInsert(
-          []() { return new nsTArray<WorkerPrivate*>(1); });
-      if (!windowArray->Contains(&aWorkerPrivate)) {
+      if (auto* const windowArray = mWindowMap.GetOrInsertNew(window, 1);
+          !windowArray->Contains(&aWorkerPrivate)) {
         windowArray->AppendElement(&aWorkerPrivate);
       } else {
         MOZ_ASSERT(aWorkerPrivate.IsSharedWorker());
@@ -1670,9 +1695,7 @@ void RuntimeService::CrashIfHanging() {
   ActiveWorkerStats activeStats;
   uint32_t inactiveWorkers = 0;
 
-  for (const auto& entry : mDomainMap) {
-    const WorkerDomainInfo* const aData = entry.GetData().get();
-
+  for (const auto& aData : mDomainMap.Values()) {
     activeStats.Update<&ActiveWorkerStats::mWorkers>(aData->mActiveWorkers);
     activeStats.Update<&ActiveWorkerStats::mServiceWorkers>(
         aData->mActiveServiceWorkers);
@@ -1828,9 +1851,7 @@ void RuntimeService::Cleanup() {
 
 void RuntimeService::AddAllTopLevelWorkersToArray(
     nsTArray<WorkerPrivate*>& aWorkers) {
-  for (const auto& entry : mDomainMap) {
-    WorkerDomainInfo* const aData = entry.GetData().get();
-
+  for (const auto& aData : mDomainMap.Values()) {
 #ifdef DEBUG
     for (const auto& activeWorker : aData->mActiveWorkers) {
       MOZ_ASSERT(!activeWorker->GetParent(),
@@ -2187,7 +2208,8 @@ WorkerThreadPrimaryRunnable::Run() {
     mWorkerPrivate->AssertIsOnWorkerThread();
 
     // This needs to be initialized on the worker thread before being used on
-    // the main thread.
+    // the main thread and calling BackgroundChild::GetOrCreateForCurrentThread
+    // exposes it to the main thread.
     mWorkerPrivate->EnsurePerformanceStorage();
 
     if (NS_WARN_IF(!BackgroundChild::GetOrCreateForCurrentThread())) {

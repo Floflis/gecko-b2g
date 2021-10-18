@@ -44,18 +44,27 @@ try {
 
     DevToolsServer.init();
     // We want a special server without any root actor and only target-scoped actors.
-    // We are going to spawn a FrameTargetActor instance in the next few lines,
+    // We are going to spawn a WindowGlobalTargetActor instance in the next few lines,
     // it is going to act like a root actor without being one.
     DevToolsServer.registerActors({ target: true });
 
     const connections = new Map();
 
     const onConnect = DevToolsUtils.makeInfallible(function(msg) {
-      removeMessageListener("debug:connect", onConnect);
-
       const mm = msg.target;
       const prefix = msg.data.prefix;
       const addonId = msg.data.addonId;
+
+      // If we try to create several frame targets simultaneously, the frame script will be loaded several times.
+      // In this case a single "debug:connect" message might be received by all the already loaded frame scripts.
+      // Check if the DevToolsServer already knows the provided connection prefix,
+      // because it means that another framescript instance already handled this message.
+      // Another "debug:connect" message is guaranteed to be emitted for another prefix,
+      // so we keep the message listener and wait for this next message.
+      if (DevToolsServer.hasConnectionForPrefix(prefix)) {
+        return;
+      }
+      removeMessageListener("debug:connect", onConnect);
 
       const conn = DevToolsServer.connectToParent(prefix, mm);
       conn.parentMessageManager = mm;
@@ -67,20 +76,26 @@ try {
         const {
           WebExtensionTargetActor,
         } = require("devtools/server/actors/targets/webextension");
-        actor = new WebExtensionTargetActor(
-          conn,
+        actor = new WebExtensionTargetActor(conn, {
+          addonId,
           chromeGlobal,
+          isTopLevelTarget: true,
           prefix,
-          addonId
-        );
+        });
       } else {
         const {
-          FrameTargetActor,
-        } = require("devtools/server/actors/targets/frame");
+          WindowGlobalTargetActor,
+        } = require("devtools/server/actors/targets/window-global");
         const { docShell } = chromeGlobal;
         // For a script loaded via loadFrameScript, the global is the content
         // message manager.
-        actor = new FrameTargetActor(conn, docShell);
+        // All WindowGlobalTarget actors created via the framescript are top-level
+        // targets. Non top-level WindowGlobalTarget actors are all created by the
+        // DevToolsFrameChild actor.
+        actor = new WindowGlobalTargetActor(conn, {
+          docShell,
+          isTopLevelTarget: true,
+        });
       }
       actor.manage(actor);
 
@@ -101,7 +116,7 @@ try {
 
       removeMessageListener("debug:disconnect", onDisconnect);
       // Call DevToolsServerConnection.close to destroy all child actors. It should end up
-      // calling DevToolsServerConnection.onClosed that would actually cleanup all actor
+      // calling DevToolsServerConnection.onTransportClosed that would actually cleanup all actor
       // pools.
       conn.close();
       connections.delete(prefix);

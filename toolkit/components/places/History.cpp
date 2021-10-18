@@ -25,7 +25,7 @@
 #include "mozilla/storage.h"
 #include "mozilla/dom/Link.h"
 #include "nsDocShellCID.h"
-#include "mozilla/Services.h"
+#include "mozilla/Components.h"
 #include "nsThreadUtils.h"
 #include "nsNetUtil.h"
 #include "nsIWidget.h"
@@ -39,6 +39,7 @@
 #include "nsTHashtable.h"
 #include "jsapi.h"
 #include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject, JS::NewArrayObject
+#include "js/PropertyAndElement.h"  // JS_DefineElement, JS_GetElement, JS_GetProperty
 #include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/dom/ContentProcessMessageManager.h"
 #include "mozilla/dom/Element.h"
@@ -368,6 +369,18 @@ class VisitedQuery final : public AsyncStatementCallback {
   NS_DECL_ISUPPORTS_INHERITED
 
   static nsresult Start(nsIURI* aURI,
+                        History::ContentParentSet&& aContentProcessesToNotify) {
+    MOZ_ASSERT(aURI, "Null URI");
+    MOZ_ASSERT(XRE_IsParentProcess());
+
+    History* history = History::GetService();
+    NS_ENSURE_STATE(history);
+    RefPtr<VisitedQuery> query =
+        new VisitedQuery(aURI, std::move(aContentProcessesToNotify));
+    return history->QueueVisitedStatement(std::move(query));
+  }
+
+  static nsresult Start(nsIURI* aURI,
                         mozIVisitedStatusCallback* aCallback = nullptr) {
     MOZ_ASSERT(aURI, "Null URI");
     MOZ_ASSERT(XRE_IsParentProcess());
@@ -425,7 +438,7 @@ class VisitedQuery final : public AsyncStatementCallback {
     if (History* history = History::GetService()) {
       auto status = mIsVisited ? IHistory::VisitedStatus::Visited
                                : IHistory::VisitedStatus::Unvisited;
-      history->NotifyVisited(mURI, status);
+      history->NotifyVisited(mURI, status, &mContentProcessesToNotify);
     }
   }
 
@@ -433,13 +446,19 @@ class VisitedQuery final : public AsyncStatementCallback {
   explicit VisitedQuery(
       nsIURI* aURI,
       const nsMainThreadPtrHandle<mozIVisitedStatusCallback>& aCallback)
-      : mURI(aURI), mCallback(aCallback), mIsVisited(false) {}
+      : mURI(aURI), mCallback(aCallback) {}
+
+  explicit VisitedQuery(nsIURI* aURI,
+                        History::ContentParentSet&& aContentProcessesToNotify)
+      : mURI(aURI),
+        mContentProcessesToNotify(std::move(aContentProcessesToNotify)) {}
 
   ~VisitedQuery() = default;
 
   nsCOMPtr<nsIURI> mURI;
   nsMainThreadPtrHandle<mozIVisitedStatusCallback> mCallback;
-  bool mIsVisited;
+  History::ContentParentSet mContentProcessesToNotify;
+  bool mIsVisited = false;
 };
 
 NS_IMPL_ISUPPORTS_INHERITED0(VisitedQuery, AsyncStatementCallback)
@@ -818,6 +837,9 @@ class InsertVisitedURIs final : public Runnable {
 
     mozStorageTransaction transaction(
         mDBConn, false, mozIStorageConnection::TRANSACTION_IMMEDIATE);
+
+    // XXX Handle the error, bug 1696133.
+    Unused << NS_WARN_IF(NS_FAILED(transaction.Start()));
 
     const VisitData* lastFetchedPlace = nullptr;
     uint32_t lastFetchedVisitCount = 0;
@@ -1318,7 +1340,7 @@ History::History()
       mRecentlyVisitedURIs(RECENTLY_VISITED_URIS_SIZE) {
   NS_ASSERTION(!gService, "Ruh-roh!  This service has already been created!");
   if (XRE_IsParentProcess()) {
-    nsCOMPtr<nsIProperties> dirsvc = services::GetDirectoryService();
+    nsCOMPtr<nsIProperties> dirsvc = components::Directory::Service();
     bool haveProfile = false;
     MOZ_RELEASE_ASSERT(
         dirsvc &&
@@ -1655,8 +1677,8 @@ History::CollectReports(nsIHandleReportCallback* aHandleReport,
 size_t History::SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) {
   size_t size = aMallocSizeOf(this);
   size += mTrackedURIs.ShallowSizeOfExcludingThis(aMallocSizeOf);
-  for (const auto& entry : mTrackedURIs) {
-    size += entry.GetData().SizeOfExcludingThis(aMallocSizeOf);
+  for (const auto& entry : mTrackedURIs.Values()) {
+    size += entry.SizeOfExcludingThis(aMallocSizeOf);
   }
   return size;
 }
@@ -1667,7 +1689,7 @@ History* History::GetService() {
     return gService;
   }
 
-  nsCOMPtr<IHistory> service = services::GetHistory();
+  nsCOMPtr<IHistory> service = components::History::Service();
   if (service) {
     NS_ASSERTION(gService, "Our constructor was not run?!");
   }
@@ -1730,15 +1752,7 @@ void History::Shutdown() {
 void History::AppendToRecentlyVisitedURIs(nsIURI* aURI, bool aHidden) {
   PRTime now = PR_Now();
 
-  {
-    RecentURIVisit& visit =
-        mRecentlyVisitedURIs.LookupForAdd(aURI).OrInsert([] {
-          return RecentURIVisit{0, false};
-        });
-
-    visit.mTime = now;
-    visit.mHidden = aHidden;
-  }
+  mRecentlyVisitedURIs.InsertOrUpdate(aURI, RecentURIVisit{now, aHidden});
 
   // Remove entries older than RECENTLY_VISITED_URIS_MAX_AGE.
   for (auto iter = mRecentlyVisitedURIs.Iter(); !iter.Done(); iter.Next()) {
@@ -1851,9 +1865,8 @@ History::VisitURI(nsIWidget* aWidget, nsIURI* aURI, nsIURI* aLastVisitedURI,
     auto entry = mRecentlyVisitedURIs.Lookup(aURI);
     // Check if the entry exists and is younger than
     // RECENTLY_VISITED_URIS_MAX_AGE.
-    if (entry &&
-        (PR_Now() - entry.Data().mTime) < RECENTLY_VISITED_URIS_MAX_AGE) {
-      bool wasHidden = entry.Data().mHidden;
+    if (entry && (PR_Now() - entry->mTime) < RECENTLY_VISITED_URIS_MAX_AGE) {
+      bool wasHidden = entry->mHidden;
       // Regardless of whether we store the visit or not, we must update the
       // stored visit time.
       AppendToRecentlyVisitedURIs(aURI, place.hidden);
@@ -2098,12 +2111,13 @@ History::IsURIVisited(nsIURI* aURI, mozIVisitedStatusCallback* aCallback) {
   return VisitedQuery::Start(aURI, aCallback);
 }
 
-void History::StartPendingVisitedQueries(
-    const PendingVisitedQueries& aQueries) {
+void History::StartPendingVisitedQueries(PendingVisitedQueries&& aQueries) {
   if (XRE_IsContentProcess()) {
     nsTArray<RefPtr<nsIURI>> uris(aQueries.Count());
-    for (auto iter = aQueries.ConstIter(); !iter.Done(); iter.Next()) {
-      uris.AppendElement(iter.Get()->GetKey());
+    for (const auto& entry : aQueries) {
+      uris.AppendElement(entry.GetKey());
+      MOZ_ASSERT(entry.GetData().IsEmpty(),
+                 "Child process shouldn't have parent requests");
     }
     auto* cpc = mozilla::dom::ContentChild::GetSingleton();
     MOZ_ASSERT(cpc, "Content Protocol is NULL!");
@@ -2111,8 +2125,9 @@ void History::StartPendingVisitedQueries(
   } else {
     // TODO(bug 1594368): We could do a single query, as long as we can
     // then notify each URI individually.
-    for (auto iter = aQueries.ConstIter(); !iter.Done(); iter.Next()) {
-      nsresult queryStatus = VisitedQuery::Start(iter.Get()->GetKey());
+    for (auto& entry : aQueries) {
+      nsresult queryStatus = VisitedQuery::Start(
+          entry.GetKey(), std::move(*entry.GetModifiableData()));
       Unused << NS_WARN_IF(NS_FAILED(queryStatus));
     }
   }

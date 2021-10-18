@@ -6,7 +6,8 @@
 
 #include "ServiceWorkerScriptCache.h"
 
-#include "js/Array.h"  // JS::GetArrayLength
+#include "js/Array.h"               // JS::GetArrayLength
+#include "js/PropertyAndElement.h"  // JS_GetElement
 #include "mozilla/Unused.h"
 #include "mozilla/dom/CacheBinding.h"
 #include "mozilla/dom/cache/CacheStorage.h"
@@ -663,7 +664,7 @@ nsresult CompareNetwork::Initialize(nsIPrincipal* aPrincipal,
 
   // Create a new cookieJarSettings.
   nsCOMPtr<nsICookieJarSettings> cookieJarSettings =
-      mozilla::net::CookieJarSettings::Create();
+      mozilla::net::CookieJarSettings::Create(aPrincipal);
 
   net::CookieJarSettings::Cast(cookieJarSettings)->SetPartitionKey(uri);
 

@@ -24,6 +24,7 @@ static const char SandboxPolicyContent[] = R"SANDBOX_LITERAL(
   (define hasWindowServer (param "HAS_WINDOW_SERVER"))
   (define home-path (param "HOME_PATH"))
   (define debugWriteDir (param "DEBUG_WRITE_DIR"))
+  (define userCacheDir (param "DARWIN_USER_CACHE_DIR"))
   (define testingReadPath1 (param "TESTING_READ_PATH1"))
   (define testingReadPath2 (param "TESTING_READ_PATH2"))
   (define testingReadPath3 (param "TESTING_READ_PATH3"))
@@ -262,6 +263,11 @@ static const char SandboxPolicyContent[] = R"SANDBOX_LITERAL(
       (when testingReadPath4
         (allow file-read* (subpath testingReadPath4)))))
 
+  ; bug 1692220
+  (when userCacheDir
+    (allow file-read*
+      (subpath (string-append userCacheDir "/com.apple.FontRegistry"))))
+
   ; bug 1303987
   (if (string? debugWriteDir)
     (begin
@@ -277,10 +283,6 @@ static const char SandboxPolicyContent[] = R"SANDBOX_LITERAL(
   (allow file-read*
       (home-regex "/Library/Application Support/[^/]+/Extensions/")
       (regex "^/Library/Application Support/[^/]+/Extensions/"))
-
-; bug 1393805
-  (allow file-read*
-      (home-subpath "/Library/Application Support/Mozilla/SystemExtensionsDev"))
 
 ; The following rules impose file access restrictions which get
 ; more restrictive in higher levels. When file-origin-specific

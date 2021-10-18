@@ -64,7 +64,7 @@ class CrashChannel final : public nsBaseChannel {
  */
 static const RedirEntry kRedirMap[] = {
     {"about", "chrome://global/content/aboutAbout.html", 0},
-    {"addons", "chrome://mozapps/content/extensions/extensions.xhtml",
+    {"addons", "chrome://mozapps/content/extensions/aboutaddons.html",
      nsIAboutModule::ALLOW_SCRIPT},
     {"buildconfig", "chrome://global/content/buildconfig.html",
      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT},
@@ -114,9 +114,8 @@ static const RedirEntry kRedirMap[] = {
     {"processes", "chrome://global/content/aboutProcesses.html",
      nsIAboutModule::ALLOW_SCRIPT},
     // about:serviceworkers always wants to load in the parent process because
-    // when dom.serviceWorkers.parent_intercept is set to true (the new default)
-    // then the only place nsIServiceWorkerManager has any data is in the
-    // parent process.
+    // the only place nsIServiceWorkerManager has any data is in the parent
+    // process.
     //
     // There is overlap without about:debugging, but about:debugging is not
     // available on mobile at this time, and it's useful to be able to know if
@@ -137,7 +136,11 @@ static const RedirEntry kRedirMap[] = {
          nsIAboutModule::MAKE_LINKABLE | nsIAboutModule::URI_CAN_LOAD_IN_CHILD},
     {"support", "chrome://global/content/aboutSupport.xhtml",
      nsIAboutModule::ALLOW_SCRIPT},
-#ifdef MOZ_GLEAN
+#ifdef XP_WIN
+    {"third-party", "chrome://global/content/aboutThirdParty.html",
+     nsIAboutModule::ALLOW_SCRIPT},
+#endif
+#ifndef MOZ_GLEAN_ANDROID
     {"glean", "chrome://global/content/aboutGlean.html",
      nsIAboutModule::HIDE_FROM_ABOUTABOUT | nsIAboutModule::ALLOW_SCRIPT},
 #endif

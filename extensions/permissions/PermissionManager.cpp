@@ -127,16 +127,6 @@ static const nsLiteralCString kPreloadPermissions[] = {
     // removed.  See bug 1428130.
     "cookie"_ns};
 
-// Certain permissions should never be persisted to disk under GeckoView; it's
-// the responsibility of the app to manage storing these beyond the scope of
-// a single session.
-#ifdef MOZ_WIDGET_ANDROID
-static const nsLiteralCString kGeckoViewRestrictedPermissions[] = {
-    "MediaManagerVideo"_ns,    "geolocation"_ns,
-    "desktop-notification"_ns, "persistent-storage"_ns,
-    "trackingprotection"_ns,   "trackingprotection-pb"_ns};
-#endif
-
 // NOTE: nullptr can be passed as aType - if it is this function will return
 // "false" unconditionally.
 bool IsPreloadPermission(const nsACString& aType) {
@@ -174,31 +164,10 @@ bool IsOAForceStripPermission(const nsACString& aType) {
   return false;
 }
 
-/**
- * Strip origin attributes depending on pref state
- * @param aForceStrip If true, strips user context and private browsing id,
- * ignoring stripping prefs.
- * @param aOriginAttributes object to strip.
- */
-void MaybeStripOAs(bool aForceStrip, OriginAttributes& aOriginAttributes) {
-  uint32_t flags = 0;
-
-  if (aForceStrip || !StaticPrefs::permissions_isolateBy_privateBrowsing()) {
-    flags |= OriginAttributes::STRIP_PRIVATE_BROWSING_ID;
-  }
-
-  if (aForceStrip || !StaticPrefs::permissions_isolateBy_userContext()) {
-    flags |= OriginAttributes::STRIP_USER_CONTEXT_ID;
-  }
-
-  if (flags != 0) {
-    aOriginAttributes.StripAttributes(flags);
-  }
-}
-
 void OriginAppendOASuffix(OriginAttributes aOriginAttributes,
                           bool aForceStripOA, nsACString& aOrigin) {
-  MaybeStripOAs(aForceStripOA, aOriginAttributes);
+  PermissionManager::MaybeStripOriginAttributes(aForceStripOA,
+                                                aOriginAttributes);
 
   nsAutoCString oaSuffix;
   aOriginAttributes.CreateSuffix(oaSuffix);
@@ -250,7 +219,7 @@ nsresult GetPrincipalFromOrigin(const nsACString& aOrigin, bool aForceStripOA,
     return NS_ERROR_FAILURE;
   }
 
-  MaybeStripOAs(aForceStripOA, attrs);
+  PermissionManager::MaybeStripOriginAttributes(aForceStripOA, attrs);
 
   nsCOMPtr<nsIURI> uri;
   nsresult rv = NS_NewURI(getter_AddRefs(uri), originNoSuffix);
@@ -435,7 +404,7 @@ nsresult UpgradeHostToOriginAndInsert(
     rv = histResultContainer->GetChildCount(&childCount);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    nsTHashtable<nsCStringHashKey> insertedOrigins;
+    nsTHashSet<nsCString> insertedOrigins;
     for (uint32_t i = 0; i < childCount; i++) {
       nsCOMPtr<nsINavHistoryResultNode> child;
       histResultContainer->GetChild(i, getter_AddRefs(child));
@@ -484,7 +453,7 @@ nsresult UpgradeHostToOriginAndInsert(
       rv = aCallback(origin, aType, aPermission, aExpireType, aExpireTime,
                      aModificationTime);
       NS_WARNING_ASSERTION(NS_SUCCEEDED(rv), "Insert failed");
-      insertedOrigins.PutEntry(origin);
+      insertedOrigins.Insert(origin);
     }
 
     rv = histResultContainer->SetContainerOpen(false);
@@ -554,11 +523,6 @@ bool IsExpandedPrincipal(nsIPrincipal* aPrincipal) {
 bool IsPersistentExpire(uint32_t aExpire, const nsACString& aType) {
   bool res = (aExpire != nsIPermissionManager::EXPIRE_SESSION &&
               aExpire != nsIPermissionManager::EXPIRE_POLICY);
-#ifdef MOZ_WIDGET_ANDROID
-  for (const auto& perm : kGeckoViewRestrictedPermissions) {
-    res = res && !perm.Equals(aType);
-  }
-#endif
   return res;
 }
 
@@ -627,9 +591,9 @@ PermissionManager::PermissionManager()
 PermissionManager::~PermissionManager() {
   // NOTE: Make sure to reject each of the promises in mPermissionKeyPromiseMap
   // before destroying.
-  for (auto iter = mPermissionKeyPromiseMap.Iter(); !iter.Done(); iter.Next()) {
-    if (iter.Data()) {
-      iter.Data()->Reject(NS_ERROR_FAILURE, __func__);
+  for (const auto& promise : mPermissionKeyPromiseMap.Values()) {
+    if (promise) {
+      promise->Reject(NS_ERROR_FAILURE, __func__);
     }
   }
   mPermissionKeyPromiseMap.Clear();
@@ -1530,6 +1494,39 @@ bool PermissionManager::HasExpired(uint32_t aExpireType, int64_t aExpireTime) {
 }
 
 NS_IMETHODIMP
+PermissionManager::AddFromPrincipalAndPersistInPrivateBrowsing(
+    nsIPrincipal* aPrincipal, const nsACString& aType, uint32_t aPermission) {
+  ENSURE_NOT_CHILD_PROCESS;
+  NS_ENSURE_ARG_POINTER(aPrincipal);
+  // We don't add the system principal because it actually has no URI and we
+  // always allow action for them.
+  if (aPrincipal->IsSystemPrincipal()) {
+    return NS_OK;
+  }
+
+  // Null principals can't meaningfully have persisted permissions attached to
+  // them, so we don't allow adding permissions for them.
+  if (aPrincipal->GetIsNullPrincipal()) {
+    return NS_OK;
+  }
+
+  // Permissions may not be added to expanded principals.
+  if (IsExpandedPrincipal(aPrincipal)) {
+    return NS_ERROR_INVALID_ARG;
+  }
+
+  // A modificationTime of zero will cause AddInternal to use now().
+  int64_t modificationTime = 0;
+
+  return AddInternal(aPrincipal, aType, aPermission, 0,
+                     nsIPermissionManager::EXPIRE_NEVER,
+                     /* aExpireTime */ 0, modificationTime, eNotify, eWriteToDB,
+                     /* aIgnoreSessionPermissions */ false,
+                     /* aOriginString*/ nullptr,
+                     /* aAllowPersistInPrivateBrowsing */ true);
+}
+
+NS_IMETHODIMP
 PermissionManager::AddFromPrincipal(nsIPrincipal* aPrincipal,
                                     const nsACString& aType,
                                     uint32_t aPermission, uint32_t aExpireType,
@@ -1576,7 +1573,8 @@ nsresult PermissionManager::AddInternal(
     int64_t aID, uint32_t aExpireType, int64_t aExpireTime,
     int64_t aModificationTime, NotifyOperationType aNotifyOperation,
     DBOperationType aDBOperation, const bool aIgnoreSessionPermissions,
-    const nsACString* aOriginString) {
+    const nsACString* aOriginString,
+    const bool aAllowPersistInPrivateBrowsing) {
   MOZ_ASSERT(NS_IsMainThread());
 
   EnsureReadCompleted();
@@ -1598,8 +1596,13 @@ nsresult PermissionManager::AddInternal(
     }
   }
 
-  // For private browsing only store permissions for the session
-  if (aExpireType != EXPIRE_SESSION) {
+  // Unless the caller sets aAllowPersistInPrivateBrowsing, only store
+  // permissions for the session in Private Browsing. Except for default
+  // permissions which are stored in-memory only and imported each startup. We
+  // also allow setting persistent UKNOWN_ACTION, to support removing default
+  // private browsing permissions.
+  if (!aAllowPersistInPrivateBrowsing && aID != cIDPermissionIsDefault &&
+      aPermission != UNKNOWN_ACTION && aExpireType != EXPIRE_SESSION) {
     uint32_t privateBrowsingId =
         nsScriptSecurityManager::DEFAULT_PRIVATE_BROWSING_ID;
     nsresult rv = aPrincipal->GetPrivateBrowsingId(&privateBrowsingId);
@@ -1946,16 +1949,15 @@ nsresult PermissionManager::RemovePermissionEntries(T aCondition) {
   EnsureReadCompleted();
 
   Vector<Tuple<nsCOMPtr<nsIPrincipal>, nsCString, nsCString>, 10> array;
-  for (auto iter = mPermissionTable.Iter(); !iter.Done(); iter.Next()) {
-    PermissionHashKey* entry = iter.Get();
-    for (const auto& permEntry : entry->GetPermissions()) {
+  for (const PermissionHashKey& entry : mPermissionTable) {
+    for (const auto& permEntry : entry.GetPermissions()) {
       if (!aCondition(permEntry)) {
         continue;
       }
 
       nsCOMPtr<nsIPrincipal> principal;
       nsresult rv = GetPrincipalFromOrigin(
-          entry->GetKey()->mOrigin,
+          entry.GetKey()->mOrigin,
           IsOAForceStripPermission(mTypeArray[permEntry.mType]),
           getter_AddRefs(principal));
       if (NS_FAILED(rv)) {
@@ -1963,7 +1965,7 @@ nsresult PermissionManager::RemovePermissionEntries(T aCondition) {
       }
 
       if (!array.emplaceBack(principal, mTypeArray[permEntry.mType],
-                             entry->GetKey()->mOrigin)) {
+                             entry.GetKey()->mOrigin)) {
         continue;
       }
     }
@@ -2259,9 +2261,8 @@ nsresult PermissionManager::GetPermissionEntries(
 
   EnsureReadCompleted();
 
-  for (auto iter = mPermissionTable.Iter(); !iter.Done(); iter.Next()) {
-    PermissionHashKey* entry = iter.Get();
-    for (const auto& permEntry : entry->GetPermissions()) {
+  for (const PermissionHashKey& entry : mPermissionTable) {
+    for (const auto& permEntry : entry.GetPermissions()) {
       // Given how "default" permissions work and the possibility of them being
       // overridden with UNKNOWN_ACTION, we might see this value here - but we
       // do *not* want to return them via the enumerator.
@@ -2282,7 +2283,7 @@ nsresult PermissionManager::GetPermissionEntries(
 
       nsCOMPtr<nsIPrincipal> principal;
       nsresult rv = GetPrincipalFromOrigin(
-          entry->GetKey()->mOrigin,
+          entry.GetKey()->mOrigin,
           IsOAForceStripPermission(mTypeArray[permEntry.mType]),
           getter_AddRefs(principal));
       if (NS_FAILED(rv)) {
@@ -2462,11 +2463,9 @@ nsresult PermissionManager::RemovePermissionsWithAttributes(
   EnsureReadCompleted();
 
   Vector<Tuple<nsCOMPtr<nsIPrincipal>, nsCString, nsCString>, 10> permissions;
-  for (auto iter = mPermissionTable.Iter(); !iter.Done(); iter.Next()) {
-    PermissionHashKey* entry = iter.Get();
-
+  for (const PermissionHashKey& entry : mPermissionTable) {
     nsCOMPtr<nsIPrincipal> principal;
-    nsresult rv = GetPrincipalFromOrigin(entry->GetKey()->mOrigin, false,
+    nsresult rv = GetPrincipalFromOrigin(entry.GetKey()->mOrigin, false,
                                          getter_AddRefs(principal));
     if (NS_FAILED(rv)) {
       continue;
@@ -2476,9 +2475,9 @@ nsresult PermissionManager::RemovePermissionsWithAttributes(
       continue;
     }
 
-    for (const auto& permEntry : entry->GetPermissions()) {
+    for (const auto& permEntry : entry.GetPermissions()) {
       if (!permissions.emplaceBack(principal, mTypeArray[permEntry.mType],
-                                   entry->GetKey()->mOrigin)) {
+                                   entry.GetKey()->mOrigin)) {
         continue;
       }
     }
@@ -2499,10 +2498,17 @@ nsresult PermissionManager::GetStripPermsForPrincipal(
   aResult.Clear();
   aResult.SetCapacity(kStripOAPermissions.size());
 
+#ifdef __clang__
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wunreachable-code-return"
+#endif
   // No special strip permissions
   if (kStripOAPermissions.empty()) {
     return NS_OK;
   }
+#ifdef __clang__
+#  pragma clang diagnostic pop
+#endif
 
   nsresult rv;
   // Create a key for the principal, but strip any origin attributes
@@ -2977,14 +2983,12 @@ bool PermissionManager::GetPermissionsFromOriginOrKey(
     return false;
   }
 
-  for (auto iter = mPermissionTable.Iter(); !iter.Done(); iter.Next()) {
-    PermissionHashKey* entry = iter.Get();
-
+  for (const PermissionHashKey& entry : mPermissionTable) {
     nsAutoCString permissionKey;
     if (aOrigin.IsEmpty()) {
       // We can't check for individual OA strip perms here.
       // Don't force strip origin attributes.
-      GetKeyForOrigin(entry->GetKey()->mOrigin, false, permissionKey);
+      GetKeyForOrigin(entry.GetKey()->mOrigin, false, permissionKey);
 
       // If the keys don't match, and we aren't getting the default "" key, then
       // we can exit early. We have to keep looking if we're getting the default
@@ -2992,14 +2996,14 @@ bool PermissionManager::GetPermissionsFromOriginOrKey(
       if (aKey != permissionKey && !aKey.IsEmpty()) {
         continue;
       }
-    } else if (aOrigin != entry->GetKey()->mOrigin) {
+    } else if (aOrigin != entry.GetKey()->mOrigin) {
       // If the origins don't match, then we can exit early. We have to keep
       // looking if we're getting the default origin, as we may see a preload
       // permission which should be transmitted.
       continue;
     }
 
-    for (const auto& permEntry : entry->GetPermissions()) {
+    for (const auto& permEntry : entry.GetPermissions()) {
       // Given how "default" permissions work and the possibility of them
       // being overridden with UNKNOWN_ACTION, we might see this value here -
       // but we do not want to send it to the content process.
@@ -3013,11 +3017,11 @@ bool PermissionManager::GetPermissionsFromOriginOrKey(
         shouldAppend = (isPreload && aKey.IsEmpty()) ||
                        (!isPreload && aKey == permissionKey);
       } else {
-        shouldAppend = (!isPreload && aOrigin == entry->GetKey()->mOrigin);
+        shouldAppend = (!isPreload && aOrigin == entry.GetKey()->mOrigin);
       }
       if (shouldAppend) {
         aPerms.AppendElement(
-            IPC::Permission(entry->GetKey()->mOrigin,
+            IPC::Permission(entry.GetKey()->mOrigin,
                             mTypeArray[permEntry.mType], permEntry.mPermission,
                             permEntry.mExpireType, permEntry.mExpireTime));
       }
@@ -3047,8 +3051,8 @@ void PermissionManager::SetPermissionsWithKey(
     // key, but it's possible.
     return;
   }
-  mPermissionKeyPromiseMap.Put(aPermissionKey,
-                               RefPtr<GenericNonExclusivePromise::Private>{});
+  mPermissionKeyPromiseMap.InsertOrUpdate(
+      aPermissionKey, RefPtr<GenericNonExclusivePromise::Private>{});
 
   // Add the permissions locally to our process
   for (IPC::Permission& perm : aPerms) {
@@ -3102,7 +3106,7 @@ void PermissionManager::GetKeyForOrigin(const nsACString& aOrigin,
     return;
   }
 
-  MaybeStripOAs(aForceStripOA, attrs);
+  MaybeStripOriginAttributes(aForceStripOA, attrs);
 
 #ifdef DEBUG
   // Parse the origin string into a principal, and extract some useful
@@ -3172,19 +3176,6 @@ PermissionManager::GetAllKeysForPrincipal(nsIPrincipal* aPrincipal) {
   return pairs;
 }
 
-NS_IMETHODIMP
-PermissionManager::BroadcastPermissionsForPrincipalToAllContentProcesses(
-    nsIPrincipal* aPrincipal) {
-  nsTArray<ContentParent*> cps;
-  ContentParent::GetAll(cps);
-  for (ContentParent* cp : cps) {
-    nsresult rv = cp->TransmitPermissionsForPrincipal(aPrincipal);
-    NS_ENSURE_SUCCESS(rv, rv);
-  }
-
-  return NS_OK;
-}
-
 bool PermissionManager::PermissionAvailable(nsIPrincipal* aPrincipal,
                                             const nsACString& aType) {
   EnsureReadCompleted();
@@ -3229,7 +3220,7 @@ void PermissionManager::WhenPermissionsAvailable(nsIPrincipal* aPrincipal,
       // promise, and send the request to the parent (if we have not already
       // done so).
       promise = new GenericNonExclusivePromise::Private(__func__);
-      mPermissionKeyPromiseMap.Put(pair.first, RefPtr{promise});
+      mPermissionKeyPromiseMap.InsertOrUpdate(pair.first, RefPtr{promise});
     }
 
     if (promise) {
@@ -3418,12 +3409,31 @@ nsresult PermissionManager::ImportLatestDefaults() {
                 GetPrincipalFromOrigin(aOrigin, IsOAForceStripPermission(aType),
                                        getter_AddRefs(principal));
             NS_ENSURE_SUCCESS(rv, rv);
+            rv =
+                AddInternal(principal, aType, aPermission,
+                            cIDPermissionIsDefault, aExpireType, aExpireTime,
+                            aModificationTime, PermissionManager::eDontNotify,
+                            PermissionManager::eNoDBOperation, false, &aOrigin);
+            NS_ENSURE_SUCCESS(rv, rv);
 
-            return AddInternal(
-                principal, aType, aPermission, cIDPermissionIsDefault,
-                aExpireType, aExpireTime, aModificationTime,
-                PermissionManager::eDontNotify,
-                PermissionManager::eNoDBOperation, false, &aOrigin);
+            if (StaticPrefs::permissions_isolateBy_privateBrowsing()) {
+              // Also import the permission for private browsing.
+              OriginAttributes attrs =
+                  OriginAttributes(principal->OriginAttributesRef());
+              attrs.mPrivateBrowsingId = 1;
+              nsCOMPtr<nsIPrincipal> pbPrincipal =
+                  BasePrincipal::Cast(principal)->CloneForcingOriginAttributes(
+                      attrs);
+
+              rv = AddInternal(
+                  pbPrincipal, aType, aPermission, cIDPermissionIsDefault,
+                  aExpireType, aExpireTime, aModificationTime,
+                  PermissionManager::eDontNotify,
+                  PermissionManager::eNoDBOperation, false, &aOrigin);
+              NS_ENSURE_SUCCESS(rv, rv);
+            }
+
+            return NS_OK;
           });
 
       if (NS_FAILED(rv)) {
@@ -3452,6 +3462,27 @@ nsresult PermissionManager::ImportLatestDefaults() {
                      0, modificationTime, eDontNotify, eNoDBOperation);
     if (NS_FAILED(rv)) {
       NS_WARNING("There was a problem importing an origin permission");
+    }
+
+    if (StaticPrefs::permissions_isolateBy_privateBrowsing()) {
+      // Also import the permission for private browsing.
+      OriginAttributes attrs =
+          OriginAttributes(principal->OriginAttributesRef());
+      attrs.mPrivateBrowsingId = 1;
+      nsCOMPtr<nsIPrincipal> pbPrincipal =
+          BasePrincipal::Cast(principal)->CloneForcingOriginAttributes(attrs);
+      // May return nullptr if clone fails.
+      NS_ENSURE_TRUE(pbPrincipal, NS_ERROR_FAILURE);
+
+      rv = AddInternal(pbPrincipal, entry.mType, entry.mPermission,
+                       cIDPermissionIsDefault,
+                       nsIPermissionManager::EXPIRE_NEVER, 0, modificationTime,
+                       eDontNotify, eNoDBOperation);
+      if (NS_FAILED(rv)) {
+        NS_WARNING(
+            "There was a problem importing an origin permission for private "
+            "browsing");
+      }
     }
   }
 
@@ -3664,6 +3695,23 @@ nsCOMPtr<nsIAsyncShutdownClient> PermissionManager::GetShutdownPhase() const {
   MOZ_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv));
 
   return client;
+}
+
+void PermissionManager::MaybeStripOriginAttributes(
+    bool aForceStrip, OriginAttributes& aOriginAttributes) {
+  uint32_t flags = 0;
+
+  if (aForceStrip || !StaticPrefs::permissions_isolateBy_privateBrowsing()) {
+    flags |= OriginAttributes::STRIP_PRIVATE_BROWSING_ID;
+  }
+
+  if (aForceStrip || !StaticPrefs::permissions_isolateBy_userContext()) {
+    flags |= OriginAttributes::STRIP_USER_CONTEXT_ID;
+  }
+
+  if (flags != 0) {
+    aOriginAttributes.StripAttributes(flags);
+  }
 }
 
 }  // namespace mozilla

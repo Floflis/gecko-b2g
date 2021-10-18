@@ -49,7 +49,7 @@ enum class NetscapeStepUpPolicy : uint32_t {
 };
 
 SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
-                        PKCS11DBConfig pkcs11DbConfig);
+                        PKCS11DBConfig pkcs11DbConfig, const char* nssDBPrefix);
 
 void DisableMD5();
 
@@ -75,11 +75,6 @@ bool LoadLoadableRoots(const nsCString& dir);
 bool LoadOSClientCertsModule(const nsCString& dir);
 
 extern const char* kOSClientCertsModuleName;
-
-/**
- * Unloads the loadable roots module and os client certs module, if loaded.
- */
-void UnloadUserModules();
 
 nsresult DefaultServerNicknameForCert(const CERTCertificate* cert,
                                       /*out*/ nsCString& nickname);
@@ -110,7 +105,7 @@ pkix::Result BuildRevocationCheckArrays(pkix::Input certDER,
                                         /*out*/ nsTArray<uint8_t>& subjectBytes,
                                         /*out*/ nsTArray<uint8_t>& pubKeyBytes);
 
-void SaveIntermediateCerts(const UniqueCERTCertList& certList);
+void SaveIntermediateCerts(const nsTArray<nsTArray<uint8_t>>& certList);
 
 class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
  public:
@@ -128,8 +123,7 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
       SECTrustType certDBTrustType, OCSPFetching ocspFetching,
       OCSPCache& ocspCache, void* pinArg, mozilla::TimeDuration ocspTimeoutSoft,
       mozilla::TimeDuration ocspTimeoutHard, uint32_t certShortLifetimeInDays,
-      CertVerifier::PinningMode pinningMode, unsigned int minRSABits,
-      ValidityCheckingMode validityCheckingMode,
+      unsigned int minRSABits, ValidityCheckingMode validityCheckingMode,
       CertVerifier::SHA1Mode sha1Mode,
       NetscapeStepUpPolicy netscapeStepUpPolicy, CRLiteMode crliteMode,
       uint64_t crliteCTMergeDelaySeconds,
@@ -137,9 +131,8 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
       const Vector<mozilla::pkix::Input>& thirdPartyRootInputs,
       const Vector<mozilla::pkix::Input>& thirdPartyIntermediateInputs,
       const Maybe<nsTArray<nsTArray<uint8_t>>>& extraCertificates,
-      /*out*/ UniqueCERTCertList& builtChain,
+      /*out*/ nsTArray<nsTArray<uint8_t>>& builtChain,
       /*optional*/ PinningTelemetryInfo* pinningTelemetryInfo = nullptr,
-      /*optional*/ CRLiteLookupResult* crliteLookupResult = nullptr,
       /*optional*/ const char* hostname = nullptr);
 
   virtual Result FindIssuer(mozilla::pkix::Input encodedIssuerName,
@@ -222,6 +215,15 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
   bool GetIsErrorDueToDistrustedCAPolicy() const;
 
  private:
+  Result CheckCRLiteStash(
+      const nsTArray<uint8_t>& issuerSubjectPublicKeyInfoBytes,
+      const nsTArray<uint8_t>& serialNumberBytes);
+  Result CheckCRLite(const nsTArray<uint8_t>& issuerBytes,
+                     const nsTArray<uint8_t>& issuerSubjectPublicKeyInfoBytes,
+                     const nsTArray<uint8_t>& serialNumberBytes,
+                     uint64_t earliestSCTTimestamp,
+                     bool& filterCoversCertificate);
+
   enum EncodedResponseSource {
     ResponseIsFromNetwork = 1,
     ResponseWasStapled = 2
@@ -235,8 +237,8 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
   Result SynchronousCheckRevocationWithServer(
       const mozilla::pkix::CertID& certID, const nsCString& aiaLocation,
       mozilla::pkix::Time time, uint16_t maxOCSPLifetimeInDays,
-      const Result cachedResponseResult,
-      const Result stapledOCSPResponseResult);
+      const Result cachedResponseResult, const Result stapledOCSPResponseResult,
+      const bool crliteFilterCoversCertificate, const Result crliteResult);
   Result HandleOCSPFailure(const Result cachedResponseResult,
                            const Result stapledOCSPResponseResult,
                            const Result error);
@@ -248,7 +250,6 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
   const mozilla::TimeDuration mOCSPTimeoutSoft;
   const mozilla::TimeDuration mOCSPTimeoutHard;
   const uint32_t mCertShortLifetimeInDays;
-  CertVerifier::PinningMode mPinningMode;
   const unsigned int mMinRSABits;
   ValidityCheckingMode mValidityCheckingMode;
   CertVerifier::SHA1Mode mSHA1Mode;
@@ -261,9 +262,8 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
   const Vector<mozilla::pkix::Input>&
       mThirdPartyIntermediateInputs;                             // non-owning
   const Maybe<nsTArray<nsTArray<uint8_t>>>& mExtraCertificates;  // non-owning
-  UniqueCERTCertList& mBuiltChain;                               // non-owning
+  nsTArray<nsTArray<uint8_t>>& mBuiltChain;                      // non-owning
   PinningTelemetryInfo* mPinningTelemetryInfo;
-  CRLiteLookupResult* mCRLiteLookupResult;
   const char* mHostname;  // non-owning - only used for pinning checks
   nsCOMPtr<nsICertStorage> mCertStorage;
   CertVerifier::OCSPStaplingStatus mOCSPStaplingStatus;

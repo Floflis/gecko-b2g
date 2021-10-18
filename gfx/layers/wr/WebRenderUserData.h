@@ -14,11 +14,14 @@
 #include "mozilla/UniquePtr.h"
 #include "nsIFrame.h"
 #include "nsRefPtrHashtable.h"
+#include "nsTHashSet.h"
 #include "ImageTypes.h"
+#include "DisplayItemClip.h"
+
+namespace mozilla {
 
 class nsDisplayItemGeometry;
 
-namespace mozilla {
 namespace webgpu {
 class WebGPUChild;
 }
@@ -32,8 +35,8 @@ class SourceSurface;
 }
 
 namespace layers {
+
 class BasicLayerManager;
-class CanvasLayer;
 class ImageClient;
 class ImageContainer;
 class WebRenderBridgeChild;
@@ -61,8 +64,7 @@ class WebRenderBackgroundData {
 /// to an nsFrame.
 class WebRenderUserData {
  public:
-  typedef nsTHashtable<nsRefPtrHashKey<WebRenderUserData>>
-      WebRenderUserDataRefTable;
+  typedef nsTHashSet<RefPtr<WebRenderUserData>> WebRenderUserDataRefTable;
 
   static bool SupportsAsyncUpdate(nsIFrame* aFrame);
 
@@ -91,6 +93,7 @@ class WebRenderUserData {
     eRemote,
     eGroup,
     eMask,
+    eBlobImage,  // SVG image
   };
 
   virtual UserDataType GetType() = 0;
@@ -183,6 +186,28 @@ class WebRenderImageData : public WebRenderUserData {
   bool mOwnsKey;
 };
 
+/// Holds some data used to share blob recordings from VectorImages with the
+/// parent process.
+class WebRenderBlobImageData : public WebRenderUserData {
+ public:
+  WebRenderBlobImageData(RenderRootStateManager* aManager,
+                         nsDisplayItem* aItem);
+  WebRenderBlobImageData(RenderRootStateManager* aManager,
+                         uint32_t aDisplayItemKey, nsIFrame* aFrame);
+  virtual ~WebRenderBlobImageData() {}
+
+  UserDataType GetType() override { return UserDataType::eBlobImage; }
+  static UserDataType Type() { return UserDataType::eBlobImage; }
+  Maybe<wr::BlobImageKey> GetImageKey() { return mKey; }
+
+  Maybe<wr::BlobImageKey> UpdateImageKey(
+      ImageContainer* aContainer, wr::IpcResourceUpdateQueue& aResources);
+
+ protected:
+  Maybe<wr::BlobImageKey> mKey;
+  RefPtr<ImageContainer> mContainer;
+};
+
 /// Used for fallback rendering.
 ///
 /// In most cases this uses blob images but it can also render on the content
@@ -195,6 +220,7 @@ class WebRenderFallbackData : public WebRenderUserData {
   WebRenderFallbackData* AsFallbackData() override { return this; }
   UserDataType GetType() override { return UserDataType::eFallback; }
   static UserDataType Type() { return UserDataType::eFallback; }
+  nsDisplayItemGeometry* GetGeometry() override { return mGeometry.get(); }
 
   void SetInvalid(bool aInvalid) { mInvalid = aInvalid; }
   bool IsInvalid() { return mInvalid; }
@@ -210,11 +236,12 @@ class WebRenderFallbackData : public WebRenderUserData {
   WebRenderImageData* PaintIntoImage();
 
   std::vector<RefPtr<gfx::SourceSurface>> mExternalSurfaces;
-  RefPtr<BasicLayerManager> mBasicLayerManager;
   UniquePtr<nsDisplayItemGeometry> mGeometry;
+  DisplayItemClip mClip;
   nsRect mBounds;
   nsRect mBuildingRect;
   gfx::Size mScale;
+  float mOpacity;
 
  protected:
   void ClearImageKey();
@@ -317,6 +344,36 @@ class WebRenderRemoteData : public WebRenderUserData {
 
  protected:
   RefPtr<dom::RemoteBrowser> mRemoteBrowser;
+};
+
+class WebRenderMaskData : public WebRenderUserData {
+ public:
+  explicit WebRenderMaskData(RenderRootStateManager* aManager,
+                             nsDisplayItem* aItem)
+      : WebRenderUserData(aManager, aItem),
+        mMaskStyle(nsStyleImageLayers::LayerType::Mask),
+        mShouldHandleOpacity(false) {
+    MOZ_COUNT_CTOR(WebRenderMaskData);
+  }
+  virtual ~WebRenderMaskData() {
+    MOZ_COUNT_DTOR(WebRenderMaskData);
+    ClearImageKey();
+  }
+
+  void ClearImageKey();
+  void Invalidate();
+
+  UserDataType GetType() override { return UserDataType::eMask; }
+  static UserDataType Type() { return UserDataType::eMask; }
+
+  Maybe<wr::BlobImageKey> mBlobKey;
+  std::vector<RefPtr<gfx::ScaledFont>> mFonts;
+  std::vector<RefPtr<gfx::SourceSurface>> mExternalSurfaces;
+  LayerIntRect mItemRect;
+  nsPoint mMaskOffset;
+  nsStyleImageLayers mMaskStyle;
+  gfx::Size mScale;
+  bool mShouldHandleOpacity;
 };
 
 extern void DestroyWebRenderUserDataTable(WebRenderUserDataTable* aTable);

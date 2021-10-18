@@ -13,7 +13,8 @@
 #include "gfx2DGlue.h"             // for ContentForFormat, etc
 #include "mozilla/gfx/2D.h"        // for DataSourceSurface
 #include "mozilla/gfx/BaseSize.h"  // for BaseSize
-#include "mozilla/gfx/Logging.h"   // for gfxCriticalError
+#include "mozilla/gfx/gfxVars.h"
+#include "mozilla/gfx/Logging.h"  // for gfxCriticalError
 #include "mozilla/layers/ISurfaceAllocator.h"
 #include "mozilla/webrender/RenderEGLImageTextureHost.h"
 #include "mozilla/webrender/WebRenderAPI.h"
@@ -171,7 +172,8 @@ void TextureImageTextureSourceOGL::DeallocateDeviceData() {
 
 bool TextureImageTextureSourceOGL::Update(gfx::DataSourceSurface* aSurface,
                                           nsIntRegion* aDestRegion,
-                                          gfx::IntPoint* aSrcOffset) {
+                                          gfx::IntPoint* aSrcOffset,
+                                          gfx::IntPoint* aDstOffset) {
   GLContext* gl = mGL;
   MOZ_ASSERT(gl);
   if (!gl || !gl->MakeCurrent()) {
@@ -225,7 +227,8 @@ bool TextureImageTextureSourceOGL::Update(gfx::DataSourceSurface* aSurface,
     }
   }
 
-  return mTexImage->UpdateFromDataSource(aSurface, aDestRegion, aSrcOffset);
+  return mTexImage->UpdateFromDataSource(aSurface, aDestRegion, aSrcOffset,
+                                         aDstOffset);
 }
 
 void TextureImageTextureSourceOGL::EnsureBuffer(const IntSize& aSize,
@@ -384,7 +387,9 @@ DirectMapTextureSource::~DirectMapTextureSource() {
 
 bool DirectMapTextureSource::Update(gfx::DataSourceSurface* aSurface,
                                     nsIntRegion* aDestRegion,
-                                    gfx::IntPoint* aSrcOffset) {
+                                    gfx::IntPoint* aSrcOffset,
+                                    gfx::IntPoint* aDstOffset) {
+  MOZ_RELEASE_ASSERT(aDstOffset == nullptr);
   if (!aSurface) {
     return false;
   }
@@ -460,7 +465,8 @@ bool DirectMapTextureSource::UpdateInternal(gfx::DataSourceSurface* aSurface,
   gfx::IntPoint srcPoint = aSrcOffset ? *aSrcOffset : gfx::IntPoint(0, 0);
   mFormat = gl::UploadSurfaceToTexture(
       gl(), aSurface, destRegion, mTextureHandle, aSurface->GetSize(), nullptr,
-      aInit, srcPoint, LOCAL_GL_TEXTURE0, LOCAL_GL_TEXTURE_RECTANGLE_ARB);
+      aInit, srcPoint, gfx::IntPoint(0, 0), LOCAL_GL_TEXTURE0,
+      LOCAL_GL_TEXTURE_RECTANGLE_ARB);
 
   if (mSync) {
     gl()->fDeleteSync(mSync);
@@ -684,8 +690,16 @@ void SurfaceTextureHost::PushResourceUpdates(
   auto method = aOp == TextureHost::ADD_IMAGE
                     ? &wr::TransactionBuilder::AddExternalImage
                     : &wr::TransactionBuilder::UpdateExternalImage;
-  auto imageType = wr::ExternalImageType::TextureHandle(
-      wr::ImageBufferKind::TextureExternal);
+
+  // Prefer TextureExternal unless the backend requires TextureRect.
+  TextureHost::NativeTexturePolicy policy =
+      TextureHost::BackendNativeTexturePolicy(aResources.GetBackendType(),
+                                              GetSize());
+  auto imageType = policy == TextureHost::NativeTexturePolicy::REQUIRE
+                       ? wr::ExternalImageType::TextureHandle(
+                             wr::ImageBufferKind::TextureRect)
+                       : wr::ExternalImageType::TextureHandle(
+                             wr::ImageBufferKind::TextureExternal);
 
   switch (GetFormat()) {
     case gfx::SurfaceFormat::R8G8B8X8:
@@ -713,23 +727,32 @@ void SurfaceTextureHost::PushDisplayItems(wr::DisplayListBuilder& aBuilder,
                                           wr::ImageRendering aFilter,
                                           const Range<wr::ImageKey>& aImageKeys,
                                           PushDisplayItemFlagSet aFlags) {
+  bool preferCompositorSurface =
+      aFlags.contains(PushDisplayItemFlag::PREFER_COMPOSITOR_SURFACE);
+  bool supportsExternalCompositing =
+      SupportsExternalCompositing(aBuilder.GetBackendType());
+
   switch (GetFormat()) {
     case gfx::SurfaceFormat::R8G8B8X8:
     case gfx::SurfaceFormat::R8G8B8A8:
     case gfx::SurfaceFormat::B8G8R8A8:
     case gfx::SurfaceFormat::B8G8R8X8: {
       MOZ_ASSERT(aImageKeys.length() == 1);
-      aBuilder.PushImage(
-          aBounds, aClip, true, aFilter, aImageKeys[0],
-          !(mFlags & TextureFlags::NON_PREMULTIPLIED),
-          wr::ColorF{1.0f, 1.0f, 1.0f, 1.0f},
-          aFlags.contains(PushDisplayItemFlag::PREFER_COMPOSITOR_SURFACE));
+      aBuilder.PushImage(aBounds, aClip, true, aFilter, aImageKeys[0],
+                         !(mFlags & TextureFlags::NON_PREMULTIPLIED),
+                         wr::ColorF{1.0f, 1.0f, 1.0f, 1.0f},
+                         preferCompositorSurface, supportsExternalCompositing);
       break;
     }
     default: {
       MOZ_ASSERT_UNREACHABLE("unexpected to be called");
     }
   }
+}
+
+bool SurfaceTextureHost::SupportsExternalCompositing(
+    WebRenderBackend aBackend) {
+  return aBackend == WebRenderBackend::SOFTWARE;
 }
 
 ////////////////////////////////////////////////////////////////////////

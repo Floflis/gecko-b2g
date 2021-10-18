@@ -11,8 +11,23 @@ INSIDE_CPOW_NESTED = 3
 
 NORMAL_PRIORITY = 1
 INPUT_PRIORITY = 2
-HIGH_PRIORITY = 3
+VSYNC_PRIORITY = 3
 MEDIUMHIGH_PRIORITY = 4
+CONTROL_PRIORITY = 5
+
+NESTED_ATTR_MAP = {
+    "not": NOT_NESTED,
+    "inside_sync": INSIDE_SYNC_NESTED,
+    "inside_cpow": INSIDE_CPOW_NESTED,
+}
+
+PRIORITY_ATTR_MAP = {
+    "normal": NORMAL_PRIORITY,
+    "input": INPUT_PRIORITY,
+    "vsync": VSYNC_PRIORITY,
+    "mediumhigh": MEDIUMHIGH_PRIORITY,
+    "control": CONTROL_PRIORITY,
+}
 
 
 class Visitor:
@@ -55,6 +70,8 @@ class Visitor:
             t.accept(self)
 
     def visitUsingStmt(self, using):
+        for a in using.attributes.values():
+            a.accept(self)
         pass
 
     def visitProtocol(self, p):
@@ -86,6 +103,9 @@ class Visitor:
         pass
 
     def visitTypeSpec(self, ts):
+        pass
+
+    def visitAttribute(self, a):
         pass
 
     def visitDecl(self, d):
@@ -193,8 +213,7 @@ class UsingStmt(Node):
         cxxTypeSpec,
         cxxHeader=None,
         kind=None,
-        refcounted=False,
-        moveonly=False,
+        attributes={},
     ):
         Node.__init__(self, loc)
         assert not isinstance(cxxTypeSpec, str)
@@ -203,8 +222,7 @@ class UsingStmt(Node):
         self.type = cxxTypeSpec
         self.header = cxxHeader
         self.kind = kind
-        self.refcounted = refcounted
-        self.moveonly = moveonly
+        self.attributes = attributes
 
     def canBeForwardDeclared(self):
         return self.isClass() or self.isStruct()
@@ -216,10 +234,10 @@ class UsingStmt(Node):
         return self.kind == "struct"
 
     def isRefcounted(self):
-        return self.refcounted
+        return "RefCounted" in self.attributes
 
     def isMoveonly(self):
-        return self.moveonly
+        return "MoveOnly" in self.attributes
 
 
 # "singletons"
@@ -237,10 +255,6 @@ class PrettyPrinted:
 
 class ASYNC(PrettyPrinted):
     pretty = "async"
-
-
-class TAINTED(PrettyPrinted):
-    pretty = "tainted"
 
 
 class INTR(PrettyPrinted):
@@ -272,11 +286,17 @@ class Namespace(Node):
 class Protocol(NamespacedNode):
     def __init__(self, loc):
         NamespacedNode.__init__(self, loc)
+        self.attributes = {}
         self.sendSemantics = ASYNC
-        self.nested = NOT_NESTED
         self.managers = []
         self.managesStmts = []
         self.messageDecls = []
+
+    def nestedUpTo(self):
+        if "NestedUpTo" not in self.attributes:
+            return NOT_NESTED
+
+        return NESTED_ATTR_MAP.get(self.attributes["NestedUpTo"].value, NOT_NESTED)
 
 
 class StructField(Node):
@@ -287,10 +307,10 @@ class StructField(Node):
 
 
 class StructDecl(NamespacedNode):
-    def __init__(self, loc, name, fields, comparable):
+    def __init__(self, loc, name, fields, attributes):
         NamespacedNode.__init__(self, loc, name)
         self.fields = fields
-        self.comparable = comparable
+        self.attributes = attributes
         # A list of indices into `fields` for determining the order in
         # which fields are laid out in memory.  We don't just reorder
         # `fields` itself so as to keep the ordering reasonably stable
@@ -299,10 +319,10 @@ class StructDecl(NamespacedNode):
 
 
 class UnionDecl(NamespacedNode):
-    def __init__(self, loc, name, components, comparable):
+    def __init__(self, loc, name, components, attributes):
         NamespacedNode.__init__(self, loc, name)
         self.components = components
-        self.comparable = comparable
+        self.attributes = attributes
 
 
 class Manager(Node):
@@ -321,15 +341,11 @@ class MessageDecl(Node):
     def __init__(self, loc):
         Node.__init__(self, loc)
         self.name = None
+        self.attributes = {}
         self.sendSemantics = ASYNC
-        self.nested = NOT_NESTED
-        self.prio = NORMAL_PRIORITY
         self.direction = None
         self.inParams = []
         self.outParams = []
-        self.compress = ""
-        self.tainted = ""
-        self.verify = ""
 
     def addInParams(self, inParamsList):
         self.inParams += inParamsList
@@ -337,23 +353,25 @@ class MessageDecl(Node):
     def addOutParams(self, outParamsList):
         self.outParams += outParamsList
 
-    def addModifiers(self, modifiers):
-        for modifier in modifiers:
-            if modifier.startswith("compress"):
-                self.compress = modifier
-            elif modifier == "verify":
-                self.verify = modifier
-            elif modifier.startswith("tainted"):
-                self.tainted = modifier
-            elif modifier != "":
-                raise Exception("Unexpected message modifier `%s'" % modifier)
+    def nested(self):
+        if "Nested" not in self.attributes:
+            return NOT_NESTED
+
+        return NESTED_ATTR_MAP.get(self.attributes["Nested"].value, NOT_NESTED)
+
+    def priority(self):
+        if "Priority" not in self.attributes:
+            return NORMAL_PRIORITY
+
+        return PRIORITY_ATTR_MAP.get(self.attributes["Priority"].value, NORMAL_PRIORITY)
 
 
 class Param(Node):
-    def __init__(self, loc, typespec, name):
+    def __init__(self, loc, typespec, name, attributes={}):
         Node.__init__(self, loc)
         self.name = name
         self.typespec = typespec
+        self.attributes = attributes
 
 
 class TypeSpec(Node):
@@ -370,6 +388,13 @@ class TypeSpec(Node):
 
     def __str__(self):
         return str(self.spec)
+
+
+class Attribute(Node):
+    def __init__(self, loc, name, value):
+        Node.__init__(self, loc)
+        self.name = name
+        self.value = value
 
 
 class QualifiedId:  # FIXME inherit from node?
@@ -404,3 +429,4 @@ class Decl(Node):
         self.loc = loc
         self.type = None
         self.scope = None
+        self.attributes = {}

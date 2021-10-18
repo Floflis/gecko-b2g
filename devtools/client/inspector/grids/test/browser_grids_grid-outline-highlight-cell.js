@@ -27,9 +27,6 @@ add_task(async function() {
   const HIGHLIGHTER_TYPE = inspector.highlighters.TYPES.GRID;
   const { waitForHighlighterTypeShown } = getHighlighterTestHelpers(inspector);
 
-  // Don't track reflows since this might cause intermittent failures.
-  inspector.off("reflow-in-selected-target", gridInspector.onReflow);
-
   const gridList = doc.getElementById("grid-list");
   const checkbox = gridList.children[0].querySelector("input");
 
@@ -41,20 +38,20 @@ add_task(async function() {
     state => state.grids.length == 1 && state.grids[0].highlighted
   );
   checkbox.click();
-  await onCheckboxChange;
-  await onHighlighterShown;
-  const elements = await onGridOutlineRendered;
 
-  const gridCellA = elements[0];
+  info("Wait for checkbox to change");
+  await onCheckboxChange;
+
+  info("Wait for highlighter to be shown");
+  await onHighlighterShown;
+
+  info("Wait for outline to be rendered");
+  await onGridOutlineRendered;
 
   info("Hovering over grid cell A in the grid outline.");
   const onCellAHighlight = waitForHighlighterTypeShown(HIGHLIGHTER_TYPE);
 
-  EventUtils.synthesizeMouseAtCenter(
-    gridCellA,
-    { type: "mouseover" },
-    doc.defaultView
-  );
+  synthesizeMouseOverOnGridCell(doc, 0);
 
   const { options } = await onCellAHighlight;
 

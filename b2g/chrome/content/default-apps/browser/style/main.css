@@ -20,3 +20,11 @@ body {
 #actions > button {
   border: 1px solid black;
 }
+
+#tabs .icon {
+  width: 32px;
+}
+
+#tabs {
+  font-size: small;
+}

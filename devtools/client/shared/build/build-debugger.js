@@ -43,7 +43,6 @@ function isRequire(t, node) {
 const VENDORS = [
   "classnames",
   "devtools-environment",
-  "devtools-splitter",
   "devtools-utils",
   "fuzzaldrin-plus",
   "lodash-move",
@@ -208,7 +207,6 @@ Babel.registerPlugin("transform-mc", transformMC);
 
 module.exports = function(filePath) {
   return [
-    "transform-flow-strip-types",
     "proposal-optional-chaining",
     "proposal-class-properties",
     "transform-modules-commonjs",

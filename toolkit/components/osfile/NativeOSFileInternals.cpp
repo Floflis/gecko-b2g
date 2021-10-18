@@ -209,7 +209,6 @@ class AbstractResult : public nsINativeOSFileResult {
  protected:
   virtual ~AbstractResult() {
     MOZ_ASSERT(NS_IsMainThread());
-    DropJSData();
     mozilla::DropJSObjects(this);
   }
 
@@ -836,8 +835,8 @@ class DoReadToStringEvent final : public AbstractReadEvent {
     }
 
     nsString resultString;
-    bool ok = resultString.SetLength(needed.value(), fallible);
-    if (!ok) {
+    auto resultSpan = resultString.GetMutableData(needed.value(), fallible);
+    if (!resultSpan) {
       Fail("allocation"_ns, mResult.forget(), OS_ERROR_TOO_LARGE);
       return;
     }
@@ -850,12 +849,12 @@ class DoReadToStringEvent final : public AbstractReadEvent {
     size_t written;
     bool hadErrors;
     Tie(result, read, written, hadErrors) =
-        mDecoder->DecodeToUTF16(src, resultString, false);
+        mDecoder->DecodeToUTF16(src, *resultSpan, false);
     MOZ_ASSERT(result == kInputEmpty);
     MOZ_ASSERT(read == src.Length());
     MOZ_ASSERT(written <= needed.value());
     Unused << hadErrors;
-    ok = resultString.SetLength(written, fallible);
+    bool ok = resultString.SetLength(written, fallible);
     if (!ok) {
       Fail("allocation"_ns, mResult.forget(), OS_ERROR_TOO_LARGE);
       return;
@@ -1208,7 +1207,14 @@ NativeOSFileInternalsService::WriteAtomic(
     return NS_ERROR_INVALID_ARG;
   }
 
-  bytes = JS::GetArrayBufferByteLength(bufferObject.get());
+  {
+    // Throw for large ArrayBuffers to prevent truncation.
+    size_t len = JS::GetArrayBufferByteLength(bufferObject.get());
+    if (len > INT32_MAX) {
+      return NS_ERROR_INVALID_ARG;
+    }
+    bytes = len;
+  }
   buffer.reset(
       static_cast<char*>(JS::StealArrayBufferContents(cx, bufferObject)));
 

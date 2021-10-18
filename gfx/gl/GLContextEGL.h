@@ -12,7 +12,6 @@
 #include "nsRegion.h"
 #include <memory>
 
-class gfxASurface;
 namespace mozilla {
 namespace layers {
 class SurfaceTextureImage;
@@ -36,8 +35,6 @@ inline std::shared_ptr<EglDisplay> DefaultEglDisplay(
 // -
 
 class GLContextEGL final : public GLContext {
-  friend class TextureImageEGL;
-
  public:
   MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(GLContextEGL, override)
 
@@ -94,10 +91,6 @@ class GLContextEGL final : public GLContext {
 
   virtual void GetWSIInfo(nsCString* const out) const override;
 
-  // hold a reference to the given surface
-  // for the lifetime of this context.
-  void HoldSurface(gfxASurface* aSurf);
-
   EGLSurface GetEGLSurface() const { return mSurface; }
 
   bool HasExtBufferAge() const;
@@ -120,8 +113,7 @@ class GLContextEGL final : public GLContext {
       widget::CompositorWidget* aCompositorWidget, const EGLConfig aConfig);
 
 #ifdef MOZ_X11
-  static bool FindVisual(bool aUseWebRender, bool useAlpha,
-                         int* const out_visualId);
+  static bool FindVisual(int* const out_visualId);
 #endif
 
  protected:
@@ -140,7 +132,6 @@ class GLContextEGL final : public GLContext {
   const EGLSurface mFallbackSurface;
 
   EGLSurface mSurfaceOverride = EGL_NO_SURFACE;
-  RefPtr<gfxASurface> mThebesSurface;
   bool mBound = false;
 
   bool mIsPBuffer = false;
@@ -162,11 +153,9 @@ class GLContextEGL final : public GLContext {
   EGLSurface CreateCompatibleSurface(void* aWindow) const;
 };
 
-// -
-// aVisual is used in Linux only to exactly match window and framebuffer
-// visuals on NVIDIA drivers (Bug 1478454).
-bool CreateConfig(EglDisplay&, EGLConfig* aConfig, int32_t depth,
-                  bool aEnableDepthBuffer, bool aUseGles, int aVisual = 0);
+bool CreateConfig(EglDisplay&, EGLConfig* aConfig, int32_t aDepth,
+                  bool aEnableDepthBuffer, bool aUseGles,
+                  bool aAllowFallback = true);
 
 }  // namespace gl
 }  // namespace mozilla

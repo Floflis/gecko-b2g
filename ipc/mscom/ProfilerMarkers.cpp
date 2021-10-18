@@ -6,12 +6,12 @@
 
 #include "ProfilerMarkers.h"
 
-#include "GeckoProfiler.h"
 #include "MainThreadUtils.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/mscom/Utils.h"
+#include "mozilla/ProfilerMarkers.h"
 #include "mozilla/Services.h"
 #include "nsCOMPtr.h"
 #include "nsIObserver.h"
@@ -22,10 +22,6 @@
 
 #include <objbase.h>
 #include <objidlbase.h>
-
-#ifdef MOZ_GECKO_PROFILER
-#  include "mozilla/ProfilerMarkerTypes.h"
-#endif
 
 // {9DBE6B28-E5E7-4FDE-AF00-9404604E74DC}
 static const GUID GUID_MozProfilerMarkerExtension = {
@@ -207,7 +203,6 @@ namespace mozilla {
 namespace mscom {
 
 void InitProfilerMarkers() {
-#ifdef MOZ_GECKO_PROFILER
   if (!XRE_IsParentProcess()) {
     return;
   }
@@ -235,7 +230,6 @@ void InitProfilerMarkers() {
 
   nsCOMPtr<nsIObserver> obs(new ProfilerStartupObserver());
   obsServ->AddObserver(obs, "profiler-started", false);
-#endif  // MOZ_GECKO_PROFILER
 }
 
 }  // namespace mscom

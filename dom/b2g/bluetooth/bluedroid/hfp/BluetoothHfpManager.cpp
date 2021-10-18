@@ -14,6 +14,7 @@
 #include "mozilla/dom/bluetooth/BluetoothTypes.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPtr.h"
+#include "nsCharSeparatedTokenizer.h"  // for nsCCharSeparatedTokenizer
 #include "nsContentUtils.h"
 #include "nsIIccInfo.h"
 #include "nsIIccService.h"
@@ -37,23 +38,71 @@ using namespace mozilla;
 using namespace mozilla::ipc;
 USING_BLUETOOTH_NAMESPACE
 
+// Declared for using nsISettingsManager
+class SettingsGetResponse;
+class SidlResponse;
+
 namespace {
 StaticRefPtr<BluetoothHfpManager> sBluetoothHfpManager;
 static BluetoothHandsfreeInterface* sBluetoothHfpInterface = nullptr;
 
-// Wait for 2 seconds for Dialer processing event 'BLDN'. '2' seconds is a
+// Wait for 3 seconds for Dialer processing event 'BLDN'. '3' seconds is a
 // magic number. The mechanism should be revised once we can get call history.
-static int sWaitingForDialingInterval = 2000;  // unit: ms
+static int sWaitingForDialingInterval = 3000;  // unit: ms
 
 // Wait 3.7 seconds until Dialer stops playing busy tone. '3' seconds is the
 // time window set in Dialer and the extra '0.7' second is a magic number.
 // The mechanism should be revised once we know the exact time at which
 // Dialer stops playing.
 static int sBusyToneInterval = 3700;  // unit: ms
+
+// StaticRefPtr used by nsISettingsManager::Get()
+StaticRefPtr<SettingsGetResponse> sSettingsGetResponse;
+
+// StaticRefPtr used by nsISettingsManager::AddObserver()
+StaticRefPtr<SidlResponse> sSidlResponse;
 }  // namespace
 
 bool BluetoothHfpManager::sInShutdown = false;
 const int BluetoothHfpManager::MAX_NUM_CLIENTS = 1;
+
+class SettingsGetResponse final : public nsISettingsGetResponse {
+ public:
+  NS_DECL_ISUPPORTS
+  NS_DECL_NSISETTINGSGETRESPONSE
+
+ protected:
+  ~SettingsGetResponse() = default;
+};
+NS_IMETHODIMP SettingsGetResponse::Resolve(nsISettingInfo* info) {
+  if (info && sBluetoothHfpManager) {
+    nsString value;
+    info->GetValue(value);
+    sBluetoothHfpManager->HandleVolumeChanged(value);
+  }
+  return NS_OK;
+}
+NS_IMETHODIMP SettingsGetResponse::Reject(
+    [[maybe_unused]] nsISettingError* aSettingError) {
+  BT_WARNING("Failed to get setting 'audio.volume.bt_sco'");
+  return NS_OK;
+}
+NS_IMPL_ISUPPORTS(SettingsGetResponse, nsISettingsGetResponse)
+
+class SidlResponse final : public nsISidlDefaultResponse {
+ public:
+  NS_DECL_ISUPPORTS
+  NS_DECL_NSISIDLDEFAULTRESPONSE
+
+ protected:
+  ~SidlResponse() = default;
+};
+NS_IMETHODIMP SidlResponse::Resolve() { return NS_OK; }
+NS_IMETHODIMP SidlResponse::Reject() {
+  BT_WARNING("Failed to observe setting 'audio.volume.bt_sco'");
+  return NS_ERROR_FAILURE;
+}
+NS_IMPL_ISUPPORTS(SidlResponse, nsISidlDefaultResponse)
 
 static bool IsValidDtmf(const char aChar) {
   // Valid DTMF: [*#0-9ABCD]
@@ -212,11 +261,41 @@ bool BluetoothHfpManager::Init() {
   nsCOMPtr<nsISettingsManager> settings =
       do_GetService("@mozilla.org/sidl-native/settings;1");
   if (settings) {
-    settings->Get(AUDIO_VOLUME_BT_SCO_ID, this);
-    settings->AddObserver(AUDIO_VOLUME_BT_SCO_ID, this, this);
+    if (!sSettingsGetResponse) {
+      sSettingsGetResponse = new SettingsGetResponse();
+    }
+    if (!sSidlResponse) {
+      sSidlResponse = new SidlResponse();
+    }
+    settings->Get(AUDIO_VOLUME_BT_SCO_ID, sSettingsGetResponse.get());
+    settings->AddObserver(AUDIO_VOLUME_BT_SCO_ID, this, sSidlResponse.get());
   }
 
   return true;
+}
+
+void BluetoothHfpManager::Uninit() {
+  if (!mListener->Listen(false)) {
+    BT_WARNING("Failed to stop listening RIL");
+  }
+  mListener = nullptr;
+
+  hal::UnregisterBatteryObserver(this);
+
+  nsCOMPtr<nsISettingsManager> settings =
+      do_GetService("@mozilla.org/sidl-native/settings;1");
+  if (settings && sSidlResponse) {
+    settings->RemoveObserver(AUDIO_VOLUME_BT_SCO_ID, this, sSidlResponse.get());
+  }
+  sSidlResponse = nullptr;
+  sSettingsGetResponse = nullptr;
+
+  nsCOMPtr<nsIObserverService> obs = services::GetObserverService();
+  NS_ENSURE_TRUE_VOID(obs);
+
+  if (NS_FAILED(obs->RemoveObserver(this, NS_XPCOM_SHUTDOWN_OBSERVER_ID))) {
+    BT_WARNING("Failed to remove observers!");
+  }
 }
 
 class BluetoothHfpManager::RegisterModuleResultHandler final
@@ -343,21 +422,7 @@ void BluetoothHfpManager::InitHfpInterface(
       new RegisterModuleResultHandler(interface, aRes));
 }
 
-BluetoothHfpManager::~BluetoothHfpManager() {
-  if (!mListener->Listen(false)) {
-    BT_WARNING("Failed to stop listening RIL");
-  }
-  mListener = nullptr;
-
-  nsCOMPtr<nsIObserverService> obs = services::GetObserverService();
-  NS_ENSURE_TRUE_VOID(obs);
-
-  if (NS_FAILED(obs->RemoveObserver(this, NS_XPCOM_SHUTDOWN_OBSERVER_ID))) {
-    BT_WARNING("Failed to remove observers!");
-  }
-
-  hal::UnregisterBatteryObserver(this);
-}
+BluetoothHfpManager::~BluetoothHfpManager() {}
 
 class BluetoothHfpManager::UnregisterModuleResultHandler final
     : public BluetoothSetupResultHandler {
@@ -373,6 +438,8 @@ class BluetoothHfpManager::UnregisterModuleResultHandler final
 
     sBluetoothHfpInterface->SetNotificationHandler(nullptr);
     sBluetoothHfpInterface = nullptr;
+
+    sBluetoothHfpManager->Uninit();
     sBluetoothHfpManager = nullptr;
 
     if (mRes) {
@@ -385,6 +452,8 @@ class BluetoothHfpManager::UnregisterModuleResultHandler final
 
     sBluetoothHfpInterface->SetNotificationHandler(nullptr);
     sBluetoothHfpInterface = nullptr;
+
+    sBluetoothHfpManager->Uninit();
     sBluetoothHfpManager = nullptr;
 
     if (mRes) {
@@ -550,6 +619,12 @@ void BluetoothHfpManager::NotifyConnectionStateChanged(const nsAString& aType) {
 
       OnConnect(EmptyString());
     } else if (mConnectionState == HFP_CONNECTION_STATE_DISCONNECTED) {
+      // Reset battery level when it's disconnected
+      if (mDeviceBatteryLevel != -1) {
+        mDeviceBatteryLevel = -1;
+        DispatchHfBatteryChangedEvent(mDeviceAddress, -1);
+      }
+
       mDeviceAddress.Clear();
       if (mPrevConnectionState == HFP_CONNECTION_STATE_DISCONNECTED) {
         // Bug 979160: This implies the outgoing connection failure.
@@ -704,9 +779,11 @@ void BluetoothHfpManager::HandleShutdown() {
 
   nsCOMPtr<nsISettingsManager> settings =
       do_GetService("@mozilla.org/sidl-native/settings;1");
-  if (settings) {
-    settings->RemoveObserver(AUDIO_VOLUME_BT_SCO_ID, this, this);
+  if (settings && sSidlResponse) {
+    settings->RemoveObserver(AUDIO_VOLUME_BT_SCO_ID, this, sSidlResponse.get());
   }
+  sSidlResponse = nullptr;
+  sSettingsGetResponse = nullptr;
 }
 
 class BluetoothHfpManager::ClccResponseResultHandler final
@@ -951,6 +1028,14 @@ void BluetoothHfpManager::HandleCallStateChanged(
     return;
   }
 
+  // We've send Dialer a dialing request and this is the response sent to
+  // HF when SLC is connected.
+  if (aCallState == nsITelephonyService::CALL_STATE_DIALING && IsConnected() &&
+      !mDialingRequestProcessed) {
+    SendResponse(HFP_AT_RESPONSE_OK);
+    mDialingRequestProcessed = true;
+  }
+
   // Update call state only
   while (aCallIndex >= mCurrentCallArray.Length()) {
     Call call;
@@ -967,36 +1052,24 @@ void BluetoothHfpManager::HandleCallStateChanged(
     UpdatePhoneCIND(aCallIndex);
   }
 
-  switch (aCallState) {
-    case nsITelephonyService::CALL_STATE_DIALING:
-      // We've send Dialer a dialing request and this is the response sent to
-      // HF when SLC is connected.
-      if (IsConnected() && !mDialingRequestProcessed) {
-        SendResponse(HFP_AT_RESPONSE_OK);
-        mDialingRequestProcessed = true;
+  if (aCallState == nsITelephonyService::CALL_STATE_DISCONNECTED) {
+    // -1 is necessary because call 0 is an invalid (padding) call object.
+    if (mCurrentCallArray.Length() - 1 ==
+        GetNumberOfCalls(nsITelephonyService::CALL_STATE_DISCONNECTED)) {
+      // When SLC is connected, in order to let user hear busy tone via
+      // connected Bluetooth headset, we postpone the timing of dropping SCO.
+      if (IsConnected() && aError.EqualsLiteral("BusyError")) {
+        // FIXME: UpdatePhoneCIND later since it causes SCO close but
+        // Dialer is still playing busy tone via HF.
+        NS_DispatchToMainThread(new CloseScoRunnable());
       }
-      break;
-    case nsITelephonyService::CALL_STATE_DISCONNECTED:
-      // -1 is necessary because call 0 is an invalid (padding) call object.
-      if (mCurrentCallArray.Length() - 1 ==
-          GetNumberOfCalls(nsITelephonyService::CALL_STATE_DISCONNECTED)) {
-        // When SLC is connected, in order to let user hear busy tone via
-        // connected Bluetooth headset, we postpone the timing of dropping SCO.
-        if (IsConnected() && aError.EqualsLiteral("BusyError")) {
-          // FIXME: UpdatePhoneCIND later since it causes SCO close but
-          // Dialer is still playing busy tone via HF.
-          NS_DispatchToMainThread(new CloseScoRunnable());
-        }
 
-        // We need to make sure the ResetCallArray() is executed after
-        // UpdatePhoneCIND(), because after resetting mCurrentCallArray,
-        // the mCurrentCallArray[aCallIndex] may be meaningless in
-        // UpdatePhoneCIND().
-        ResetCallArray();
-      }
-      break;
-    default:
-      break;
+      // We need to make sure the ResetCallArray() is executed after
+      // UpdatePhoneCIND(), because after resetting mCurrentCallArray,
+      // the mCurrentCallArray[aCallIndex] may be meaningless in
+      // UpdatePhoneCIND().
+      ResetCallArray();
+    }
   }
 }
 
@@ -1656,7 +1729,54 @@ void BluetoothHfpManager::UnknownAtNotification(
 
   BT_LOGR("[%s]", nsCString(aAtString).get());
 
+  // Directly handle AT+IPHONEACCEV without checking AT+XAPL
+  if (nsAutoCString(aAtString).Find("+IPHONEACCEV=") != kNotFound) {
+    if (HandleIphoneAccev(aAtString, aBdAddress)) {
+      SendResponse(HFP_AT_RESPONSE_OK);
+      return;
+    } else {
+      BT_WARNING("Failed to parse AT+IPHONEACCEV command");
+    }
+  }
+
   SendResponse(HFP_AT_RESPONSE_ERROR);
+}
+
+// Handle AT+IPHONEACCEV command. Currently, only battery level is used.
+bool BluetoothHfpManager::HandleIphoneAccev(
+    const nsACString& aAtString, const BluetoothAddress& aBdAddress) {
+  // Format:
+  //   +IPHONEACCEV=Number of key/value pairs,key1,val1,key2,val2,...
+  // Key/value pairs:
+  //   key: the type of change being reported:
+  //     - 1 = Battery Level
+  //     - 2 = Dock State
+  //   val: the value of the change:
+  //     - Battery Level: string value between '0' and '9'
+  //     - Dock State: 0 = undocked, 1 = docked
+  nsCCharSeparatedTokenizer exposeTokens(aAtString, ',');
+  if (!exposeTokens.hasMoreTokens()) {
+    return false;
+  }
+  // Skip the 1st token "+IPHONEACCEV="
+  exposeTokens.nextToken();
+
+  while (exposeTokens.hasMoreTokens()) {
+    const nsDependentCSubstring& key = exposeTokens.nextToken();
+    if (!exposeTokens.hasMoreTokens()) {
+      return false;
+    }
+    const nsDependentCSubstring& value = exposeTokens.nextToken();
+    if (key.EqualsLiteral("1")) {
+      if (value.Length() != 1 || value[0] < '0' || value[0] > '9') {
+        return false;
+      }
+      mDeviceBatteryLevel = (value[0] - '0') * 10;
+      DispatchHfBatteryChangedEvent(aBdAddress, mDeviceBatteryLevel);
+      return true;
+    }
+  }
+  return true;
 }
 
 void BluetoothHfpManager::KeyPressedNotification(
@@ -1703,21 +1823,28 @@ void BluetoothHfpManager::KeyPressedNotification(
   }
 }
 
-// Implements nsISettingsGetResponse::Resolve
-NS_IMETHODIMP BluetoothHfpManager::Resolve(nsISettingInfo* info) {
-  if (info) {
-    nsString value;
-    info->GetValue(value);
-    HandleVolumeChanged(value);
-  }
-  return NS_OK;
+void BluetoothHfpManager::BindNotification(const nsACString& aAtString,
+                                           const BluetoothAddress& aBdAddress) {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  BT_LOGD("[%s]", nsCString(aAtString).get());
 }
 
-// Implements nsISettingsGetResponse::Reject
-NS_IMETHODIMP BluetoothHfpManager::Reject([
-    [maybe_unused]] nsISettingError* error) {
-  BT_WARNING("Failed to get setting 'audio.volume.bt_sco'");
-  return NS_OK;
+void BluetoothHfpManager::BievNotification(BluetoothHandsfreeHfIndType aType,
+                                           int aValue,
+                                           const BluetoothAddress& aBdAddr) {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  BT_LOGD("type: %d, value: %d", static_cast<int>(aType), aValue);
+
+  if (aType == HFP_HF_IND_BATTERY_LEVEL_STATUS) {
+    if (aValue >= 0 && aValue <= 100) {
+      mDeviceBatteryLevel = aValue;
+      DispatchHfBatteryChangedEvent(aBdAddr, mDeviceBatteryLevel);
+    } else {
+      BT_WARNING("The value of HF battery level is abnormal");
+    }
+  }
 }
 
 // Implements nsISettingsObserver::ObserveSetting
@@ -1731,11 +1858,4 @@ NS_IMETHODIMP BluetoothHfpManager::ObserveSetting(nsISettingInfo* info) {
   return NS_OK;
 }
 
-// Implements nsISidlDefaultResponse
-NS_IMETHODIMP BluetoothHfpManager::Resolve() { return NS_OK; }
-NS_IMETHODIMP BluetoothHfpManager::Reject() {
-  BT_WARNING("Failed to observe setting 'audio.volume.bt_sco'");
-  return NS_OK;
-}
-
-NS_IMPL_ISUPPORTS(BluetoothHfpManager, nsIObserver)
+NS_IMPL_ISUPPORTS(BluetoothHfpManager, nsIObserver, nsISettingsObserver)

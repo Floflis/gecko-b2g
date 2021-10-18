@@ -23,7 +23,6 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/Atomics.h"
 #include "nsTArray.h"
-#include "nsDataHashtable.h"
 
 #include "mozilla/Mutex.h"
 #include "mozilla/RefPtr.h"
@@ -108,7 +107,7 @@ class gfxWindowsPlatform final : public gfxPlatform {
   void EnsureDevicesInitialized() override;
   bool DevicesInitialized() override;
 
-  gfxPlatformFontList* CreatePlatformFontList() override;
+  bool CreatePlatformFontList() override;
 
   virtual already_AddRefed<gfxASurface> CreateOffscreenSurface(
       const IntSize& aSize, gfxImageFormat aFormat) override;
@@ -173,17 +172,8 @@ class gfxWindowsPlatform final : public gfxPlatform {
 
   void FontsPrefsChanged(const char* aPref) override;
 
-  void SetupClearTypeParams();
-
   static inline bool DWriteEnabled() {
     return !!mozilla::gfx::Factory::GetDWriteFactory();
-  }
-  inline DWRITE_MEASURING_MODE DWriteMeasuringMode() { return mMeasuringMode; }
-
-  // Note that this may return nullptr, if we encountered an error initializing
-  // the default rendering params.
-  IDWriteRenderingParams* GetRenderingParams(TextRenderingMode aRenderMode) {
-    return mRenderingParams[aRenderMode];
   }
 
  public:
@@ -214,8 +204,6 @@ class gfxWindowsPlatform final : public gfxPlatform {
 
  protected:
   bool AccelerateLayersByDefault() override { return true; }
-  void GetAcceleratedCompositorBackends(
-      nsTArray<mozilla::layers::LayersBackend>& aBackends) override;
   nsTArray<uint8_t> GetPlatformCMSOutputProfileData() override;
   void GetPlatformDisplayInfo(mozilla::widget::InfoObject& aObj) override;
 
@@ -256,12 +244,8 @@ class gfxWindowsPlatform final : public gfxPlatform {
   void InitializeD3D11Config();
   void InitializeD2DConfig();
   void InitializeDirectDrawConfig();
-  void InitializeAdvancedLayersConfig();
 
   void RecordStartupTelemetry();
-
-  RefPtr<IDWriteRenderingParams> mRenderingParams[TEXT_RENDERING_COUNT];
-  DWRITE_MEASURING_MODE mMeasuringMode;
 
   RefPtr<mozilla::layers::ReadbackManagerD3D11> mD3D11ReadbackManager;
   bool mInitializedDevices = false;

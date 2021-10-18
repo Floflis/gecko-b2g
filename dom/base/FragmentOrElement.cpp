@@ -245,7 +245,7 @@ dom::Element* nsIContent::GetEditingHost() {
   }
 
   // If this is in designMode, we should return <body>
-  if (doc->HasFlag(NODE_IS_EDITABLE) && !IsInShadowTree()) {
+  if (IsInDesignMode() && !IsInShadowTree()) {
     return doc->GetBodyElement();
   }
 
@@ -537,7 +537,9 @@ void nsIContent::nsExtendedContentSlots::TraverseExtendedSlots(
 
 nsIContent::nsExtendedContentSlots::nsExtendedContentSlots() = default;
 
-nsIContent::nsExtendedContentSlots::~nsExtendedContentSlots() = default;
+nsIContent::nsExtendedContentSlots::~nsExtendedContentSlots() {
+  MOZ_ASSERT(!mManualSlotAssignment);
+}
 
 size_t nsIContent::nsExtendedContentSlots::SizeOfExcludingThis(
     MallocSizeOf aMallocSizeOf) const {
@@ -1048,6 +1050,10 @@ void nsIContent::SetAssignedSlot(HTMLSlotElement* aSlot) {
   ExtendedContentSlots()->mAssignedSlot = aSlot;
 }
 
+#ifdef MOZ_DOM_LIST
+void nsIContent::Dump() { List(); }
+#endif
+
 void FragmentOrElement::GetTextContentInternal(nsAString& aTextContent,
                                                OOMReporter& aError) {
   if (!nsContentUtils::GetNodeTextContent(this, true, aTextContent, fallible)) {
@@ -1308,15 +1314,13 @@ nsINode* FindOptimizableSubtreeRoot(nsINode* aNode) {
   return aNode;
 }
 
-StaticAutoPtr<nsTHashtable<nsPtrHashKey<nsINode>>> gCCBlackMarkedNodes;
+StaticAutoPtr<nsTHashSet<nsINode*>> gCCBlackMarkedNodes;
 
 static void ClearBlackMarkedNodes() {
   if (!gCCBlackMarkedNodes) {
     return;
   }
-  for (auto iter = gCCBlackMarkedNodes->ConstIter(); !iter.Done();
-       iter.Next()) {
-    nsINode* n = iter.Get()->GetKey();
+  for (nsINode* n : *gCCBlackMarkedNodes) {
     n->SetCCMarkedRoot(false);
     n->SetInCCBlackTree(false);
   }
@@ -1328,7 +1332,7 @@ void FragmentOrElement::RemoveBlackMarkedNode(nsINode* aNode) {
   if (!gCCBlackMarkedNodes) {
     return;
   }
-  gCCBlackMarkedNodes->RemoveEntry(aNode);
+  gCCBlackMarkedNodes->Remove(aNode);
 }
 
 static bool IsCertainlyAliveNode(nsINode* aNode, Document* aDoc) {
@@ -1374,7 +1378,7 @@ bool FragmentOrElement::CanSkipInCC(nsINode* aNode) {
   }
 
   if (!gCCBlackMarkedNodes) {
-    gCCBlackMarkedNodes = new nsTHashtable<nsPtrHashKey<nsINode>>(1020);
+    gCCBlackMarkedNodes = new nsTHashSet<nsINode*>(1020);
   }
 
   // nodesToUnpurple contains nodes which will be removed
@@ -1418,7 +1422,7 @@ bool FragmentOrElement::CanSkipInCC(nsINode* aNode) {
 
   root->SetCCMarkedRoot(true);
   root->SetInCCBlackTree(foundLiveWrapper);
-  gCCBlackMarkedNodes->PutEntry(root);
+  gCCBlackMarkedNodes->Insert(root);
 
   if (!foundLiveWrapper) {
     return false;
@@ -1433,7 +1437,7 @@ bool FragmentOrElement::CanSkipInCC(nsINode* aNode) {
     for (uint32_t i = 0; i < grayNodes.Length(); ++i) {
       nsINode* node = grayNodes[i];
       node->SetInCCBlackTree(true);
-      gCCBlackMarkedNodes->PutEntry(node);
+      gCCBlackMarkedNodes->Insert(node);
     }
   }
 
@@ -1727,8 +1731,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(FragmentOrElement)
           static_cast<IntersectionObserverList*>(
               elem->GetProperty(nsGkAtoms::intersectionobserverlist));
       if (observers) {
-        for (auto iter = observers->Iter(); !iter.Done(); iter.Next()) {
-          DOMIntersectionObserver* observer = iter.Key();
+        for (DOMIntersectionObserver* observer : observers->Keys()) {
           cb.NoteXPCOMChild(observer);
         }
       }
@@ -1799,7 +1802,7 @@ static inline bool IsVoidTag(nsAtom* aTag) {
       nsGkAtoms::link,    nsGkAtoms::meta,  nsGkAtoms::param,
       nsGkAtoms::source,  nsGkAtoms::track, nsGkAtoms::wbr};
 
-  static mozilla::BloomFilter<12, nsAtom> sFilter;
+  static mozilla::BitBloomFilter<12, nsAtom> sFilter;
   static bool sInitialized = false;
   if (!sInitialized) {
     sInitialized = true;

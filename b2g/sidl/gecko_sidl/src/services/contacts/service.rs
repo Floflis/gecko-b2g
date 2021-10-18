@@ -11,7 +11,7 @@ use crate::services::core::service::*;
 
 use crate::services::contacts::messages::*;
 use log::{debug, error};
-use moz_task::{TaskRunnable, ThreadPtrHolder};
+use moz_task::ThreadPtrHolder;
 use nserror::{nsresult, NS_ERROR_INVALID_ARG, NS_OK};
 use nsstring::*;
 use parking_lot::Mutex;
@@ -70,7 +70,9 @@ sidl_callback_for_resolve_string_array!(
 
 type MatchesTask = (
     SidlCallTask<bool, (), nsIMatchesResponse>,
-    FilterByOption, FilterOption, String,
+    FilterByOption,
+    FilterOption,
+    String,
 );
 
 type FindBlockedNumbersTask = (
@@ -142,6 +144,13 @@ impl ServiceClientImpl<ContactsTask> for ContactsManagerImpl {
         }
     }
 
+    fn run_task(&mut self, task: ContactsTask) -> Result<(), nsresult> {
+        match task {
+            ContactsTask::Matches(task) => self.matches(task),
+            ContactsTask::FindBlockedNumbers(task) => self.find_blocked_numbers(task),
+        }
+    }
+
     fn dispatch_queue(
         &mut self,
         task_queue: &Shared<Vec<ContactsTask>>,
@@ -152,14 +161,7 @@ impl ServiceClientImpl<ContactsTask> for ContactsManagerImpl {
 
         // drain the queue.
         for task in task_queue.drain(..) {
-            match task {
-                ContactsTask::Matches(task) => {
-                    let _ = self.matches(task);
-                }
-                ContactsTask::FindBlockedNumbers(task) => {
-                    let _ = self.find_blocked_numbers(task);
-                }
-            }
+            let _ = self.run_task(task);
         }
     }
 }
@@ -179,7 +181,11 @@ impl ContactsManagerImpl {
         debug!("ContactsManager::matches");
 
         let (task, filter_by_option, filter_option, value) = task;
-        let request = ContactsManagerFromClient::ContactsFactoryMatches(filter_by_option, filter_option, value);
+        let request = ContactsManagerFromClient::ContactsFactoryMatches(
+            filter_by_option,
+            filter_option,
+            value,
+        );
         self.sender
             .send_task(&request, MatchesTaskReceiver { task });
         Ok(())
@@ -242,9 +248,12 @@ impl ContactsManagerXpcom {
         });
 
         let obs = instance.coerce::<nsISidlConnectionObserver>();
-        transport.add_connection_observer(
-            ThreadPtrHolder::new(cstr!("nsISidlConnectionObserver"), RefPtr::new(obs)).unwrap(),
-        );
+        match ThreadPtrHolder::new(cstr!("nsISidlConnectionObserver"), RefPtr::new(obs)) {
+            Ok(obs) => {
+                transport.add_connection_observer(obs);
+            }
+            Err(err) => error!("Failed to create connection observer: {}", err),
+        }
 
         instance
     }
@@ -270,7 +279,7 @@ impl ContactsManagerXpcom {
             _ => return Err(NS_ERROR_INVALID_ARG),
         };
 
-        let filter =  match filter_option {
+        let filter = match filter_option {
             0 => FilterOption::Equals,
             1 => FilterOption::Contains,
             2 => FilterOption::Match,
@@ -279,21 +288,15 @@ impl ContactsManagerXpcom {
             _ => return Err(NS_ERROR_INVALID_ARG),
         };
 
-        let callback =
-            ThreadPtrHolder::new(cstr!("nsIMatchesResponse"), RefPtr::new(callback)).unwrap();
-        let task = (SidlCallTask::new(callback), filter_by, filter, value.to_string());
+        let callback = ThreadPtrHolder::new(cstr!("nsIMatchesResponse"), RefPtr::new(callback))?;
+        let task = (
+            SidlCallTask::new(callback),
+            filter_by,
+            filter,
+            value.to_string(),
+        );
 
-        if !self.ensure_service() {
-            self.queue_task(ContactsTask::Matches(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().matches(task);
-        } else {
-            error!("Unable to get ContactsManagerImpl");
-        }
-
+        self.run_or_queue_task(Some(ContactsTask::Matches(task)));
         Ok(())
     }
 
@@ -329,25 +332,14 @@ impl ContactsManagerXpcom {
         let callback = ThreadPtrHolder::new(
             cstr!("nsIFindBlockedNumbersResponse"),
             RefPtr::new(callback),
-        )
-        .unwrap();
+        )?;
         let task = (SidlCallTask::new(callback), (find_options));
 
-        if !self.ensure_service() {
-            self.queue_task(ContactsTask::FindBlockedNumbers(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().find_blocked_numbers(task);
-        } else {
-            error!("Unable to get ContactsManagerImpl");
-        }
-
+        self.run_or_queue_task(Some(ContactsTask::FindBlockedNumbers(task)));
         Ok(())
     }
 
-    ensure_service_and_queue!(ContactsTask, "ContactsManager", SERVICE_FINGERPRINT);
+    task_runner!(ContactsTask, "ContactsManager", SERVICE_FINGERPRINT);
 }
 
 impl Drop for ContactsManagerXpcom {

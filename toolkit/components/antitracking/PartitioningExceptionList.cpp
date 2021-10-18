@@ -59,6 +59,11 @@ NS_IMPL_ISUPPORTS(PartitioningExceptionList,
 
 bool PartitioningExceptionList::Check(const nsACString& aFirstPartyOrigin,
                                       const nsACString& aThirdPartyOrigin) {
+  if (!StaticPrefs::privacy_antitracking_enableWebcompat()) {
+    LOG(("Partition exception list disabled via pref"));
+    return false;
+  }
+
   if (aFirstPartyOrigin.IsEmpty() || aThirdPartyOrigin.IsEmpty()) {
     return false;
   }
@@ -125,6 +130,11 @@ PartitioningExceptionList::OnExceptionListUpdate(const nsACString& aList) {
     auto origins = item.Split(',');
     auto originsIt = origins.begin();
 
+    if (originsIt == origins.end()) {
+      LOG(("Ignoring empty exception entry"));
+      continue;
+    }
+
     nsAutoCString firstPartyOrigin;
     rv = CreateUnifiedOriginString(*originsIt, firstPartyOrigin);
     if (NS_WARN_IF(NS_FAILED(rv))) {
@@ -132,6 +142,11 @@ PartitioningExceptionList::OnExceptionListUpdate(const nsACString& aList) {
     }
 
     ++originsIt;
+
+    if (originsIt == origins.end()) {
+      LOG(("Ignoring incomplete exception entry"));
+      continue;
+    }
 
     nsAutoCString thirdPartyOrigin;
     rv = CreateUnifiedOriginString(*originsIt, thirdPartyOrigin);

@@ -14,13 +14,12 @@
 #include "nsHostResolver.h"
 #include "mozilla/Unused.h"
 #include "DNSResolverInfo.h"
+#include "nsServiceManagerUtils.h"
 
 using namespace mozilla::ipc;
 
 namespace mozilla {
 namespace net {
-
-DNSRequestHandler::DNSRequestHandler() : mFlags(0) {}
 
 //-----------------------------------------------------------------------------
 // DNSRequestHandler::nsISupports

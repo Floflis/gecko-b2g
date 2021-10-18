@@ -34,18 +34,10 @@ pub fn connection_tparams_set(qlog: &mut NeqoQlog, tph: &TransportParametersHand
             None,
             None,
             None,
-            if let Some(ocid) = remote.get_bytes(tparams::ORIGINAL_DESTINATION_CONNECTION_ID) {
-                // Cannot use packet::ConnectionId's Display trait implementation
-                // because it does not include the 0x prefix.
-                Some(hex(ocid))
-            } else {
-                None
-            },
-            if let Some(srt) = remote.get_bytes(tparams::STATELESS_RESET_TOKEN) {
-                Some(hex(srt))
-            } else {
-                None
-            },
+            remote
+                .get_bytes(tparams::ORIGINAL_DESTINATION_CONNECTION_ID)
+                .map(hex),
+            remote.get_bytes(tparams::STATELESS_RESET_TOKEN).map(hex),
             if remote.get_empty(tparams::DISABLE_MIGRATION) {
                 Some(true)
             } else {
@@ -376,7 +368,7 @@ fn frame_to_qlogframe(frame: &Frame) -> QuicFrame {
                 NeqoStreamType::BiDi => qlog::StreamType::Bidirectional,
                 NeqoStreamType::UniDi => qlog::StreamType::Unidirectional,
             },
-            maximum_streams.as_u64().to_string(),
+            maximum_streams.to_string(),
         ),
         Frame::DataBlocked { data_limit } => QuicFrame::data_blocked(data_limit.to_string()),
         Frame::StreamDataBlocked {
@@ -394,7 +386,7 @@ fn frame_to_qlogframe(frame: &Frame) -> QuicFrame {
                 NeqoStreamType::BiDi => qlog::StreamType::Bidirectional,
                 NeqoStreamType::UniDi => qlog::StreamType::Unidirectional,
             },
-            stream_limit.as_u64().to_string(),
+            stream_limit.to_string(),
         ),
         Frame::NewConnectionId {
             sequence_number,
@@ -424,10 +416,12 @@ fn frame_to_qlogframe(frame: &Frame) -> QuicFrame {
             },
             error_code.code(),
             0,
-            String::from_utf8_lossy(&reason_phrase).to_string(),
+            String::from_utf8_lossy(reason_phrase).to_string(),
             Some(frame_type.to_string()),
         ),
         Frame::HandshakeDone => QuicFrame::handshake_done(),
+        Frame::AckFrequency { .. } => QuicFrame::unknown(frame.get_type()),
+        Frame::Datagram { .. } => QuicFrame::unknown(frame.get_type()),
     }
 }
 

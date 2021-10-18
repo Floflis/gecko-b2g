@@ -87,6 +87,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(MobileConnection,
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mData)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mIccHandler)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mImsHandler)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSignalStrength)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(MobileConnection,
@@ -96,6 +97,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(MobileConnection,
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mData)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mIccHandler)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mImsHandler)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mSignalStrength)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(MobileConnection)
@@ -135,6 +137,7 @@ MobileConnection::MobileConnection(nsPIDOMWindowInner* aWindow,
   mListener = new Listener(this);
   mVoice = new MobileConnectionInfo(GetOwner());
   mData = new MobileConnectionInfo(GetOwner());
+  mSignalStrength = new DOMMobileSignalStrength(GetOwner());
 
   if (CheckPermission("mobileconnection")) {
     DebugOnly<nsresult> rv = mMobileConnection->RegisterListener(mListener);
@@ -248,6 +251,12 @@ bool MobileConnection::UpdateIccId() {
   }
 
   return false;
+}
+
+void MobileConnection::UpdateSignalStrength() {
+  nsCOMPtr<nsIMobileSignalStrength> ss;
+  mMobileConnection->GetSignalStrength(getter_AddRefs(ss));
+  mSignalStrength->Update(ss);
 }
 
 nsresult MobileConnection::NotifyError(DOMRequest* aRequest,
@@ -375,52 +384,11 @@ MobileConnection::GetDeviceIdentities() {
   return domIdentities.forget();
 }
 
-already_AddRefed<MobileSignalStrength> MobileConnection::SignalStrength()
-    const {
+already_AddRefed<DOMMobileSignalStrength> MobileConnection::SignalStrength() const {
   if (!mMobileConnection) {
     return nullptr;
   }
-
-  int16_t level;
-  int16_t gsmSignalStrength;
-  int16_t gsmSignalBitErrorRate;
-  int16_t cdmaDbm;
-  int16_t cdmaEcio;
-  int16_t cdmaEvdoDbm;
-  int16_t cdmaEvdoEcio;
-  int16_t cdmaEvdoSNR;
-  int16_t lteSignalStrength;
-  int32_t lteRsrp;
-  int32_t lteRsrq;
-  int32_t lteRssnr;
-  int32_t lteCqi;
-  int32_t lteTimingAdvance;
-  int32_t tdscdmaRscp;
-
-  nsCOMPtr<nsIMobileSignalStrength> ss;
-  mMobileConnection->GetSignalStrength(getter_AddRefs(ss));
-
-  ss->GetLevel(&level);
-  ss->GetGsmSignalStrength(&gsmSignalStrength);
-  ss->GetGsmBitErrorRate(&gsmSignalBitErrorRate);
-  ss->GetCdmaDbm(&cdmaDbm);
-  ss->GetCdmaEcio(&cdmaEcio);
-  ss->GetCdmaEvdoDbm(&cdmaEvdoDbm);
-  ss->GetCdmaEvdoEcio(&cdmaEvdoEcio);
-  ss->GetCdmaEvdoSNR(&cdmaEvdoSNR);
-  ss->GetLteSignalStrength(&lteSignalStrength);
-  ss->GetLteRsrp(&lteRsrp);
-  ss->GetLteRsrq(&lteRsrq);
-  ss->GetLteRssnr(&lteRssnr);
-  ss->GetLteCqi(&lteCqi);
-  ss->GetLteTimingAdvance(&lteTimingAdvance);
-  ss->GetTdscdmaRscp(&tdscdmaRscp);
-
-  RefPtr<MobileSignalStrength> signalStrength = new MobileSignalStrength(
-      GetOwner(), level, gsmSignalStrength, gsmSignalBitErrorRate, cdmaDbm,
-      cdmaEcio, cdmaEvdoDbm, cdmaEvdoEcio, cdmaEvdoSNR, lteSignalStrength,
-      lteRsrp, lteRsrq, lteRssnr, lteCqi, lteTimingAdvance, tdscdmaRscp);
-
+  RefPtr<DOMMobileSignalStrength> signalStrength = mSignalStrength;
   return signalStrength.forget();
 }
 
@@ -478,28 +446,6 @@ Nullable<MobileRadioState> MobileConnection::GetRadioState() const {
   }
 
   return retVal;
-}
-
-void MobileConnection::GetSupportedNetworkTypes(
-    nsTArray<MobileNetworkType>& aTypes) const {
-  if (!mMobileConnection) {
-    return;
-  }
-
-  int32_t* types = nullptr;
-  uint32_t length = 0;
-
-  nsresult rv = mMobileConnection->GetSupportedNetworkTypes(&types, &length);
-  NS_ENSURE_SUCCESS_VOID(rv);
-
-  for (uint32_t i = 0; i < length; ++i) {
-    int32_t type = types[i];
-
-    MOZ_ASSERT(type < static_cast<int32_t>(MobileNetworkType::EndGuard_));
-    aTypes.AppendElement(static_cast<MobileNetworkType>(type));
-  }
-
-  free(types);
 }
 
 already_AddRefed<Promise> MobileConnection::GetSupportedNetworkTypes(
@@ -1066,6 +1012,25 @@ already_AddRefed<DOMRequest> MobileConnection::SetRadioEnabled(
   return request.forget();
 }
 
+already_AddRefed<DOMRequest> MobileConnection::StopNetworkScan(ErrorResult& aRv) {
+  if (!mMobileConnection) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+
+  RefPtr<DOMRequest> request = new DOMRequest(GetOwner());
+  RefPtr<MobileConnectionCallback> requestCallback =
+      new MobileConnectionCallback(GetOwner(), request);
+
+  nsresult rv = mMobileConnection->StopNetworkScan(requestCallback);
+  if (NS_FAILED(rv)) {
+    aRv.Throw(rv);
+    return nullptr;
+  }
+
+  return request.forget();
+}
+
 // nsIMobileConnectionListener
 
 NS_IMETHODIMP
@@ -1219,6 +1184,8 @@ MobileConnection::NotifySignalStrengthChanged() {
   if (!CheckPermission("mobileconnection")) {
     return NS_OK;
   }
+
+  UpdateSignalStrength();
 
   return DispatchTrustedEvent(u"signalstrengthchange"_ns);
 }

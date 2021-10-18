@@ -8,14 +8,14 @@ include GMPTypes;
 
 include "GMPMessageUtils.h";
 
-using cdm::HdcpVersion from "gmp-sanitized-cdm-exports.h";
+using cdm::HdcpVersion from "GMPSanitizedExports.h";
 
 include "GMPMessageUtils.h";
 
 namespace mozilla {
 namespace gmp {
 
-async refcounted protocol PChromiumCDM
+[RefCounted] async protocol PChromiumCDM
 {
   manager PGMPContent;
 child:
@@ -48,6 +48,12 @@ child:
 
   async RemoveSession(uint32_t aPromiseId,
                       nsCString aSessionId);
+
+  // This is called after the parent has verified the protection status and
+  // round tripped the call back to the child.
+  async CompleteQueryOutputProtectionStatus(bool aSuccess,
+                                            uint32_t aLinkMask,
+                                            uint32_t aProtectionMask);
 
   async Decrypt(uint32_t aId, CDMInputBuffer aBuffer);
 
@@ -94,6 +100,8 @@ parent:
                            double aSecondsSinceEpoch);
 
   async OnSessionClosed(nsCString aSessionId);
+
+  async OnQueryOutputProtectionStatus();
 
   async ResolveLoadSessionPromise(uint32_t aPromiseId, bool aSuccessful);
 

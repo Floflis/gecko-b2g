@@ -6,20 +6,14 @@ package org.mozilla.geckoview.test
 
 import androidx.test.filters.MediumTest
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import android.util.Log
-
 import org.hamcrest.Matchers.*
-import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.Assume.assumeThat
-import org.junit.Assume.assumeTrue
 
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
-import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
-import org.mozilla.geckoview.test.util.Callbacks
 
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
@@ -79,6 +73,9 @@ class MediaSessionTest : BaseSessionTest() {
 
     @Test
     fun domMetadataPlayback() {
+        // TODO: needs bug 1700243
+        assumeThat(sessionRule.env.isIsolatedProcess, equalTo(false))
+
         val onActivatedCalled = arrayOf(GeckoResult<Void>())
         val onMetadataCalled = arrayOf(
                 GeckoResult<Void>(),
@@ -166,7 +163,7 @@ class MediaSessionTest : BaseSessionTest() {
         // 1.
         session1.loadTestPath(path)
 
-        session1.delegateUntilTestEnd(object : Callbacks.MediaSessionDelegate {
+        session1.delegateUntilTestEnd(object : MediaSession.Delegate {
             @AssertCalled(count = 1, order = [1])
             override fun onActivated(
                     session: GeckoSession,
@@ -309,6 +306,9 @@ class MediaSessionTest : BaseSessionTest() {
 
     @Test
     fun defaultMetadataPlayback() {
+        // TODO: needs bug 1700243
+        assumeThat(sessionRule.env.isIsolatedProcess, equalTo(false))
+
         val onActivatedCalled = arrayOf(GeckoResult<Void>())
         val onPlayCalled = arrayOf(GeckoResult<Void>(),
                 GeckoResult<Void>(),
@@ -354,7 +354,7 @@ class MediaSessionTest : BaseSessionTest() {
         // 1.
         session1.loadTestPath(path)
 
-        session1.delegateUntilTestEnd(object : Callbacks.MediaSessionDelegate {
+        session1.delegateUntilTestEnd(object : MediaSession.Delegate {
             @AssertCalled(count = 1, order = [1])
             override fun onActivated(
                     session: GeckoSession,
@@ -392,6 +392,9 @@ class MediaSessionTest : BaseSessionTest() {
 
     @Test
     fun domMultiSessions() {
+        // TODO: needs bug 1700243
+        assumeThat(sessionRule.env.isIsolatedProcess, equalTo(false))
+
         val onActivatedCalled = arrayOf(
                 arrayOf(GeckoResult<Void>()),
                 arrayOf(GeckoResult<Void>()))
@@ -486,7 +489,7 @@ class MediaSessionTest : BaseSessionTest() {
         var mediaSession1 : MediaSession? = null
         var mediaSession2 : MediaSession? = null
 
-        session1.delegateUntilTestEnd(object : Callbacks.MediaSessionDelegate {
+        session1.delegateUntilTestEnd(object : MediaSession.Delegate {
             @AssertCalled(count = 1)
             override fun onActivated(
                     session: GeckoSession,
@@ -540,13 +543,16 @@ class MediaSessionTest : BaseSessionTest() {
                         equalTo(true))
             }
 
-            @AssertCalled(count = 2)
+            @AssertCalled
             override fun onMetadata(
                     session: GeckoSession,
                     mediaSession: MediaSession,
                     meta: MediaSession.Metadata) {
-                onMetadataCalled[0][sessionRule.currentCall.counter - 1]
-                        .complete(null)
+                val count = sessionRule.currentCall.counter
+                if (count < 3) {
+                        // Ignore redundant calls.
+                        onMetadataCalled[0][count - 1].complete(null)
+                }
 
                 assertThat(
                         "Title should match",
@@ -589,7 +595,7 @@ class MediaSessionTest : BaseSessionTest() {
             }
         })
 
-        session2.delegateUntilTestEnd(object : Callbacks.MediaSessionDelegate {
+        session2.delegateUntilTestEnd(object : MediaSession.Delegate {
             @AssertCalled(count = 1)
             override fun onActivated(
                     session: GeckoSession,
@@ -608,13 +614,16 @@ class MediaSessionTest : BaseSessionTest() {
                         equalTo(true))
             }
 
-            @AssertCalled(count = 1)
+            @AssertCalled
             override fun onMetadata(
                     session: GeckoSession,
                     mediaSession: MediaSession,
                     meta: MediaSession.Metadata) {
-                onMetadataCalled[1][sessionRule.currentCall.counter - 1]
-                        .complete(null)
+                val count = sessionRule.currentCall.counter
+                if (count < 2) {
+                        // Ignore redundant calls.
+                        onMetadataCalled[1][0].complete(null)
+                }
 
                 assertThat(
                         "Title should match",
@@ -671,6 +680,9 @@ class MediaSessionTest : BaseSessionTest() {
 
     @Test
     fun fullscreenVideoElementMetadata() {
+        // TODO: bug 1706656
+        assumeThat(sessionRule.env.isIsolatedProcess, equalTo(false))
+
         sessionRule.setPrefsUntilTestEnd(mapOf(
                 "media.autoplay.default" to 0,
                 "full-screen-api.allow-trusted-requests-only" to false))
@@ -712,7 +724,7 @@ class MediaSessionTest : BaseSessionTest() {
         val path = VIDEO_WEBM_PATH
         val session1 = sessionRule.createOpenSession()
 
-        session1.delegateUntilTestEnd(object : Callbacks.MediaSessionDelegate {
+        session1.delegateUntilTestEnd(object : MediaSession.Delegate {
             @AssertCalled(count = 1, order = [1])
             override fun onActivated(
                     session: GeckoSession,

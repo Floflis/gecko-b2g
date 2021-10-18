@@ -31,15 +31,10 @@ class ProcessingInstruction;
 }  // namespace dom
 }  // namespace mozilla
 
-typedef enum {
+enum XMLContentSinkState {
   eXMLContentSinkState_InProlog,
   eXMLContentSinkState_InDocumentElement,
   eXMLContentSinkState_InEpilog
-} XMLContentSinkState;
-
-struct StackNode {
-  nsCOMPtr<nsIContent> mContent;
-  uint32_t mNumFlushed;
 };
 
 class nsXMLContentSink : public nsContentSink,
@@ -47,6 +42,11 @@ class nsXMLContentSink : public nsContentSink,
                          public nsITransformObserver,
                          public nsIExpatSink {
  public:
+  struct StackNode {
+    nsCOMPtr<nsIContent> mContent;
+    uint32_t mNumFlushed;
+  };
+
   nsXMLContentSink();
 
   nsresult Init(mozilla::dom::Document* aDoc, nsIURI* aURL,
@@ -55,8 +55,7 @@ class nsXMLContentSink : public nsContentSink,
   // nsISupports
   NS_DECL_ISUPPORTS_INHERITED
 
-  NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED_NO_UNLINK(nsXMLContentSink,
-                                                     nsContentSink)
+  NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(nsXMLContentSink, nsContentSink)
 
   NS_DECL_NSIEXPATSINK
 

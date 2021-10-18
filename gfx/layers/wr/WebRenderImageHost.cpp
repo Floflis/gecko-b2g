@@ -13,7 +13,6 @@
 #include "mozilla/layers/Compositor.h"                // for Compositor
 #include "mozilla/layers/CompositorVsyncScheduler.h"  // for CompositorVsyncScheduler
 #include "mozilla/layers/Effects.h"  // for TexturedEffect, Effect, etc
-#include "mozilla/layers/LayerManagerComposite.h"  // for TexturedEffect, Effect, etc
 #include "mozilla/layers/WebRenderBridgeParent.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
 #include "nsAString.h"
@@ -70,7 +69,8 @@ void WebRenderImageHost::UseTextureHost(
     for (const auto& it : mWrBridges) {
       RefPtr<WebRenderBridgeParent> wrBridge = it.second->WrBridge();
       if (wrBridge && wrBridge->CompositorScheduler()) {
-        wrBridge->CompositorScheduler()->ScheduleComposition();
+        wrBridge->CompositorScheduler()->ScheduleComposition(
+            wr::RenderReasons::ASYNC_IMAGE);
       }
     }
   }
@@ -201,20 +201,6 @@ void WebRenderImageHost::SetTextureSourceProvider(
     }
   }
   CompositableHost::SetTextureSourceProvider(aProvider);
-}
-
-void WebRenderImageHost::PrintInfo(std::stringstream& aStream,
-                                   const char* aPrefix) {
-  aStream << aPrefix;
-  aStream << nsPrintfCString("WebRenderImageHost (0x%p)", this).get();
-
-  nsAutoCString pfx(aPrefix);
-  pfx += "  ";
-  for (const auto& img : Images()) {
-    aStream << "\n";
-    img.mTextureHost->PrintInfo(aStream, pfx.get());
-    aStream << " [picture-rect=" << img.mPictureRect << "]";
-  }
 }
 
 void WebRenderImageHost::Dump(std::stringstream& aStream, const char* aPrefix,

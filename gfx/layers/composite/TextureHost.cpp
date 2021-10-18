@@ -7,8 +7,7 @@
 #include "TextureHost.h"
 
 #include "CompositableHost.h"  // for CompositableHost
-#include "LayerScope.h"
-#include "mozilla/gfx/2D.h"  // for DataSourceSurface, Factory
+#include "mozilla/gfx/2D.h"    // for DataSourceSurface, Factory
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/ipc/Shmem.h"  // for Shmem
 #include "mozilla/layers/AsyncImagePipelineManager.h"
@@ -19,8 +18,7 @@
 #include "mozilla/layers/ISurfaceAllocator.h"  // for ISurfaceAllocator
 #include "mozilla/layers/ImageBridgeParent.h"  // for ImageBridgeParent
 #include "mozilla/layers/LayersSurfaces.h"     // for SurfaceDescriptor, etc
-#include "mozilla/layers/TextureHostBasic.h"
-#include "mozilla/layers/TextureHostOGL.h"  // for TextureHostOGL
+#include "mozilla/layers/TextureHostOGL.h"     // for TextureHostOGL
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/TextureClient.h"
 #ifdef XP_DARWIN
@@ -31,7 +29,6 @@
 #include "mozilla/StaticPrefs_layers.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/webrender/RenderBufferTextureHost.h"
-#include "mozilla/webrender/RenderBufferTextureHostSWGL.h"
 #include "mozilla/webrender/RenderExternalTextureHost.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/webrender/WebRenderAPI.h"
@@ -50,17 +47,12 @@
 #  include "../d3d11/CompositorD3D11.h"
 #endif
 
-#ifdef MOZ_X11
-#  include "mozilla/layers/X11TextureHost.h"
-#endif
-
 #ifdef XP_MACOSX
 #  include "../opengl/MacIOSurfaceTextureHostOGL.h"
 #endif
 
 #ifdef XP_WIN
 #  include "mozilla/layers/TextureD3D11.h"
-#  include "mozilla/layers/TextureDIB.h"
 #endif
 
 #if 0
@@ -197,8 +189,6 @@ already_AddRefed<TextureHost> TextureHost::Create(
 
   switch (aDesc.type()) {
     case SurfaceDescriptor::TSurfaceDescriptorBuffer:
-    case SurfaceDescriptor::TSurfaceDescriptorDIB:
-    case SurfaceDescriptor::TSurfaceDescriptorFileMapping:
     case SurfaceDescriptor::TSurfaceDescriptorGPUVideo:
       result = CreateBackendIndependentTextureHost(aDesc, aDeallocator,
                                                    aBackend, aFlags);
@@ -214,29 +204,8 @@ already_AddRefed<TextureHost> TextureHost::Create(
 
     case SurfaceDescriptor::TSurfaceDescriptorMacIOSurface:
     case SurfaceDescriptor::TSurfaceDescriptorGralloc:
-      if (aBackend == LayersBackend::LAYERS_OPENGL ||
-          aBackend == LayersBackend::LAYERS_WR) {
-        result = CreateTextureHostOGL(aDesc, aDeallocator, aBackend, aFlags);
-        break;
-      } else {
-        result = CreateTextureHostBasic(aDesc, aDeallocator, aBackend, aFlags);
-        break;
-      }
-
-#ifdef MOZ_X11
-    case SurfaceDescriptor::TSurfaceDescriptorX11: {
-      if (!aDeallocator->IsSameProcess()) {
-        NS_ERROR(
-            "A client process is trying to peek at our address space using a "
-            "X11Texture!");
-        return nullptr;
-      }
-
-      const SurfaceDescriptorX11& desc = aDesc.get_SurfaceDescriptorX11();
-      result = MakeAndAddRef<X11TextureHost>(aFlags, desc);
+      result = CreateTextureHostOGL(aDesc, aDeallocator, aBackend, aFlags);
       break;
-    }
-#endif
 
 #ifdef XP_WIN
     case SurfaceDescriptor::TSurfaceDescriptorD3D10:
@@ -357,42 +326,12 @@ already_AddRefed<TextureHost> CreateBackendIndependentTextureHost(
       break;
     }
     case SurfaceDescriptor::TSurfaceDescriptorGPUVideo: {
-      if (aDesc.get_SurfaceDescriptorGPUVideo().type() ==
-          SurfaceDescriptorGPUVideo::TSurfaceDescriptorPlugin) {
-        MOZ_ASSERT(aDeallocator && aDeallocator->UsesImageBridge());
-        auto ibpBase = static_cast<ImageBridgeParent*>(aDeallocator);
-        result =
-            ibpBase->LookupTextureHost(aDesc.get_SurfaceDescriptorGPUVideo());
-        if (!result) {
-          return nullptr;
-        }
-        MOZ_ASSERT(aFlags == result->GetFlags());
-        break;
-      }
-
       MOZ_ASSERT(aDesc.get_SurfaceDescriptorGPUVideo().type() ==
                  SurfaceDescriptorGPUVideo::TSurfaceDescriptorRemoteDecoder);
       result = GPUVideoTextureHost::CreateFromDescriptor(
           aFlags, aDesc.get_SurfaceDescriptorGPUVideo());
       break;
     }
-#ifdef XP_WIN
-    case SurfaceDescriptor::TSurfaceDescriptorDIB: {
-      if (!aDeallocator->IsSameProcess()) {
-        NS_ERROR(
-            "A client process is trying to peek at our address space using a "
-            "DIBTexture!");
-        return nullptr;
-      }
-
-      result = new DIBTextureHost(aFlags, aDesc);
-      break;
-    }
-    case SurfaceDescriptor::TSurfaceDescriptorFileMapping: {
-      result = new TextureHostFileMapping(aFlags, aDesc);
-      break;
-    }
-#endif
     default: {
       NS_WARNING("No backend independent TextureHost for this descriptor type");
     }
@@ -521,33 +460,7 @@ void TextureHost::EnsureRenderTexture(
   CreateRenderTexture(mExternalImageId.ref());
 }
 
-void TextureHost::PrintInfo(std::stringstream& aStream, const char* aPrefix) {
-  aStream << aPrefix;
-  aStream << nsPrintfCString("%s (0x%p)", Name(), this).get();
-  // Note: the TextureHost needs to be locked before it is safe to call
-  //       GetSize() and GetFormat() on it.
-  if (Lock()) {
-    aStream << " [size=" << GetSize() << "]"
-            << " [format=" << GetFormat() << "]";
-    Unlock();
-  }
-  aStream << " [flags=" << mFlags << "]";
-#ifdef MOZ_DUMP_PAINTING
-  if (StaticPrefs::layers_dump_texture()) {
-    nsAutoCString pfx(aPrefix);
-    pfx += "  ";
-
-    aStream << "\n" << pfx.get() << "Surface: ";
-    RefPtr<gfx::DataSourceSurface> dSurf = GetAsSurface();
-    if (dSurf) {
-      aStream << gfxUtils::GetAsLZ4Base64Str(dSurf).get();
-    }
-  }
-#endif
-}
-
 void TextureHost::Updated(const nsIntRegion* aRegion) {
-  LayerScope::ContentChanged(this);
   UpdatedInternal(aRegion);
 }
 
@@ -678,10 +591,7 @@ void BufferTextureHost::CreateRenderTexture(
     const wr::ExternalImageId& aExternalImageId) {
   RefPtr<wr::RenderTextureHost> texture;
 
-  if (gfx::gfxVars::UseSoftwareWebRender()) {
-    texture =
-        new wr::RenderBufferTextureHostSWGL(GetBuffer(), GetBufferDescriptor());
-  } else if (UseExternalTextures()) {
+  if (UseExternalTextures()) {
     texture =
         new wr::RenderExternalTextureHost(GetBuffer(), GetBufferDescriptor());
   } else {
@@ -708,10 +618,15 @@ void BufferTextureHost::PushResourceUpdates(
                     ? &wr::TransactionBuilder::AddExternalImage
                     : &wr::TransactionBuilder::UpdateExternalImage;
 
-  auto imageType = UseExternalTextures() || gfx::gfxVars::UseSoftwareWebRender()
-                       ? wr::ExternalImageType::TextureHandle(
-                             wr::ImageBufferKind::TextureRect)
-                       : wr::ExternalImageType::Buffer();
+  // Use native textures if our backend requires it, or if our backend doesn't
+  // forbid it and we want to use them.
+  NativeTexturePolicy policy =
+      BackendNativeTexturePolicy(aResources.GetBackendType(), GetSize());
+  bool useNativeTexture =
+      (policy == REQUIRE) || (policy != FORBID && UseExternalTextures());
+  auto imageType = useNativeTexture ? wr::ExternalImageType::TextureHandle(
+                                          wr::ImageBufferKind::TextureRect)
+                                    : wr::ExternalImageType::Buffer();
 
   if (GetFormat() != gfx::SurfaceFormat::YUV) {
     MOZ_ASSERT(aImageKeys.length() == 1);
@@ -897,17 +812,6 @@ static bool IsCompatibleTextureSource(TextureSource* aTexture,
 
 void BufferTextureHost::PrepareTextureSource(
     CompositableTextureSourceRef& aTexture) {
-  // Reuse WrappingTextureSourceYCbCrBasic to reduce memory consumption.
-  if (mFormat == gfx::SurfaceFormat::YUV && !mHasIntermediateBuffer &&
-      aTexture.get() && aTexture->AsWrappingTextureSourceYCbCrBasic() &&
-      aTexture->NumCompositableRefs() <= 1 &&
-      aTexture->GetSize() == GetSize()) {
-    aTexture->AsSourceBasic()->SetBufferTextureHost(this);
-    aTexture->AsDataTextureSource()->SetOwner(this);
-    mFirstSource = aTexture->AsDataTextureSource();
-    mNeedsFullUpdate = true;
-  }
-
   if (!mHasIntermediateBuffer) {
     EnsureWrappingTextureSource();
   }
@@ -1021,7 +925,7 @@ gfx::YUVColorSpace BufferTextureHost::GetYUVColorSpace() const {
     const YCbCrDescriptor& desc = mDescriptor.get_YCbCrDescriptor();
     return desc.yUVColorSpace();
   }
-  return gfx::YUVColorSpace::UNKNOWN;
+  return gfx::YUVColorSpace::Identity;
 }
 
 gfx::ColorDepth BufferTextureHost::GetColorDepth() const {

@@ -7,6 +7,7 @@
 
 from __future__ import absolute_import
 import datetime
+import enum
 import os
 import subprocess
 import sys
@@ -23,6 +24,13 @@ from mozharness.mozilla.automation import (
 from mozharness.mozilla.mozbase import MozbaseMixin
 from mozharness.mozilla.testing.android import AndroidMixin
 from mozharness.mozilla.testing.testbase import TestingMixin
+
+
+class TestMode(enum.Enum):
+    OPTIMIZED_SHADER_COMPILATION = 0
+    UNOPTIMIZED_SHADER_COMPILATION = 1
+    SHADER_TEST = 2
+    REFTEST = 3
 
 
 class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
@@ -71,7 +79,6 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
             if "abs_work_dir" in parent_abs_dirs:
                 abs_dirs["abs_work_dir"] = parent_abs_dirs["abs_work_dir"]
 
-        abs_dirs["abs_avds_dir"] = os.path.join(abs_dirs["abs_work_dir"], "avds")
         abs_dirs["abs_blob_upload_dir"] = os.path.join(abs_dirs["abs_work_dir"], "logs")
         abs_dirs["abs_apk_path"] = os.environ.get(
             "WRENCH_APK", "gfx/wr/target/android-artifacts/debug/apk/wrench.apk"
@@ -83,9 +90,13 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
             fetches_dir = os.environ.get("MOZ_FETCHES_DIR")
             if self.is_emulator and fetches_dir:
                 abs_dirs["abs_sdk_dir"] = os.path.join(fetches_dir, "android-sdk-linux")
+                abs_dirs["abs_avds_dir"] = os.path.join(fetches_dir, "android-device")
             else:
                 abs_dirs["abs_sdk_dir"] = os.path.join(
                     abs_dirs["abs_work_dir"], "android-sdk-linux"
+                )
+                abs_dirs["abs_avds_dir"] = os.path.join(
+                    abs_dirs["abs_work_dir"], "android-device"
                 )
         else:
             mozbuild_path = os.environ.get(
@@ -95,6 +106,10 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
                 "ANDROID_SDK_HOME", os.path.join(mozbuild_path, "android-sdk-linux")
             )
             abs_dirs["abs_sdk_dir"] = mozbuild_sdk
+            avds_dir = os.environ.get(
+                "ANDROID_EMULATOR_HOME", os.path.join(mozbuild_path, "android-device")
+            )
+            abs_dirs["abs_avds_dir"] = avds_dir
 
         self.abs_dirs = abs_dirs
         return self.abs_dirs
@@ -122,30 +137,48 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
         end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
         while self.device.process_exist(process_name, timeout=timeout):
             if datetime.datetime.now() > end_time:
+                stop_cmd = [
+                    self.adb_path,
+                    "-s",
+                    self.device_serial,
+                    "shell",
+                    "am",
+                    "force-stop",
+                    process_name,
+                ]
+                subprocess.check_call(stop_cmd)
                 return False
             time.sleep(5)
 
         return True
 
-    def setup_sdcard(self):
+    def setup_sdcard(self, test_mode):
         # Note that we hard-code /sdcard/wrench as the path here, rather than
         # using something like self.device.test_root, because it needs to be
         # kept in sync with the path hard-coded inside the wrench source code.
         self.device.rm("/sdcard/wrench", recursive=True, force=True)
         self.device.mkdir("/sdcard/wrench", parents=True)
-        self.device.push(
-            self.query_abs_dirs()["abs_reftests_path"], "/sdcard/wrench/reftests"
-        )
+        if test_mode == TestMode.REFTEST:
+            self.device.push(
+                self.query_abs_dirs()["abs_reftests_path"], "/sdcard/wrench/reftests"
+            )
         args_file = os.path.join(self.query_abs_dirs()["abs_work_dir"], "wrench_args")
         with open(args_file, "w") as argfile:
             if self.is_emulator:
                 argfile.write("env: WRENCH_REFTEST_CONDITION_EMULATOR=1\n")
             else:
                 argfile.write("env: WRENCH_REFTEST_CONDITION_DEVICE=1\n")
-            argfile.write("reftest")
+            if test_mode == TestMode.OPTIMIZED_SHADER_COMPILATION:
+                argfile.write("--precache test_init")
+            elif test_mode == TestMode.UNOPTIMIZED_SHADER_COMPILATION:
+                argfile.write("--precache --use-unoptimized-shaders test_init")
+            elif test_mode == TestMode.SHADER_TEST:
+                argfile.write("--precache test_shaders")
+            elif test_mode == TestMode.REFTEST:
+                argfile.write("reftest")
         self.device.push(args_file, "/sdcard/wrench/args")
 
-    def run_tests(self):
+    def run_tests(self, timeout):
         self.timed_screenshots(None)
         self.device.launch_application(
             app_name="org.mozilla.wrench",
@@ -153,7 +186,7 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
             intent=None,
         )
         self.info("App launched")
-        done = self.wait_until_process_done("org.mozilla.wrench", timeout=60 * 30)
+        done = self.wait_until_process_done("org.mozilla.wrench", timeout=timeout)
         if not done:
             self._errored = True
             self.error("Wrench still running after timeout")
@@ -169,7 +202,7 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
         lines, so part of what this function does is unwrap that so that the
         resulting log is readable by the reftest analyzer."""
 
-        with open(self.logcat_path(), "r") as f:
+        with open(self.logcat_path(), "r", encoding="utf-8") as f:
             self.info("=== scraped logcat output ===")
             tag = "RustAndroidGlueStdouterr: "
             long_line = None
@@ -209,22 +242,16 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
             self.info("(see logcat artifact for full logcat")
 
     def setup_emulator(self):
-        # Running setup_avds will clobber the existing AVD and redownload it.
-        # For local testing that's kinda expensive, so we omit that if we
-        # already have that dir.
-        if not os.path.exists(self.query_abs_dirs()["abs_avds_dir"]):
-            self.setup_avds()
+        avds_dir = self.query_abs_dirs()["abs_avds_dir"]
+        if not os.path.exists(avds_dir):
+            self.error("Unable to find android AVDs at %s" % avds_dir)
+            return
 
         sdk_path = self.query_abs_dirs()["abs_sdk_dir"]
         if not os.path.exists(sdk_path):
             self.error("Unable to find android SDK at %s" % sdk_path)
             return
-        if os.environ.get("MOZ_AUTOMATION", "0") == "1":
-            self.start_emulator()
-        else:
-            # Can't use start_emulator because it tries to download a non-public
-            # artifact. Instead we just manually run the launch.
-            self._launch_emulator()
+        self.start_emulator()
 
     def do_test(self):
         if self.is_emulator:
@@ -235,10 +262,31 @@ class AndroidWrench(TestingMixin, BaseScript, MozbaseMixin, AndroidMixin):
         self.info(self.shell_output("getprop"))
         self.info("Installing APK...")
         self.install_apk(self.query_abs_dirs()["abs_apk_path"], replace=True)
-        self.info("Setting up SD card...")
-        self.setup_sdcard()
-        self.info("Running tests...")
-        self.run_tests()
+
+        if not self._errored:
+            self.info("Setting up SD card...")
+            self.setup_sdcard(TestMode.OPTIMIZED_SHADER_COMPILATION)
+            self.info("Running optimized shader compilation tests...")
+            self.run_tests(60)
+
+        if not self._errored:
+            self.info("Setting up SD card...")
+            self.setup_sdcard(TestMode.UNOPTIMIZED_SHADER_COMPILATION)
+            self.info("Running unoptimized shader compilation tests...")
+            self.run_tests(60)
+
+        if not self._errored:
+            self.info("Setting up SD card...")
+            self.setup_sdcard(TestMode.SHADER_TEST)
+            self.info("Running shader tests...")
+            self.run_tests(60 * 5)
+
+        if not self._errored:
+            self.info("Setting up SD card...")
+            self.setup_sdcard(TestMode.REFTEST)
+            self.info("Running reftests...")
+            self.run_tests(60 * 30)
+
         self.info("Tests done; parsing logcat...")
         self.logcat_stop()
         self.scrape_logcat()

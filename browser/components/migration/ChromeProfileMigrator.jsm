@@ -108,15 +108,8 @@ ChromeProfileMigrator.prototype.getResources = async function Chrome_getResource
   if (chromeUserDataPath) {
     let profileFolder = OS.Path.join(chromeUserDataPath, aProfile.id);
     if (await OS.File.exists(profileFolder)) {
-      let localePropertySuffix = MigrationUtils._getLocalePropertyForBrowser(
-        this.getBrowserKey()
-      ).replace(/^source-name-/, "");
       let possibleResourcePromises = [
-        GetBookmarksResource(
-          profileFolder,
-          localePropertySuffix,
-          this.getBrowserKey()
-        ),
+        GetBookmarksResource(profileFolder),
         GetHistoryResource(profileFolder),
         GetCookiesResource(profileFolder),
       ];
@@ -218,11 +211,7 @@ Object.defineProperty(ChromeProfileMigrator.prototype, "sourceLocked", {
   },
 });
 
-async function GetBookmarksResource(
-  aProfileFolder,
-  aLocalePropertySuffix,
-  aBrowserKey
-) {
+async function GetBookmarksResource(aProfileFolder) {
   let bookmarksPath = OS.Path.join(aProfileFolder, "Bookmarks");
   if (!(await OS.File.exists(bookmarksPath))) {
     return null;
@@ -242,30 +231,15 @@ async function GetBookmarksResource(
           encoding: "UTF-8",
         });
         let roots = JSON.parse(bookmarkJSON).roots;
-        let histogramBookmarkRoots = 0;
 
         // Importing bookmark bar items
         if (roots.bookmark_bar.children && roots.bookmark_bar.children.length) {
           // Toolbar
-          histogramBookmarkRoots |=
-            MigrationUtils.SOURCE_BOOKMARK_ROOTS_BOOKMARKS_TOOLBAR;
           let parentGuid = PlacesUtils.bookmarks.toolbarGuid;
           let bookmarks = convertBookmarks(
             roots.bookmark_bar.children,
             errorGatherer
           );
-          if (
-            !Services.prefs.getBoolPref("browser.toolbars.bookmarks.2h2020") &&
-            !MigrationUtils.isStartupMigration &&
-            PlacesUtils.getChildCountForFolder(
-              PlacesUtils.bookmarks.toolbarGuid
-            ) > PlacesUIUtils.NUM_TOOLBAR_BOOKMARKS_TO_UNHIDE
-          ) {
-            parentGuid = await MigrationUtils.createImportedBookmarksFolder(
-              aLocalePropertySuffix,
-              parentGuid
-            );
-          }
           await MigrationUtils.insertManyBookmarksWrapper(
             bookmarks,
             parentGuid
@@ -276,21 +250,8 @@ async function GetBookmarksResource(
         // Importing bookmark menu items
         if (roots.other.children && roots.other.children.length) {
           // Bookmark menu
-          histogramBookmarkRoots |=
-            MigrationUtils.SOURCE_BOOKMARK_ROOTS_BOOKMARKS_MENU;
           let parentGuid = PlacesUtils.bookmarks.menuGuid;
           let bookmarks = convertBookmarks(roots.other.children, errorGatherer);
-          if (
-            !Services.prefs.getBoolPref("browser.toolbars.bookmarks.2h2020") &&
-            !MigrationUtils.isStartupMigration &&
-            PlacesUtils.getChildCountForFolder(PlacesUtils.bookmarks.menuGuid) >
-              PlacesUIUtils.NUM_TOOLBAR_BOOKMARKS_TO_UNHIDE
-          ) {
-            parentGuid = await MigrationUtils.createImportedBookmarksFolder(
-              aLocalePropertySuffix,
-              parentGuid
-            );
-          }
           await MigrationUtils.insertManyBookmarksWrapper(
             bookmarks,
             parentGuid
@@ -299,9 +260,6 @@ async function GetBookmarksResource(
         if (gotErrors) {
           throw new Error("The migration included errors.");
         }
-        Services.telemetry
-          .getKeyedHistogramById("FX_MIGRATION_BOOKMARKS_ROOTS")
-          .add(aBrowserKey, histogramBookmarkRoots);
       })().then(
         () => aCallback(true),
         () => aCallback(false)

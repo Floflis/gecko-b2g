@@ -428,11 +428,14 @@ class nsFrameSelection final {
 
   bool IsValidSelectionPoint(nsINode* aNode) const;
 
+  static bool AdjustFrameForLineStart(nsIFrame*& aFrame, int32_t& aFrameOffset);
+
   /**
    * Given a node and its child offset, return the nsIFrame and the offset into
    * that frame.
    *
    * @param aNode input parameter for the node to look at
+   *              TODO: Make this `const nsIContent*` for `ContentEventHandler`.
    * @param aOffset offset into above node.
    * @param aReturnOffset will contain offset into frame.
    */
@@ -734,7 +737,7 @@ class nsFrameSelection final {
   mozilla::PresShell* GetPresShell() const { return mPresShell; }
 
   void DisconnectFromPresShell();
-  nsresult ClearNormalSelection();
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult ClearNormalSelection();
 
   // Table selection support.
   static nsITableCellLayout* GetCellLayout(const nsIContent* aCellContent);
@@ -742,10 +745,12 @@ class nsFrameSelection final {
  private:
   ~nsFrameSelection();
 
-  MOZ_CAN_RUN_SCRIPT
-  nsresult TakeFocus(nsIContent* aNewFocus, uint32_t aContentOffset,
-                     uint32_t aContentEndOffset, CaretAssociateHint aHint,
-                     FocusMode aFocusMode);
+  // TODO: in case an error is returned, it sometimes refers to a programming
+  // error, in other cases to runtime errors. This deserves to be cleaned up.
+  [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult
+  TakeFocus(nsIContent& aNewFocus, uint32_t aContentOffset,
+            uint32_t aContentEndOffset, CaretAssociateHint aHint,
+            FocusMode aFocusMode);
 
   /**
    * After moving the caret, its Bidi level is set according to the following
@@ -967,7 +972,7 @@ class nsFrameSelection final {
     mozilla::Result<FirstAndLastCell, nsresult>
     FindFirstAndLastCellOfRowOrColumn(const nsIContent& aCellContent) const;
 
-    [[nodiscard]] nsresult HandleDragSelecting(
+    [[nodiscard]] MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult HandleDragSelecting(
         mozilla::TableSelectionMode aTarget, nsIContent* aChildContent,
         const mozilla::WidgetMouseEvent* aMouseEvent,
         mozilla::dom::Selection& aNormalSelection);

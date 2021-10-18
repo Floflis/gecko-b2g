@@ -18,6 +18,7 @@
 #include "mozilla/layout/ScrollAnchorContainer.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/PresShellInlines.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/ServoBindings.h"
 #include "mozilla/ServoStyleSetInlines.h"
 #include "mozilla/StaticPrefs_layout.h"
@@ -36,7 +37,7 @@
 #include "Layers.h"
 #include "nsAnimationManager.h"
 #include "nsBlockFrame.h"
-#include "nsBulletFrame.h"
+#include "nsIScrollableFrame.h"
 #include "nsContentUtils.h"
 #include "nsCSSFrameConstructor.h"
 #include "nsCSSRendering.h"
@@ -464,7 +465,11 @@ static bool StateChangeMayAffectFrame(const Element& aElement,
                                       const nsIFrame& aFrame,
                                       EventStates aStates) {
   if (aFrame.IsGeneratedContentFrame()) {
-    // If it's generated content, ignore LOADING/etc state changes on it.
+    if (aElement.IsHTMLElement(nsGkAtoms::mozgeneratedcontentimage)) {
+      return aStates.HasState(NS_EVENT_STATE_BROKEN);
+    }
+
+    // If it's other generated content, ignore LOADING/etc state changes on it.
     return false;
   }
 
@@ -692,9 +697,23 @@ static bool RecomputePosition(nsIFrame* aFrame) {
     return false;
   }
 
-  // Flexbox and Grid layout supports CSS Align and the optimizations below
-  // don't support that yet.
   if (aFrame->HasAnyStateBits(NS_FRAME_OUT_OF_FLOW)) {
+    // If the frame has an intrinsic block-size, we resolve its 'auto' margins
+    // after doing layout, since we need to know the frame's block size. See
+    // nsAbsoluteContainingBlock::ResolveAutoMarginsAfterLayout().
+    //
+    // Since the size of the frame doesn't change, we could modify the below
+    // computation to compute the margin correctly without doing a full reflow,
+    // however we decided to try doing a full reflow for now.
+    if (aFrame->HasIntrinsicKeywordForBSize()) {
+      WritingMode wm = aFrame->GetWritingMode();
+      const auto* styleMargin = aFrame->StyleMargin();
+      if (styleMargin->HasBlockAxisAuto(wm)) {
+        return false;
+      }
+    }
+    // Flexbox and Grid layout supports CSS Align and the optimizations below
+    // don't support that yet.
     nsIFrame* ph = aFrame->GetPlaceholderFrame();
     if (ph && ph->HasAnyStateBits(PLACEHOLDER_STATICPOS_NEEDS_CSSALIGN)) {
       return false;
@@ -756,8 +775,7 @@ static bool RecomputePosition(nsIFrame* aFrame) {
         bool hasProperty;
         nsPoint normalPosition = cont->GetNormalPosition(&hasProperty);
         if (!hasProperty) {
-          cont->AddProperty(nsIFrame::NormalPositionProperty(),
-                            new nsPoint(normalPosition));
+          cont->AddProperty(nsIFrame::NormalPositionProperty(), normalPosition);
         }
         cont->SetPosition(normalPosition +
                           nsPoint(newOffsets.left, newOffsets.top));
@@ -1050,22 +1068,7 @@ static void DoApplyRenderingChangeToTree(nsIFrame* aFrame,
       // layer activity index, so does the restyle count. Therefore, using
       // eCSSProperty_transform should be fine.
       ActiveLayerTracker::NotifyRestyle(aFrame, eCSSProperty_transform);
-      // If we're not already going to do an invalidating paint, see
-      // if we can get away with only updating the transform on a
-      // layer for this frame, and not scheduling an invalidating
-      // paint.
-      if (!needInvalidatingPaint) {
-        nsDisplayItem::Layer* layer;
-        needInvalidatingPaint |= !aFrame->TryUpdateTransformOnly(&layer);
-
-        if (!needInvalidatingPaint) {
-          // Since we're not going to paint, we need to resend animation
-          // data to the layer.
-          MOZ_ASSERT(layer, "this can't happen if there's no layer");
-          nsDisplayListBuilder::AddAnimationsAndTransitionsToLayer(
-              layer, nullptr, nullptr, aFrame, DisplayItemType::TYPE_TRANSFORM);
-        }
-      }
+      needInvalidatingPaint = true;
     }
     if (aChange & nsChangeHint_ChildrenOnlyTransform) {
       needInvalidatingPaint = true;
@@ -1254,6 +1257,77 @@ static inline bool CanSkipOverflowUpdates(const nsIFrame* aFrame) {
                                  NS_FRAME_HAS_DIRTY_CHILDREN);
 }
 
+static inline void MaybeDealWithScrollbarChange(nsStyleChangeData& aData,
+                                                nsPresContext* aPc) {
+  if (!(aData.mHint & nsChangeHint_ScrollbarChange)) {
+    return;
+  }
+  aData.mHint &= ~nsChangeHint_ScrollbarChange;
+
+  // Only bother with this if we're html/body, since:
+  //  (a) It'd be *expensive* to reframe these particular nodes.  They're
+  //      at the root, so reframing would mean rebuilding the world.
+  //  (b) It's often *unnecessary* to reframe for "overflow" changes on
+  //      these particular nodes.  In general, the only reason we reframe
+  //      for "overflow" changes is so we can construct (or destroy) a
+  //      scrollframe & scrollbars -- and the html/body nodes often don't
+  //      need their own scrollframe/scrollbars because they coopt the ones
+  //      on the viewport (which always exist). So depending on whether
+  //      that's happening, we can skip the reframe for these nodes.
+  if (aData.mContent->IsAnyOfHTMLElements(nsGkAtoms::body, nsGkAtoms::html)) {
+    // If the restyled element provided/provides the scrollbar styles for
+    // the viewport before and/or after this restyle, AND it's not coopting
+    // that responsibility from some other element (which would need
+    // reconstruction to make its own scrollframe now), THEN: we don't need
+    // to reconstruct - we can just reflow, because no scrollframe is being
+    // added/removed.
+    nsIContent* prevOverrideNode =
+        aPc->GetViewportScrollStylesOverrideElement();
+    nsIContent* newOverrideNode = aPc->UpdateViewportScrollStylesOverride();
+
+    if (aData.mContent == prevOverrideNode ||
+        aData.mContent == newOverrideNode) {
+      // If we get here, the restyled element provided the scrollbar styles
+      // for viewport before this restyle, OR it will provide them after.
+      if (!prevOverrideNode || !newOverrideNode ||
+          prevOverrideNode == newOverrideNode) {
+        // If we get here, the restyled element is NOT replacing (or being
+        // replaced by) some other element as the viewport's
+        // scrollbar-styles provider. (If it were, we'd potentially need to
+        // reframe to create a dedicated scrollframe for whichever element
+        // is being booted from providing viewport scrollbar styles.)
+        //
+        // Under these conditions, we're OK to assume that this "overflow"
+        // change only impacts the root viewport's scrollframe, which
+        // already exists, so we can simply reflow instead of reframing.
+        if (nsIScrollableFrame* sf = do_QueryFrame(aData.mFrame)) {
+          sf->MarkScrollbarsDirtyForReflow();
+        } else if (nsIScrollableFrame* sf =
+                       aPc->PresShell()->GetRootScrollFrameAsScrollable()) {
+          sf->MarkScrollbarsDirtyForReflow();
+        }
+        aData.mHint |= nsChangeHint_ReflowHintsForScrollbarChange;
+        return;
+      }
+    }
+  }
+
+  if (nsIScrollableFrame* sf = do_QueryFrame(aData.mFrame)) {
+    if (aData.mFrame->StyleDisplay()->IsScrollableOverflow() &&
+        sf->HasAllNeededScrollbars()) {
+      sf->MarkScrollbarsDirtyForReflow();
+      // Once we've created scrollbars for a frame, don't bother reconstructing
+      // it just to remove them if we still need a scroll frame.
+      aData.mHint |= nsChangeHint_ReflowHintsForScrollbarChange;
+      return;
+    }
+  }
+
+  // Oh well, we couldn't optimize it out, just reconstruct frames for the
+  // subtree.
+  aData.mHint |= nsChangeHint_ReconstructFrame;
+}
+
 void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
   NS_ASSERTION(!nsContentUtils::IsSafeToRunScript(),
                "Someone forgot a script blocker");
@@ -1295,7 +1369,7 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
 
   MaybeClearDestroyedFrames maybeClear(mDestroyedFrames);
   if (!mDestroyedFrames) {
-    mDestroyedFrames = MakeUnique<nsTHashtable<nsPtrHashKey<const nsIFrame>>>();
+    mDestroyedFrames = MakeUnique<nsTHashSet<const nsIFrame*>>();
   }
 
   AUTO_PROFILER_LABEL("RestyleManager::ProcessRestyledFrames", LAYOUT);
@@ -1303,61 +1377,10 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
   nsPresContext* presContext = PresContext();
   nsCSSFrameConstructor* frameConstructor = presContext->FrameConstructor();
 
-  // Handle nsChangeHint_ScrollbarChange, by either updating the
-  // scrollbars on the viewport, or upgrading the change hint to
-  // frame-reconstruct.
+  // Handle nsChangeHint_ScrollbarChange, by either updating the scrollbars on
+  // the viewport, or upgrading the change hint to frame-reconstruct.
   for (nsStyleChangeData& data : aChangeList) {
-    if (data.mHint & nsChangeHint_ScrollbarChange) {
-      data.mHint &= ~nsChangeHint_ScrollbarChange;
-      bool doReconstruct = true;  // assume the worst
-
-      // Only bother with this if we're html/body, since:
-      //  (a) It'd be *expensive* to reframe these particular nodes.  They're
-      //      at the root, so reframing would mean rebuilding the world.
-      //  (b) It's often *unnecessary* to reframe for "overflow" changes on
-      //      these particular nodes.  In general, the only reason we reframe
-      //      for "overflow" changes is so we can construct (or destroy) a
-      //      scrollframe & scrollbars -- and the html/body nodes often don't
-      //      need their own scrollframe/scrollbars because they coopt the ones
-      //      on the viewport (which always exist). So depending on whether
-      //      that's happening, we can skip the reframe for these nodes.
-      if (data.mContent->IsAnyOfHTMLElements(nsGkAtoms::body,
-                                             nsGkAtoms::html)) {
-        // If the restyled element provided/provides the scrollbar styles for
-        // the viewport before and/or after this restyle, AND it's not coopting
-        // that responsibility from some other element (which would need
-        // reconstruction to make its own scrollframe now), THEN: we don't need
-        // to reconstruct - we can just reflow, because no scrollframe is being
-        // added/removed.
-        nsIContent* prevOverrideNode =
-            presContext->GetViewportScrollStylesOverrideElement();
-        nsIContent* newOverrideNode =
-            presContext->UpdateViewportScrollStylesOverride();
-
-        if (data.mContent == prevOverrideNode ||
-            data.mContent == newOverrideNode) {
-          // If we get here, the restyled element provided the scrollbar styles
-          // for viewport before this restyle, OR it will provide them after.
-          if (!prevOverrideNode || !newOverrideNode ||
-              prevOverrideNode == newOverrideNode) {
-            // If we get here, the restyled element is NOT replacing (or being
-            // replaced by) some other element as the viewport's
-            // scrollbar-styles provider. (If it were, we'd potentially need to
-            // reframe to create a dedicated scrollframe for whichever element
-            // is being booted from providing viewport scrollbar styles.)
-            //
-            // Under these conditions, we're OK to assume that this "overflow"
-            // change only impacts the root viewport's scrollframe, which
-            // already exists, so we can simply reflow instead of reframing.
-            data.mHint |= nsChangeHint_ReflowHintsForScrollbarChange;
-            doReconstruct = false;
-          }
-        }
-      }
-      if (doReconstruct) {
-        data.mHint |= nsChangeHint_ReconstructFrame;
-      }
-    }
+    MaybeDealWithScrollbarChange(data, presContext);
   }
 
   bool didUpdateCursor = false;
@@ -1946,7 +1969,7 @@ static const nsIFrame* ExpectedOwnerForChild(const nsIFrame* aFrame) {
 
   parent = FirstContinuationOrPartOfIBSplit(parent);
 
-  // We've handled already anon boxes and bullet frames, so now we're looking at
+  // We've handled already anon boxes, so now we're looking at
   // a frame of a DOM element or pseudo. Hop through anon and line-boxes
   // generated by our DOM parent, and go find the owner frame for it.
   while (parent && (IsAnonBox(parent) || parent->IsLineFrame())) {
@@ -2916,7 +2939,8 @@ ServoElementSnapshot& RestyleManager::SnapshotFor(Element& aElement) {
   MOZ_ASSERT(aElement.HasServoData());
   MOZ_ASSERT(!aElement.HasFlag(ELEMENT_HANDLED_SNAPSHOT));
 
-  ServoElementSnapshot* snapshot = mSnapshots.LookupOrAdd(&aElement, aElement);
+  ServoElementSnapshot* snapshot =
+      mSnapshots.GetOrInsertNew(&aElement, aElement);
   aElement.SetFlags(ELEMENT_HAS_SNAPSHOT);
 
   // Now that we have a snapshot, make sure a restyle is triggered.
@@ -3115,11 +3139,11 @@ void RestyleManager::ProcessAllPendingAttributeAndStateInvalidations() {
   if (mSnapshots.IsEmpty()) {
     return;
   }
-  for (auto iter = mSnapshots.Iter(); !iter.Done(); iter.Next()) {
+  for (const auto& key : mSnapshots.Keys()) {
     // Servo data for the element might have been dropped. (e.g. by removing
     // from its document)
-    if (iter.Key()->HasFlag(ELEMENT_HAS_SNAPSHOT)) {
-      Servo_ProcessInvalidations(StyleSet()->RawSet(), iter.Key(), &mSnapshots);
+    if (key->HasFlag(ELEMENT_HAS_SNAPSHOT)) {
+      Servo_ProcessInvalidations(StyleSet()->RawSet(), key, &mSnapshots);
     }
   }
   ClearSnapshots();

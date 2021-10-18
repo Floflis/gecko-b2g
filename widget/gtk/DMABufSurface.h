@@ -18,6 +18,9 @@ typedef void* EGLSyncKHR;
 #define DMABUF_BUFFER_PLANES 4
 
 namespace mozilla {
+namespace gfx {
+class SourceSurface;
+}
 namespace layers {
 class SurfaceDescriptor;
 class SurfaceDescriptorDMABuf;
@@ -74,7 +77,7 @@ class DMABufSurface {
   virtual EGLImageKHR GetEGLImage(int aPlane = 0) = 0;
 
   SurfaceType GetSurfaceType() { return mSurfaceType; };
-  virtual uint32_t GetTextureCount() = 0;
+  virtual int GetTextureCount() = 0;
 
   bool IsMapped(int aPlane = 0) { return (mMappedRegion[aPlane] != nullptr); };
   void Unmap(int aPlane = 0);
@@ -83,7 +86,7 @@ class DMABufSurface {
   virtual DMABufSurfaceYUV* GetAsDMABufSurfaceYUV() { return nullptr; }
 
   virtual mozilla::gfx::YUVColorSpace GetYUVColorSpace() {
-    return mozilla::gfx::YUVColorSpace::UNKNOWN;
+    return mozilla::gfx::YUVColorSpace::Default;
   };
   virtual bool IsFullRange() { return false; };
 
@@ -140,6 +143,18 @@ class DMABufSurface {
   void* MapInternal(uint32_t aX, uint32_t aY, uint32_t aWidth, uint32_t aHeight,
                     uint32_t* aStride, int aGbmFlags, int aPlane = 0);
 
+  // We want to keep number of opened file descriptors low so open/close
+  // DMABuf file handles only when we need them, i.e. when DMABuf is exported
+  // to another process or to EGL.
+  virtual bool OpenFileDescriptorForPlane(
+      const mozilla::MutexAutoLock& aProofOfLock, int aPlane) = 0;
+  virtual void CloseFileDescriptorForPlane(
+      const mozilla::MutexAutoLock& aProofOfLock, int aPlane,
+      bool aForceClose = false) = 0;
+  bool OpenFileDescriptors(const mozilla::MutexAutoLock& aProofOfLock);
+  void CloseFileDescriptors(const mozilla::MutexAutoLock& aProofOfLock,
+                            bool aForceClose = false);
+
   virtual ~DMABufSurface();
 
   SurfaceType mSurfaceType;
@@ -162,6 +177,7 @@ class DMABufSurface {
 
   int mGlobalRefCountFd;
   uint32_t mUID;
+  mozilla::Mutex mSurfaceLock;
 };
 
 class DMABufSurfaceRGBA : public DMABufSurface {
@@ -201,7 +217,11 @@ class DMABufSurfaceRGBA : public DMABufSurface {
   GLuint GetTexture(int aPlane = 0) { return mTexture; };
   EGLImageKHR GetEGLImage(int aPlane = 0) { return mEGLImage; };
 
-  uint32_t GetTextureCount() { return 1; };
+  bool CreateWlBuffer();
+  void ReleaseWlBuffer();
+  wl_buffer* GetWlBuffer() { return mWlBuffer; };
+
+  int GetTextureCount() { return 1; };
 
 #ifdef DEBUG
   virtual void DumpToFile(const char* pFile);
@@ -215,7 +235,12 @@ class DMABufSurfaceRGBA : public DMABufSurface {
   bool Create(int aWidth, int aHeight, int aDMABufSurfaceFlags);
   bool Create(const mozilla::layers::SurfaceDescriptor& aDesc);
 
-  void ImportSurfaceDescriptor(const mozilla::layers::SurfaceDescriptor& aDesc);
+  bool ImportSurfaceDescriptor(const mozilla::layers::SurfaceDescriptor& aDesc);
+
+  bool OpenFileDescriptorForPlane(const mozilla::MutexAutoLock& aProofOfLock,
+                                  int aPlane);
+  void CloseFileDescriptorForPlane(const mozilla::MutexAutoLock& aProofOfLock,
+                                   int aPlane, bool aForceClose);
 
  private:
   int mSurfaceFlags;
@@ -227,6 +252,7 @@ class DMABufSurfaceRGBA : public DMABufSurface {
   EGLImageKHR mEGLImage;
   GLuint mTexture;
   uint32_t mGbmBufferFlags;
+  wl_buffer* mWlBuffer;
 };
 
 class DMABufSurfaceYUV : public DMABufSurface {
@@ -255,7 +281,7 @@ class DMABufSurfaceYUV : public DMABufSurface {
   GLuint GetTexture(int aPlane = 0) { return mTexture[aPlane]; };
   EGLImageKHR GetEGLImage(int aPlane = 0) { return mEGLImage[aPlane]; };
 
-  uint32_t GetTextureCount();
+  int GetTextureCount();
 
   void SetYUVColorSpace(mozilla::gfx::YUVColorSpace aColorSpace) {
     mColorSpace = aColorSpace;
@@ -277,14 +303,20 @@ class DMABufSurfaceYUV : public DMABufSurface {
   bool CreateYUVPlane(int aPlane, int aWidth, int aHeight, int aDrmFormat);
   void UpdateYUVPlane(int aPlane, void* aPixelData, int aLineSize);
 
-  void ImportSurfaceDescriptor(
+  bool ImportSurfaceDescriptor(
       const mozilla::layers::SurfaceDescriptorDMABuf& aDesc);
+
+  bool OpenFileDescriptorForPlane(const mozilla::MutexAutoLock& aProofOfLock,
+                                  int aPlane);
+  void CloseFileDescriptorForPlane(const mozilla::MutexAutoLock& aProofOfLock,
+                                   int aPlane, bool aForceClose);
 
   int mWidth[DMABUF_BUFFER_PLANES];
   int mHeight[DMABUF_BUFFER_PLANES];
   EGLImageKHR mEGLImage[DMABUF_BUFFER_PLANES];
   GLuint mTexture[DMABUF_BUFFER_PLANES];
-  mozilla::gfx::YUVColorSpace mColorSpace;
+  mozilla::gfx::YUVColorSpace mColorSpace =
+      mozilla::gfx::YUVColorSpace::Default;
 };
 
 #endif

@@ -13,9 +13,9 @@
 namespace mozilla::dom {
 
 RTCStatsTimestampMaker::RTCStatsTimestampMaker(const GlobalObject* aGlobal) {
-  nsCOMPtr<nsPIDOMWindowInner> window =
-      do_QueryInterface(aGlobal->GetAsSupports());
-  if (window) {
+  nsCOMPtr<nsPIDOMWindowInner> window;
+  if (aGlobal && (window = do_QueryInterface(aGlobal->GetAsSupports())) &&
+      window->GetPerformance()) {
     mRandomTimelineSeed = window->GetPerformance()->GetRandomTimelineSeed();
     mStartMonotonic = window->GetPerformance()->CreationTimeStamp();
     // Ugh. Performance::TimeOrigin is not constant, which means we need to
@@ -39,7 +39,7 @@ DOMHighResTimeStamp RTCStatsTimestampMaker::GetNow() const {
   // We are very careful to do exactly what Performance does, to avoid timestamp
   // discrepancies.
   DOMHighResTimeStamp msSinceStart =
-      (TimeStamp::NowUnfuzzed() - mStartMonotonic).ToMilliseconds();
+      (TimeStamp::Now() - mStartMonotonic).ToMilliseconds();
   // mRandomTimelineSeed is not set in the unit-tests.
   if (mRandomTimelineSeed) {
     msSinceStart = nsRFPService::ReduceTimePrecisionAsMSecs(

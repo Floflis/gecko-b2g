@@ -9,29 +9,39 @@
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/widget/CompositorWidget.h"
 
+#ifdef MOZ_WIDGET_GTK
+#  include "mozilla/WidgetUtilsGtk.h"
+#endif
+
 namespace mozilla {
 using namespace gfx;
 
 namespace wr {
 
+extern LazyLogModule gRenderThreadLog;
+#define LOG(...) MOZ_LOG(gRenderThreadLog, LogLevel::Debug, (__VA_ARGS__))
+
 /* static */
 UniquePtr<RenderCompositor> RenderCompositorSWGL::Create(
-    RefPtr<widget::CompositorWidget>&& aWidget, nsACString& aError) {
+    const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
   void* ctx = wr_swgl_create_context();
   if (!ctx) {
     gfxCriticalNote << "Failed SWGL context creation for WebRender";
     return nullptr;
   }
-  return MakeUnique<RenderCompositorSWGL>(std::move(aWidget), ctx);
+  return MakeUnique<RenderCompositorSWGL>(aWidget, ctx);
 }
 
 RenderCompositorSWGL::RenderCompositorSWGL(
-    RefPtr<widget::CompositorWidget>&& aWidget, void* aContext)
-    : RenderCompositor(std::move(aWidget)), mContext(aContext) {
+    const RefPtr<widget::CompositorWidget>& aWidget, void* aContext)
+    : RenderCompositor(aWidget), mContext(aContext) {
   MOZ_ASSERT(mContext);
+  LOG("RenderCompositorSWGL::RenderCompositorSWGL()");
 }
 
 RenderCompositorSWGL::~RenderCompositorSWGL() {
+  LOG("RenderCompositorSWGL::~RenderCompositorSWGL()");
+
   wr_swgl_destroy_context(mContext);
 }
 
@@ -62,6 +72,8 @@ bool RenderCompositorSWGL::AllocateMappedBuffer(
   layers::BufferMode bufferMode = layers::BufferMode::BUFFERED;
   mDT = mWidget->StartRemoteDrawingInRegion(mDirtyRegion, &bufferMode);
   if (!mDT) {
+    gfxCriticalNoteOnce
+        << "RenderCompositorSWGL failed mapping default framebuffer, no dt";
     return false;
   }
   // Attempt to lock the underlying buffer directly from the draw target.
@@ -94,6 +106,14 @@ bool RenderCompositorSWGL::AllocateMappedBuffer(
       // Update the bounds to include zero if the origin is at zero.
       bounds.ExpandToEnclose(LayoutDeviceIntPoint(0, 0));
     }
+    // Sometimes we end up racing on the widget size, and it can shrink between
+    // BeginFrame and StartCompositing. We calculated our dirty region based on
+    // the previous widget size, so we need to clamp the bounds here to ensure
+    // we remain within the buffer.
+    bounds.IntersectRect(
+        bounds,
+        LayoutDeviceIntRect(bounds.TopLeft(),
+                            LayoutDeviceIntSize(size.width, size.height)));
   } else {
     // If we couldn't lock the DT above, then allocate a data surface and map
     // that for usage with SWGL.
@@ -107,6 +127,8 @@ bool RenderCompositorSWGL::AllocateMappedBuffer(
       // We failed mapping the data surface, so need to cancel the frame.
       mWidget->EndRemoteDrawingInRegion(mDT, mDirtyRegion);
       ClearMappedBuffer();
+      gfxCriticalNoteOnce
+          << "RenderCompositorSWGL failed mapping default framebuffer, no surf";
       return false;
     }
     mMappedData = map.mData;
@@ -119,8 +141,8 @@ bool RenderCompositorSWGL::AllocateMappedBuffer(
   LayoutDeviceIntRegion opaque;
   for (size_t i = 0; i < aNumOpaqueRects; i++) {
     const auto& rect = aOpaqueRects[i];
-    opaque.OrWith(LayoutDeviceIntRect(rect.origin.x, rect.origin.y,
-                                      rect.size.width, rect.size.height));
+    opaque.OrWith(LayoutDeviceIntRect(rect.min.x, rect.min.y, rect.width(),
+                                      rect.height()));
   }
 
   LayoutDeviceIntRegion clear = mWidget->GetTransparentRegion();
@@ -136,8 +158,9 @@ bool RenderCompositorSWGL::AllocateMappedBuffer(
 }
 
 void RenderCompositorSWGL::StartCompositing(
-    const wr::DeviceIntRect* aDirtyRects, size_t aNumDirtyRects,
-    const wr::DeviceIntRect* aOpaqueRects, size_t aNumOpaqueRects) {
+    wr::ColorF aClearColor, const wr::DeviceIntRect* aDirtyRects,
+    size_t aNumDirtyRects, const wr::DeviceIntRect* aOpaqueRects,
+    size_t aNumOpaqueRects) {
   if (mDT) {
     // Cancel any existing buffers that might accidentally be left from updates
     CommitMappedBuffer(false);
@@ -150,8 +173,8 @@ void RenderCompositorSWGL::StartCompositing(
     mDirtyRegion.SetEmpty();
     for (size_t i = 0; i < aNumDirtyRects; i++) {
       const auto& rect = aDirtyRects[i];
-      mDirtyRegion.OrWith(LayoutDeviceIntRect(
-          rect.origin.x, rect.origin.y, rect.size.width, rect.size.height));
+      mDirtyRegion.OrWith(LayoutDeviceIntRect(rect.min.x, rect.min.y,
+                                              rect.width(), rect.height()));
     }
     // Ensure the region lies within the widget bounds
     mDirtyRegion.AndWith(bounds);
@@ -159,18 +182,27 @@ void RenderCompositorSWGL::StartCompositing(
   // Now that the dirty rects have been supplied and the composition region
   // is known, allocate and install a framebuffer encompassing the composition
   // region.
-  if (!AllocateMappedBuffer(aOpaqueRects, aNumOpaqueRects)) {
-    gfxCriticalNote
-        << "RenderCompositorSWGL failed mapping default framebuffer";
+  if (mDirtyRegion.IsEmpty() ||
+      !AllocateMappedBuffer(aOpaqueRects, aNumOpaqueRects)) {
     // If allocation of the mapped default framebuffer failed, then just install
-    // a small temporary framebuffer so compositing can still proceed.
-    wr_swgl_init_default_framebuffer(mContext, 0, 0, 2, 2, 0, nullptr);
+    // a temporary framebuffer (with a minimum size of 2x2) so compositing can
+    // still proceed.
+    auto bounds = mDirtyRegion.GetBounds();
+    bounds.width = std::max(bounds.width, 2);
+    bounds.height = std::max(bounds.height, 2);
+    wr_swgl_init_default_framebuffer(mContext, bounds.x, bounds.y, bounds.width,
+                                     bounds.height, 0, nullptr);
   }
 }
 
 void RenderCompositorSWGL::CommitMappedBuffer(bool aDirty) {
   if (!mDT) {
+    mDirtyRegion.SetEmpty();
     return;
+  }
+  // Force any delayed clears to resolve.
+  if (aDirty) {
+    wr_swgl_resolve_framebuffer(mContext, 0);
   }
   // Clear out the old framebuffer in case something tries to access it after
   // the frame.
@@ -201,8 +233,11 @@ void RenderCompositorSWGL::CommitMappedBuffer(bool aDirty) {
     // Otherwise, we had locked the DT directly. Just release the data.
     mDT->ReleaseBits(mMappedData);
   }
+  mDT->Flush();
+
   // Done with the DT. Hand it back to the widget and clear out any trace of it.
   mWidget->EndRemoteDrawingInRegion(mDT, mDirtyRegion);
+  mDirtyRegion.SetEmpty();
   ClearMappedBuffer();
 }
 
@@ -218,6 +253,15 @@ RenderedFrameId RenderCompositorSWGL::EndFrame(
   return frameId;
 }
 
+bool RenderCompositorSWGL::RequestFullRender() {
+#ifdef MOZ_WIDGET_ANDROID
+  // XXX Add partial present support.
+  return true;
+#else
+  return false;
+#endif
+}
+
 void RenderCompositorSWGL::Pause() {}
 
 bool RenderCompositorSWGL::Resume() { return true; }
@@ -226,13 +270,19 @@ LayoutDeviceIntSize RenderCompositorSWGL::GetBufferSize() {
   return mWidget->GetClientSize();
 }
 
-CompositorCapabilities RenderCompositorSWGL::GetCompositorCapabilities() {
-  CompositorCapabilities caps;
+void RenderCompositorSWGL::GetCompositorCapabilities(
+    CompositorCapabilities* aCaps) {
+  // Always support a single update rect for SwCompositor
+  aCaps->max_update_rects = 1;
 
-  // don't use virtual surfaces
-  caps.virtual_surface_size = 0;
-
-  return caps;
+  // On uncomposited desktops such as X11 without compositor or Window 7 with
+  // Aero disabled we need to force a full redraw when the window contents may
+  // be damaged.
+#ifdef MOZ_WIDGET_GTK
+  aCaps->redraw_on_invalidation = widget::GdkIsX11Display();
+#else
+  aCaps->redraw_on_invalidation = true;
+#endif
 }
 
 }  // namespace wr

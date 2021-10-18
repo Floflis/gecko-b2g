@@ -477,8 +477,7 @@ nsSynthVoiceRegistry::GetVoiceName(const nsAString& aUri, nsAString& aRetval) {
 nsresult nsSynthVoiceRegistry::AddVoiceImpl(
     nsISpeechService* aService, const nsAString& aUri, const nsAString& aName,
     const nsAString& aLang, bool aLocalService, bool aQueuesUtterances) {
-  bool found = false;
-  mUriVoiceMap.GetWeak(aUri, &found);
+  const bool found = mUriVoiceMap.Contains(aUri);
   if (NS_WARN_IF(found)) {
     return NS_ERROR_INVALID_ARG;
   }
@@ -487,7 +486,7 @@ nsresult nsSynthVoiceRegistry::AddVoiceImpl(
                                           aLocalService, aQueuesUtterances);
 
   mVoices.AppendElement(voice);
-  mUriVoiceMap.Put(aUri, std::move(voice));
+  mUriVoiceMap.InsertOrUpdate(aUri, std::move(voice));
   mUseGlobalQueue |= aQueuesUtterances;
 
   nsTArray<SpeechSynthesisParent*> ssplist;
@@ -731,6 +730,17 @@ void nsSynthVoiceRegistry::ResumeQueue() {
 }
 
 bool nsSynthVoiceRegistry::IsSpeaking() { return mIsSpeaking; }
+
+void nsSynthVoiceRegistry::ShutdownEngine() {
+  if (!mVoices.IsEmpty()) {
+    VoiceData* aVoice = FindBestMatch(u""_ns,u""_ns);
+    if (aVoice) {
+      aVoice->mService->ShutdownEngine();
+    }
+  }
+
+  return;
+}
 
 void nsSynthVoiceRegistry::SetIsSpeaking(bool aIsSpeaking) {
   MOZ_ASSERT(XRE_IsParentProcess());

@@ -32,7 +32,6 @@ class FormData final : public nsISupports,
 
   struct FormDataTuple {
     nsString name;
-    bool wasNullBlob;
     OwningBlobOrDirectoryOrUSVString value;
   };
 
@@ -42,7 +41,7 @@ class FormData final : public nsISupports,
       const nsAString& aName);
 
   void SetNameValuePair(FormDataTuple* aData, const nsAString& aName,
-                        const nsAString& aValue, bool aWasNullBlob = false);
+                        const nsAString& aValue);
 
   void SetNameFilePair(FormDataTuple* aData, const nsAString& aName,
                        File* aFile);
@@ -108,20 +107,26 @@ class FormData final : public nsISupports,
 
   virtual nsresult AddNameValuePair(const nsAString& aName,
                                     const nsAString& aValue) override {
+    nsAutoString usvName(aName);
+    nsAutoString usvValue(aValue);
+    if (!NormalizeUSVString(usvName) || !NormalizeUSVString(usvValue)) {
+      return NS_ERROR_OUT_OF_MEMORY;
+    }
+
     FormDataTuple* data = mFormData.AppendElement();
-    SetNameValuePair(data, aName, aValue);
+    SetNameValuePair(data, usvName, usvValue);
     return NS_OK;
   }
 
-  virtual nsresult AddNameBlobOrNullPair(const nsAString& aName,
-                                         Blob* aBlob) override;
+  virtual nsresult AddNameBlobPair(const nsAString& aName,
+                                   Blob* aBlob) override;
 
   virtual nsresult AddNameDirectoryPair(const nsAString& aName,
                                         Directory* aDirectory) override;
 
-  typedef bool (*FormDataEntryCallback)(
-      const nsString& aName, const OwningBlobOrDirectoryOrUSVString& aValue,
-      void* aClosure);
+  using FormDataEntryCallback =
+      bool (*)(const nsString& aName,
+               const OwningBlobOrDirectoryOrUSVString& aValue, void* aClosure);
 
   uint32_t Length() const { return mFormData.Length(); }
 
@@ -144,8 +149,13 @@ class FormData final : public nsISupports,
 
   nsresult CopySubmissionDataTo(HTMLFormSubmission* aFormSubmission) const;
 
+  Element* GetSubmitterElement() const { return mSubmitter.get(); }
+
  private:
   nsCOMPtr<nsISupports> mOwner;
+
+  // Submitter element.
+  RefPtr<Element> mSubmitter;
 
   nsTArray<FormDataTuple> mFormData;
 };

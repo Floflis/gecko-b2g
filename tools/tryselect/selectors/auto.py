@@ -2,16 +2,15 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function, unicode_literals
 
-from taskgraph.util.python_path import find_object
+from gecko_taskgraph.util.python_path import find_object
 
 from ..cli import BaseTryParser
 from ..push import push_to_try
 
 
 TRY_AUTO_PARAMETERS = {
-    "optimize_strategies": "taskgraph.optimize:tryselect.bugbug_debug_disperse",
+    "optimize_strategies": "gecko_taskgraph.optimize:tryselect.bugbug_reduced_manifests_config_selection_medium",  # noqa
     "optimize_target_tasks": True,
     "target_tasks_method": "try_auto",
     "test_manifest_loader": "bugbug",
@@ -37,7 +36,7 @@ class AutoParser(BaseTryParser):
                 "default": None,
                 "help": "Override the default optimization strategy. Valid values "
                 "are the experimental strategies defined at the bottom of "
-                "`taskcluster/taskgraph/optimize/__init__.py`.",
+                "`taskcluster/gecko_taskgraph/optimize/__init__.py`.",
             },
         ],
         [
@@ -61,11 +60,13 @@ class AutoParser(BaseTryParser):
     ]
 
     def validate(self, args):
-        super(AutoParser, self).validate(args)
+        super().validate(args)
 
         if args.strategy:
             if ":" not in args.strategy:
-                args.strategy = "taskgraph.optimize:tryselect.{}".format(args.strategy)
+                args.strategy = "gecko_taskgraph.optimize:tryselect.{}".format(
+                    args.strategy
+                )
 
             try:
                 obj = find_object(args.strategy)

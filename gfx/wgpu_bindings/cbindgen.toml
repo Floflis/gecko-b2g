@@ -34,21 +34,23 @@ exclude = [
 	"Option_AdapterId", "Option_BufferId", "Option_PipelineLayoutId", "Option_BindGroupLayoutId",
 	"Option_SamplerId", "Option_SurfaceId", "Option_TextureViewId",
 	"Option_BufferSize", "Option_NonZeroU32", "Option_NonZeroU8",
+	"ANativeWindow_setBuffersGeometry",
 ]
 
 [export.rename]
 "BufferDescriptor_RawString" = "BufferDescriptor"
 "CommandBufferDescriptor_RawString" = "CommandBufferDescriptor"
 "CommandEncoderDescriptor_RawString" = "CommandEncoderDescriptor"
+"RenderBundleDescriptor_RawString" = "RenderBundleDescriptor"
 "DeviceDescriptor_RawString" = "DeviceDescriptor"
 "TextureDescriptor_RawString" = "TextureDescriptor"
 "SamplerDescriptor_RawString" = "SamplerDescriptor"
 
 [parse]
 parse_deps = true
-include = ["wgpu-core", "wgpu-types"]
+include = ["wgpu-core", "wgpu-types", "wgpu-hal"]
 
-extra_bindings = ["wgpu-core", "wgpu-types"]
+extra_bindings = ["wgpu-core", "wgpu-types", "wgpu-hal"]
 
 [fn]
 prefix = "WGPU_INLINE"

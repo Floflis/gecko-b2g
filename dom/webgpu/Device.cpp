@@ -8,6 +8,7 @@
 #include "mozilla/ErrorResult.h"
 #include "mozilla/Logging.h"
 #include "mozilla/ipc/Shmem.h"
+#include "mozilla/dom/Promise.h"
 #include "mozilla/dom/WebGPUBinding.h"
 #include "Device.h"
 #include "CommandEncoder.h"
@@ -17,10 +18,12 @@
 #include "Buffer.h"
 #include "ComputePipeline.h"
 #include "Queue.h"
+#include "RenderBundleEncoder.h"
 #include "RenderPipeline.h"
 #include "Sampler.h"
 #include "Texture.h"
 #include "TextureView.h"
+#include "ValidationError.h"
 #include "ipc/WebGPUChild.h"
 
 namespace mozilla {
@@ -52,7 +55,7 @@ Device::Device(Adapter* const aParent, RawId aId)
     : DOMEventTargetHelper(aParent->GetParentObject()),
       mId(aId),
       mBridge(aParent->mBridge),
-      mQueue(new Queue(this, aParent->mBridge, aId)) {
+      mQueue(new class Queue(this, aParent->mBridge, aId)) {
   mBridge->RegisterDevice(mId, this);
 }
 
@@ -68,7 +71,7 @@ void Device::Cleanup() {
 void Device::GetLabel(nsAString& aValue) const { aValue = mLabel; }
 void Device::SetLabel(const nsAString& aLabel) { mLabel = aLabel; }
 
-Queue* Device::DefaultQueue() const { return mQueue; }
+const RefPtr<Queue>& Device::GetQueue() const { return mQueue; }
 
 already_AddRefed<Buffer> Device::CreateBuffer(
     const dom::GPUBufferDescriptor& aDesc, ErrorResult& aRv) {
@@ -98,14 +101,12 @@ already_AddRefed<Buffer> Device::CreateBuffer(
   // If the buffer is not mapped at creation, and it has Shmem, we send it
   // to the GPU process. Otherwise, we keep it.
   RawId id = mBridge->DeviceCreateBuffer(mId, aDesc);
-  if (hasMapFlags && !aDesc.mMappedAtCreation) {
-    mBridge->SendBufferReturnShmem(id, std::move(shmem));
-  }
-  RefPtr<Buffer> buffer = new Buffer(this, id, aDesc.mSize);
-
+  RefPtr<Buffer> buffer = new Buffer(this, id, aDesc.mSize, hasMapFlags);
   if (aDesc.mMappedAtCreation) {
     buffer->SetMapped(std::move(shmem),
                       !(aDesc.mUsage & dom::GPUBufferUsage_Binding::MAP_READ));
+  } else if (hasMapFlags) {
+    mBridge->SendBufferReturnShmem(id, std::move(shmem));
   }
 
   return buffer.forget();
@@ -142,8 +143,9 @@ RefPtr<MappingPromise> Device::MapBufferAsync(RawId aId, uint32_t aMode,
   return mBridge->SendBufferMap(aId, mode, offset.value(), size.value());
 }
 
-void Device::UnmapBuffer(RawId aId, ipc::Shmem&& aShmem, bool aFlush) {
-  mBridge->SendBufferUnmap(aId, std::move(aShmem), aFlush);
+void Device::UnmapBuffer(RawId aId, ipc::Shmem&& aShmem, bool aFlush,
+                         bool aKeepShmem) {
+  mBridge->SendBufferUnmap(aId, std::move(aShmem), aFlush, aKeepShmem);
 }
 
 already_AddRefed<Texture> Device::CreateTexture(
@@ -167,10 +169,17 @@ already_AddRefed<CommandEncoder> Device::CreateCommandEncoder(
   return encoder.forget();
 }
 
+already_AddRefed<RenderBundleEncoder> Device::CreateRenderBundleEncoder(
+    const dom::GPURenderBundleEncoderDescriptor& aDesc) {
+  RefPtr<RenderBundleEncoder> encoder =
+      new RenderBundleEncoder(this, mBridge, aDesc);
+  return encoder.forget();
+}
+
 already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
     const dom::GPUBindGroupLayoutDescriptor& aDesc) {
   RawId id = mBridge->DeviceCreateBindGroupLayout(mId, aDesc);
-  RefPtr<BindGroupLayout> object = new BindGroupLayout(this, id);
+  RefPtr<BindGroupLayout> object = new BindGroupLayout(this, id, true);
   return object.forget();
 }
 already_AddRefed<PipelineLayout> Device::CreatePipelineLayout(
@@ -187,11 +196,8 @@ already_AddRefed<BindGroup> Device::CreateBindGroup(
 }
 
 already_AddRefed<ShaderModule> Device::CreateShaderModule(
-    const dom::GPUShaderModuleDescriptor& aDesc) {
-  if (aDesc.mCode.IsString()) {
-    // we don't yet support WGSL
-    return nullptr;
-  }
+    JSContext* aCx, const dom::GPUShaderModuleDescriptor& aDesc) {
+  Unused << aCx;
   RawId id = mBridge->DeviceCreateShaderModule(mId, aDesc);
   RefPtr<ShaderModule> object = new ShaderModule(this, id);
   return object.forget();
@@ -200,31 +206,50 @@ already_AddRefed<ShaderModule> Device::CreateShaderModule(
 already_AddRefed<ComputePipeline> Device::CreateComputePipeline(
     const dom::GPUComputePipelineDescriptor& aDesc) {
   nsTArray<RawId> implicitBindGroupLayoutIds;
-  RawId id = mBridge->DeviceCreateComputePipeline(mId, aDesc,
-                                                  &implicitBindGroupLayoutIds);
+  RawId implicitPipelineLayoutId = 0;
+  RawId id = mBridge->DeviceCreateComputePipeline(
+      mId, aDesc, &implicitPipelineLayoutId, &implicitBindGroupLayoutIds);
   RefPtr<ComputePipeline> object =
-      new ComputePipeline(this, id, std::move(implicitBindGroupLayoutIds));
+      new ComputePipeline(this, id, implicitPipelineLayoutId,
+                          std::move(implicitBindGroupLayoutIds));
   return object.forget();
 }
 
 already_AddRefed<RenderPipeline> Device::CreateRenderPipeline(
     const dom::GPURenderPipelineDescriptor& aDesc) {
   nsTArray<RawId> implicitBindGroupLayoutIds;
-  RawId id = mBridge->DeviceCreateRenderPipeline(mId, aDesc,
-                                                 &implicitBindGroupLayoutIds);
+  RawId implicitPipelineLayoutId = 0;
+  RawId id = mBridge->DeviceCreateRenderPipeline(
+      mId, aDesc, &implicitPipelineLayoutId, &implicitBindGroupLayoutIds);
   RefPtr<RenderPipeline> object =
-      new RenderPipeline(this, id, std::move(implicitBindGroupLayoutIds));
+      new RenderPipeline(this, id, implicitPipelineLayoutId,
+                         std::move(implicitBindGroupLayoutIds));
   return object.forget();
 }
 
 already_AddRefed<Texture> Device::InitSwapChain(
-    const dom::GPUSwapChainDescriptor& aDesc,
-    const dom::GPUExtent3DDict& aExtent3D, wr::ExternalImageId aExternalImageId,
-    gfx::SurfaceFormat aFormat) {
-  const layers::RGBDescriptor rgbDesc(
-      gfx::IntSize(AssertedCast<int>(aExtent3D.mWidth),
-                   AssertedCast<int>(aExtent3D.mHeight)),
-      aFormat, false);
+    const dom::GPUCanvasConfiguration& aDesc,
+    wr::ExternalImageId aExternalImageId, gfx::SurfaceFormat aFormat,
+    gfx::IntSize* aCanvasSize) {
+  gfx::IntSize size = *aCanvasSize;
+  if (aDesc.mSize.WasPassed()) {
+    const auto& descSize = aDesc.mSize.Value();
+    if (descSize.IsRangeEnforcedUnsignedLongSequence()) {
+      const auto& seq = descSize.GetAsRangeEnforcedUnsignedLongSequence();
+      // TODO: add a check for `seq.Length()`
+      size.width = AssertedCast<int>(seq[0]);
+      size.height = AssertedCast<int>(seq[1]);
+    } else if (descSize.IsGPUExtent3DDict()) {
+      const auto& dict = descSize.GetAsGPUExtent3DDict();
+      size.width = AssertedCast<int>(dict.mWidth);
+      size.height = AssertedCast<int>(dict.mHeight);
+    } else {
+      MOZ_CRASH("Unexpected union");
+    }
+  }
+  *aCanvasSize = size;
+
+  const layers::RGBDescriptor rgbDesc(size, aFormat, false);
   // buffer count doesn't matter much, will be created on demand
   const size_t maxBufferCount = 10;
   mBridge->DeviceCreateSwapChain(mId, rgbDesc, maxBufferCount,
@@ -232,12 +257,58 @@ already_AddRefed<Texture> Device::InitSwapChain(
 
   dom::GPUTextureDescriptor desc;
   desc.mDimension = dom::GPUTextureDimension::_2d;
-  desc.mSize.SetAsGPUExtent3DDict() = aExtent3D;
+  auto& sizeDict = desc.mSize.SetAsGPUExtent3DDict();
+  sizeDict.mWidth = size.width;
+  sizeDict.mHeight = size.height;
+  sizeDict.mDepthOrArrayLayers = 1;
   desc.mFormat = aDesc.mFormat;
   desc.mMipLevelCount = 1;
   desc.mSampleCount = 1;
   desc.mUsage = aDesc.mUsage | dom::GPUTextureUsage_Binding::COPY_SRC;
   return CreateTexture(desc);
+}
+
+void Device::Destroy() {
+  // TODO
+}
+
+void Device::PushErrorScope(const dom::GPUErrorFilter& aFilter) {
+  mBridge->SendDevicePushErrorScope(mId);
+}
+
+already_AddRefed<dom::Promise> Device::PopErrorScope(ErrorResult& aRv) {
+  RefPtr<dom::Promise> promise = dom::Promise::Create(GetParentObject(), aRv);
+  if (NS_WARN_IF(aRv.Failed())) {
+    return nullptr;
+  }
+
+  auto errorPromise = mBridge->SendDevicePopErrorScope(mId);
+
+  errorPromise->Then(
+      GetMainThreadSerialEventTarget(), __func__,
+      [self = RefPtr{this}, promise](const MaybeScopedError& aMaybeError) {
+        if (aMaybeError) {
+          if (aMaybeError->operationError) {
+            promise->MaybeRejectWithOperationError("Stack is empty");
+          } else {
+            dom::OwningGPUOutOfMemoryErrorOrGPUValidationError error;
+            if (aMaybeError->validationMessage.IsEmpty()) {
+              error.SetAsGPUOutOfMemoryError();
+            } else {
+              error.SetAsGPUValidationError() =
+                  new ValidationError(self, aMaybeError->validationMessage);
+            }
+            promise->MaybeResolve(std::move(error));
+          }
+        } else {
+          promise->MaybeResolveWithUndefined();
+        }
+      },
+      [promise](const ipc::ResponseRejectReason&) {
+        promise->MaybeRejectWithOperationError("Internal communication error");
+      });
+
+  return promise.forget();
 }
 
 }  // namespace webgpu

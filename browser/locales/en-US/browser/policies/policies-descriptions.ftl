@@ -11,11 +11,17 @@
 
 policy-3rdparty = Set policies that WebExtensions can access via chrome.storage.managed.
 
+policy-AllowedDomainsForApps = Define domains allowed to access Google Workspace.
+
 policy-AppAutoUpdate = Enable or disable automatic application update.
 
 policy-AppUpdateURL = Set custom app update URL.
 
 policy-Authentication = Configure integrated authentication for websites that support it.
+
+policy-AutoLaunchProtocolsFromOrigins = Define a list of external protocols that can be used from listed origins without prompting the user.
+
+policy-BackgroundAppUpdate2 = Enable or disable the background updater.
 
 policy-BlockAboutAddons = Block access to the Add-ons Manager (about:addons).
 
@@ -180,6 +186,8 @@ policy-SearchSuggestEnabled = Enable or disable search suggestions.
 # For more information, see https://developer.mozilla.org/en-US/docs/Mozilla/Projects/NSS/PKCS11/Module_Installation
 policy-SecurityDevices = Install PKCS #11 modules.
 
+policy-ShowHomeButton = Show the home button on the toolbar.
+
 policy-SSLVersionMax = Set the maximum SSL version.
 
 policy-SSLVersionMin = Set the minimum SSL version.
@@ -190,3 +198,5 @@ policy-UserMessaging = Don’t show certain messages to the user.
 
 # “format” refers to the format used for the value of this policy.
 policy-WebsiteFilter = Block websites from being visited. See documentation for more details on the format.
+
+policy-Windows10SSO = Allow Windows single sign-on for Microsoft, work, and school accounts.

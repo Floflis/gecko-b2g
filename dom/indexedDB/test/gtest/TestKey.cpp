@@ -15,6 +15,7 @@
 #include "jsapi.h"
 #include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject, JS::NewArrayObject
 #include "js/ArrayBuffer.h"
+#include "js/PropertyAndElement.h"  // JS_GetElement, JS_SetElement
 
 // TODO: This PrintTo overload is defined in dom/media/gtest/TestGroupId.cpp.
 // However, it is not used, probably because of
@@ -114,7 +115,7 @@ static JSObject* ExpectArrayObject(JSContext* const aContext,
 static void CheckArrayBuffer(const nsCString& aExpected,
                              const JS::Value& aActual) {
   auto obj = ExpectArrayBufferObject(aActual);
-  uint32_t length;
+  size_t length;
   bool isSharedMemory;
   uint8_t* data;
   JS::GetArrayBufferLengthAndData(obj, &length, &isSharedMemory, &data);

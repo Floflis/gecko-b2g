@@ -23,12 +23,7 @@
 #endif
 #define MOZ_LAYERS_LOG(_args) \
   MOZ_LOG(LayerManager::GetLog(), LogLevel::Debug, _args)
-#define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)             \
-  do {                                                         \
-    if (layer->AsShadowableLayer()) {                          \
-      MOZ_LOG(LayerManager::GetLog(), LogLevel::Debug, _args); \
-    }                                                          \
-  } while (0)
+#define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
 
 #define INVALID_OVERLAY -1
 
@@ -188,6 +183,8 @@ enum class WebRenderCompositor : int8_t {
   CORE_ANIMATION,
   SOFTWARE,
   D3D11,
+  OPENGL,
+  WAYLAND,
   LAST
 };
 
@@ -196,8 +193,6 @@ const char* GetLayersBackendName(LayersBackend aBackend);
 enum class TextureType : int8_t {
   Unknown = 0,
   D3D11,
-  DIB,
-  X11,
   MacIOSurface,
   AndroidNativeWindow,
   AndroidHardwareBuffer,
@@ -387,16 +382,16 @@ class CompositableHandle final {
 };
 
 // clang-format off
-MOZ_DEFINE_ENUM_CLASS_WITH_BASE(ScrollDirection, uint32_t, (
+MOZ_DEFINE_ENUM_CLASS_WITH_BASE(ScrollDirection, uint8_t, (
   eVertical,
   eHorizontal
 ));
 
-typedef EnumSet<ScrollDirection> ScrollDirections;
+using ScrollDirections = EnumSet<ScrollDirection, uint8_t>;
 
 constexpr ScrollDirections EitherScrollDirection(ScrollDirection::eVertical,ScrollDirection::eHorizontal);
 constexpr ScrollDirections HorizontalScrollDirection(ScrollDirection::eHorizontal);
-constexpr ScrollDirections VerticalScollDirection(ScrollDirection::eVertical);
+constexpr ScrollDirections VerticalScrollDirection(ScrollDirection::eVertical);
 
 
 MOZ_DEFINE_ENUM_CLASS_WITH_BASE(CompositionPayloadType, uint8_t, (
@@ -423,7 +418,15 @@ MOZ_DEFINE_ENUM_CLASS_WITH_BASE(CompositionPayloadType, uint8_t, (
    * A |CompositionPayload| with this type indicates that content was painted
    * that will be included in the composition.
    */
-  eContentPaint
+  eContentPaint,
+
+  /**
+   * A |CompositionPayload| with this type indicates a mouse up (which caused
+   * a click to happen) happened before composition and will be used to determine latency
+   * between mouse up and presentation in
+   * |mozilla::Telemetry::MOUSEUP_FOLLOWED_BY_CLICK_PRESENT_LATENCY|
+   */
+  eMouseUpFollowedByClick
 ));
 // clang-format on
 

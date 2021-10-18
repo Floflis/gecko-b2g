@@ -12,9 +12,9 @@
 #include "gc/ObjectKind-inl.h"
 
 /* static */
-js::gc::AllocKind js::InlineTypedObject::allocKindForTypeDescriptor(
-    TypeDescr* descr) {
-  size_t nbytes = descr->size();
+js::gc::AllocKind js::InlineTypedObject::allocKindForRttValue(RttValue* rtt) {
+  MOZ_ASSERT(rtt->kind() == wasm::TypeDefKind::Struct);
+  size_t nbytes = rtt->typeDef().structType().size_;
   MOZ_ASSERT(nbytes <= MaxInlineBytes);
 
   return gc::GetGCObjectKindForBytes(nbytes + sizeof(TypedObject));

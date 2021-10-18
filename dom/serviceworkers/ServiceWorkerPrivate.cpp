@@ -99,18 +99,16 @@ ServiceWorkerPrivate::ServiceWorkerPrivate(ServiceWorkerInfo* aInfo)
   mIdleWorkerTimer = NS_NewTimer();
   MOZ_ASSERT(mIdleWorkerTimer);
 
-  if (ServiceWorkerParentInterceptEnabled()) {
-    RefPtr<ServiceWorkerPrivateImpl> inner = new ServiceWorkerPrivateImpl(this);
+  RefPtr<ServiceWorkerPrivateImpl> inner = new ServiceWorkerPrivateImpl(this);
 
-    // Assert in all debug builds as well as non-debug Nightly and Dev Edition.
+  // Assert in all debug builds as well as non-debug Nightly and Dev Edition.
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
-    MOZ_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(inner->Initialize()));
+  MOZ_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(inner->Initialize()));
 #else
-    MOZ_ALWAYS_SUCCEEDS(inner->Initialize());
+  MOZ_ALWAYS_SUCCEEDS(inner->Initialize());
 #endif
 
-    mInner = std::move(inner);
-  }
+  mInner = std::move(inner);
 }
 
 ServiceWorkerPrivate::~ServiceWorkerPrivate() {
@@ -830,7 +828,7 @@ class SendPushEventRunnable final
     RefPtr<PushErrorReporter> errorReporter =
         new PushErrorReporter(aWorkerPrivate, mMessageId);
 
-    PushEventInit pei;
+    RootedDictionary<PushEventInit> pei(aCx);
     if (mData) {
       const nsTArray<uint8_t>& bytes = mData.ref();
       JSObject* data =
@@ -1323,7 +1321,6 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
   nsCString mMethod;
   nsString mClientId;
   nsString mResultingClientId;
-  bool mMarkLaunchServiceWorkerEnd;
   RequestCache mCacheMode;
   RequestMode mRequestMode;
   RequestRedirect mRequestRedirect;
@@ -1352,7 +1349,6 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
         mScriptSpec(aScriptSpec),
         mClientId(aClientId),
         mResultingClientId(aResultingClientId),
-        mMarkLaunchServiceWorkerEnd(aMarkLaunchServiceWorkerEnd),
         mCacheMode(RequestCache::Default),
         mRequestMode(RequestMode::No_cors),
         mRequestRedirect(RequestRedirect::Follow)
@@ -1462,20 +1458,6 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
   bool WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate) override {
     MOZ_ASSERT(aWorkerPrivate);
 
-    if (mMarkLaunchServiceWorkerEnd) {
-      mInterceptedChannel->SetLaunchServiceWorkerEnd(TimeStamp::Now());
-
-      // A probe to measure sw launch time for telemetry.
-      TimeStamp launchStartTime = TimeStamp();
-      mInterceptedChannel->GetLaunchServiceWorkerStart(&launchStartTime);
-
-      TimeStamp launchEndTime = TimeStamp();
-      mInterceptedChannel->GetLaunchServiceWorkerEnd(&launchEndTime);
-      Telemetry::AccumulateTimeDelta(Telemetry::SERVICE_WORKER_LAUNCH_TIME,
-                                     launchStartTime, launchEndTime);
-    }
-
-    mInterceptedChannel->SetDispatchFetchEventEnd(TimeStamp::Now());
     return DispatchFetchEvent(aCx, aWorkerPrivate);
   }
 
@@ -1498,19 +1480,12 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
     explicit ResumeRequest(
         nsMainThreadPtrHandle<nsIInterceptedChannel>& aChannel)
         : Runnable("dom::FetchEventRunnable::ResumeRequest"),
-          mChannel(aChannel) {
-      mChannel->SetFinishResponseStart(TimeStamp::Now());
-    }
+          mChannel(aChannel) {}
 
     NS_IMETHOD Run() override {
       MOZ_ASSERT(NS_IsMainThread());
 
-      TimeStamp timeStamp = TimeStamp::Now();
-      mChannel->SetHandleFetchEventEnd(timeStamp);
-      mChannel->SetChannelResetEnd(timeStamp);
-      mChannel->SaveTimeStamps();
-
-      nsresult rv = mChannel->ResetInterception();
+      nsresult rv = mChannel->ResetInterception(false);
       if (NS_FAILED(rv)) {
         NS_WARNING("Failed to resume intercepted network request");
         mChannel->CancelInterception(rv);
@@ -1606,8 +1581,6 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
     event->PostInit(mInterceptedChannel, mRegistration, mScriptSpec);
     event->SetTrusted(true);
 
-    mInterceptedChannel->SetHandleFetchEventStart(TimeStamp::Now());
-
     nsresult rv2 = DispatchExtendableEventOnWorkerScope(
         aCx, aWorkerPrivate->GlobalScope(), event, nullptr);
     if ((NS_WARN_IF(NS_FAILED(rv2)) &&
@@ -1669,7 +1642,7 @@ nsresult ServiceWorkerPrivate::SendFetchEvent(
   // condition we handle the reset here instead of returning an error which
   // would in turn trigger a console report.
   if (!registration) {
-    nsresult rv = aChannel->ResetInterception();
+    nsresult rv = aChannel->ResetInterception(false);
     if (NS_FAILED(rv)) {
       NS_WARNING("Failed to resume intercepted network request");
       aChannel->CancelInterception(rv);
@@ -1681,7 +1654,7 @@ nsresult ServiceWorkerPrivate::SendFetchEvent(
   // any fetch event handlers, then abort the interception and maybe trigger
   // the soft update algorithm.
   if (!mInfo->HandlesFetch()) {
-    nsresult rv = aChannel->ResetInterception();
+    nsresult rv = aChannel->ResetInterception(false);
     if (NS_FAILED(rv)) {
       NS_WARNING("Failed to resume intercepted network request");
       aChannel->CancelInterception(rv);
@@ -1698,16 +1671,9 @@ nsresult ServiceWorkerPrivate::SendFetchEvent(
                                   aResultingClientId);
   }
 
-  aChannel->SetLaunchServiceWorkerStart(TimeStamp::Now());
-  aChannel->SetDispatchFetchEventStart(TimeStamp::Now());
-
   bool newWorkerCreated = false;
   rv = SpawnWorkerIfNeeded(FetchEvent, &newWorkerCreated, aLoadGroup);
   NS_ENSURE_SUCCESS(rv, rv);
-
-  if (!newWorkerCreated) {
-    aChannel->SetLaunchServiceWorkerEnd(TimeStamp::Now());
-  }
 
   nsMainThreadPtrHandle<nsIInterceptedChannel> handle(
       new nsMainThreadPtrHolder<nsIInterceptedChannel>("nsIInterceptedChannel",
@@ -1828,8 +1794,9 @@ nsresult ServiceWorkerPrivate::SpawnWorkerIfNeeded(WakeUpReason aWhy,
   // PartitionedPrincipal for ServiceWorkers is equal to mPrincipal because, at
   // the moment, ServiceWorkers are not exposed in partitioned contexts.
   info.mPartitionedPrincipal = info.mPrincipal;
+  info.mCookieJarSettings =
+      mozilla::net::CookieJarSettings::Create(info.mPrincipal);
 
-  info.mCookieJarSettings = mozilla::net::CookieJarSettings::Create();
   MOZ_ASSERT(info.mCookieJarSettings);
 
   net::CookieJarSettings::Cast(info.mCookieJarSettings)
@@ -1871,7 +1838,7 @@ nsresult ServiceWorkerPrivate::SpawnWorkerIfNeeded(WakeUpReason aWhy,
   NS_ConvertUTF8toUTF16 scriptSpec(mInfo->ScriptSpec());
 
   mWorkerPrivate = WorkerPrivate::Constructor(jsapi.cx(), scriptSpec, false,
-                                              WorkerTypeService, VoidString(),
+                                              WorkerKindService, VoidString(),
                                               ""_ns, &info, error);
   if (NS_WARN_IF(error.Failed())) {
     return error.StealNSResult();
@@ -2104,7 +2071,7 @@ namespace {
 class ServiceWorkerPrivateTimerCallback final : public nsITimerCallback,
                                                 public nsINamed {
  public:
-  typedef void (ServiceWorkerPrivate::*Method)(nsITimer*);
+  using Method = void (ServiceWorkerPrivate::*)(nsITimer*);
 
   ServiceWorkerPrivateTimerCallback(ServiceWorkerPrivate* aServiceWorkerPrivate,
                                     Method aMethod)

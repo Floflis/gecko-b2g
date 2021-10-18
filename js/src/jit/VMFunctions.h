@@ -8,7 +8,7 @@
 #define jit_VMFunctions_h
 
 #include "mozilla/Assertions.h"
-#include "mozilla/Attributes.h"
+#include "mozilla/HashFunctions.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -17,7 +17,6 @@
 #include "NamespaceImports.h"
 
 #include "gc/Rooting.h"
-#include "jit/IonTypes.h"
 #include "js/ScalarType.h"
 #include "js/TypeDecls.h"
 
@@ -30,9 +29,11 @@ class AbstractGeneratorObject;
 class GlobalObject;
 class InterpreterFrame;
 class LexicalScope;
+class ClassBodyScope;
+class MapObject;
 class NativeObject;
-class ObjectGroup;
 class PropertyName;
+class SetObject;
 class Shape;
 class TypedArrayObject;
 class WithScope;
@@ -352,9 +353,9 @@ struct LastArg<HeadType, TailTypes...> {
                                   uint32_t argc, Value* argv,
                                   MutableHandleValue rval);
 
-class InterpreterStubExitFrameLayout;
 bool InvokeFromInterpreterStub(JSContext* cx,
                                InterpreterStubExitFrameLayout* frame);
+void* GetContextSensitiveInterpreterStub();
 
 bool CheckOverRecursed(JSContext* cx);
 bool CheckOverRecursedBaseline(JSContext* cx, BaselineFrame* frame);
@@ -391,8 +392,7 @@ JSString* StringFromCodePoint(JSContext* cx, int32_t codePoint);
 
 [[nodiscard]] bool InterruptCheck(JSContext* cx);
 
-JSObject* NewCallObject(JSContext* cx, HandleShape shape,
-                        HandleObjectGroup group);
+JSObject* NewCallObject(JSContext* cx, HandleShape shape);
 JSObject* NewStringObject(JSContext* cx, HandleString str);
 
 bool OperatorIn(JSContext* cx, HandleValue key, HandleObject obj, bool* out);
@@ -463,7 +463,7 @@ JSObject* CopyLexicalEnvironmentObject(JSContext* cx, HandleObject env,
                                        bool copySlots);
 
 JSObject* InitRestParameter(JSContext* cx, uint32_t length, Value* rest,
-                            HandleObject templateObj, HandleObject res);
+                            HandleObject res);
 
 [[nodiscard]] bool HandleDebugTrap(JSContext* cx, BaselineFrame* frame,
                                    uint8_t* retAddr);
@@ -476,7 +476,8 @@ JSObject* InitRestParameter(JSContext* cx, uint32_t length, Value* rest,
 
 [[nodiscard]] bool PushLexicalEnv(JSContext* cx, BaselineFrame* frame,
                                   Handle<LexicalScope*> scope);
-[[nodiscard]] bool PopLexicalEnv(JSContext* cx, BaselineFrame* frame);
+[[nodiscard]] bool PushClassBodyEnv(JSContext* cx, BaselineFrame* frame,
+                                    Handle<ClassBodyScope*> scope);
 [[nodiscard]] bool DebugLeaveThenPopLexicalEnv(JSContext* cx,
                                                BaselineFrame* frame,
                                                jsbytecode* pc);
@@ -515,15 +516,12 @@ void JitValuePreWriteBarrier(JSRuntime* rt, Value* vp);
 void JitStringPreWriteBarrier(JSRuntime* rt, JSString** stringp);
 void JitObjectPreWriteBarrier(JSRuntime* rt, JSObject** objp);
 void JitShapePreWriteBarrier(JSRuntime* rt, Shape** shapep);
-void JitObjectGroupPreWriteBarrier(JSRuntime* rt, ObjectGroup** groupp);
 
 bool ObjectIsCallable(JSObject* obj);
 bool ObjectIsConstructor(JSObject* obj);
 
 [[nodiscard]] bool ThrowRuntimeLexicalError(JSContext* cx,
                                             unsigned errorNumber);
-
-[[nodiscard]] bool ThrowBadDerivedReturn(JSContext* cx, HandleValue v);
 
 [[nodiscard]] bool ThrowBadDerivedReturnOrUninitializedThis(JSContext* cx,
                                                             HandleValue v);
@@ -563,9 +561,10 @@ bool HasNativeElementPure(JSContext* cx, NativeObject* obj, int32_t index,
 bool SetNativeDataPropertyPure(JSContext* cx, JSObject* obj, PropertyName* name,
                                Value* val);
 
-bool ObjectHasGetterSetterPure(JSContext* cx, JSObject* obj, Shape* propShape);
+bool ObjectHasGetterSetterPure(JSContext* cx, JSObject* objArg, jsid id,
+                               GetterSetter* getterSetter);
 
-JSString* TypeOfObject(JSObject* obj, JSRuntime* rt);
+JSString* TypeOfNameObject(JSObject* obj, JSRuntime* rt);
 
 bool GetPrototypeOf(JSContext* cx, HandleObject target,
                     MutableHandleValue rval);
@@ -640,6 +639,41 @@ AtomicsReadWriteModifyFn AtomicsSub(Scalar::Type elementType);
 AtomicsReadWriteModifyFn AtomicsAnd(Scalar::Type elementType);
 AtomicsReadWriteModifyFn AtomicsOr(Scalar::Type elementType);
 AtomicsReadWriteModifyFn AtomicsXor(Scalar::Type elementType);
+
+BigInt* AtomicsLoad64(JSContext* cx, TypedArrayObject* typedArray,
+                      size_t index);
+
+void AtomicsStore64(TypedArrayObject* typedArray, size_t index, BigInt* value);
+
+BigInt* AtomicsCompareExchange64(JSContext* cx, TypedArrayObject* typedArray,
+                                 size_t index, BigInt* expected,
+                                 BigInt* replacement);
+
+BigInt* AtomicsExchange64(JSContext* cx, TypedArrayObject* typedArray,
+                          size_t index, BigInt* value);
+
+BigInt* AtomicsAdd64(JSContext* cx, TypedArrayObject* typedArray, size_t index,
+                     BigInt* value);
+BigInt* AtomicsAnd64(JSContext* cx, TypedArrayObject* typedArray, size_t index,
+                     BigInt* value);
+BigInt* AtomicsOr64(JSContext* cx, TypedArrayObject* typedArray, size_t index,
+                    BigInt* value);
+BigInt* AtomicsSub64(JSContext* cx, TypedArrayObject* typedArray, size_t index,
+                     BigInt* value);
+BigInt* AtomicsXor64(JSContext* cx, TypedArrayObject* typedArray, size_t index,
+                     BigInt* value);
+
+JSAtom* AtomizeStringNoGC(JSContext* cx, JSString* str);
+
+bool SetObjectHas(JSContext* cx, HandleObject obj, HandleValue key, bool* rval);
+bool MapObjectHas(JSContext* cx, HandleObject obj, HandleValue key, bool* rval);
+bool MapObjectGet(JSContext* cx, HandleObject obj, HandleValue key,
+                  MutableHandleValue rval);
+
+void AssertSetObjectHash(JSContext* cx, SetObject* obj, const Value* value,
+                         mozilla::HashNumber actualHash);
+void AssertMapObjectHash(JSContext* cx, MapObject* obj, const Value* value,
+                         mozilla::HashNumber actualHash);
 
 // Functions used when JS_MASM_VERBOSE is enabled.
 void AssumeUnreachable(const char* output);

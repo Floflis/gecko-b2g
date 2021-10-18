@@ -67,22 +67,14 @@ impl<'a> Expander<'a> {
         match field {
             ModuleField::Alias(a) => {
                 let id = gensym::fill(a.span, &mut a.id);
-                match &mut a.kind {
-                    AliasKind::InstanceExport {
-                        instance,
-                        export,
-                        kind,
-                    } => {
+                match &mut a.source {
+                    AliasSource::InstanceExport { instance, export } => {
                         self.expand(instance);
                         self.instances
-                            .insert((*instance.unwrap_index(), export, *kind), id.into());
+                            .insert((*instance.unwrap_index(), export, a.kind), id.into());
                     }
-                    AliasKind::Outer {
-                        module,
-                        index,
-                        kind,
-                    } => {
-                        self.parents.insert((*module, *index, *kind), id.into());
+                    AliasSource::Outer { module, index } => {
+                        self.parents.insert((*module, *index, a.kind), id.into());
                     }
                 }
             }
@@ -97,8 +89,9 @@ impl<'a> Expander<'a> {
             }
 
             ModuleField::Elem(e) => {
-                if let ElemKind::Active { table, .. } = &mut e.kind {
+                if let ElemKind::Active { table, offset, .. } = &mut e.kind {
                     self.expand(table);
+                    self.expand_expr(offset);
                 }
                 match &mut e.payload {
                     ElemPayload::Indices(funcs) => {
@@ -107,18 +100,17 @@ impl<'a> Expander<'a> {
                         }
                     }
                     ElemPayload::Exprs { exprs, .. } => {
-                        for func in exprs {
-                            if let Some(func) = func {
-                                self.expand(func);
-                            }
+                        for expr in exprs {
+                            self.expand_expr(expr);
                         }
                     }
                 }
             }
 
             ModuleField::Data(e) => {
-                if let DataKind::Active { memory, .. } = &mut e.kind {
+                if let DataKind::Active { memory, offset, .. } = &mut e.kind {
                     self.expand(memory);
+                    self.expand_expr(offset);
                 }
             }
 
@@ -141,8 +133,8 @@ impl<'a> Expander<'a> {
 
             ModuleField::Start(s) => self.expand(s),
 
-            ModuleField::Event(e) => match &mut e.ty {
-                EventType::Exception(t) => self.expand_type_use(t),
+            ModuleField::Tag(t) => match &mut t.ty {
+                TagType::Exception(t) => self.expand_type_use(t),
             },
 
             ModuleField::NestedModule(m) => match &mut m.kind {
@@ -150,10 +142,15 @@ impl<'a> Expander<'a> {
                 NestedModuleKind::Inline { fields } => run(fields),
             },
 
-            ModuleField::Custom(_)
-            | ModuleField::Memory(_)
-            | ModuleField::Table(_)
-            | ModuleField::Type(_) => {}
+            ModuleField::Type(t) => match &mut t.def {
+                TypeDef::Func(f) => f.expand(self),
+                TypeDef::Struct(_) => {}
+                TypeDef::Array(_) => {}
+                TypeDef::Module(m) => m.expand(self),
+                TypeDef::Instance(i) => i.expand(self),
+            },
+
+            ModuleField::Custom(_) | ModuleField::Memory(_) | ModuleField::Table(_) => {}
         }
     }
 
@@ -165,13 +162,18 @@ impl<'a> Expander<'a> {
             ItemKind::Table(_) => {}
             ItemKind::Memory(_) => {}
             ItemKind::Global(_) => {}
-            ItemKind::Event(_) => {}
+            ItemKind::Tag(t) => match t {
+                TagType::Exception(t) => self.expand_type_use(t),
+            },
         }
     }
 
-    fn expand_type_use<T>(&mut self, ty: &mut TypeUse<'a, T>) {
+    fn expand_type_use<T: Expand<'a>>(&mut self, ty: &mut TypeUse<'a, T>) {
         if let Some(index) = &mut ty.index {
             self.expand(index);
+        }
+        if let Some(inline) = &mut ty.inline {
+            inline.expand(self);
         }
     }
 
@@ -211,6 +213,12 @@ impl<'a> Expander<'a> {
 
             MemorySize(m) | MemoryGrow(m) | MemoryFill(m) => self.expand(&mut m.mem),
 
+            Let(t) => self.expand_type_use(&mut t.block.ty),
+
+            Block(bt) | If(bt) | Loop(bt) | Try(bt) => self.expand_type_use(&mut bt.ty),
+
+            FuncBind(t) => self.expand_type_use(&mut t.ty),
+
             _ => {}
         }
     }
@@ -231,11 +239,11 @@ impl<'a> Expander<'a> {
                             span,
                             id: Some(id),
                             name: None,
-                            kind: AliasKind::Outer {
+                            source: AliasSource::Outer {
                                 module: *module,
                                 index: *idx,
-                                kind: (*kind).into(),
                             },
+                            kind: (*kind).into(),
                         }));
                         *v.insert(Index::Id(id))
                     }
@@ -244,9 +252,21 @@ impl<'a> Expander<'a> {
                     kind: *kind,
                     idx,
                     exports: Vec::new(),
+                    #[cfg(wast_check_exhaustive)]
+                    visited: true,
                 };
             }
-            ItemRef::Item { kind, idx, exports } => {
+            ItemRef::Item {
+                kind,
+                idx,
+                exports,
+                #[cfg(wast_check_exhaustive)]
+                visited,
+            } => {
+                #[cfg(wast_check_exhaustive)]
+                {
+                    *visited = true;
+                }
                 let mut cur = *idx;
                 let len = exports.len();
                 for (i, export) in exports.drain(..).enumerate() {
@@ -265,12 +285,14 @@ impl<'a> Expander<'a> {
                                 span,
                                 id: Some(id),
                                 name: None,
-                                kind: AliasKind::InstanceExport {
-                                    kind,
+                                kind,
+                                source: AliasSource::InstanceExport {
                                     instance: ItemRef::Item {
                                         kind: kw::instance(span),
                                         idx: cur,
                                         exports: Vec::new(),
+                                        #[cfg(wast_check_exhaustive)]
+                                        visited: true,
                                     },
                                     export,
                                 },
@@ -281,6 +303,33 @@ impl<'a> Expander<'a> {
                 }
                 *idx = cur;
             }
+        }
+    }
+}
+
+trait Expand<'a> {
+    fn expand(&mut self, cx: &mut Expander<'a>);
+}
+
+impl<'a> Expand<'a> for FunctionType<'a> {
+    fn expand(&mut self, _cx: &mut Expander<'a>) {}
+}
+
+impl<'a> Expand<'a> for ModuleType<'a> {
+    fn expand(&mut self, cx: &mut Expander<'a>) {
+        for i in self.imports.iter_mut() {
+            cx.expand_item_sig(&mut i.item);
+        }
+        for e in self.exports.iter_mut() {
+            cx.expand_item_sig(&mut e.item);
+        }
+    }
+}
+
+impl<'a> Expand<'a> for InstanceType<'a> {
+    fn expand(&mut self, cx: &mut Expander<'a>) {
+        for e in self.exports.iter_mut() {
+            cx.expand_item_sig(&mut e.item);
         }
     }
 }

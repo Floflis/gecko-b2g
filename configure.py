@@ -21,8 +21,11 @@ except ImportError:
 
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(base_dir, "python", "mach"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozboot"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozbuild"))
+sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "packaging"))
+sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "pyparsing"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "six"))
 from mozbuild.configure import (
     ConfigureSandbox,
@@ -194,8 +197,6 @@ def config_status(config, execute=True):
                 textwrap.dedent(
                     """
                 if __name__ == '__main__':
-                    from mozbuild.util import patch_main
-                    patch_main()
                     from mozbuild.config_status import config_status
                     args = dict([(name, globals()[name]) for name in __all__])
                     config_status(**args)

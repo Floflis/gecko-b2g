@@ -31,12 +31,8 @@
 // override
 - (NSNumber*)moxVisited;
 
-@end
-
-@interface MOXSummaryAccessible : mozAccessible
-
 // override
-- (NSNumber*)moxExpanded;
+- (NSArray*)moxLinkedUIElements;
 
 @end
 

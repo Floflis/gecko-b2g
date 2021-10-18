@@ -25,7 +25,7 @@ add_task(async function() {
         },
         {
           urls: [
-            "http://example.com/browser/devtools/client/netmonitor/test/request_0",
+            "https://example.com/browser/devtools/client/netmonitor/test/request_0",
           ],
         },
         ["blocking"]
@@ -38,7 +38,7 @@ add_task(async function() {
   await extension.startup();
   await extension.awaitMessage("ready");
 
-  const { tab, monitor } = await initNetMonitor(SINGLE_GET_URL, {
+  const { tab, monitor } = await initNetMonitor(HTTPS_SINGLE_GET_URL, {
     requestCount: 2,
   });
 
@@ -53,7 +53,7 @@ add_task(async function() {
   );
   const waitForReload = BrowserTestUtils.browserLoaded(tab.linkedBrowser);
 
-  tab.linkedBrowser.reload();
+  await reloadBrowser();
 
   await Promise.all([
     waitForNetworkEventsToComplete,
@@ -61,34 +61,38 @@ add_task(async function() {
     waitForReload,
   ]);
 
-  const requests = document.querySelectorAll(".request-list-item");
+  // Find the request list item that matches the blocked url
+  const request = document.querySelector(
+    "td.requests-list-url[title*=request_0]"
+  ).parentNode;
 
   info("Assert the blocked request");
   ok(
-    !!requests[1].querySelector(
-      ".requests-list-status .status-code-blocked-icon"
-    ),
+    !!request.querySelector(".requests-list-status .status-code-blocked-icon"),
     "The request blocked status icon is visible"
   );
+
   is(
-    requests[1].querySelector(
-      ".requests-list-status .requests-list-status-code"
-    ).title,
+    request.querySelector(".requests-list-status .requests-list-status-code")
+      .title,
     "Blocked",
     "The request status title is 'Blocked'"
   );
+
   is(
-    requests[1].querySelector(".requests-list-type").innerText,
+    request.querySelector(".requests-list-type").innerText,
     "",
     "The request shows no type"
   );
+
   is(
-    requests[1].querySelector(".requests-list-transferred").innerText,
+    request.querySelector(".requests-list-transferred").innerText,
     `Blocked By ${extensionName}`,
     "The request shows the blocking extension name"
   );
+
   is(
-    requests[1].querySelector(".requests-list-size").innerText,
+    request.querySelector(".requests-list-size").innerText,
     "",
     "The request shows no size"
   );

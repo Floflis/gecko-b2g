@@ -11,13 +11,14 @@ const { XPCOMUtils } = ChromeUtils.import(
 XPCOMUtils.defineLazyGlobalGetters(this, ["fetch"]);
 XPCOMUtils.defineLazyModuleGetters(this, {
   AppConstants: "resource://gre/modules/AppConstants.jsm",
-  BookmarkPanelHub: "resource://activity-stream/lib/BookmarkPanelHub.jsm",
   SnippetsTestMessageProvider:
     "resource://activity-stream/lib/SnippetsTestMessageProvider.jsm",
   PanelTestProvider: "resource://activity-stream/lib/PanelTestProvider.jsm",
+  Spotlight: "resource://activity-stream/lib/Spotlight.jsm",
   ToolbarBadgeHub: "resource://activity-stream/lib/ToolbarBadgeHub.jsm",
   ToolbarPanelHub: "resource://activity-stream/lib/ToolbarPanelHub.jsm",
   MomentsPageHub: "resource://activity-stream/lib/MomentsPageHub.jsm",
+  InfoBar: "resource://activity-stream/lib/InfoBar.jsm",
   ASRouterTargeting: "resource://activity-stream/lib/ASRouterTargeting.jsm",
   ASRouterPreferences: "resource://activity-stream/lib/ASRouterPreferences.jsm",
   TARGETING_PREFERENCES:
@@ -28,7 +29,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   KintoHttpClient: "resource://services-common/kinto-http-client.js",
   Downloader: "resource://services-settings/Attachments.jsm",
   RemoteL10n: "resource://activity-stream/lib/RemoteL10n.jsm",
-  ExperimentAPI: "resource://messaging-system/experiments/ExperimentAPI.jsm",
+  ExperimentAPI: "resource://nimbus/ExperimentAPI.jsm",
   SpecialMessageActions:
     "resource://messaging-system/lib/SpecialMessageActions.jsm",
   TargetingContext: "resource://messaging-system/targeting/Targeting.jsm",
@@ -78,7 +79,7 @@ const STARTPAGE_VERSION = "6";
 const RS_SERVER_PREF = "services.settings.server";
 const RS_MAIN_BUCKET = "main";
 const RS_COLLECTION_L10N = "ms-language-packs"; // "ms" stands for Messaging System
-const RS_PROVIDERS_WITH_L10N = ["cfr", "cfr-fxa", "whats-new-panel"];
+const RS_PROVIDERS_WITH_L10N = ["cfr"];
 const RS_FLUENT_VERSION = "v1";
 const RS_FLUENT_RECORD_PREFIX = `cfr-${RS_FLUENT_VERSION}`;
 const RS_DOWNLOAD_MAX_RETRIES = 2;
@@ -96,7 +97,7 @@ const USE_REMOTE_L10N_PREF =
 // Experiment groups that need to report the reach event in Messaging-Experiments.
 // If you're adding new groups to it, make sure they're also added in the
 // `messaging_experiments.reach.objects` defined in "toolkit/components/telemetry/Events.yaml"
-const REACH_EVENT_GROUPS = ["cfr", "moments-page"];
+const REACH_EVENT_GROUPS = ["cfr", "moments-page", "infobar", "spotlight"];
 const REACH_EVENT_CATEGORY = "messaging_experiments";
 const REACH_EVENT_METHOD = "reach";
 
@@ -128,21 +129,6 @@ const MessageLoaderUtils = {
    */
   _localLoader(provider) {
     return provider.messages;
-  },
-
-  async _localJsonLoader(provider) {
-    let payload;
-    try {
-      payload = await (
-        await fetch(provider.location, {
-          credentials: "omit",
-        })
-      ).json();
-    } catch (e) {
-      return [];
-    }
-
-    return payload.messages;
   },
 
   async _remoteLoaderCache(storage) {
@@ -258,7 +244,7 @@ const MessageLoaderUtils = {
    * _remoteSettingsLoader - Loads messages for a RemoteSettings provider
    *
    * Note:
-   * 1). Both "cfr" and "cfr-fxa" require the Fluent file for l10n, so there is
+   * 1). The "cfr" provider requires the Fluent file for l10n, so there is
    * another file downloading phase for those two providers after their messages
    * are successfully fetched from Remote Settings. Currently, they share the same
    * attachment of the record "${RS_FLUENT_RECORD_PREFIX}-${locale}" in the
@@ -311,7 +297,9 @@ const MessageLoaderUtils = {
           if (record && record.data) {
             const downloader = new Downloader(
               RS_MAIN_BUCKET,
-              RS_COLLECTION_L10N
+              RS_COLLECTION_L10N,
+              "browser",
+              "newtab"
             );
             // Await here in order to capture the exceptions for reporting.
             await downloader.download(record.data, {
@@ -343,27 +331,13 @@ const MessageLoaderUtils = {
   },
 
   async _experimentsAPILoader(provider, options) {
-    try {
-      await ExperimentAPI.ready();
-    } catch (e) {
-      MessageLoaderUtils.reportError(e);
-      return [];
-    }
+    await ExperimentAPI.ready();
 
     let experiments = [];
     for (const featureId of provider.messageGroups) {
-      let experimentData;
-      try {
-        experimentData = ExperimentAPI.getExperiment({
-          featureId,
-          sendExposurePing: false,
-        });
-        // Not enrolled in any experiment for this feature, we can skip
-        if (!experimentData) {
-          continue;
-        }
-      } catch (e) {
-        MessageLoaderUtils.reportError(e);
+      let experimentData = ExperimentAPI.getExperiment({ featureId });
+      // Not enrolled in any experiment for this feature, we can skip
+      if (!experimentData) {
         continue;
       }
 
@@ -374,7 +348,6 @@ const MessageLoaderUtils = {
       if (featureData.enabled) {
         experiments.push({
           forExposureEvent: {
-            sent: experimentData.exposurePingSent,
             experimentSlug: experimentData.slug,
             branchSlug: experimentData.branch.slug,
           },
@@ -432,8 +405,6 @@ const MessageLoaderUtils = {
         return this._remoteLoader;
       case "remote-settings":
         return this._remoteSettingsLoader;
-      case "json":
-        return this._localJsonLoader;
       case "remote-experiments":
         return this._experimentsAPILoader;
       case "local":
@@ -501,16 +472,6 @@ const MessageLoaderUtils = {
             groups: messageData.groups || [],
             provider: provider.id,
           };
-
-          // This is to support a personalization experiment
-          if (provider.personalized) {
-            const score = ASRouterPreferences.personalizedCfrScores[message.id];
-            if (score) {
-              message.score = score;
-            }
-            message.personalizedModelVersion =
-              provider.personalizedModelVersion;
-          }
 
           return message;
         })
@@ -695,9 +656,11 @@ class _ASRouter {
    */
   _resetInitialization() {
     this.initialized = false;
+    this.initializing = false;
     this.waitForInitialized = new Promise(resolve => {
       this._finishInitializing = () => {
         this.initialized = true;
+        this.initializing = false;
         resolve();
       };
     });
@@ -899,6 +862,10 @@ class _ASRouter {
     updateAdminState,
     dispatchCFRAction,
   }) {
+    if (this.initializing || this.initialized) {
+      return null;
+    }
+    this.initializing = true;
     this._storage = storage;
     this.ALLOWLIST_HOSTS = this._loadSnippetsAllowHosts();
     this.clearChildMessages = this.toWaitForInitFunc(clearChildMessages);
@@ -910,11 +877,6 @@ class _ASRouter {
 
     ASRouterPreferences.init();
     ASRouterPreferences.addListener(this.onPrefChange);
-    BookmarkPanelHub.init(
-      this.handleMessageRequest,
-      this.addImpression,
-      this.sendTelemetry
-    );
     ToolbarBadgeHub.init(this.waitForInitialized, {
       handleMessageRequest: this.handleMessageRequest,
       addImpression: this.addImpression,
@@ -975,7 +937,6 @@ class _ASRouter {
 
     ASRouterPreferences.removeListener(this.onPrefChange);
     ASRouterPreferences.uninit();
-    BookmarkPanelHub.uninit();
     ToolbarPanelHub.uninit();
     ToolbarBadgeHub.uninit();
     MomentsPageHub.uninit();
@@ -1056,14 +1017,14 @@ class _ASRouter {
     return targetingParameters;
   }
 
-  _handleTargetingError(type, error, message) {
+  _handleTargetingError(error, message) {
     Cu.reportError(error);
     this.dispatchCFRAction(
       ac.ASRouterUserEvent({
         message_id: message.id,
         action: "asrouter_undesired_event",
         event: "TARGETING_EXPRESSION_ERROR",
-        event_context: type,
+        event_context: {},
       })
     );
   }
@@ -1215,16 +1176,17 @@ class _ASRouter {
           );
         }
         break;
-      case "fxa_bookmark_panel":
-        if (force) {
-          BookmarkPanelHub.forceShowMessage(browser, message);
-        }
-        break;
       case "toolbar_badge":
         ToolbarBadgeHub.registerBadgeNotificationListener(message, { force });
         break;
       case "update_action":
         MomentsPageHub.executeAction(message);
+        break;
+      case "infobar":
+        InfoBar.showInfoBarMessage(browser, message, this.dispatchCFRAction);
+        break;
+      case "spotlight":
+        Spotlight.showSpotlightDialog(browser, message, this.dispatchCFRAction);
         break;
     }
 
@@ -1699,12 +1661,13 @@ class _ASRouter {
     // Exposure events only apply to messages that come from the
     // messaging-experiments provider
     if (nonReachMessages.length && nonReachMessages[0].forExposureEvent) {
-      ExperimentAPI.recordExposureEvent(
+      ExperimentAPI.recordExposureEvent({
         // Any message processed by ASRouter will report the exposure event
         // as `cfr`
-        "cfr",
-        nonReachMessages[0].forExposureEvent
-      );
+        featureId: "cfr",
+        // experimentSlug and branchSlug
+        ...nonReachMessages[0].forExposureEvent,
+      });
     }
 
     return this.routeCFRMessage(

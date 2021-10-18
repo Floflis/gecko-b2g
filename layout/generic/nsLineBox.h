@@ -14,6 +14,8 @@
 
 #include "nsILineIterator.h"
 #include "nsIFrame.h"
+#include "nsTHashSet.h"
+
 #include <algorithm>
 
 class nsLineBox;
@@ -302,10 +304,9 @@ class nsLineBox final : public nsLineLink {
     uint32_t minLength =
         std::max(kMinChildCountForHashtable,
                  uint32_t(PLDHashTable::kDefaultInitialLength));
-    mFrames =
-        new nsTHashtable<nsPtrHashKey<nsIFrame> >(std::max(count, minLength));
+    mFrames = new nsTHashSet<nsIFrame*>(std::max(count, minLength));
     for (nsIFrame* f = mFirstChild; count-- > 0; f = f->GetNextSibling()) {
-      mFrames->PutEntry(f);
+      mFrames->Insert(f);
     }
   }
   void SwitchToCounter() {
@@ -327,7 +328,7 @@ class nsLineBox final : public nsLineLink {
    */
   void NoteFrameAdded(nsIFrame* aFrame) {
     if (MOZ_UNLIKELY(mFlags.mHasHashedFrames)) {
-      mFrames->PutEntry(aFrame);
+      mFrames->Insert(aFrame);
     } else {
       if (++mChildCount >= kMinChildCountForHashtable) {
         SwitchToHashtable();
@@ -341,7 +342,7 @@ class nsLineBox final : public nsLineLink {
   void NoteFrameRemoved(nsIFrame* aFrame) {
     MOZ_ASSERT(GetChildCount() > 0);
     if (MOZ_UNLIKELY(mFlags.mHasHashedFrames)) {
-      mFrames->RemoveEntry(aFrame);
+      mFrames->Remove(aFrame);
       if (mFrames->Count() < kMinChildCountForHashtable) {
         SwitchToCounter();
       }
@@ -591,16 +592,10 @@ class nsLineBox final : public nsLineLink {
     mBounds =
         mozilla::LogicalRect(aWritingMode, aIStart, aBStart, aISize, aBSize);
   }
-  void SetBounds(mozilla::WritingMode aWritingMode, nsRect aRect,
-                 const nsSize& aContainerSize) {
-    mWritingMode = aWritingMode;
-    mContainerSize = aContainerSize;
-    mBounds = mozilla::LogicalRect(aWritingMode, aRect, aContainerSize);
-  }
 
   // mFlags.mHasHashedFrames says which one to use
   union {
-    nsTHashtable<nsPtrHashKey<nsIFrame> >* mFrames;
+    nsTHashSet<nsIFrame*>* mFrames;
     uint32_t mChildCount;
   };
 
@@ -1639,7 +1634,7 @@ nsLineList_const_reverse_iterator::operator=(
 
 class nsLineIterator final : public nsILineIterator {
  public:
-  nsLineIterator();
+  nsLineIterator(nsLineList& aLines, bool aRightToLeft);
   ~nsLineIterator();
 
   virtual void DisposeLineIterator() override;
@@ -1655,14 +1650,14 @@ class nsLineIterator final : public nsILineIterator {
                          nsIFrame** aFrameFound, bool* aPosIsBeforeFirstFrame,
                          bool* aPosIsAfterLastFrame) const override;
 
-  NS_IMETHOD GetNextSiblingOnLine(nsIFrame*& aFrame,
-                                  int32_t aLineNumber) const override;
   NS_IMETHOD CheckLineOrder(int32_t aLine, bool* aIsReordered,
                             nsIFrame** aFirstVisual,
                             nsIFrame** aLastVisual) override;
-  nsresult Init(nsLineList& aLines, bool aRightToLeft);
 
  private:
+  nsLineIterator() = delete;
+  nsLineIterator(const nsLineIterator& aOther) = delete;
+
   nsLineBox* PrevLine() {
     if (0 == mIndex) {
       return nullptr;

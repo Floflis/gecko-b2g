@@ -66,8 +66,6 @@ class MediaEngineWebRTCMicrophoneSource : public MediaEngineSource {
     return NS_ERROR_NOT_IMPLEMENTED;
   }
 
-  void Shutdown() override;
-
  protected:
   ~MediaEngineWebRTCMicrophoneSource() = default;
 
@@ -185,9 +183,8 @@ class AudioInputProcessing : public AudioDataListener {
   }
 #endif
 
-  template <typename T>
-  void InsertInGraph(MediaTrackGraphImpl* aGraph, const T* aBuffer,
-                     size_t aFrames, uint32_t aChannels);
+  // aSegment stores the unprocessed non-interleaved audio input data from mic
+  void ProcessInput(MediaTrackGraphImpl* aGraph, const AudioSegment* aSegment);
 
   void PacketizeAndProcess(MediaTrackGraphImpl* aGraph,
                            const AudioDataValue* aBuffer, size_t aFrames,
@@ -212,6 +209,8 @@ class AudioInputProcessing : public AudioDataListener {
   void UpdateAPMExtraOptions(bool aExtendedFilter, bool aDelayAgnostic);
 
   void End();
+
+  TrackTime NumBufferedFrames(MediaTrackGraphImpl* aGraph) const;
 
  private:
   ~AudioInputProcessing() = default;
@@ -253,15 +252,13 @@ class AudioInputProcessing : public AudioDataListener {
   AlignedFloatBuffer mInputDownmixBuffer;
   // Stores data waiting to be pulled.
   AudioSegment mSegment;
-  // Set to false by Start(). Becomes true after the first time we append real
-  // audio frames from the audio callback.
-  bool mLiveFramesAppended;
-  // Once live frames have been appended, this is the number of frames appended
-  // as pre-buffer for that data, to avoid underruns. Buffering in the track
-  // might be needed because of the AUDIO_BLOCK interval at which we run the
-  // graph, the packetizer keeping some input data. Care must be taken when
-  // turning on and off the packetizer.
-  TrackTime mLiveBufferingAppended;
+  // Set to Nothing() by Start(). Once live frames have been appended from the
+  // audio callback, this is the number of frames appended as pre-buffer for
+  // that data, to avoid underruns. Buffering in the track might be needed
+  // because of the AUDIO_BLOCK interval at which we run the graph, the
+  // packetizer keeping some input data. Care must be taken when turning on and
+  // off the packetizer.
+  Maybe<TrackTime> mLiveBufferingAppended;
   // Principal for the data that flows through this class.
   const PrincipalHandle mPrincipal;
   // Whether or not this MediaEngine is enabled. If it's not enabled, it
@@ -270,6 +267,8 @@ class AudioInputProcessing : public AudioDataListener {
   bool mEnabled;
   // Whether or not we've ended and removed the AudioInputTrack.
   bool mEnded;
+  // Store the unprocessed interleaved audio input data
+  AudioInputSamples mPendingData;
 };
 
 // MediaTrack subclass tailored for MediaEngineWebRTCMicrophoneSource.
@@ -277,11 +276,18 @@ class AudioInputTrack : public ProcessedMediaTrack {
   // Only accessed on the graph thread.
   RefPtr<AudioInputProcessing> mInputProcessing;
 
+  // Only accessed on the main thread. Link to the track producing raw audio
+  // input data. Graph thread should use mInputs to get the source
+  RefPtr<MediaInputPort> mPort;
+
   // Only accessed on the main thread. Used for bookkeeping on main thread, such
   // that CloseAudioInput can be idempotent.
   // XXX Should really be a CubebUtils::AudioDeviceID, but they aren't
   // copyable (opaque pointers)
   RefPtr<AudioDataListener> mInputListener;
+
+  // Only accessed on the main thread.
+  Maybe<CubebUtils::AudioDeviceID> mDeviceId;
 
   explicit AudioInputTrack(TrackRate aSampleRate)
       : ProcessedMediaTrack(aSampleRate, MediaSegment::AUDIO,
@@ -296,7 +302,8 @@ class AudioInputTrack : public ProcessedMediaTrack {
   // input. Main thread only.
   nsresult OpenAudioInput(CubebUtils::AudioDeviceID aId,
                           AudioDataListener* aListener);
-  void CloseAudioInput(Maybe<CubebUtils::AudioDeviceID>& aId);
+  void CloseAudioInput();
+  Maybe<CubebUtils::AudioDeviceID> DeviceId() const;
   void Destroy() override;
   void SetInputProcessing(RefPtr<AudioInputProcessing> aInputProcessing);
   static AudioInputTrack* Create(MediaTrackGraph* aGraph);

@@ -19,6 +19,7 @@
 #include "nsIFrame.h"
 #include "nsIScrollableFrame.h"
 #include "nsIContent.h"
+#include "nsIFrameInlines.h"
 #include "nsLayoutUtils.h"
 #include "nsPresContext.h"
 #include "nsBlockFrame.h"
@@ -83,7 +84,9 @@ static nsLineBox* FindContainingLine(nsIFrame* aFrame) {
 
 static void AdjustCaretFrameForLineEnd(nsIFrame** aFrame, int32_t* aOffset) {
   nsLineBox* line = FindContainingLine(*aFrame);
-  if (!line) return;
+  if (!line) {
+    return;
+  }
   int32_t count = line->GetChildCount();
   for (nsIFrame* f = line->mFirstChild; count > 0;
        --count, f = f->GetNextSibling()) {
@@ -143,9 +146,13 @@ nsresult nsCaret::Init(PresShell* aPresShell) {
 static bool DrawCJKCaret(nsIFrame* aFrame, int32_t aOffset) {
   nsIContent* content = aFrame->GetContent();
   const nsTextFragment* frag = content->GetText();
-  if (!frag) return false;
-  if (aOffset < 0 || uint32_t(aOffset) >= frag->GetLength()) return false;
-  char16_t ch = frag->CharAt(aOffset);
+  if (!frag) {
+    return false;
+  }
+  if (aOffset < 0 || static_cast<uint32_t>(aOffset) >= frag->GetLength()) {
+    return false;
+  }
+  const char16_t ch = frag->CharAt(AssertedCast<uint32_t>(aOffset));
   return 0x2e80 <= ch && ch <= 0xd7ff;
 }
 
@@ -399,6 +406,13 @@ nsIFrame* nsCaret::GetGeometry(const Selection* aSelection, nsRect* aRect) {
   return frame;
 }
 
+[[nodiscard]] static nsIFrame* GetContainingBlockIfNeeded(nsIFrame* aFrame) {
+  if (aFrame->IsBlockOutside() || aFrame->IsBlockFrameOrSubclass()) {
+    return nullptr;
+  }
+  return aFrame->GetContainingBlock();
+}
+
 void nsCaret::SchedulePaint(Selection* aSelection) {
   Selection* selection;
   if (aSelection) {
@@ -410,8 +424,13 @@ void nsCaret::SchedulePaint(Selection* aSelection) {
   int32_t frameOffset;
   nsIFrame* frame = GetFrameAndOffset(selection, mOverrideContent,
                                       mOverrideOffset, &frameOffset);
+  if (!frame) {
+    return;
+  }
 
-  if (frame) {
+  if (nsIFrame* cb = GetContainingBlockIfNeeded(frame)) {
+    cb->SchedulePaint();
+  } else {
     frame->SchedulePaint();
   }
 }
@@ -448,7 +467,24 @@ void nsCaret::CheckSelectionLanguageChange() {
   }
 }
 
-nsIFrame* nsCaret::GetPaintGeometry(nsRect* aRect) {
+// This ensures that the caret is not affected by clips on inlines and so forth.
+[[nodiscard]] static nsIFrame* MapToContainingBlock(nsIFrame* aFrame,
+                                                    nsRect* aCaretRect,
+                                                    nsRect* aHookRect) {
+  nsIFrame* containingBlock = GetContainingBlockIfNeeded(aFrame);
+  if (!containingBlock) {
+    return aFrame;
+  }
+
+  *aCaretRect = nsLayoutUtils::TransformFrameRectToAncestor(aFrame, *aCaretRect,
+                                                            containingBlock);
+  *aHookRect = nsLayoutUtils::TransformFrameRectToAncestor(aFrame, *aHookRect,
+                                                           containingBlock);
+  return containingBlock;
+}
+
+nsIFrame* nsCaret::GetPaintGeometry(nsRect* aCaretRect, nsRect* aHookRect,
+                                    nscolor* aCaretColor) {
   // Return null if we should not be visible.
   if (!IsVisible() || !mIsBlinkOn) {
     return nullptr;
@@ -478,56 +514,57 @@ nsIFrame* nsCaret::GetPaintGeometry(nsRect* aRect) {
   // since the <br> we're focused at is editable, but we do want to paint it at
   // the adjusted frame offset, so that we can see the collapsed whitespace.
   const nsStyleUI* ui = unadjustedFrame->StyleUI();
-  if ((!mIgnoreUserModify && ui->mUserModify == StyleUserModify::ReadOnly) ||
+  if ((!mIgnoreUserModify && ui->UserModify() == StyleUserModify::ReadOnly) ||
       unadjustedFrame->IsContentDisabled()) {
     return nullptr;
   }
 
   // If the offset falls outside of the frame, then don't paint the caret.
-  int32_t startOffset, endOffset;
-  if (frame->IsTextFrame() &&
-      (NS_FAILED(frame->GetOffsets(startOffset, endOffset)) ||
-       startOffset > frameOffset || endOffset < frameOffset)) {
-    return nullptr;
+  if (frame->IsTextFrame()) {
+    auto [startOffset, endOffset] = frame->GetOffsets();
+    if (startOffset > frameOffset || endOffset < frameOffset) {
+      return nullptr;
+    }
   }
 
+  if (aCaretColor) {
+    *aCaretColor = frame->GetCaretColorAt(frameOffset);
+  }
+
+  ComputeCaretRects(frame, frameOffset, aCaretRect, aHookRect);
+  return MapToContainingBlock(frame, aCaretRect, aHookRect);
+}
+
+nsIFrame* nsCaret::GetPaintGeometry(nsRect* aRect) {
   nsRect caretRect;
   nsRect hookRect;
-  ComputeCaretRects(frame, frameOffset, &caretRect, &hookRect);
-
+  nsIFrame* frame = GetPaintGeometry(&caretRect, &hookRect);
   aRect->UnionRect(caretRect, hookRect);
   return frame;
 }
 
-nsIFrame* nsCaret::GetFrame(int32_t* aContentOffset) {
-  return GetFrameAndOffset(GetSelection(), mOverrideContent, mOverrideOffset,
-                           aContentOffset);
-}
-
 void nsCaret::PaintCaret(DrawTarget& aDrawTarget, nsIFrame* aForFrame,
                          const nsPoint& aOffset) {
-  int32_t contentOffset;
-  nsIFrame* frame = GetFrame(&contentOffset);
+  nsRect caretRect;
+  nsRect hookRect;
+  nscolor color;
+  nsIFrame* frame = GetPaintGeometry(&caretRect, &hookRect, &color);
+  MOZ_ASSERT(frame == aForFrame, "We're referring different frame");
+
   if (!frame) {
     return;
   }
-  NS_ASSERTION(frame == aForFrame, "We're referring different frame");
 
   int32_t appUnitsPerDevPixel = frame->PresContext()->AppUnitsPerDevPixel();
-
-  nsRect caretRect;
-  nsRect hookRect;
-  ComputeCaretRects(frame, contentOffset, &caretRect, &hookRect);
-
   Rect devPxCaretRect = NSRectToSnappedRect(caretRect + aOffset,
                                             appUnitsPerDevPixel, aDrawTarget);
   Rect devPxHookRect =
       NSRectToSnappedRect(hookRect + aOffset, appUnitsPerDevPixel, aDrawTarget);
-  ColorPattern color(ToDeviceColor(frame->GetCaretColorAt(contentOffset)));
 
-  aDrawTarget.FillRect(devPxCaretRect, color);
+  ColorPattern pattern(ToDeviceColor(color));
+  aDrawTarget.FillRect(devPxCaretRect, pattern);
   if (!hookRect.IsEmpty()) {
-    aDrawTarget.FillRect(devPxHookRect, color);
+    aDrawTarget.FillRect(devPxHookRect, pattern);
   }
 }
 
@@ -591,7 +628,7 @@ void nsCaret::ResetBlinking() {
   }
 
   if (blinkRate > 0) {
-    mBlinkCount = Preferences::GetInt("ui.caretBlinkCount", -1);
+    mBlinkCount = LookAndFeel::GetInt(LookAndFeel::IntID::CaretBlinkCount, -1);
     mBlinkTimer->InitWithNamedFuncCallback(CaretBlinkCallback, this, blinkRate,
                                            nsITimer::TYPE_REPEATING_SLACK,
                                            "nsCaret::CaretBlinkCallback_timer");
@@ -636,11 +673,15 @@ nsIFrame* nsCaret::GetCaretFrameForNodeOffset(
     *aReturnUnadjustedFrame = theFrame;
   }
 
-  // if theFrame is after a text frame that's logically at the end of the line
-  // (e.g. if theFrame is a <br> frame), then put the caret at the end of
-  // that text frame instead. This way, the caret will be positioned as if
-  // trailing whitespace was not trimmed.
-  AdjustCaretFrameForLineEnd(&theFrame, &theFrameOffset);
+  if (nsFrameSelection::AdjustFrameForLineStart(theFrame, theFrameOffset)) {
+    aFrameSelection->SetHint(CARET_ASSOCIATE_AFTER);
+  } else {
+    // if theFrame is after a text frame that's logically at the end of the line
+    // (e.g. if theFrame is a <br> frame), then put the caret at the end of
+    // that text frame instead. This way, the caret will be positioned as if
+    // trailing whitespace was not trimmed.
+    AdjustCaretFrameForLineEnd(&theFrame, &theFrameOffset);
+  }
 
   // Mamdouh : modification of the caret to work at rtl and ltr with Bidi
   //
@@ -653,14 +694,12 @@ nsIFrame* nsCaret::GetCaretFrameForNodeOffset(
       aBidiLevel = theFrame->GetEmbeddingLevel();
     }
 
-    int32_t start;
-    int32_t end;
     nsIFrame* frameBefore;
     nsIFrame* frameAfter;
     nsBidiLevel levelBefore;  // Bidi level of the character before the caret
     nsBidiLevel levelAfter;   // Bidi level of the character after the caret
 
-    theFrame->GetOffsets(start, end);
+    auto [start, end] = theFrame->GetOffsets();
     if (start == 0 || end == 0 || start == theFrameOffset ||
         end == theFrameOffset) {
       nsPrevNextBidiLevels levels =
@@ -688,7 +727,7 @@ nsIFrame* nsCaret::GetCaretFrameForNodeOffset(
             if (theFrame != frameBefore) {
               if (frameBefore) {  // if there is a frameBefore, move into it
                 theFrame = frameBefore;
-                theFrame->GetOffsets(start, end);
+                std::tie(start, end) = theFrame->GetOffsets();
                 theFrameOffset = end;
               } else {
                 // if there is no frameBefore, we must be at the beginning of
@@ -718,7 +757,7 @@ nsIFrame* nsCaret::GetCaretFrameForNodeOffset(
               if (frameAfter) {
                 // if there is a frameAfter, move into it
                 theFrame = frameAfter;
-                theFrame->GetOffsets(start, end);
+                std::tie(start, end) = theFrame->GetOffsets();
                 theFrameOffset = start;
               } else {
                 // if there is no frameAfter, we must be at the end of the line
@@ -747,7 +786,7 @@ nsIFrame* nsCaret::GetCaretFrameForNodeOffset(
                      !IS_SAME_DIRECTION(aBidiLevel, levelAfter)) {
             if (NS_SUCCEEDED(aFrameSelection->GetFrameFromLevel(
                     frameAfter, eDirNext, aBidiLevel, &theFrame))) {
-              theFrame->GetOffsets(start, end);
+              std::tie(start, end) = theFrame->GetOffsets();
               levelAfter = theFrame->GetEmbeddingLevel();
               if (IS_LEVEL_RTL(aBidiLevel))  // c8: caret to the right of the
                                              // rightmost character
@@ -763,7 +802,7 @@ nsIFrame* nsCaret::GetCaretFrameForNodeOffset(
                      !IS_SAME_DIRECTION(aBidiLevel, levelAfter)) {
             if (NS_SUCCEEDED(aFrameSelection->GetFrameFromLevel(
                     frameBefore, eDirPrevious, aBidiLevel, &theFrame))) {
-              theFrame->GetOffsets(start, end);
+              std::tie(start, end) = theFrame->GetOffsets();
               levelBefore = theFrame->GetEmbeddingLevel();
               if (IS_LEVEL_RTL(aBidiLevel))  // c12: caret to the left of the
                                              // leftmost character
@@ -911,7 +950,7 @@ void nsCaret::CaretBlinkCallback(nsITimer* aTimer, void* aClosure) {
   }
 
   // Track the blink count, but only at end of a blink cycle.
-  if (!theCaret->mIsBlinkOn) {
+  if (theCaret->mIsBlinkOn) {
     // If we exceeded the blink count, stop the timer.
     if (--theCaret->mBlinkCount <= 0) {
       theCaret->StopBlinking();

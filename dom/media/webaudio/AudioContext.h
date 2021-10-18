@@ -22,9 +22,9 @@
 #include "mozilla/UniquePtr.h"
 #include "nsCOMPtr.h"
 #include "nsCycleCollectionParticipant.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsHashKeys.h"
-#include "nsTHashtable.h"
+#include "nsTHashSet.h"
 #include "js/TypeDecls.h"
 #include "nsIMemoryReporter.h"
 
@@ -52,6 +52,7 @@ class AudioDestinationNode;
 class AudioListener;
 class AudioNode;
 class BiquadFilterNode;
+class BrowsingContext;
 class ChannelMergerNode;
 class ChannelSplitterNode;
 class ConstantSourceNode;
@@ -118,7 +119,9 @@ class StateChangeTask final : public Runnable {
   AudioContextState mNewState;
 };
 
-enum class AudioContextOperation { Suspend, Resume, Close };
+enum class AudioContextOperation : uint8_t { Suspend, Resume, Close };
+static const char* const kAudioContextOptionsStrings[] = {"Suspend", "Resume",
+                                                          "Close"};
 // When suspending or resuming an AudioContext, some operations have to notify
 // the main thread, so that the Promise is resolved, the state is modified, and
 // the statechanged event is sent. Some other operations don't go back to the
@@ -348,7 +351,7 @@ class AudioContext final : public DOMEventTargetHelper,
                                  AudioParamDescriptorMap* aParamMap);
   const AudioParamDescriptorMap* GetParamMapForWorkletName(
       const nsAString& aName) {
-    return mWorkletParamDescriptors.GetValue(aName);
+    return mWorkletParamDescriptors.Lookup(aName).DataPtrOrNull();
   }
 
   IMPL_EVENT_HANDLER(mozinterruptbegin)
@@ -392,6 +395,15 @@ class AudioContext final : public DOMEventTargetHelper,
 
   bool CheckAudioChannelPermissions(AudioChannel aValue);
 
+  // If the pref `dom.suspend_inactive.enabled` is enabled, the dom window will
+  // be suspended when the window becomes inactive. In order to keep audio
+  // context running still, we will ask pages to keep awake in that situation.
+  void MaybeUpdatePageAwakeRequest();
+  void MaybeClearPageAwakeRequest();
+  void SetPageAwakeRequest(bool aShouldSet);
+
+  BrowsingContext* GetTopLevelBrowsingContext();
+
  private:
   // Each AudioContext has an id, that is passed down the MediaTracks that
   // back the AudioNodes, so we can easily compute the set of all the
@@ -416,11 +428,10 @@ class AudioContext final : public DOMEventTargetHelper,
   nsTArray<RefPtr<Promise>> mPendingResumePromises;
   // See RegisterActiveNode.  These will keep the AudioContext alive while it
   // is rendering and the window remains alive.
-  nsTHashtable<nsRefPtrHashKey<AudioNode>> mActiveNodes;
+  nsTHashSet<RefPtr<AudioNode>> mActiveNodes;
   // Raw (non-owning) references to all AudioNodes for this AudioContext.
-  nsTHashtable<nsPtrHashKey<AudioNode>> mAllNodes;
-  nsDataHashtable<nsStringHashKey, AudioParamDescriptorMap>
-      mWorkletParamDescriptors;
+  nsTHashSet<AudioNode*> mAllNodes;
+  nsTHashMap<nsStringHashKey, AudioParamDescriptorMap> mWorkletParamDescriptors;
   // Cache to avoid recomputing basic waveforms all the time.
   RefPtr<BasicWaveFormCache> mBasicWaveFormCache;
   // Number of channels passed in the OfflineAudioContext ctor.
@@ -452,6 +463,11 @@ class AudioContext final : public DOMEventTargetHelper,
   bool mWasEverAllowedToStart;
   bool mWasEverBlockedToStart;
   bool mWouldBeAllowedToStart;
+
+  // Whether we have set the page awake reqeust when non-offline audio context
+  // is running. That will keep the audio context being able to continue running
+  // even if the window is inactive.
+  bool mSetPageAwakeRequest = false;
 };
 
 static const dom::AudioContext::AudioContextId NO_AUDIO_CONTEXT = 0;

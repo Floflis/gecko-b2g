@@ -15,12 +15,12 @@
 namespace mozilla {
 namespace dom {
 
-class HTMLFormSubmission;
+class FormData;
 template <typename T>
 struct Nullable;
 class WindowProxyHolder;
 
-class HTMLObjectElement final : public nsGenericHTMLFormElement,
+class HTMLObjectElement final : public nsGenericHTMLFormControlElement,
                                 public nsObjectLoadingContent,
                                 public nsIConstraintValidation {
  public:
@@ -47,8 +47,9 @@ class HTMLObjectElement final : public nsGenericHTMLFormElement,
                                int32_t* aTabIndex) override;
 
   // Overriden nsIFormControl methods
-  NS_IMETHOD Reset() override;
-  NS_IMETHOD SubmitNamesValues(HTMLFormSubmission* aFormSubmission) override;
+  NS_IMETHOD Reset() override { return NS_OK; }
+
+  NS_IMETHOD SubmitNamesValues(FormData* aFormData) override { return NS_OK; }
 
   virtual void DoneAddingChildren(bool aHaveNotified) override;
   virtual bool IsDoneAddingChildren() override;
@@ -73,7 +74,7 @@ class HTMLObjectElement final : public nsGenericHTMLFormElement,
   void StartObjectLoad() { StartObjectLoad(true, false); }
 
   NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(HTMLObjectElement,
-                                           nsGenericHTMLFormElement)
+                                           nsGenericHTMLFormControlElement)
 
   // Web IDL binding methods
   void GetData(DOMString& aValue) {
@@ -94,7 +95,6 @@ class HTMLObjectElement final : public nsGenericHTMLFormElement,
   void SetUseMap(const nsAString& aValue, ErrorResult& aRv) {
     SetHTMLAttr(nsGkAtoms::usemap, aValue, aRv);
   }
-  using nsGenericHTMLFormElement::GetForm;
   void GetWidth(DOMString& aValue) { GetHTMLAttr(nsGkAtoms::width, aValue); }
   void SetWidth(const nsAString& aValue, ErrorResult& aRv) {
     SetHTMLAttr(nsGkAtoms::width, aValue, aRv);

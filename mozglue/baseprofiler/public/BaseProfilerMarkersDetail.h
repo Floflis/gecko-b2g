@@ -13,18 +13,16 @@
 
 #include "mozilla/BaseProfilerMarkersPrerequisites.h"
 
-#ifdef MOZ_GECKO_PROFILER
-
 //                        ~~ HERE BE DRAGONS ~~
 //
 // Everything below is internal implementation detail, you shouldn't need to
 // look at it unless working on the profiler code.
 
-#  include "mozilla/BaseProfileJSONWriter.h"
-#  include "mozilla/ProfileBufferEntryKinds.h"
+#include "mozilla/BaseProfileJSONWriter.h"
+#include "mozilla/ProfileBufferEntryKinds.h"
 
-#  include <limits>
-#  include <tuple>
+#include <limits>
+#include <tuple>
 
 namespace mozilla::baseprofiler {
 // Implemented in platform.cpp
@@ -111,7 +109,8 @@ struct StreamFunctionTypeHelper<R(baseprofiler::SpliceableJSONWriter&, As...)> {
     // Note that options are first after the entry kind, because they contain
     // the thread id, which is handled first to filter markers by threads.
     return aBuffer.PutObjects(ProfileBufferEntryKind::Marker, aOptions, aName,
-                              aCategory, aDeserializerTag, aAs...);
+                              aCategory, aDeserializerTag,
+                              MarkerPayloadType::Cpp, aAs...);
   }
 };
 
@@ -229,7 +228,7 @@ static ProfileBufferBlockIndex AddMarkerWithOptionalStackToBuffer(
         }
         static mozilla::MarkerSchema MarkerTypeDisplay() {
           using MS = mozilla::MarkerSchema;
-          MS schema{MS::Location::markerChart, MS::Location::markerTable};
+          MS schema{MS::Location::MarkerChart, MS::Location::MarkerTable};
           // No user data to display.
           return schema;
         }
@@ -251,7 +250,8 @@ static ProfileBufferBlockIndex AddMarkerWithOptionalStackToBuffer(
 
 // Pointer to a function that can capture a backtrace into the provided
 // `ProfileChunkedBuffer`, and returns true when successful.
-using BacktraceCaptureFunction = bool (*)(ProfileChunkedBuffer&);
+using BacktraceCaptureFunction = bool (*)(ProfileChunkedBuffer&,
+                                          StackCaptureOptions);
 
 // Add a marker with the given name, options, and arguments to the given buffer.
 // Because this may be called from either Base or Gecko Profiler functions, the
@@ -271,7 +271,8 @@ ProfileBufferBlockIndex AddMarkerToBuffer(
     aOptions.Set(MarkerTiming::InstantNow());
   }
 
-  if (aOptions.Stack().IsCaptureNeeded()) {
+  StackCaptureOptions captureOptions = aOptions.Stack().CaptureOptions();
+  if (captureOptions != StackCaptureOptions::NoStack) {
     // A capture was requested, let's attempt to do it here&now. This avoids a
     // lot of allocations that would be necessary if capturing a backtrace
     // separately.
@@ -282,7 +283,9 @@ ProfileBufferBlockIndex AddMarkerToBuffer(
     ProfileChunkedBuffer chunkedBuffer(
         ProfileChunkedBuffer::ThreadSafety::WithoutMutex, chunkManager);
     aOptions.StackRef().UseRequestedBacktrace(
-        aBacktraceCaptureFunction(chunkedBuffer) ? &chunkedBuffer : nullptr);
+        aBacktraceCaptureFunction(chunkedBuffer, captureOptions)
+            ? &chunkedBuffer
+            : nullptr);
     // This call must be made from here, while chunkedBuffer is in scope.
     return AddMarkerWithOptionalStackToBuffer<MarkerType>(
         aBuffer, aName, aCategory, std::move(aOptions), aTs...);
@@ -292,19 +295,23 @@ ProfileBufferBlockIndex AddMarkerToBuffer(
       aBuffer, aName, aCategory, std::move(aOptions), aTs...);
 }
 
-template <typename StackCallback>
+template <typename StackCallback, typename RustMarkerCallback>
 [[nodiscard]] bool DeserializeAfterKindAndStream(
     ProfileBufferEntryReader& aEntryReader,
-    baseprofiler::SpliceableJSONWriter& aWriter, int aThreadIdOrZero,
-    StackCallback&& aStackCallback) {
+    baseprofiler::SpliceableJSONWriter& aWriter,
+    baseprofiler::BaseProfilerThreadId aThreadIdOrUnspecified,
+    StackCallback&& aStackCallback, RustMarkerCallback&& aRustMarkerCallback) {
   // Each entry is made up of the following:
   //   ProfileBufferEntry::Kind::Marker, <- already read by caller
   //   options,                          <- next location in entries
   //   name,
+  //   category,
+  //   deserializer tag,
+  //   payload type (cpp or rust)
   //   payload
   const MarkerOptions options = aEntryReader.ReadObject<MarkerOptions>();
-  if (aThreadIdOrZero != 0 &&
-      options.ThreadId().ThreadId() != aThreadIdOrZero) {
+  if (aThreadIdOrUnspecified.IsSpecified() &&
+      options.ThreadId().ThreadId() != aThreadIdOrUnspecified) {
     // A specific thread is being read, we're not in it.
     return false;
   }
@@ -315,10 +322,10 @@ template <typename StackCallback>
     aWriter.UniqueStringElement(aEntryReader.ReadObject<ProfilerString8View>());
 
     const double startTime = options.Timing().GetStartTime();
-    aWriter.DoubleElement(startTime);
+    aWriter.TimeDoubleMsElement(startTime);
 
     const double endTime = options.Timing().GetEndTime();
-    aWriter.DoubleElement(endTime);
+    aWriter.TimeDoubleMsElement(endTime);
 
     aWriter.IntElement(static_cast<int64_t>(options.Timing().MarkerPhase()));
 
@@ -354,12 +361,29 @@ template <typename StackCallback>
           aWriter.EndObject();
         }
 
+        auto payloadType = static_cast<mozilla::MarkerPayloadType>(
+            aEntryReader
+                .ReadObject<mozilla::MarkerPayloadTypeUnderlyingType>());
+
         // Stream the payload, including the type.
-        mozilla::base_profiler_markers_detail::Streaming::MarkerDataDeserializer
-            deserializer = mozilla::base_profiler_markers_detail::Streaming::
-                DeserializerForTag(tag);
-        MOZ_RELEASE_ASSERT(deserializer);
-        deserializer(aEntryReader, aWriter);
+        switch (payloadType) {
+          case mozilla::MarkerPayloadType::Cpp: {
+            mozilla::base_profiler_markers_detail::Streaming::
+                MarkerDataDeserializer deserializer =
+                    mozilla::base_profiler_markers_detail::Streaming::
+                        DeserializerForTag(tag);
+
+            MOZ_RELEASE_ASSERT(deserializer);
+            deserializer(aEntryReader, aWriter);
+            break;
+          }
+          case mozilla::MarkerPayloadType::Rust:
+            std::forward<RustMarkerCallback>(aRustMarkerCallback)(tag);
+            break;
+          default:
+            MOZ_ASSERT_UNREACHABLE("Unknown payload type.");
+            break;
+        }
       }
       aWriter.EndObject();
     }
@@ -402,16 +426,16 @@ struct ProfileBufferEntryWriter::Serializer<ProfilerStringView<CHAR>> {
     MOZ_RELEASE_ASSERT(
         aString.Length() < std::numeric_limits<Length>::max() / 2,
         "Double the string length doesn't fit in Length type");
-    const Length stringLength = static_cast<Length>(aString.Length());
+    const Span<const CHAR> span = aString;
     if (aString.IsLiteral()) {
       // Literal -> Length shifted left and LSB=0, then pointer.
-      aEW.WriteULEB128(stringLength << 1 | 0u);
-      aEW.WriteObject(WrapProfileBufferRawPointer(aString.Data()));
+      aEW.WriteULEB128(span.Length() << 1 | 0u);
+      aEW.WriteObject(WrapProfileBufferRawPointer(span.Elements()));
       return;
     }
     // Non-literal -> Length shifted left and LSB=1, then string size in bytes.
-    aEW.WriteULEB128(stringLength << 1 | 1u);
-    aEW.WriteBytes(aString.Data(), stringLength * sizeof(CHAR));
+    aEW.WriteULEB128(span.Length() << 1 | 1u);
+    aEW.WriteBytes(span.Elements(), span.LengthBytes());
   }
 };
 
@@ -419,25 +443,7 @@ template <typename CHAR>
 struct ProfileBufferEntryReader::Deserializer<ProfilerStringView<CHAR>> {
   static void ReadInto(ProfileBufferEntryReader& aER,
                        ProfilerStringView<CHAR>& aString) {
-    const Length lengthAndIsLiteral = aER.ReadULEB128<Length>();
-    const Length stringLength = lengthAndIsLiteral >> 1;
-    if ((lengthAndIsLiteral & 1u) == 0u) {
-      // LSB==0 -> Literal string, read the string pointer.
-      aString.mStringView = std::basic_string_view<CHAR>(
-          aER.ReadObject<const CHAR*>(), stringLength);
-      aString.mOwnership = ProfilerStringView<CHAR>::Ownership::Literal;
-      return;
-    }
-    // LSB==1 -> Not a literal string, allocate a buffer to store the string
-    // (plus terminal, for safety), and give it to the ProfilerStringView; Note
-    // that this is a secret use of ProfilerStringView, which is intended to
-    // only be used between deserialization and JSON streaming.
-    CHAR* buffer = new CHAR[stringLength + 1];
-    aER.ReadBytes(buffer, stringLength * sizeof(CHAR));
-    buffer[stringLength] = CHAR(0);
-    aString.mStringView = std::basic_string_view<CHAR>(buffer, stringLength);
-    aString.mOwnership =
-        ProfilerStringView<CHAR>::Ownership::OwnedThroughStringView;
+    aString = Read(aER);
   }
 
   static ProfilerStringView<CHAR> Read(ProfileBufferEntryReader& aER) {
@@ -449,16 +455,32 @@ struct ProfileBufferEntryReader::Deserializer<ProfilerStringView<CHAR>> {
           aER.ReadObject<const CHAR*>(), stringLength,
           ProfilerStringView<CHAR>::Ownership::Literal);
     }
-    // LSB==1 -> Not a literal string, allocate a buffer to store the string
-    // (plus terminal, for safety), and give it to the ProfilerStringView; Note
-    // that this is a secret use of ProfilerStringView, which is intended to
-    // only be used between deserialization and JSON streaming.
-    CHAR* buffer = new CHAR[stringLength + 1];
-    aER.ReadBytes(buffer, stringLength * sizeof(CHAR));
-    buffer[stringLength] = CHAR(0);
-    return ProfilerStringView<CHAR>(
-        buffer, stringLength,
-        ProfilerStringView<CHAR>::Ownership::OwnedThroughStringView);
+    // LSB==1 -> Not a literal string.
+    ProfileBufferEntryReader::DoubleSpanOfConstBytes spans =
+        aER.ReadSpans(stringLength * sizeof(CHAR));
+    if (MOZ_LIKELY(spans.IsSingleSpan()) &&
+        reinterpret_cast<uintptr_t>(spans.mFirstOrOnly.Elements()) %
+                alignof(CHAR) ==
+            0u) {
+      // Only a single span, correctly aligned for the CHAR type, we can just
+      // refer to it directly, assuming that this ProfilerStringView will not
+      // outlive the chunk.
+      return ProfilerStringView<CHAR>(
+          reinterpret_cast<const CHAR*>(spans.mFirstOrOnly.Elements()),
+          stringLength, ProfilerStringView<CHAR>::Ownership::Reference);
+    } else {
+      // Two spans, we need to concatenate them; or one span, but misaligned.
+      // Allocate a buffer to store the string (plus terminal, for safety), and
+      // give it to the ProfilerStringView; Note that this is a secret use of
+      // ProfilerStringView, which is intended to only be used between
+      // deserialization and JSON streaming.
+      CHAR* buffer = new CHAR[stringLength + 1];
+      spans.CopyBytesTo(buffer);
+      buffer[stringLength] = CHAR(0);
+      return ProfilerStringView<CHAR>(
+          buffer, stringLength,
+          ProfilerStringView<CHAR>::Ownership::OwnedThroughStringView);
+    }
   }
 };
 
@@ -668,7 +690,5 @@ struct ProfileBufferEntryReader::Deserializer<MarkerOptions> {
 };
 
 }  // namespace mozilla
-
-#endif  // MOZ_GECKO_PROFILER
 
 #endif  // BaseProfilerMarkersDetail_h

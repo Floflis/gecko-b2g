@@ -8,11 +8,11 @@ import os
 
 import pytest
 import yaml
-from mock import MagicMock
+from unittest.mock import MagicMock
 from moztest.resolve import TestResolver
-from taskgraph.graph import Graph
-from taskgraph.task import Task
-from taskgraph.taskgraph import TaskGraph
+from gecko_taskgraph.graph import Graph
+from gecko_taskgraph.task import Task
+from gecko_taskgraph.taskgraph import TaskGraph
 
 from tryselect import push
 
@@ -56,11 +56,11 @@ def patch_vcs(monkeypatch):
 
 @pytest.fixture(scope="session")
 def run_mach():
-    import mach_bootstrap
+    import mach_initialize
     from mach.config import ConfigSettings
     from tryselect.tasks import build
 
-    mach = mach_bootstrap.bootstrap(build.topsrcdir)
+    mach = mach_initialize.initialize(build.topsrcdir)
 
     def inner(args):
         mach.settings = ConfigSettings()

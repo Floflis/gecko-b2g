@@ -318,6 +318,15 @@ class BackgroundParentImpl : public PBackgroundParent,
   mozilla::ipc::IPCResult RecvRemoveBackgroundSessionStorageManager(
       const uint64_t& aTopContextId) override;
 
+  mozilla::ipc::IPCResult RecvLoadSessionStorageManagerData(
+      const uint64_t& aTopContextId,
+      nsTArray<mozilla::dom::SSCacheCopy>&& aOriginCacheCopy) override;
+
+  mozilla::ipc::IPCResult RecvGetSessionStorageManagerData(
+      const uint64_t& aTopContextId, const uint32_t& aSizeLimit,
+      const bool& aCancelSessionStoreTimer,
+      GetSessionStorageManagerDataResolver&& aResolver) override;
+
   already_AddRefed<PFileSystemRequestParent> AllocPFileSystemRequestParent(
       const FileSystemParams&) override;
 
@@ -365,6 +374,9 @@ class BackgroundParentImpl : public PBackgroundParent,
   already_AddRefed<PServiceWorkerParent> AllocPServiceWorkerParent(
       const IPCServiceWorkerDescriptor&) final;
 
+  mozilla::ipc::IPCResult RecvPServiceWorkerManagerConstructor(
+      PServiceWorkerManagerParent* aActor) override;
+
   mozilla::ipc::IPCResult RecvPServiceWorkerConstructor(
       PServiceWorkerParent* aActor,
       const IPCServiceWorkerDescriptor& aDescriptor) override;
@@ -403,6 +415,11 @@ class BackgroundParentImpl : public PBackgroundParent,
   dom::PMediaTransportParent* AllocPMediaTransportParent() override;
   bool DeallocPMediaTransportParent(
       dom::PMediaTransportParent* aActor) override;
+
+  already_AddRefed<mozilla::net::PWebSocketConnectionParent>
+  AllocPWebSocketConnectionParent(const uint32_t& aListenerId) override;
+  mozilla::ipc::IPCResult RecvPWebSocketConnectionConstructor(
+      PWebSocketConnectionParent* actor, const uint32_t& aListenerId) override;
 };
 
 }  // namespace ipc

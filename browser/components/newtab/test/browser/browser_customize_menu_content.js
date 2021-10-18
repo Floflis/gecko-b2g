@@ -3,19 +3,15 @@
 test_newtab({
   async before({ pushPrefs }) {
     await pushPrefs(
-      ["browser.newtabpage.activity-stream.newNewtabExperience.enabled", true],
-      ["browser.newtabpage.activity-stream.customizationMenu.enabled", true],
       ["browser.newtabpage.activity-stream.feeds.topsites", false],
       ["browser.newtabpage.activity-stream.feeds.section.topstories", false],
-      ["browser.newtabpage.activity-stream.feeds.section.highlights", false],
-      ["browser.newtabpage.activity-stream.feeds.snippets", false]
+      ["browser.newtabpage.activity-stream.feeds.section.highlights", false]
     );
   },
   test: async function test_render_customizeMenu() {
     const TOPSITES_PREF = "browser.newtabpage.activity-stream.feeds.topsites";
     const HIGHLIGHTS_PREF =
       "browser.newtabpage.activity-stream.feeds.section.highlights";
-    const SNIPPETS_PREF = "browser.newtabpage.activity-stream.feeds.snippets";
     const TOPSTORIES_PREF =
       "browser.newtabpage.activity-stream.feeds.section.topstories";
 
@@ -110,38 +106,8 @@ test_newtab({
       content.document.querySelector("section[data-section-id='highlights']"),
       "Highlights section is rendered"
     );
-
-    // Test that clicking the snippets toggle will flip the snippets pref
-    // note: Snippets are disabled in tests.
-    let snippetsSwitch = content.document.querySelector(
-      "#snippets-section .switch"
-    );
-    Assert.ok(
-      !Services.prefs.getBoolPref(SNIPPETS_PREF),
-      "Snippets pref is turned off"
-    );
-
-    prefPromise = ContentTaskUtils.waitForCondition(
-      () => Services.prefs.getBoolPref(SNIPPETS_PREF),
-      "Snippets pref is turned on after click"
-    );
-    snippetsSwitch.click();
-    await prefPromise;
-
-    prefPromise = ContentTaskUtils.waitForCondition(
-      () => !Services.prefs.getBoolPref(SNIPPETS_PREF),
-      "Snippets pref is turned on after click"
-    );
-    snippetsSwitch.click();
-    await prefPromise;
   },
   async after() {
-    Services.prefs.clearUserPref(
-      "browser.newtabpage.activity-stream.newNewtabExperience.enabled"
-    );
-    Services.prefs.clearUserPref(
-      "browser.newtabpage.activity-stream.customizationMenu.enabled"
-    );
     Services.prefs.clearUserPref(
       "browser.newtabpage.activity-stream.feeds.topsites"
     );
@@ -151,19 +117,10 @@ test_newtab({
     Services.prefs.clearUserPref(
       "browser.newtabpage.activity-stream.feeds.section.highlights"
     );
-    Services.prefs.clearUserPref(
-      "browser.newtabpage.activity-stream.feeds.snippets"
-    );
   },
 });
 
 test_newtab({
-  async before({ pushPrefs }) {
-    await pushPrefs([
-      "browser.newtabpage.activity-stream.newNewtabExperience.enabled",
-      true,
-    ]);
-  },
   test: async function test_open_close_customizeMenu() {
     const EventUtils = ContentTaskUtils.getEventUtils(content);
     await ContentTaskUtils.waitForCondition(
@@ -183,6 +140,19 @@ test_newtab({
       "Customize Menu should be visible on screen"
     );
 
+    await ContentTaskUtils.waitForCondition(
+      () => content.document.activeElement.classList.contains("close-button"),
+      "Close button should be focused when menu becomes visible"
+    );
+
+    await ContentTaskUtils.waitForCondition(
+      () =>
+        content.getComputedStyle(
+          content.document.querySelector(".personalize-button")
+        ).visibility === "hidden",
+      "Personalize button should become hidden"
+    );
+
     // Test close button.
     let closeButton = content.document.querySelector(".close-button");
     closeButton.click();
@@ -192,6 +162,20 @@ test_newtab({
           content.document.querySelector(".customize-menu")
         ).transform !== defaultPos,
       "Customize Menu should not be visible anymore"
+    );
+
+    await ContentTaskUtils.waitForCondition(
+      () =>
+        content.document.activeElement.classList.contains("personalize-button"),
+      "Personalize button should be focused when menu closes"
+    );
+
+    await ContentTaskUtils.waitForCondition(
+      () =>
+        content.getComputedStyle(
+          content.document.querySelector(".personalize-button")
+        ).visibility === "visible",
+      "Personalize button should become visible"
     );
 
     // Reopen the customize menu
@@ -233,11 +217,6 @@ test_newtab({
           content.document.querySelector(".customize-menu")
         ).transform !== defaultPos,
       "Customize Menu should not be visible anymore"
-    );
-  },
-  async after() {
-    Services.prefs.clearUserPref(
-      "browser.newtabpage.activity-stream.newNewtabExperience.enabled"
     );
   },
 });

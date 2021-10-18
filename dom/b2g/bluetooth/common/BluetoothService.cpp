@@ -22,6 +22,7 @@
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/bluetooth/BluetoothTypes.h"
+#include "nsComponentManagerUtils.h"
 #include "nsContentUtils.h"
 #include "nsIObserverService.h"
 #include "nsITimer.h"
@@ -34,7 +35,7 @@
 
 #if defined(MOZ_B2G_BT_DAEMON)
 #  include "BluetoothServiceBluedroid.h"
-#else
+#elif !defined(ENABLE_TESTS)
 #  error No backend
 #endif
 
@@ -163,8 +164,7 @@ void BluetoothService::RegisterBluetoothSignalHandler(
 
   BluetoothSignalObserverList* ol;
   if (!mBluetoothSignalObserverTable.Get(aNodeName, &ol)) {
-    ol = new BluetoothSignalObserverList();
-    mBluetoothSignalObserverTable.Put(aNodeName, ol);
+    ol = mBluetoothSignalObserverTable.InsertOrUpdate(aNodeName, MakeUnique<BluetoothSignalObserverList>()).get();
   }
 
   ol->AddObserver(aHandler);

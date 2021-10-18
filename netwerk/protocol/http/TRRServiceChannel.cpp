@@ -88,7 +88,6 @@ NS_INTERFACE_MAP_END_INHERITING(HttpBaseChannel)
 
 TRRServiceChannel::TRRServiceChannel()
     : HttpAsyncAborter<TRRServiceChannel>(this),
-      mPushedStreamId(0),
       mProxyRequest(nullptr, "TRRServiceChannel::mProxyRequest"),
       mCurrentEventTarget(GetCurrentEventTarget()) {
   LOG(("TRRServiceChannel ctor [this=%p]\n", this));
@@ -382,9 +381,7 @@ nsresult TRRServiceChannel::BeginConnect() {
   // TODO: Bug 1622778 for using AltService in socket process.
   StoreAllowAltSvc(XRE_IsParentProcess() && LoadAllowAltSvc());
   bool http2Allowed = !gHttpHandler->IsHttp2Excluded(connInfo);
-  bool http3Allowed = !mUpgradeProtocolCallback && !mProxyInfo &&
-                      !(mCaps & NS_HTTP_BE_CONSERVATIVE) &&
-                      !LoadBeConservative();
+  bool http3Allowed = Http3Allowed();
 
   RefPtr<AltSvcMapping> mapping;
   if (!mConnectionInfo && LoadAllowAltSvc() &&  // per channel
@@ -445,8 +442,9 @@ nsresult TRRServiceChannel::BeginConnect() {
   // Adjust mCaps according to our request headers:
   //  - If "Connection: close" is set as a request header, then do not bother
   //    trying to establish a keep-alive connection.
-  if (mRequestHead.HasHeaderValue(nsHttp::Connection, "close"))
+  if (mRequestHead.HasHeaderValue(nsHttp::Connection, "close")) {
     mCaps &= ~(NS_HTTP_ALLOW_KEEPALIVE);
+  }
 
   if (gHttpHandler->CriticalRequestPrioritization()) {
     if (mClassOfService & nsIClassOfService::Leader) {
@@ -496,11 +494,13 @@ nsresult TRRServiceChannel::ContinueOnBeforeConnect() {
   LOG(("TRRServiceChannel::ContinueOnBeforeConnect [this=%p]\n", this));
 
   // ensure that we are using a valid hostname
-  if (!net_IsValidHostName(nsDependentCString(mConnectionInfo->Origin())))
+  if (!net_IsValidHostName(nsDependentCString(mConnectionInfo->Origin()))) {
     return NS_ERROR_UNKNOWN_HOST;
+  }
 
   if (LoadIsTRRServiceChannel()) {
     mCaps |= NS_HTTP_LARGE_KEEPALIVE;
+    mCaps |= NS_HTTP_DISALLOW_HTTPS_RR;
   }
 
   mCaps |= NS_HTTP_TRR_FLAGS_FROM_MODE(nsIRequest::GetTRRMode());
@@ -668,10 +668,10 @@ nsresult TRRServiceChannel::SetupTransaction() {
   rv = mTransaction->Init(
       mCaps, mConnectionInfo, &mRequestHead, mUploadStream, mReqContentLength,
       LoadUploadStreamHasHeaders(), mCurrentEventTarget, callbacks, this,
-      mTopLevelOuterContentWindowId, HttpTrafficCategory::eInvalid,
-      mRequestContext, mClassOfService, mInitialRwin,
-      LoadResponseTimeoutEnabled(), mChannelId, nullptr,
-      std::move(pushCallback), mTransWithPushedStream, mPushedStreamId);
+      mTopBrowsingContextId, HttpTrafficCategory::eInvalid, mRequestContext,
+      mClassOfService, mInitialRwin, LoadResponseTimeoutEnabled(), mChannelId,
+      nullptr, std::move(pushCallback), mTransWithPushedStream,
+      mPushedStreamId);
 
   mTransWithPushedStream = nullptr;
 
@@ -805,8 +805,9 @@ nsresult TRRServiceChannel::CallOnStartRequest() {
     StoreOnStartRequestCalled(true);
   });
 
-  if (mResponseHead && !mResponseHead->HasContentCharset())
+  if (mResponseHead && !mResponseHead->HasContentCharset()) {
     mResponseHead->SetContentCharset(mContentCharsetHint);
+  }
 
   LOG(("  calling mListener->OnStartRequest [this=%p, listener=%p]\n", this,
        mListener.get()));
@@ -1151,6 +1152,12 @@ nsresult TRRServiceChannel::SetupReplacementChannel(nsIURI* aNewURI,
     encodedChannel->SetApplyConversion(LoadApplyConversion());
   }
 
+  // mContentTypeHint is empty when this channel is used to download
+  // ODoHConfigs.
+  if (mContentTypeHint.IsEmpty()) {
+    return NS_OK;
+  }
+
   // Make sure we set content-type on the old channel properly.
   MOZ_ASSERT(mContentTypeHint.Equals("application/dns-message") ||
              mContentTypeHint.Equals("application/oblivious-dns-message"));
@@ -1265,11 +1272,6 @@ TRRServiceChannel::LogMimeTypeMismatch(const nsACString& aMessageName,
 }
 
 NS_IMETHODIMP
-TRRServiceChannel::SetupFallbackChannel(const char* aFallbackKey) {
-  return NS_ERROR_NOT_IMPLEMENTED;
-}
-
-NS_IMETHODIMP
 TRRServiceChannel::GetIsAuthChannel(bool* aIsAuthChannel) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -1336,10 +1338,11 @@ void TRRServiceChannel::DoAsyncAbort(nsresult aStatus) {
 
 NS_IMETHODIMP
 TRRServiceChannel::GetProxyInfo(nsIProxyInfo** result) {
-  if (!mConnectionInfo)
+  if (!mConnectionInfo) {
     *result = mProxyInfo;
-  else
+  } else {
     *result = mConnectionInfo->ProxyInfo();
+  }
   NS_IF_ADDREF(*result);
   return NS_OK;
 }
@@ -1360,8 +1363,7 @@ TRRServiceChannel::GetLoadFlags(nsLoadFlags* aLoadFlags) {
 NS_IMETHODIMP
 TRRServiceChannel::SetLoadFlags(nsLoadFlags aLoadFlags) {
   if (aLoadFlags & (nsICachingChannel::LOAD_ONLY_FROM_CACHE | LOAD_FROM_CACHE |
-                    nsICachingChannel::LOAD_NO_NETWORK_IO |
-                    nsICachingChannel::LOAD_CHECK_OFFLINE_CACHE)) {
+                    nsICachingChannel::LOAD_NO_NETWORK_IO)) {
     MOZ_ASSERT(false, "Wrong load flags!");
     return NS_ERROR_FAILURE;
   }
@@ -1430,82 +1432,91 @@ void TRRServiceChannel::DoNotifyListenerCleanup() {}
 
 NS_IMETHODIMP
 TRRServiceChannel::GetDomainLookupStart(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetDomainLookupStart();
-  else
+  } else {
     *_retval = mTransactionTimings.domainLookupStart;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetDomainLookupEnd(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetDomainLookupEnd();
-  else
+  } else {
     *_retval = mTransactionTimings.domainLookupEnd;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetConnectStart(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetConnectStart();
-  else
+  } else {
     *_retval = mTransactionTimings.connectStart;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetTcpConnectEnd(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetTcpConnectEnd();
-  else
+  } else {
     *_retval = mTransactionTimings.tcpConnectEnd;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetSecureConnectionStart(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetSecureConnectionStart();
-  else
+  } else {
     *_retval = mTransactionTimings.secureConnectionStart;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetConnectEnd(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetConnectEnd();
-  else
+  } else {
     *_retval = mTransactionTimings.connectEnd;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetRequestStart(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetRequestStart();
-  else
+  } else {
     *_retval = mTransactionTimings.requestStart;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetResponseStart(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetResponseStart();
-  else
+  } else {
     *_retval = mTransactionTimings.responseStart;
+  }
   return NS_OK;
 }
 
 NS_IMETHODIMP
 TRRServiceChannel::GetResponseEnd(TimeStamp* _retval) {
-  if (mTransaction)
+  if (mTransaction) {
     *_retval = mTransaction->GetResponseEnd();
-  else
+  } else {
     *_retval = mTransactionTimings.responseEnd;
+  }
   return NS_OK;
 }
 

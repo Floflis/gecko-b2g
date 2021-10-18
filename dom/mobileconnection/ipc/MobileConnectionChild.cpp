@@ -46,7 +46,7 @@ void MobileConnectionChild::Init() {
 
   nsCOMPtr<nsIMobileSignalStrength> signalStrength =
       dont_AddRef(rawSignalStrength);
-  mSingalStrength = new MobileSignalStrength(nullptr);
+  mSingalStrength = new MobileSignalStrength();
   mSingalStrength->Update(signalStrength);
 
   nsCOMPtr<nsIMobileDeviceIdentities> deviceIdentities =
@@ -134,7 +134,12 @@ MobileConnectionChild::GetSupportedNetworkTypes(int32_t** aTypes,
   NS_ENSURE_ARG(aTypes);
   NS_ENSURE_ARG(aLength);
 
-  SendGetSupportedNetworkTypes(&mSupportedNetworkTypes);
+  // Currently the support network type get from property in gecko layer.
+  // Therefore, only get those value one time.
+  // Need to change this design, if the support network type will change.
+  if (mSupportedNetworkTypes.IsEmpty()) {
+    SendGetSupportedNetworkTypes(&mSupportedNetworkTypes);
+  }
 
   *aLength = mSupportedNetworkTypes.Length();
   *aTypes = static_cast<int32_t*>(moz_xmalloc((*aLength) * sizeof(int32_t)));
@@ -365,6 +370,12 @@ MobileConnectionChild::GetIdentities(nsIMobileConnectionCallback* aCallback) {
   return SendRequest(GetDeviceIdentitiesRequest(), aCallback)
              ? NS_OK
              : NS_ERROR_FAILURE;
+}
+
+NS_IMETHODIMP
+MobileConnectionChild::StopNetworkScan(nsIMobileConnectionCallback* aCallback) {
+  return SendRequest(StopNetworkScanRequest(), aCallback) ? NS_OK
+                                                      : NS_ERROR_FAILURE;
 }
 
 bool MobileConnectionChild::SendRequest(

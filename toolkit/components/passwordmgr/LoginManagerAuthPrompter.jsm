@@ -13,6 +13,13 @@ const { PromptUtils } = ChromeUtils.import(
   "resource://gre/modules/SharedPromptUtils.jsm"
 );
 
+XPCOMUtils.defineLazyServiceGetter(
+  this,
+  "gPrompterService",
+  "@mozilla.org/login-manager/prompter;1",
+  Ci.nsILoginManagerPrompter
+);
+
 /* eslint-disable block-scoped-var, no-var */
 
 ChromeUtils.defineModuleGetter(
@@ -110,6 +117,7 @@ LoginManagerAuthPromptFactory.prototype = {
   // This enables us to consolidate auth prompts with the same browser and
   // hashkey (level, origin, realm).
   _pendingPrompts: new WeakMap(),
+  _pendingSavePrompts: new WeakMap(),
   // We use a separate bucket for when we don't have a browser.
   // _noBrowser -> hashkey -> prompt
   _noBrowser: {},
@@ -132,7 +140,25 @@ LoginManagerAuthPromptFactory.prototype = {
   },
 
   getPendingPrompt(browser, hashKey) {
-    return this._pendingPrompts.get(browser || this._noBrowser)?.get(hashKey);
+    // If there is already a matching auth prompt which has no browser
+    // associated we can reuse it. This way we avoid showing tab level prompts
+    // when there is already a pending window prompt.
+    let pendingNoBrowserPrompt = this._pendingPrompts
+      .get(this._noBrowser)
+      ?.get(hashKey);
+    if (pendingNoBrowserPrompt) {
+      return pendingNoBrowserPrompt;
+    }
+    return this._pendingPrompts.get(browser)?.get(hashKey);
+  },
+
+  _dismissPendingSavePrompt(browser) {
+    this._pendingSavePrompts.get(browser)?.dismiss();
+    this._pendingSavePrompts.delete(browser);
+  },
+
+  _setPendingSavePrompt(browser, prompt) {
+    this._pendingSavePrompts.set(browser, prompt);
   },
 
   _setPendingPrompt(prompt, hashKey) {
@@ -279,7 +305,6 @@ LoginManagerAuthPrompter.prototype = {
   _factory: null,
   _chromeWindow: null,
   _browser: null,
-  _openerBrowser: null,
 
   __strBundle: null, // String bundle for L10N
   get _strBundle() {
@@ -389,23 +414,16 @@ LoginManagerAuthPrompter.prototype = {
     }
 
     let foundLogins = null;
+    let canRememberLogin = false;
     var selectedLogin = null;
-    var checkBox = { value: false };
-    var checkBoxLabel = null;
     var [origin, realm, unused] = this._getRealmInfo(aPasswordRealm);
 
     // If origin is null, we can't save this login.
     if (origin) {
-      var canRememberLogin = false;
       if (this._allowRememberLogin) {
         canRememberLogin =
           aSavePassword == Ci.nsIAuthPrompt.SAVE_PASSWORD_PERMANENTLY &&
           Services.logins.getLoginSavingEnabled(origin);
-      }
-
-      // if checkBoxLabel is null, the checkbox won't be shown at all.
-      if (canRememberLogin) {
-        checkBoxLabel = this._getLocalizedString("rememberPassword");
       }
 
       // Look for existing logins.
@@ -427,7 +445,6 @@ LoginManagerAuthPrompter.prototype = {
         }
 
         if (selectedLogin) {
-          checkBox.value = true;
           aUsername.value = selectedLogin.username;
           // If the caller provided a password, prefer it.
           if (!aPassword.value) {
@@ -443,12 +460,10 @@ LoginManagerAuthPrompter.prototype = {
       aDialogTitle,
       aText,
       aUsername,
-      aPassword,
-      checkBoxLabel,
-      checkBox
+      aPassword
     );
 
-    if (!ok || !checkBox.value || !origin) {
+    if (!ok || !canRememberLogin) {
       return ok;
     }
 
@@ -516,23 +531,16 @@ LoginManagerAuthPrompter.prototype = {
       );
     }
 
-    var checkBox = { value: false };
-    var checkBoxLabel = null;
     var [origin, realm, username] = this._getRealmInfo(aPasswordRealm);
 
     username = decodeURIComponent(username);
 
+    let canRememberLogin = false;
     // If origin is null, we can't save this login.
     if (origin && !this._inPrivateBrowsing) {
-      var canRememberLogin =
+      canRememberLogin =
         aSavePassword == Ci.nsIAuthPrompt.SAVE_PASSWORD_PERMANENTLY &&
         Services.logins.getLoginSavingEnabled(origin);
-
-      // if checkBoxLabel is null, the checkbox won't be shown at all.
-      if (canRememberLogin) {
-        checkBoxLabel = this._getLocalizedString("rememberPassword");
-      }
-
       if (!aPassword.value) {
         // Look for existing logins.
         var foundLogins = Services.logins.findLogins(origin, null, realm);
@@ -555,12 +563,10 @@ LoginManagerAuthPrompter.prototype = {
       this._chromeWindow,
       aDialogTitle,
       aText,
-      aPassword,
-      checkBoxLabel,
-      checkBox
+      aPassword
     );
 
-    if (ok && checkBox.value && origin && aPassword.value) {
+    if (ok && canRememberLogin && aPassword.value) {
       let newLogin = new LoginInfo(
         origin,
         null,
@@ -611,11 +617,8 @@ LoginManagerAuthPrompter.prototype = {
 
   async promptAuthInternal(aChannel, aLevel, aAuthInfo) {
     var selectedLogin = null;
-    var checkbox = { value: false };
-    var checkboxLabel = null;
     var epicfail = false;
     var canAutologin = false;
-    var notifyObj;
     var foundLogins;
     let autofilled = false;
 
@@ -625,12 +628,12 @@ LoginManagerAuthPrompter.prototype = {
       // If the user submits a login but it fails, we need to remove the
       // notification prompt that was displayed. Conveniently, the user will
       // be prompted for authentication again, which brings us here.
-      this._removeLoginNotifications();
+      this._factory._dismissPendingSavePrompt(this._browser);
 
       var [origin, httpRealm] = this._getAuthTarget(aChannel, aAuthInfo);
 
       // Looks for existing logins to prefill the prompt with.
-      foundLogins = LoginHelper.searchLoginsWithObject({
+      foundLogins = await Services.logins.searchLoginsAsync({
         origin,
         httpRealm,
         schemeUpgrades: LoginHelper.schemeUpgrades,
@@ -665,19 +668,11 @@ LoginManagerAuthPrompter.prototype = {
           this.log("Autologin enabled, skipping auth prompt.");
           canAutologin = true;
         }
-
-        checkbox.value = true;
       }
 
       var canRememberLogin = Services.logins.getLoginSavingEnabled(origin);
       if (!this._allowRememberLogin) {
         canRememberLogin = false;
-      }
-
-      // if checkboxLabel is null, the checkbox won't be shown at all.
-      notifyObj = this._getPopupNote();
-      if (canRememberLogin && !notifyObj) {
-        checkboxLabel = this._getLocalizedString("rememberPassword");
       }
     } catch (e) {
       // Ignore any errors and display the prompt anyway.
@@ -725,9 +720,7 @@ LoginManagerAuthPrompter.prototype = {
         LoginManagerAuthPrompter.promptAuthModalType,
         aChannel,
         aLevel,
-        aAuthInfo,
-        checkboxLabel,
-        checkbox
+        aAuthInfo
       );
     }
 
@@ -739,12 +732,7 @@ LoginManagerAuthPrompter.prototype = {
       PromptAbuseHelper.resetPromptAbuseCounter(baseDomain, browser);
     }
 
-    // If there's a notification prompt, use it to allow the user to
-    // determine if the login should be saved. If there isn't a
-    // notification prompt, only save the login if the user set the
-    // checkbox to do so.
-    var rememberLogin = notifyObj ? canRememberLogin : checkbox.value;
-    if (!ok || !rememberLogin || epicfail) {
+    if (!ok || !canRememberLogin || epicfail) {
       return ok;
     }
 
@@ -773,20 +761,12 @@ LoginManagerAuthPrompter.prototype = {
             ")"
         );
 
-        if (notifyObj) {
-          let promptBrowser = LoginHelper.getBrowserForPrompt(browser);
-          LoginManagerPrompter._showLoginCaptureDoorhanger(
-            promptBrowser,
-            newLogin,
-            "password-save",
-            {
-              dismissed: this._inPrivateBrowsing,
-            }
-          );
-          Services.obs.notifyObservers(newLogin, "passwordmgr-prompt-save");
-        } else {
-          Services.logins.addLogin(newLogin);
-        }
+        let promptBrowser = LoginHelper.getBrowserForPrompt(browser);
+        let savePrompt = gPrompterService.promptToSavePassword(
+          promptBrowser,
+          newLogin
+        );
+        this._factory._setPendingSavePrompt(promptBrowser, savePrompt);
       } else if (password != selectedLogin.password) {
         this.log(
           "Updating password for " +
@@ -797,11 +777,13 @@ LoginManagerAuthPrompter.prototype = {
             httpRealm +
             ")"
         );
-        if (notifyObj) {
-          this._showChangeLoginNotification(browser, selectedLogin, newLogin);
-        } else {
-          this._updateLogin(selectedLogin, newLogin);
-        }
+        let promptBrowser = LoginHelper.getBrowserForPrompt(browser);
+        let savePrompt = gPrompterService.promptToChangePassword(
+          promptBrowser,
+          selectedLogin,
+          newLogin
+        );
+        this._factory._setPendingSavePrompt(promptBrowser, savePrompt);
       } else {
         this.log("Login unchanged, no further action needed.");
         Services.logins.recordPasswordUse(
@@ -833,7 +815,10 @@ LoginManagerAuthPrompter.prototype = {
     this.promptAuthInternal(aChannel, aLevel, aAuthInfo)
       .then(ok => (result = ok))
       .finally(() => (closed = true));
-    Services.tm.spinEventLoopUntilOrShutdown(() => closed);
+    Services.tm.spinEventLoopUntilOrQuit(
+      "LoginManagerAuthPrompter.jsm:promptAuth",
+      () => closed
+    );
     return result;
   },
 
@@ -846,7 +831,7 @@ LoginManagerAuthPrompter.prototype = {
       // If the user submits a login but it fails, we need to remove the
       // notification prompt that was displayed. Conveniently, the user will
       // be prompted for authentication again, which brings us here.
-      this._removeLoginNotifications();
+      this._factory._dismissPendingSavePrompt(this._browser);
 
       cancelable = this._newAsyncPromptConsumer(aCallback, aContext);
 
@@ -908,7 +893,6 @@ LoginManagerAuthPrompter.prototype = {
       this._chromeWindow = win;
       this._browser = browser;
     }
-    this._openerBrowser = null;
     this._factory = aFactory || null;
 
     this.log("===== initialized =====");
@@ -920,86 +904,6 @@ LoginManagerAuthPrompter.prototype = {
 
   get browser() {
     return this._browser;
-  },
-
-  set openerBrowser(aOpenerBrowser) {
-    this._openerBrowser = aOpenerBrowser;
-  },
-
-  _removeLoginNotifications() {
-    var popupNote = this._getPopupNote();
-    if (popupNote) {
-      popupNote = popupNote.getNotification("password");
-    }
-    if (popupNote) {
-      popupNote.remove();
-    }
-  },
-
-  /**
-   * Shows the Change Password popup notification.
-   *
-   * @param aBrowser
-   *        The relevant <browser>.
-   * @param aOldLogin
-   *        The stored login we want to update.
-   * @param aNewLogin
-   *        The login object with the changes we want to make.
-   * @param dismissed
-   *        A boolean indicating if the prompt should be automatically
-   *        dismissed on being shown.
-   * @param notifySaved
-   *        A boolean value indicating whether the notification should indicate that
-   *        a login has been saved
-   */
-  _showChangeLoginNotification(
-    aBrowser,
-    aOldLogin,
-    aNewLogin,
-    dismissed = false,
-    notifySaved = false,
-    autoSavedLoginGuid = ""
-  ) {
-    let login = aOldLogin.clone();
-    login.origin = aNewLogin.origin;
-    login.formActionOrigin = aNewLogin.formActionOrigin;
-    login.password = aNewLogin.password;
-    login.username = aNewLogin.username;
-
-    let messageStringID;
-    if (
-      aOldLogin.username === "" &&
-      login.username !== "" &&
-      login.password == aOldLogin.password
-    ) {
-      // If the saved password matches the password we're prompting with then we
-      // are only prompting to let the user add a username since there was one in
-      // the form. Change the message so the purpose of the prompt is clearer.
-      messageStringID = "updateLoginMsgAddUsername";
-    }
-
-    let promptBrowser = LoginHelper.getBrowserForPrompt(aBrowser);
-    LoginManagerPrompter._showLoginCaptureDoorhanger(
-      promptBrowser,
-      login,
-      "password-change",
-      {
-        dismissed,
-        extraAttr: notifySaved ? "attention" : "",
-      },
-      {
-        notifySaved,
-        messageStringID,
-        autoSavedLoginGuid,
-      }
-    );
-
-    let oldGUID = aOldLogin.QueryInterface(Ci.nsILoginMetaInfo).guid;
-    Services.obs.notifyObservers(
-      aNewLogin,
-      "passwordmgr-prompt-change",
-      oldGUID
-    );
   },
 
   /* ---------- Internal Methods ---------- */
@@ -1039,48 +943,6 @@ LoginManagerAuthPrompter.prototype = {
     }
 
     return { win: chromeWin, browser };
-  },
-
-  _getNotifyWindow() {
-    if (this._openerBrowser) {
-      let chromeDoc = this._chromeWindow.document.documentElement;
-
-      // Check to see if the current window was opened with chrome
-      // disabled, and if so use the opener window. But if the window
-      // has been used to visit other pages (ie, has a history),
-      // assume it'll stick around and *don't* use the opener.
-      if (chromeDoc.getAttribute("chromehidden") && !this._browser.canGoBack) {
-        this.log("Using opener window for notification prompt.");
-        return {
-          win: this._openerBrowser.ownerGlobal,
-          browser: this._openerBrowser,
-        };
-      }
-    }
-
-    return {
-      win: this._chromeWindow,
-      browser: this._browser,
-    };
-  },
-
-  /**
-   * Returns the popup notification to this prompter,
-   * or null if there isn't one available.
-   */
-  _getPopupNote() {
-    let popupNote = null;
-
-    try {
-      let { win: notifyWin } = this._getNotifyWindow();
-
-      // .wrappedJSObject needed here -- see bug 422974 comment 5.
-      popupNote = notifyWin.wrappedJSObject.PopupNotifications;
-    } catch (e) {
-      this.log("Popup notifications not available on window");
-    }
-
-    return popupNote;
   },
 
   /**

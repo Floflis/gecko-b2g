@@ -6,6 +6,7 @@
 
 #include "InputEventStatistics.h"
 
+#include "mozilla/ClearOnShutdown.h"
 #include "mozilla/Preferences.h"
 #include "nsRefreshDriver.h"
 
@@ -65,4 +66,8 @@ TimeStamp InputEventStatistics::GetInputHandlingStartTime(
   return nextTickHint.value() - inputCost;
 }
 
+TimeDuration InputEventStatistics::GetMaxInputHandlingDuration() const {
+  MOZ_ASSERT(StaticPrefs::dom_input_events_strict_input_vsync_alignment());
+  return mMaxInputDuration;
+}
 }  // namespace mozilla

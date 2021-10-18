@@ -20,6 +20,10 @@
 #include <memory>
 #include <unordered_map>
 
+#ifdef MOZ_WIDGET_ANDROID
+#  include "mozilla/ProfilerLabels.h"
+#endif
+
 #if defined(MOZ_X11)
 #  define EGL_DEFAULT_DISPLAY ((EGLNativeDisplayType)mozilla::DefaultXDisplay())
 #else
@@ -65,6 +69,7 @@ enum class EGLLibExtension {
   ANGLE_device_creation_d3d11,
   ANGLE_platform_angle,
   ANGLE_platform_angle_d3d,
+  EXT_device_query,
   Max
 };
 
@@ -90,7 +95,6 @@ enum class EGLExtension {
   KHR_create_context,
   KHR_stream,
   KHR_stream_consumer_gltexture,
-  EXT_device_query,
   NV_stream_consumer_gltexture_yuv,
   ANGLE_stream_producer_d3d_texture,
   KHR_surfaceless_context,
@@ -757,7 +761,7 @@ class EglDisplay final {
 
   // EXT_device_query
   EGLBoolean fQueryDisplayAttribEXT(EGLint attribute, EGLAttrib* value) const {
-    MOZ_ASSERT(IsExtensionSupported(EGLExtension::EXT_device_query));
+    MOZ_ASSERT(mLib->IsExtensionSupported(EGLLibExtension::EXT_device_query));
     return mLib->fQueryDisplayAttribEXT(mDisplay, attribute, value);
   }
 

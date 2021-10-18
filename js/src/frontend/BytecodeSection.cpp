@@ -9,10 +9,10 @@
 #include "mozilla/Assertions.h"       // MOZ_ASSERT
 #include "mozilla/ReverseIterator.h"  // mozilla::Reversed
 
-#include "frontend/AbstractScopePtr.h"  // ScopeIndex
-#include "frontend/CompilationInfo.h"
-#include "frontend/SharedContext.h"  // FunctionBox
-#include "vm/BytecodeUtil.h"         // INDEX_LIMIT, StackUses, StackDefs
+#include "frontend/AbstractScopePtr.h"    // ScopeIndex
+#include "frontend/CompilationStencil.h"  // CompilationStencil
+#include "frontend/SharedContext.h"       // FunctionBox
+#include "vm/BytecodeUtil.h"              // INDEX_LIMIT, StackUses, StackDefs
 #include "vm/GlobalObject.h"
 #include "vm/JSContext.h"     // JSContext
 #include "vm/RegExpObject.h"  // RegexpObject
@@ -36,9 +36,7 @@ AbstractScopePtr GCThingList::getScope(size_t index) const {
   if (elem.isEmptyGlobalScope()) {
     // The empty enclosing scope should be stored by
     // CompilationInput::initForSelfHostingGlobal.
-    MOZ_ASSERT(stencil.input.enclosingScope);
-    MOZ_ASSERT(!stencil.input.enclosingScope->as<GlobalScope>().hasBindings());
-    return AbstractScopePtr(stencil.input.enclosingScope);
+    return AbstractScopePtr::compilationEnclosingScope(compilationState);
   }
   return AbstractScopePtr(compilationState, elem.toScope());
 }
@@ -51,24 +49,27 @@ mozilla::Maybe<ScopeIndex> GCThingList::getScopeIndex(size_t index) const {
   return mozilla::Some(vector[index].toScope());
 }
 
+TaggedParserAtomIndex GCThingList::getAtom(size_t index) const {
+  const TaggedScriptThingIndex& elem = vector[index];
+  return elem.toAtom();
+}
+
 bool js::frontend::EmitScriptThingsVector(
-    JSContext* cx, const CompilationInput& input,
-    const BaseCompilationStencil& stencil, CompilationGCOutput& gcOutput,
+    JSContext* cx, const CompilationAtomCache& atomCache,
+    const CompilationStencil& stencil, CompilationGCOutput& gcOutput,
     mozilla::Span<const TaggedScriptThingIndex> things,
     mozilla::Span<JS::GCCellPtr> output) {
   MOZ_ASSERT(things.size() <= INDEX_LIMIT);
   MOZ_ASSERT(things.size() == output.size());
-
-  const auto& atomCache = input.atomCache;
 
   for (uint32_t i = 0; i < things.size(); i++) {
     const auto& thing = things[i];
     switch (thing.tag()) {
       case TaggedScriptThingIndex::Kind::ParserAtomIndex:
       case TaggedScriptThingIndex::Kind::WellKnown: {
-        JSAtom* atom = atomCache.getExistingAtomAt(cx, thing.toAtom());
-        MOZ_ASSERT(atom);
-        output[i] = JS::GCCellPtr(atom);
+        JSString* str = atomCache.getExistingStringAt(cx, thing.toAtom());
+        MOZ_ASSERT(str);
+        output[i] = JS::GCCellPtr(str);
         break;
       }
       case TaggedScriptThingIndex::Kind::Null:
@@ -86,11 +87,11 @@ bool js::frontend::EmitScriptThingsVector(
       case TaggedScriptThingIndex::Kind::ObjLiteral: {
         const ObjLiteralStencil& data =
             stencil.objLiteralData[thing.toObjLiteral()];
-        JSObject* obj = data.create(cx, atomCache);
-        if (!obj) {
+        JS::GCCellPtr ptr = data.create(cx, atomCache);
+        if (!ptr) {
           return false;
         }
-        output[i] = JS::GCCellPtr(obj);
+        output[i] = ptr;
         break;
       }
       case TaggedScriptThingIndex::Kind::RegExp: {
@@ -103,10 +104,10 @@ bool js::frontend::EmitScriptThingsVector(
         break;
       }
       case TaggedScriptThingIndex::Kind::Scope:
-        output[i] = JS::GCCellPtr(gcOutput.scopes[thing.toScope()]);
+        output[i] = JS::GCCellPtr(gcOutput.getScope(thing.toScope()));
         break;
       case TaggedScriptThingIndex::Kind::Function:
-        output[i] = JS::GCCellPtr(gcOutput.functions[thing.toFunction()]);
+        output[i] = JS::GCCellPtr(gcOutput.getFunction(thing.toFunction()));
         break;
       case TaggedScriptThingIndex::Kind::EmptyGlobalScope: {
         Scope* scope = &cx->global()->emptyGlobalScope();
@@ -158,11 +159,6 @@ void CGScopeNoteList::recordEndImpl(uint32_t index, uint32_t offset) {
   list[index].length = offset - list[index].start;
 }
 
-JSObject* ObjLiteralStencil::create(
-    JSContext* cx, const CompilationAtomCache& atomCache) const {
-  return InterpretObjLiteral(cx, atomCache, code_, flags_);
-}
-
 BytecodeSection::BytecodeSection(JSContext* cx, uint32_t lineNum,
                                  uint32_t column)
     : code_(cx),
@@ -190,9 +186,8 @@ void BytecodeSection::updateDepth(BytecodeOffset target) {
 }
 
 PerScriptData::PerScriptData(JSContext* cx,
-                             frontend::CompilationStencil& stencil,
                              frontend::CompilationState& compilationState)
-    : gcThingList_(cx, stencil, compilationState),
+    : gcThingList_(cx, compilationState),
       atomIndices_(cx->frontendCollectionPool()) {}
 
 bool PerScriptData::init(JSContext* cx) { return atomIndices_.acquire(cx); }

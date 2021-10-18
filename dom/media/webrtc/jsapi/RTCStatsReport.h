@@ -10,8 +10,8 @@
 #include "nsWrapperCache.h"
 #include "nsCOMPtr.h"
 
-#include "nsPIDOMWindow.h"               // nsPIDOMWindowInner
-#include "mozilla/dom/ScriptSettings.h"  // AutoEntryScript
+#include "nsPIDOMWindow.h"  // nsPIDOMWindowInner
+#include "mozilla/dom/AutoEntryScript.h"
 #include "nsIGlobalObject.h"
 #include "js/RootingAPI.h"  // JS::Rooted
 #include "js/Value.h"
@@ -21,6 +21,7 @@
 #include "mozilla/MozPromise.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/dom/RTCStatsReportBinding.h"  // RTCStatsCollection
+#include "mozilla/dom/ToJSValue.h"
 
 namespace mozilla {
 namespace dom {
@@ -34,7 +35,7 @@ class RTCStatsTimestampMaker {
  private:
   uint64_t mRandomTimelineSeed = 0;
   DOMHighResTimeStamp mStartWallClockRaw = (double)PR_Now() / PR_USEC_PER_MSEC;
-  TimeStamp mStartMonotonic = TimeStamp::NowUnfuzzed();
+  TimeStamp mStartMonotonic = TimeStamp::Now();
   bool mCrossOriginIsolated = false;
 };
 

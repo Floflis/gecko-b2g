@@ -35,7 +35,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   Extension: "resource://gre/modules/Extension.jsm",
   Langpack: "resource://gre/modules/Extension.jsm",
   FileUtils: "resource://gre/modules/FileUtils.jsm",
-  OS: "resource://gre/modules/osfile.jsm",
   JSONFile: "resource://gre/modules/JSONFile.jsm",
   TelemetrySession: "resource://gre/modules/TelemetrySession.jsm",
 
@@ -213,7 +212,10 @@ function awaitPromise(promise) {
     }
   );
 
-  Services.tm.spinEventLoopUntil(() => success !== undefined);
+  Services.tm.spinEventLoopUntil(
+    "XPIProvider.jsm:awaitPromise",
+    () => success !== undefined
+  );
 
   if (!success) {
     throw result;
@@ -676,20 +678,11 @@ class XPIStateLocation extends Map {
     this.staged = {};
     this.changed = false;
 
-    // The profile extensions directory is whitelisted for access by the
-    // content process sandbox if, and only if it already exists. Since
-    // we want it to be available for newly-installed extensions even if
-    // no profile extensions were present at startup, make sure it
-    // exists now.
-    if (name === KEY_APP_PROFILE) {
-      OS.File.makeDir(this.path, { ignoreExisting: true });
-    }
-
     if (saved) {
       this.restore(saved);
     }
 
-    this._installler = undefined;
+    this._installer = undefined;
   }
 
   hasPrecedence(otherLocation) {
@@ -1634,7 +1627,10 @@ var XPIStates = {
   save() {
     if (!this._jsonFile) {
       this._jsonFile = new JSONFile({
-        path: OS.Path.join(OS.Constants.Path.profileDir, FILE_XPI_STATES),
+        path: PathUtils.join(
+          Services.dirsvc.get("ProfD", Ci.nsIFile).path,
+          FILE_XPI_STATES
+        ),
         finalizeAt: AddonManagerPrivate.finalShutdown,
         compression: "lz4",
       });
@@ -1813,6 +1809,7 @@ class BootstrapScope {
         temporarilyInstalled: addon.location.isTemporary,
         builtIn: addon.location.isBuiltin,
         isSystem: addon.location.isSystem,
+        recommendationState: addon.recommendationState,
       };
 
       if (aMethod == "startup" && addon.startupData) {
@@ -2475,9 +2472,27 @@ var XPIProvider = {
 
       AddonManagerPrivate.markProviderSafe(this);
 
+      const lastTheme = Services.prefs.getCharPref(
+        "extensions.activeThemeID",
+        null
+      );
+
+      if (
+        lastTheme === "recommended-1" ||
+        lastTheme === "recommended-2" ||
+        lastTheme === "recommended-3" ||
+        lastTheme === "recommended-4" ||
+        lastTheme === "recommended-5"
+      ) {
+        // The user is using a theme that was once bundled with Firefox, but no longer
+        // is. Clear their theme so that they will be forced to reset to the default.
+        this.startupPromises.push(
+          AddonManagerPrivate.notifyAddonChanged(null, "theme")
+        );
+      }
       this.maybeInstallBuiltinAddon(
         "default-theme@mozilla.org",
-        "1.1",
+        "1.3",
         "resource://default-theme/"
       );
 
@@ -2498,10 +2513,6 @@ var XPIProvider = {
       // enabled extension will be migrated.
       try {
         if (
-          !Services.prefs.getBoolPref(
-            "extensions.allowPrivateBrowsingByDefault",
-            true
-          ) &&
           !Services.prefs.getBoolPref("extensions.incognito.migrated", false)
         ) {
           XPIDatabase.syncLoadDB(false);
@@ -2847,55 +2858,83 @@ var XPIProvider = {
    *        True if any new add-ons were installed
    */
   installDistributionAddons(aManifests, aAppChanged, aOldAppVersion) {
-    let distroDir;
+    let distroDirs = [];
     try {
-      distroDir = FileUtils.getDir(KEY_APP_DISTRIBUTION, [DIR_EXTENSIONS]);
+      distroDirs.push(FileUtils.getDir(KEY_APP_DISTRIBUTION, [DIR_EXTENSIONS]));
     } catch (e) {
       return false;
     }
 
+    let availableLocales = [];
+    for (let file of iterDirectory(distroDirs[0])) {
+      if (file.isDirectory() && file.leafName.startsWith("locale-")) {
+        availableLocales.push(file.leafName.replace("locale-", ""));
+      }
+    }
+
+    let locales = Services.locale.negotiateLanguages(
+      Services.locale.requestedLocales,
+      availableLocales,
+      undefined,
+      Services.locale.langNegStrategyMatching
+    );
+
+    // Also install addons from subdirectories that correspond to the requested
+    // locales. This allows for installing language packs and dictionaries.
+    for (let locale of locales) {
+      let langPackDir = distroDirs[0].clone();
+      langPackDir.append(`locale-${locale}`);
+      distroDirs.push(langPackDir);
+    }
+
     let changed = false;
-    for (let file of iterDirectory(distroDir)) {
-      if (!isXPI(file.leafName, true)) {
-        logger.warn(`Ignoring distribution: not an XPI: ${file.path}`);
-        continue;
-      }
-
-      let id = getExpectedID(file);
-      if (!id) {
-        logger.warn(
-          `Ignoring distribution: name is not a valid add-on ID: ${file.path}`
-        );
-        continue;
-      }
-
-      /* If this is not an upgrade and we've already handled this extension
-       * just continue */
-      if (
-        !aAppChanged &&
-        Services.prefs.prefHasUserValue(PREF_BRANCH_INSTALLED_ADDON + id)
-      ) {
-        continue;
-      }
-
-      try {
-        let loc = XPIStates.getLocation(KEY_APP_PROFILE);
-        let addon = awaitPromise(
-          XPIInstall.installDistributionAddon(id, file, loc, aOldAppVersion)
-        );
-
-        if (addon) {
-          // aManifests may contain a copy of a newly installed add-on's manifest
-          // and we'll have overwritten that so instead cache our install manifest
-          // which will later be put into the database in processFileChanges
-          if (!(loc.name in aManifests)) {
-            aManifests[loc.name] = {};
+    for (let distroDir of distroDirs) {
+      logger.warn(`Checking ${distroDir.path} for addons`);
+      for (let file of iterDirectory(distroDir)) {
+        if (!isXPI(file.leafName, true)) {
+          // Only warn for files, not directories
+          if (!file.isDirectory()) {
+            logger.warn(`Ignoring distribution: not an XPI: ${file.path}`);
           }
-          aManifests[loc.name][id] = addon;
-          changed = true;
+          continue;
         }
-      } catch (e) {
-        logger.error(`Failed to install distribution add-on ${file.path}`, e);
+
+        let id = getExpectedID(file);
+        if (!id) {
+          logger.warn(
+            `Ignoring distribution: name is not a valid add-on ID: ${file.path}`
+          );
+          continue;
+        }
+
+        /* If this is not an upgrade and we've already handled this extension
+         * just continue */
+        if (
+          !aAppChanged &&
+          Services.prefs.prefHasUserValue(PREF_BRANCH_INSTALLED_ADDON + id)
+        ) {
+          continue;
+        }
+
+        try {
+          let loc = XPIStates.getLocation(KEY_APP_PROFILE);
+          let addon = awaitPromise(
+            XPIInstall.installDistributionAddon(id, file, loc, aOldAppVersion)
+          );
+
+          if (addon) {
+            // aManifests may contain a copy of a newly installed add-on's manifest
+            // and we'll have overwritten that so instead cache our install manifest
+            // which will later be put into the database in processFileChanges
+            if (!(loc.name in aManifests)) {
+              aManifests[loc.name] = {};
+            }
+            aManifests[loc.name][id] = addon;
+            changed = true;
+          }
+        } catch (e) {
+          logger.error(`Failed to install distribution add-on ${file.path}`, e);
+        }
       }
     }
 
@@ -3283,8 +3322,7 @@ var addonTypes = [
     URI_EXTENSION_STRINGS,
     "type.extension.name",
     AddonManager.VIEW_TYPE_LIST,
-    4000,
-    AddonManager.TYPE_SUPPORTS_UNDO_RESTARTLESS_UNINSTALL
+    4000
   ),
   new AddonManagerPrivate.AddonType(
     "theme",
@@ -3298,18 +3336,14 @@ var addonTypes = [
     URI_EXTENSION_STRINGS,
     "type.dictionary.name",
     AddonManager.VIEW_TYPE_LIST,
-    7000,
-    AddonManager.TYPE_UI_HIDE_EMPTY |
-      AddonManager.TYPE_SUPPORTS_UNDO_RESTARTLESS_UNINSTALL
+    7000
   ),
   new AddonManagerPrivate.AddonType(
     "locale",
     URI_EXTENSION_STRINGS,
     "type.locale.name",
     AddonManager.VIEW_TYPE_LIST,
-    8000,
-    AddonManager.TYPE_UI_HIDE_EMPTY |
-      AddonManager.TYPE_SUPPORTS_UNDO_RESTARTLESS_UNINSTALL
+    8000
   ),
 ];
 

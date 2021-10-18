@@ -470,11 +470,11 @@ impl<Candidate> Default for SharingCacheBase<Candidate> {
 
 impl<Candidate> SharingCacheBase<Candidate> {
     fn clear(&mut self) {
-        self.entries.evict_all();
+        self.entries.clear();
     }
 
     fn is_empty(&self) -> bool {
-        self.entries.num_entries() == 0
+        self.entries.len() == 0
     }
 }
 
@@ -786,10 +786,7 @@ impl<E: TElement> StyleSharingCache<E> {
         }
 
         // It's possible that there are no styles for either id.
-        let may_match_different_id_rules =
-            checks::may_match_different_id_rules(shared, target.element, candidate.element);
-
-        if may_match_different_id_rules {
+        if checks::may_match_different_id_rules(shared, target.element, candidate.element) {
             trace!("Miss: ID Attr");
             return None;
         }

@@ -317,7 +317,17 @@ class AboutProtectionsParent extends JSWindowActorParent {
       return gTestOverride.vpnOverrides().hasSubscription;
     }
 
-    const vpnToken = await fxAccounts.getOAuthToken({ scope: SCOPE_VPN });
+    let vpnToken;
+    try {
+      vpnToken = await fxAccounts.getOAuthToken({ scope: SCOPE_VPN });
+    } catch (e) {
+      Cu.reportError(
+        "There was an error fetching the user's token: ",
+        e.message
+      );
+      // there was an error, assume user is not subscribed to VPN
+      return false;
+    }
     let headers = new Headers();
     headers.append("Authorization", `Bearer ${vpnToken}`);
     const request = new Request(VPN_ENDPOINT, { headers });
@@ -331,7 +341,7 @@ class AboutProtectionsParent extends JSWindowActorParent {
       }
       return false;
     }
-    // there was an error, assume user is not subscribed to VPN
+    // unknown logic: assume user is not subscribed to VPN
     return false;
   }
 
@@ -380,20 +390,14 @@ class AboutProtectionsParent extends JSWindowActorParent {
         break;
       case "FetchContentBlockingEvents":
         let dataToSend = {};
-        let weekdays = Services.intl.getDisplayNames(undefined, {
-          style: "short",
-          keys: [
-            "dates/gregorian/weekdays/sunday",
-            "dates/gregorian/weekdays/monday",
-            "dates/gregorian/weekdays/tuesday",
-            "dates/gregorian/weekdays/wednesday",
-            "dates/gregorian/weekdays/thursday",
-            "dates/gregorian/weekdays/friday",
-            "dates/gregorian/weekdays/saturday",
-            "dates/gregorian/weekdays/sunday",
-          ],
+        let displayNames = new Services.intl.DisplayNames(undefined, {
+          type: "weekday",
+          style: "abbreviated",
+          calendar: "gregory",
         });
-        weekdays = Object.values(weekdays.values);
+
+        // Weekdays starting Sunday (7) to Saturday (6).
+        let weekdays = [7, 1, 2, 3, 4, 5, 6].map(day => displayNames.of(day));
         dataToSend.weekdays = weekdays;
 
         if (PrivateBrowsingUtils.isWindowPrivate(win)) {

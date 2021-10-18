@@ -50,7 +50,7 @@ add_task(async function() {
 
 async function checkContentConsoleApiMessages(nonPrimitiveVariablesDisplayed) {
   // Add the tab first so it creates the ContentProcess
-  const tab = await addTab(TEST_URI);
+  await addTab(TEST_URI);
 
   // Open the Browser Console
   const hud = await BrowserConsoleManager.toggleBrowserConsole();
@@ -59,9 +59,7 @@ async function checkContentConsoleApiMessages(nonPrimitiveVariablesDisplayed) {
   // In non fission world, we don't retrieve cached messages, so we need to reload the
   // tab to see them.
   if (!nonPrimitiveVariablesDisplayed) {
-    const loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser);
-    tab.linkedBrowser.reload();
-    await loaded;
+    await reloadBrowser();
   }
 
   const suffix = nonPrimitiveVariablesDisplayed
@@ -86,6 +84,7 @@ async function checkContentConsoleApiMessages(nonPrimitiveVariablesDisplayed) {
     expectedMessages.push("console.table()");
   }
 
+  info("wait for all the messages to be displayed");
   await waitFor(
     () =>
       expectedMessages.every(expectedMessage =>
@@ -141,10 +140,5 @@ async function checkContentConsoleApiMessages(nonPrimitiveVariablesDisplayed) {
   }
 
   info("Clear and close the Browser Console");
-  await clearOutput(hud);
-  // We use waitForTick here because of a race condition. Otherwise, the test
-  // would occassionally fail because the transport is closed before pending server
-  // responses have been sent.
-  await waitForTick();
-  await safeCloseBrowserConsole();
+  await safeCloseBrowserConsole({ clearOutput: true });
 }

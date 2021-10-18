@@ -6,8 +6,10 @@
 
 #include "DocumentL10n.h"
 #include "nsIContentSink.h"
+#include "mozilla/dom/AutoEntryScript.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentL10nBinding.h"
+#include "mozilla/Telemetry.h"
 
 using namespace mozilla::dom;
 
@@ -30,32 +32,26 @@ NS_IMPL_RELEASE_INHERITED(DocumentL10n, DOMLocalization)
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(DocumentL10n)
 NS_INTERFACE_MAP_END_INHERITING(DOMLocalization)
 
+bool DocumentL10n::mIsFirstBrowserWindow = true;
+
 /* static */
-RefPtr<DocumentL10n> DocumentL10n::Create(Document* aDocument,
-                                          const bool aSync) {
+RefPtr<DocumentL10n> DocumentL10n::Create(Document* aDocument, bool aSync) {
   RefPtr<DocumentL10n> l10n = new DocumentL10n(aDocument, aSync);
 
-  if (!l10n->Init()) {
+  IgnoredErrorResult rv;
+  l10n->mReady = Promise::Create(l10n->mGlobal, rv);
+  if (NS_WARN_IF(rv.Failed())) {
     return nullptr;
   }
+
   return l10n.forget();
 }
 
-DocumentL10n::DocumentL10n(Document* aDocument, const bool aSync)
-    : DOMLocalization(aDocument->GetScopeObject(), aSync, {}),
+DocumentL10n::DocumentL10n(Document* aDocument, bool aSync)
+    : DOMLocalization(aDocument->GetScopeObject(), aSync),
       mDocument(aDocument),
       mState(DocumentL10nState::Constructed) {
   mContentSink = do_QueryInterface(aDocument->GetCurrentContentSink());
-}
-
-bool DocumentL10n::Init() {
-  DOMLocalization::Init();
-  ErrorResult rv;
-  mReady = Promise::Create(mGlobal, rv);
-  if (NS_WARN_IF(rv.Failed())) {
-    return false;
-  }
-  return true;
 }
 
 JSObject* DocumentL10n::WrapObject(JSContext* aCx,
@@ -101,6 +97,7 @@ void DocumentL10n::TriggerInitialTranslation() {
   if (mState >= DocumentL10nState::InitialTranslationTriggered) {
     return;
   }
+  mInitialTranslationStart = mozilla::TimeStamp::Now();
 
   AutoAllowLegacyScriptExecution exemption;
 
@@ -241,6 +238,41 @@ already_AddRefed<Promise> DocumentL10n::TranslateDocument(ErrorResult& aRv) {
   return promise.forget();
 }
 
+void DocumentL10n::MaybeRecordTelemetry() {
+  mozilla::TimeStamp initialTranslationEnd = mozilla::TimeStamp::Now();
+
+  nsAutoString documentURI;
+  ErrorResult rv;
+  rv = mDocument->GetDocumentURI(documentURI);
+  if (rv.Failed()) {
+    return;
+  }
+
+  nsCString key;
+
+  if (documentURI.Find("chrome://browser/content/browser.xhtml") == 0) {
+    if (mIsFirstBrowserWindow) {
+      key = "browser_first_window";
+      mIsFirstBrowserWindow = false;
+    } else {
+      key = "browser_new_window";
+    }
+  } else if (documentURI.Find("about:home") == 0) {
+    key = "about:home";
+  } else if (documentURI.Find("about:newtab") == 0) {
+    key = "about:newtab";
+  } else if (documentURI.Find("about:preferences") == 0) {
+    key = "about:preferences";
+  } else {
+    return;
+  }
+
+  mozilla::TimeDuration totalTime(initialTranslationEnd -
+                                  mInitialTranslationStart);
+  Accumulate(Telemetry::L10N_DOCUMENT_INITIAL_TRANSLATION_TIME_US, key,
+             totalTime.ToMicroseconds());
+}
+
 void DocumentL10n::InitialTranslationCompleted(bool aL10nCached) {
   if (mState >= DocumentL10nState::Ready) {
     return;
@@ -253,16 +285,19 @@ void DocumentL10n::InitialTranslationCompleted(bool aL10nCached) {
 
   mState = DocumentL10nState::Ready;
 
+  MaybeRecordTelemetry();
+
   mDocument->InitialTranslationCompleted(aL10nCached);
 
   // In XUL scenario contentSink is nullptr.
   if (mContentSink) {
     mContentSink->InitialTranslationCompleted();
+    mContentSink = nullptr;
   }
 
   // From now on, the state of Localization is unconditionally
   // async.
-  SetIsSync(false);
+  SetAsync();
 }
 
 void DocumentL10n::ConnectRoot(nsINode& aNode, bool aTranslate,

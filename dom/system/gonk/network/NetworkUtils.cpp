@@ -25,7 +25,9 @@
 #include <android/log.h>
 #include <limits>
 #include "mozilla/fallible.h"
-#include "mozilla/Preferences.h"
+#include "mozilla/StaticPrefs_network.h"
+#include "mozilla/StaticPrefs_dom.h"
+#include "mozilla/Unused.h"
 #include "nsPrintfCString.h"
 #include <errno.h>
 #include <string.h>
@@ -38,6 +40,7 @@
 #include <private/android_filesystem_config.h>  // AID_SYSTEM
 #include <android/net/INetd.h>
 #include <android/net/InterfaceConfigurationParcel.h>
+#include <android/net/TetherStatsParcel.h>
 #include <binder/IServiceManager.h>
 #include <utils/String16.h>
 #include <binder/IBinder.h>
@@ -50,8 +53,6 @@
 #define ERROR(args...) \
   __android_log_print(ANDROID_LOG_ERROR, "NetworkUtils", ##args)
 
-#define PREF_NETWORK_DEBUG_ENABLED "network.debugging.enabled"
-
 namespace binder = android::binder;
 using android::IBinder;
 using android::IServiceManager;
@@ -62,6 +63,7 @@ using namespace mozilla::dom;
 using namespace mozilla::ipc;
 using android::net::IDnsResolver;
 using android::net::ResolverParamsParcel;
+using android::net::TetherStatsParcel;
 using mozilla::system::Property;
 
 static bool ENABLE_NU_DEBUG = false;
@@ -70,11 +72,21 @@ static const int32_t SUCCESS = 0;
 
 static const char* TCP_BUFFER_DELIMIT = ",";
 
+static const char* DEFAULT_DNS_FORWARDER1 = "8.8.4.4";
+static const char* DEFAULT_DNS_FORWARDER2 = "8.8.8.8";
+
 // Default resolver parameters.
 static const uint32_t DNS_RESOLVER_DEFAULT_SAMPLE_VALIDITY_SECONDS = 1800;
 static const uint32_t DNS_RESOLVER_DEFAULT_SUCCESS_THRESHOLD_PERCENT = 25;
 static const uint32_t DNS_RESOLVER_DEFAULT_MIN_SAMPLES = 8;
 static const uint32_t DNS_RESOLVER_DEFAULT_MAX_SAMPLES = 64;
+
+// Wake up event for driver specific constants.
+static const int32_t WAKEUP_PACKET_MARK = 0x80000000;
+static const int32_t WAKEUP_PACKET_MASK = 0x80000000;
+
+// IPv6 addressing mode.
+static int32_t IPV6_ADDR_GEN_MODE = INetd::IPV6_ADDR_GEN_MODE_DEFAULT;
 
 static const char RADVD_CONF_FILE[] = "/data/misc/radvd/radvd.conf";
 
@@ -284,6 +296,10 @@ class NetdInitRunnable : public mozilla::Runnable {
         Property::Set("ctl.stop", "netd");
       }
     }
+
+    if (gNetworkUtils) {
+      gNetworkUtils->updateDebug();
+    }
     return NS_OK;
   }
 
@@ -371,54 +387,12 @@ static void split(char* str, const char* sep, nsTArray<nsCString>& result) {
   }
 }
 
-/**
- * Helper function that implement join function.
- */
-static void join(nsTArray<nsCString>& array, const char* sep,
-                 const uint32_t maxlen, char* result) {
-#define CHECK_LENGTH(len, add, max) \
-  len += add;                       \
-  if (len > max - 1) return;
-
-  uint32_t len = 0;
-  uint32_t seplen = strlen(sep);
-
-  if (array.Length() > 0) {
-    CHECK_LENGTH(len, strlen(array[0].get()), maxlen)
-    strcpy(result, array[0].get());
-
-    for (uint32_t i = 1; i < array.Length(); i++) {
-      CHECK_LENGTH(len, seplen, maxlen)
-      strcat(result, sep);
-
-      CHECK_LENGTH(len, strlen(array[i].get()), maxlen)
-      strcat(result, array[i].get());
-    }
-  }
-
-#undef CHECK_LEN
-}
-
 [[maybe_unused]] static void convertUTF8toUTF16(nsTArray<nsCString>& narrow,
                                                 nsTArray<nsString>& wide,
                                                 uint32_t length) {
   for (uint32_t i = 0; i < length; i++) {
     wide.AppendElement(NS_ConvertUTF8toUTF16(narrow[i].get()));
   }
-}
-
-/**
- * Helper function to get network interface properties from the system property
- * table.
- */
-static void getIFProperties(const char* ifname, IFProperties& prop) {
-  char key[Property::KEY_MAX_LENGTH];
-  SprintfLiteral(key, "net.%s.gw", ifname);
-  Property::Get(key, prop.gateway, "");
-  SprintfLiteral(key, "net.%s.dns1", ifname);
-  Property::Get(key, prop.dns1, "");
-  SprintfLiteral(key, "net.%s.dns2", ifname);
-  Property::Get(key, prop.dns2, "");
 }
 
 static int getIpType(const char* aIp) {
@@ -578,10 +552,42 @@ void NetworkUtils::destroyNetwork(CommandChain* aChain,
   next(aChain, !networkStatus.isOk(), aResult);
 }
 
+void NetworkUtils::setIpv6AddrGenMode(CommandChain* aChain,
+                                      CommandCallback aCallback,
+                                      NetworkResultOptions& aResult) {
+  Status status = gNetd->setIPv6AddrGenMode(std::string(GET_CHAR(mIfname)),
+                                            IPV6_ADDR_GEN_MODE);
+  NU_DBG("setIpv6AddrGenMode %d %s", IPV6_ADDR_GEN_MODE,
+         status.isOk() ? "success" : "failed but continue");
+  next(aChain, false, aResult);
+}
+
+void NetworkUtils::setIpv6PrivacyExtensions(CommandChain* aChain,
+                                            CommandCallback aCallback,
+                                            NetworkResultOptions& aResult) {
+  bool enable = GET_FIELD(mEnable);
+  Status status = gNetd->interfaceSetIPv6PrivacyExtensions(
+      std::string(GET_CHAR(mIfname)), enable);
+  NU_DBG("setIpv6PrivacyExtensions %s %s", enable ? "enable" : "disable",
+         status.isOk() ? "success" : "failed but continue");
+  next(aChain, false, aResult);
+}
+
 void NetworkUtils::setIpv6Enabled(CommandChain* aChain,
                                   CommandCallback aCallback,
-                                  NetworkResultOptions& aResult,
-                                  bool aEnabled) {
+                                  NetworkResultOptions& aResult) {
+  bool enable = GET_FIELD(mEnable);
+  Status status =
+      gNetd->interfaceSetEnableIPv6(std::string(GET_CHAR(mIfname)), enable);
+  NU_DBG("setIpv6Enabled %s %s", enable ? "enable" : "disable",
+         status.isOk() ? "success" : "failed");
+  aCallback(aChain, !status.isOk(), aResult);
+}
+
+void NetworkUtils::wakeupAddInterface(CommandChain* aChain,
+                                      CommandCallback aCallback,
+                                      NetworkResultOptions& aResult) {
+  // Marks only available on wlan interfaces.
   if (nsINetworkInfo::NETWORK_TYPE_WIFI != GET_FIELD(mNetworkType)) {
     NU_DBG("%s : ignore network type = %ld", __FUNCTION__,
            GET_FIELD(mNetworkType));
@@ -589,21 +595,33 @@ void NetworkUtils::setIpv6Enabled(CommandChain* aChain,
     return;
   }
 
-  Status status =
-      gNetd->interfaceSetEnableIPv6(std::string(GET_CHAR(mIfname)), aEnabled);
-  NU_DBG("setIpv6Enabled %s",
-         status.isOk() ? "success" : "failed but continue");
+  std::string interface(GET_CHAR(mIfname));
+  std::string prefix = "iface:" + interface;
+  Status status = gNetd->wakeupAddInterface(
+      interface, prefix, WAKEUP_PACKET_MARK, WAKEUP_PACKET_MASK);
+  NU_DBG("%s : %s", status.isOk() ? "success" : "failed but continue",
+         __FUNCTION__);
   aCallback(aChain, false, aResult);
 }
 
-void NetworkUtils::enableIpv6(CommandChain* aChain, CommandCallback aCallback,
-                              NetworkResultOptions& aResult) {
-  setIpv6Enabled(aChain, aCallback, aResult, true);
-}
+void NetworkUtils::wakeupDelInterface(CommandChain* aChain,
+                                      CommandCallback aCallback,
+                                      NetworkResultOptions& aResult) {
+  // Marks only available on wlan interfaces.
+  if (nsINetworkInfo::NETWORK_TYPE_WIFI != GET_FIELD(mNetworkType)) {
+    NU_DBG("%s : ignore network type = %ld", __FUNCTION__,
+           GET_FIELD(mNetworkType));
+    aCallback(aChain, false, aResult);
+    return;
+  }
 
-void NetworkUtils::disableIpv6(CommandChain* aChain, CommandCallback aCallback,
-                               NetworkResultOptions& aResult) {
-  setIpv6Enabled(aChain, aCallback, aResult, false);
+  std::string interface(GET_CHAR(mIfname));
+  std::string prefix = "iface:" + interface;
+  Status status = gNetd->wakeupDelInterface(
+      interface, prefix, WAKEUP_PACKET_MARK, WAKEUP_PACKET_MASK);
+  NU_DBG("%s : %s", status.isOk() ? "success" : "failed but continue",
+         __FUNCTION__);
+  aCallback(aChain, false, aResult);
 }
 
 void NetworkUtils::addInterfaceToNetwork(CommandChain* aChain,
@@ -822,15 +840,6 @@ void NetworkUtils::setDefaultNetwork(CommandChain* aChain,
   next(aChain, !status.isOk(), aResult);
 }
 
-void NetworkUtils::setIpv6PrivacyExtensions(CommandChain* aChain,
-                                            CommandCallback aCallback,
-                                            NetworkResultOptions& aResult) {
-  Status status = gNetd->interfaceSetIPv6PrivacyExtensions(
-      std::string(GET_CHAR(mIfname)), GET_FIELD(mPrivacyExtensions));
-  NU_DBG("setIpv6PrivacyExtensions %s", status.isOk() ? "success" : "failed");
-  next(aChain, !status.isOk(), aResult);
-}
-
 void NetworkUtils::setConfig(CommandChain* aChain, CommandCallback aCallback,
                              NetworkResultOptions& aResult) {
   android::net::InterfaceConfigurationParcel interfaceCfg;
@@ -1034,11 +1043,17 @@ void NetworkUtils::setDnsForwarders(CommandChain* aChain,
                                     CommandCallback aCallback,
                                     NetworkResultOptions& aResult) {
   std::vector<std::string> tetherDnsAddrs;
-  if (!GET_FIELD(mDns1).IsEmpty()) {
-    tetherDnsAddrs.push_back(GET_CHAR(mDns1));
-  }
-  if (!GET_FIELD(mDns2).IsEmpty()) {
-    tetherDnsAddrs.push_back(GET_CHAR(mDns2));
+  nsTArray<nsString>& dnses = GET_FIELD(mDnses);
+  if (!dnses.Length()) {
+    tetherDnsAddrs.push_back(DEFAULT_DNS_FORWARDER1);
+    tetherDnsAddrs.push_back(DEFAULT_DNS_FORWARDER2);
+  } else {
+    NU_DBG("%s: list dnses:", __FUNCTION__);
+    for (uint32_t i = 0; i < dnses.Length(); i++) {
+      NS_ConvertUTF16toUTF8 dns(dnses[i]);
+      tetherDnsAddrs.push_back(dns.get());
+      NU_DBG("%s: %s", __FUNCTION__, dns.get());
+    }
   }
 
   Status status = gNetd->tetherDnsSet(GET_FIELD(mNetId), tetherDnsAddrs);
@@ -1184,7 +1199,7 @@ void NetworkUtils::updateIpv6Tethering(CommandChain* aChain,
          gIpv6TetheringInterfaces[0].get(), ipv6Prefix.get());
 
   if (composeIpv6TetherConf(gIpv6TetheringInterfaces[0].get(), ipv6Prefix.get(),
-                            dnsLength)) {
+                            dnses)) {
     NU_DBG("radvd configured, start radvd");
     Property::Set("ctl.start", "radvd");
     gIpv6TetheringIfaceEnabled = true;
@@ -1235,27 +1250,27 @@ void NetworkUtils::removeIpv6LocalNetworkRoute(CommandChain* aChain,
 
 bool NetworkUtils::composeIpv6TetherConf(const char* aInternalIface,
                                          const char* aNetworkPrefix,
-                                         uint32_t aDnsLength) {
+                                         nsTArray<nsString>& aDnses) {
   int type;
-  char dnses_list[256] = {0};
-  char dns_prop_key[PROPERTY_VALUE_MAX] = {0};
-  char dns_buffer[PROPERTY_VALUE_MAX] = {0};
-  char dns_buffer2[PROPERTY_VALUE_MAX] = {0};
+  char dnsesList[256] = {0};
+  char dnsBuffer[64] = {0};
+  char dnsSpace[64] = {0};
   FILE* radvdFile;
   char buffer[512] = {0};
 
-  for (uint32_t i = 0; i < aDnsLength; i++) {
-    SprintfLiteral(dns_prop_key, "net.dns%d", i + 1);
-    Property::Get(dns_prop_key, dns_buffer, "8.8.8.8");
-    type = getIpType(dns_buffer);
+  for (uint32_t i = 0; i < aDnses.Length(); i++) {
+    NS_ConvertUTF16toUTF8 autoDns(aDnses[i]);
+    SprintfLiteral(dnsBuffer, "%s", autoDns.get());
+    type = getIpType(dnsBuffer);
     if (type == AF_INET6) {
-      snprintf(dns_buffer2, strlen(dns_buffer) + 2, " %s", dns_buffer);
-      strcat(dnses_list, dns_buffer2);
+      snprintf(dnsSpace, strlen(dnsBuffer) + 2, " %s", dnsBuffer);
+      strcat(dnsesList, dnsSpace);
     }
-    memset(&dns_buffer, 0, sizeof(dns_buffer));
+    memset(&dnsBuffer, 0, sizeof(dnsBuffer));
+    memset(&dnsSpace, 0, sizeof(dnsSpace));
   }
 
-  if (strlen(dnses_list) == 0) {
+  if (strlen(dnsesList) == 0) {
     NU_DBG("Do not enable Ipv6 Tethering since no Ipv6 DNS");
     return false;
   }
@@ -1281,7 +1296,7 @@ bool NetworkUtils::composeIpv6TetherConf(const char* aInternalIface,
                  "\t\tAdvRDNSSLifetime 3600;\n"
                  "\t};"
                  "\n};\n",
-                 aInternalIface, aNetworkPrefix, dnses_list);
+                 aInternalIface, aNetworkPrefix, dnsesList);
 
   if (!fwrite(buffer, sizeof(char), strlen(buffer), radvdFile)) {
     NU_DBG("Write %s fail", RADVD_CONF_FILE);
@@ -1474,6 +1489,7 @@ NetworkUtils::NetworkUtils(MessageCallback aCallback)
   NU_DBG("Start Netd Service");
   setupNetd(true);
 
+  IPV6_ADDR_GEN_MODE = mozilla::StaticPrefs::dom_b2g_ipv6_addr_mode();
   updateDebug();
 
   gNetworkUtils = this;
@@ -1526,7 +1542,7 @@ void NetworkUtils::ExecuteCommand(NetworkParams aOptions) {
       BUILD_ENTRY(setDefaultNetwork),
       BUILD_ENTRY(addInterfaceToNetwork),
       BUILD_ENTRY(removeInterfaceToNetwork),
-      BUILD_ENTRY(setIpv6PrivacyExtensions),
+      BUILD_ENTRY(setIpv6Status),
       BUILD_ENTRY(dhcpRequest),
       BUILD_ENTRY(stopDhcp),
       BUILD_ENTRY(getInterfaces),
@@ -1542,6 +1558,7 @@ void NetworkUtils::ExecuteCommand(NetworkParams aOptions) {
       BUILD_ENTRY(removeTetheringAlarm),
       BUILD_ENTRY(setDhcpServer),
       BUILD_ENTRY(getTetheringStatus),
+      BUILD_ENTRY(getTetherStats),
       BUILD_ENTRY(updateUpStream),
       BUILD_ENTRY(removeUpStream),
       BUILD_ENTRY(setUSBTethering),
@@ -1585,34 +1602,6 @@ void NetworkUtils::ExecuteCommand(NetworkParams aOptions) {
  * Set DNS servers for given network interface.
  */
 CommandResult NetworkUtils::setDNS(NetworkParams& aOptions) {
-  uint32_t length = aOptions.mDnses.Length();
-
-  // TODO: do we still need this ?
-  if (length > 0) {
-    for (uint32_t i = 0; i < length; i++) {
-      NS_ConvertUTF16toUTF8 autoDns(aOptions.mDnses[i]);
-
-      char dns_prop_key[Property::VALUE_MAX_LENGTH];
-      SprintfLiteral(dns_prop_key, "net.dns%d", i + 1);
-      Property::Set(dns_prop_key, autoDns.get());
-    }
-  } else {
-    // Set dnses from system properties.
-    IFProperties interfaceProperties;
-    getIFProperties(GET_CHAR(mIfname), interfaceProperties);
-
-    Property::Set("net.dns1", interfaceProperties.dns1);
-    Property::Set("net.dns2", interfaceProperties.dns2);
-  }
-
-  // Bump the DNS change property.
-  char dnschange[Property::VALUE_MAX_LENGTH];
-  Property::Get("net.dnschange", dnschange, "0");
-
-  char num[Property::VALUE_MAX_LENGTH];
-  snprintf(num, Property::VALUE_MAX_LENGTH - 1, "%d", atoi(dnschange) + 1);
-  Property::Set("net.dnschange", num);
-
   static CommandFunc COMMAND_CHAIN[] = {setInterfaceDns,
                                         defaultAsyncSuccessHandler};
   NetIdManager::NetIdInfo netIdInfo;
@@ -1651,8 +1640,8 @@ CommandResult NetworkUtils::getNetId(NetworkParams& aOptions) {
 CommandResult NetworkUtils::createNetwork(NetworkParams& aOptions) {
   static CommandFunc COMMAND_CHAIN[] = {
       createNetwork,
-      enableIpv6,
       addInterfaceToNetwork,
+      wakeupAddInterface,
       defaultAsyncSuccessHandler,
   };
 
@@ -1680,7 +1669,8 @@ CommandResult NetworkUtils::createNetwork(NetworkParams& aOptions) {
  */
 CommandResult NetworkUtils::destroyNetwork(NetworkParams& aOptions) {
   static CommandFunc COMMAND_CHAIN[] = {
-      disableIpv6,
+      wakeupDelInterface,
+      removeInterfaceToNetwork,
       destroyNetwork,
       defaultAsyncSuccessHandler,
   };
@@ -1950,13 +1940,23 @@ CommandResult NetworkUtils::removeInterfaceToNetwork(NetworkParams& aOptions) {
   return CommandResult(-1);
 }
 
-CommandResult NetworkUtils::setIpv6PrivacyExtensions(NetworkParams& aOptions) {
-  static CommandFunc COMMAND_CHAIN[] = {
-      setIpv6PrivacyExtensions,
-      defaultAsyncSuccessHandler,
-  };
-
-  runChain(aOptions, COMMAND_CHAIN, defaultAsyncFailureHandler);
+CommandResult NetworkUtils::setIpv6Status(NetworkParams& aOptions) {
+  bool enable = aOptions.mEnable;
+  if (enable) {
+    static CommandFunc COMMAND_CHAIN[] = {
+        setIpv6PrivacyExtensions,
+        setIpv6AddrGenMode,
+        setIpv6Enabled,
+        defaultAsyncSuccessHandler,
+    };
+    runChain(aOptions, COMMAND_CHAIN, defaultAsyncFailureHandler);
+  } else {
+    static CommandFunc COMMAND_CHAIN[] = {
+        setIpv6Enabled,
+        defaultAsyncSuccessHandler,
+    };
+    runChain(aOptions, COMMAND_CHAIN, defaultAsyncFailureHandler);
+  }
   return CommandResult(CommandResult::Pending());
 }
 
@@ -2032,7 +2032,7 @@ CommandResult NetworkUtils::getInterfaces(NetworkParams& aOptions) {
   if (status.isOk()) {
     result.mInterfaceList.Construct();
     for (uint32_t i = 0; i < interfaceGetList.size(); i++) {
-      auto item = result.mInterfaceList.Value().AppendElement(
+      mozilla::Unused << result.mInterfaceList.Value().AppendElement(
           NS_ConvertUTF8toUTF16(interfaceGetList[i].c_str()),
           mozilla::fallible_t());
     }
@@ -2129,7 +2129,7 @@ CommandResult NetworkUtils::startClatd(NetworkParams& aOptions) {
 
   std::string clatAddress;
   Status status =
-      gNetd->clatdStart(GET_CHAR(mIfname), GET_CHAR(mIPv6Prefix), &clatAddress);
+      gNetd->clatdStart(GET_CHAR(mIfname), GET_CHAR(mNat64Prefix), &clatAddress);
   result.mResult = status.isOk();
 
   if (result.mResult) {
@@ -2345,25 +2345,41 @@ CommandResult NetworkUtils::getTetheringStatus(NetworkParams& aOptions) {
   return CommandResult(result);
 }
 
+CommandResult NetworkUtils::getTetherStats(NetworkParams& aOptions) {
+  NetworkResultOptions result;
+  Status status;
+  result.mResult = false;
+
+  std::vector<TetherStatsParcel> tetherStatsParcelVec;
+  status = gNetd->tetherGetStats(&tetherStatsParcelVec);
+  NU_DBG("getTetherStats %s", status.isOk() ? "success" : "failed");
+  result.mResult = status.isOk();
+  result.mTetherStats.Construct();
+
+  if (tetherStatsParcelVec.size()) {
+    for (auto statsParcel : tetherStatsParcelVec) {
+      if (!strcmp(statsParcel.iface.c_str(), "rmnet0")) {
+        // Just ignore the dummy upstream interface.
+        continue;
+      }
+      TetherStats tetherStats;
+      tetherStats.mIfname =
+          nsString(NS_ConvertUTF8toUTF16(statsParcel.iface.c_str()));
+      tetherStats.mRxBytes = statsParcel.rxBytes;
+      tetherStats.mRxPackets = statsParcel.rxPackets;
+      tetherStats.mTxBytes = statsParcel.txBytes;
+      tetherStats.mTxPackets = statsParcel.txPackets;
+      mozilla::Unused << result.mTetherStats.Value().AppendElement(
+          std::move(tetherStats), mozilla::fallible);
+    }
+  }
+  return CommandResult(result);
+}
+
 CommandResult NetworkUtils::setUSBTethering(NetworkParams& aOptions) {
   bool enable = aOptions.mEnable;
   char ipv6Prefix[64] = {0};
-  IFProperties interfaceProperties;
-  getIFProperties(GET_CHAR(mExternalIfname), interfaceProperties);
   nsCString externalIface(GET_CHAR(mExternalIfname));
-
-  if (strcmp(interfaceProperties.dns1, "")) {
-    int type = getIpType(interfaceProperties.dns1);
-    if (type != AF_INET6) {
-      aOptions.mDns1 = NS_ConvertUTF8toUTF16(interfaceProperties.dns1);
-    }
-  }
-  if (strcmp(interfaceProperties.dns2, "")) {
-    int type = getIpType(interfaceProperties.dns2);
-    if (type != AF_INET6) {
-      aOptions.mDns2 = NS_ConvertUTF8toUTF16(interfaceProperties.dns2);
-    }
-  }
 
   NetIdManager::NetIdInfo netIdInfo;
   aOptions.mNetId = mNetIdManager.lookup(aOptions.mExternalIfname, &netIdInfo)
@@ -2400,22 +2416,7 @@ CommandResult NetworkUtils::setUSBTethering(NetworkParams& aOptions) {
 CommandResult NetworkUtils::setWifiTethering(NetworkParams& aOptions) {
   bool enable = aOptions.mEnable;
   char ipv6Prefix[64] = {0};
-  IFProperties interfaceProperties;
-  getIFProperties(GET_CHAR(mExternalIfname), interfaceProperties);
   nsCString externalIface(GET_CHAR(mExternalIfname));
-
-  if (strcmp(interfaceProperties.dns1, "")) {
-    int type = getIpType(interfaceProperties.dns1);
-    if (type != AF_INET6) {
-      aOptions.mDns1 = NS_ConvertUTF8toUTF16(interfaceProperties.dns1);
-    }
-  }
-  if (strcmp(interfaceProperties.dns2, "")) {
-    int type = getIpType(interfaceProperties.dns2);
-    if (type != AF_INET6) {
-      aOptions.mDns2 = NS_ConvertUTF8toUTF16(interfaceProperties.dns2);
-    }
-  }
 
   // Collect external interface Ipv6 prefix.
   if (!aOptions.mIpv6Ip.IsEmpty() &&
@@ -2454,23 +2455,7 @@ CommandResult NetworkUtils::setWifiTethering(NetworkParams& aOptions) {
  */
 CommandResult NetworkUtils::updateUpStream(NetworkParams& aOptions) {
   char ipv6Prefix[64] = {0};
-  IFProperties interfaceProperties;
-  getIFProperties(GET_CHAR(mCurExternalIfname), interfaceProperties);
   nsCString externalIface(GET_CHAR(mExternalIfname));
-
-  if (strcmp(interfaceProperties.dns1, "")) {
-    int type = getIpType(interfaceProperties.dns1);
-    if (type != AF_INET6) {
-      aOptions.mDns1 = NS_ConvertUTF8toUTF16(interfaceProperties.dns1);
-    }
-  }
-
-  if (strcmp(interfaceProperties.dns2, "")) {
-    int type = getIpType(interfaceProperties.dns2);
-    if (type != AF_INET6) {
-      aOptions.mDns2 = NS_ConvertUTF8toUTF16(interfaceProperties.dns2);
-    }
-  }
 
   NetIdManager::NetIdInfo netIdInfo;
   if (!mNetIdManager.lookup(aOptions.mCurExternalIfname, &netIdInfo)) {
@@ -2557,11 +2542,14 @@ void NetworkUtils::dumpParams(NetworkParams& aOptions, const char* aType) {
   NU_DBG("     wifiEndIp: %s", GET_CHAR(mWifiEndIp));
   NU_DBG("     usbStartIp: %s", GET_CHAR(mUsbStartIp));
   NU_DBG("     usbEndIp: %s", GET_CHAR(mUsbEndIp));
-  NU_DBG("     dnsserver1: %s", GET_CHAR(mDns1));
-  NU_DBG("     dnsserver2: %s", GET_CHAR(mDns2));
   NU_DBG("     internalIfname: %s", GET_CHAR(mInternalIfname));
   NU_DBG("     externalIfname: %s", GET_CHAR(mExternalIfname));
   NU_DBG("     netId: %d", GET_FIELD(mNetId));
+  nsTArray<nsString>& dnses = GET_FIELD(mDnses);
+  for (uint32_t i = 0; i < dnses.Length(); i++) {
+    NS_ConvertUTF16toUTF8 autoDns(dnses[i]);
+    NU_DBG("     dnsserver %d: %s", i + 1, autoDns.get());
+  }
 
   if (!strcmp(aType, "WIFI")) {
     NU_DBG("     wifictrlinterfacename: %s", GET_CHAR(mWifictrlinterfacename));
@@ -2577,10 +2565,12 @@ void NetworkUtils::dumpParams(NetworkParams& aOptions, const char* aType) {
 }
 
 void NetworkUtils::updateDebug() {
-  ENABLE_NU_DEBUG =
-      mozilla::Preferences::GetBool(PREF_NETWORK_DEBUG_ENABLED, false);
+  ENABLE_NU_DEBUG = mozilla::StaticPrefs::network_debugging_enabled();
   if (gNetdUnsolService) {
     gNetdUnsolService->updateDebug(ENABLE_NU_DEBUG);
+  }
+  if (gNetdEventListener) {
+    gNetdEventListener->updateDebug(ENABLE_NU_DEBUG);
   }
 }
 

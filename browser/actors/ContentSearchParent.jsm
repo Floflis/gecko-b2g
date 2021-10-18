@@ -18,6 +18,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.jsm",
   SearchSuggestionController:
     "resource://gre/modules/SearchSuggestionController.jsm",
+  UrlbarPrefs: "resource:///modules/UrlbarPrefs.jsm",
 });
 
 const MAX_LOCAL_SUGGESTIONS = 3;
@@ -110,6 +111,7 @@ let ContentSearch = {
       Services.obs.addObserver(this, "browser-search-service");
       Services.obs.addObserver(this, "shutdown-leaks-before-check");
       Services.prefs.addObserver("browser.search.hiddenOneOffs", this);
+      UrlbarPrefs.addObserver(this);
 
       this.initialized = true;
     }
@@ -181,6 +183,22 @@ let ContentSearch = {
     }
   },
 
+  /**
+   * Observes changes in prefs tracked by UrlbarPrefs.
+   * @param {string} pref
+   *   The name of the pref, relative to `browser.urlbar.` if the pref is
+   *   in that branch.
+   */
+  onPrefChanged(pref) {
+    if (UrlbarPrefs.shouldHandOffToSearchModePrefs.includes(pref)) {
+      this._eventQueue.push({
+        type: "Observe",
+        data: "shouldHandOffToSearchMode",
+      });
+      this._processEventQueue();
+    }
+  },
+
   removeFormHistoryEntry(browser, entry) {
     let browserData = this._suggestionDataForBrowser(browser);
     if (browserData && browserData.previousFormHistoryResult) {
@@ -194,7 +212,7 @@ let ContentSearch = {
     }
   },
 
-  performSearch(browser, data) {
+  performSearch(actor, browser, data) {
     this._ensureDataHasProperties(data, [
       "engineName",
       "searchString",
@@ -223,7 +241,7 @@ let ContentSearch = {
     if (where === "current") {
       // Since we're going to load the search in the same browser, blur the search
       // UI to prevent further interaction before we start loading.
-      this._reply(browser, "Blur");
+      this._reply(actor, "Blur");
       browser.loadURI(submission.uri.spec, {
         postData: submission.postData,
         triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal(
@@ -352,9 +370,11 @@ let ContentSearch = {
     }
 
     if (window) {
-      state.isPrivateWindow = PrivateBrowsingUtils.isContentWindowPrivate(
+      state.isInPrivateBrowsingMode = PrivateBrowsingUtils.isContentWindowPrivate(
         window
       );
+      state.isAboutPrivateBrowsing =
+        window.gBrowser.currentURI.spec == "about:privatebrowsing";
     }
 
     return state;
@@ -380,7 +400,7 @@ let ContentSearch = {
     })();
   },
 
-  _cancelSuggestions(browser) {
+  _cancelSuggestions({ actor, browser }) {
     let cancelled = false;
     // cancel active suggestion request
     if (
@@ -393,14 +413,14 @@ let ContentSearch = {
     // cancel queued suggestion requests
     for (let i = 0; i < this._eventQueue.length; i++) {
       let m = this._eventQueue[i];
-      if (browser === m.browser && m.name === "GetSuggestions") {
+      if (actor === m.actor && m.name === "GetSuggestions") {
         this._eventQueue.splice(i, 1);
         cancelled = true;
         i--;
       }
     }
     if (cancelled) {
-      this._reply(browser, "SuggestionsCancelled");
+      this._reply(actor, "SuggestionsCancelled");
     }
   },
 
@@ -408,45 +428,54 @@ let ContentSearch = {
     let methodName = "_onMessage" + eventItem.name;
     if (methodName in this) {
       await this._initService();
-      await this[methodName](eventItem.browser, eventItem.data);
+      await this[methodName](eventItem);
       eventItem.browser.removeEventListener("SwapDocShells", eventItem, true);
     }
   },
 
-  _onMessageGetState(browser, data) {
+  _onMessageGetState({ actor, browser }) {
     return this.currentStateObj(browser.ownerGlobal).then(state => {
-      this._reply(browser, "State", state);
+      this._reply(actor, "State", state);
     });
   },
 
-  _onMessageGetEngine(browser, data) {
+  _onMessageGetEngine({ actor, browser }) {
     return this.currentStateObj(browser.ownerGlobal).then(state => {
-      this._reply(browser, "Engine", {
-        isPrivateWindow: state.isPrivateWindow,
-        engine: state.isPrivateWindow
+      this._reply(actor, "Engine", {
+        isPrivateEngine: state.isInPrivateBrowsingMode,
+        isAboutPrivateBrowsing: state.isAboutPrivateBrowsing,
+        engine: state.isInPrivateBrowsingMode
           ? state.currentPrivateEngine
           : state.currentEngine,
       });
     });
   },
 
-  _onMessageGetStrings(browser, data) {
-    this._reply(browser, "Strings", this.searchSuggestionUIStrings);
+  _onMessageGetHandoffSearchModePrefs({ actor }) {
+    this._reply(
+      actor,
+      "HandoffSearchModePrefs",
+      UrlbarPrefs.get("shouldHandOffToSearchMode")
+    );
   },
 
-  _onMessageSearch(browser, data) {
-    this.performSearch(browser, data);
+  _onMessageGetStrings({ actor }) {
+    this._reply(actor, "Strings", this.searchSuggestionUIStrings);
   },
 
-  _onMessageSetCurrentEngine(browser, data) {
+  _onMessageSearch({ actor, browser, data }) {
+    this.performSearch(actor, browser, data);
+  },
+
+  _onMessageSetCurrentEngine({ data }) {
     Services.search.defaultEngine = Services.search.getEngineByName(data);
   },
 
-  _onMessageManageEngines(browser) {
+  _onMessageManageEngines({ browser }) {
     browser.ownerGlobal.openPreferences("paneSearch");
   },
 
-  async _onMessageGetSuggestions(browser, data) {
+  async _onMessageGetSuggestions({ actor, browser, data }) {
     this._ensureDataHasProperties(data, ["engineName", "searchString"]);
     let { engineName, searchString } = data;
     let suggestions = await this.getSuggestions(
@@ -455,7 +484,7 @@ let ContentSearch = {
       browser
     );
 
-    this._reply(browser, "Suggestions", {
+    this._reply(actor, "Suggestions", {
       engineName: data.engineName,
       searchString: suggestions.term,
       formHistory: suggestions.local,
@@ -463,15 +492,15 @@ let ContentSearch = {
     });
   },
 
-  async _onMessageAddFormHistoryEntry(browser, entry) {
+  async _onMessageAddFormHistoryEntry({ browser, data: entry }) {
     await this.addFormHistoryEntry(browser, entry);
   },
 
-  _onMessageRemoveFormHistoryEntry(browser, entry) {
+  _onMessageRemoveFormHistoryEntry({ browser, data: entry }) {
     this.removeFormHistoryEntry(browser, entry);
   },
 
-  _onMessageSpeculativeConnect(browser, engineName) {
+  _onMessageSpeculativeConnect({ browser, data: engineName }) {
     let engine = Services.search.getEngineByName(engineName);
     if (!engine) {
       throw new Error("Unknown engine name: " + engineName);
@@ -485,15 +514,26 @@ let ContentSearch = {
   },
 
   async _onObserve(eventItem) {
-    if (eventItem.data === "engine-default") {
-      let engine = await this._currentEngineObj(false);
-      this._broadcast("CurrentEngine", engine);
-    } else if (eventItem.data === "engine-default-private") {
-      let engine = await this._currentEngineObj(true);
-      this._broadcast("CurrentPrivateEngine", engine);
-    } else {
-      let state = await this.currentStateObj();
-      this._broadcast("CurrentState", state);
+    let engine;
+    switch (eventItem.data) {
+      case "engine-default":
+        engine = await this._currentEngineObj(false);
+        this._broadcast("CurrentEngine", engine);
+        break;
+      case "engine-default-private":
+        engine = await this._currentEngineObj(true);
+        this._broadcast("CurrentPrivateEngine", engine);
+        break;
+      case "shouldHandOffToSearchMode":
+        this._broadcast(
+          "HandoffSearchModePrefs",
+          UrlbarPrefs.get("shouldHandOffToSearchMode")
+        );
+        break;
+      default:
+        let state = await this.currentStateObj();
+        this._broadcast("CurrentState", state);
+        break;
     }
   },
 
@@ -511,8 +551,8 @@ let ContentSearch = {
     return data;
   },
 
-  _reply(browser, type, data) {
-    browser.sendMessageToActor(type, data, "ContentSearch");
+  _reply(actor, type, data) {
+    actor.sendAsyncMessage(type, data);
   },
 
   _broadcast(type, data) {
@@ -609,6 +649,7 @@ class ContentSearchParent extends JSWindowActorParent {
       name: msg.name,
       data: msg.data,
       browser,
+      actor: this,
       handleEvent: event => {
         let browserData = ContentSearch._suggestionMap.get(eventItem.browser);
         if (browserData) {
@@ -625,7 +666,7 @@ class ContentSearchParent extends JSWindowActorParent {
     // Search requests cause cancellation of all Suggestion requests from the
     // same browser.
     if (msg.name === "Search") {
-      ContentSearch._cancelSuggestions();
+      ContentSearch._cancelSuggestions(eventItem);
     }
 
     ContentSearch._eventQueue.push(eventItem);

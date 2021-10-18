@@ -38,8 +38,6 @@
 #include "nsAppShell.h"
 #include "nsTArray.h"
 #include "nsIWidgetListener.h"
-#include "ClientLayerManager.h"
-#include "BasicLayers.h"
 #include "CompositorSession.h"
 #include "ScreenHelperGonk.h"
 #include "libdisplay/GonkDisplay.h"
@@ -50,8 +48,8 @@
 #include "mozilla/layers/APZThreadUtils.h"
 #include "mozilla/layers/CompositorOGL.h"
 #include "mozilla/layers/CompositorBridgeParent.h"
-#include "mozilla/layers/LayerManagerComposite.h"
-#include "mozilla/layers/LayerTransactionChild.h"
+// #include "mozilla/layers/LayerManagerComposite.h"
+// #include "mozilla/layers/LayerTransactionChild.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/TouchEvents.h"
 #include "HwcComposer2D.h"
@@ -145,14 +143,6 @@ void nsWindow::DoDraw(void) {
 
     listener = targetWindow->GetWidgetListener();
     if (listener) {
-      mozilla::layers::LayersBackend backendType =
-          targetWindow->GetLayerManager()->GetBackendType();
-      if (mozilla::layers::LayersBackend::LAYERS_CLIENT == backendType ||
-          mozilla::layers::LayersBackend::LAYERS_WR == backendType) {
-        // No need to do anything, the compositor will handle drawing
-      } else {
-        MOZ_CRASH("Unexpected layer manager type");
-      }
       listener->DidPaintWindow();
     }
   }
@@ -274,7 +264,7 @@ class DispatchTouchInputOnMainThread : public mozilla::Runnable {
 /*static*/ void nsWindow::KickOffCompositionImpl(
     CompositorBridgeParent* aCompositorBridge) {
   aCompositorBridge->Invalidate();
-  aCompositorBridge->ScheduleComposition();
+  aCompositorBridge->ScheduleComposition(wr::RenderReasons::FLUSH);
 }
 
 void nsWindow::DispatchTouchInputViaAPZ(MultiTouchInput& aInput) {
@@ -290,7 +280,7 @@ void nsWindow::DispatchTouchInputViaAPZ(MultiTouchInput& aInput) {
   mozilla::layers::APZEventResult result =
       mAPZC->InputBridge()->ReceiveInputEvent(aInput);
   // If the APZ says to drop it, then we drop it
-  if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
+  if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
     return;
   }
 
@@ -308,7 +298,7 @@ void nsWindow::DispatchTouchEventForAPZ(
   UserActivity();
 
   // Convert it to an event we can send to Gecko
-  WidgetTouchEvent event = aInput.ToWidgetTouchEvent(this);
+  WidgetTouchEvent event = aInput.ToWidgetEvent(this);
 
   // Dispatch the event into the gecko root process for "normal" flow.
   // The event might get sent to a child process,
@@ -426,6 +416,8 @@ nsWindow::Create(nsIWidget* aParent, void* aNativeParent,
       aParent ? ((nsWindow*)aParent)->mScreen->GetId() : aInitData->mScreenId;
   ScreenHelperGonk* screenHelper = ScreenHelperGonk::GetSingleton();
   mScreen = screenHelper->ScreenGonkForId(screenId);
+  // Add display for specific screenId according to vsync type.
+  screenHelper->AddDisplay(screenId, mScreen);
 
   mBounds = aRect;
 
@@ -609,12 +601,11 @@ void nsWindow::EnsureGLCursorImageManager() {
   mGLCursorImageManager = mozilla::MakeUnique<GLCursorImageManager>();
 }
 
-void nsWindow::SetCursor(nsCursor aDefaultCursor, imgIContainer* aCursorImage,
-                         uint32_t aHotspotX, uint32_t aHotspotY) {
-  nsBaseWidget::SetCursor(aDefaultCursor, aCursorImage, aHotspotX, aHotspotY);
+void nsWindow::SetCursor(const Cursor& aCursor) {
+  nsBaseWidget::SetCursor(aCursor);
   if (mGLCursorImageManager) {
     // Prepare GLCursor if it doesn't exist
-    mGLCursorImageManager->PrepareCursorImage(aDefaultCursor, this);
+    mGLCursorImageManager->PrepareCursorImage(aCursor.mDefaultCursor, this);
     mGLCursorImageManager->HasSetCursor();
     KickOffComposition();
   }
@@ -690,24 +681,24 @@ nsWindow::MakeFullScreen(bool aFullScreen, nsIScreen*) {
   return NS_OK;
 }
 
-void nsWindow::DrawWindowOverlay(LayerManagerComposite* aManager,
-                                 LayoutDeviceIntRect aRect) {
-  if (aManager && mGLCursorImageManager) {
-    CompositorOGL* compositor =
-        static_cast<CompositorOGL*>(aManager->GetCompositor());
-    if (compositor) {
-      if (mGLCursorImageManager->ShouldDrawGLCursor() &&
-          mGLCursorImageManager->IsCursorImageReady(mCursor)) {
-        GLCursorImageManager::GLCursorImage cursorImage =
-            mGLCursorImageManager->GetGLCursorImage(mCursor);
-        LayoutDeviceIntPoint position =
-            mGLCursorImageManager->GetGLCursorPosition();
-        compositor->DrawGLCursor(aRect, position, cursorImage.mSurface,
-                                 cursorImage.mImgSize, cursorImage.mHotspot);
-      }
-    }
-  }
-}
+// void nsWindow::DrawWindowOverlay(LayerManagerComposite* aManager,
+//                                  LayoutDeviceIntRect aRect) {
+//   if (aManager && mGLCursorImageManager) {
+//     CompositorOGL* compositor =
+//         static_cast<CompositorOGL*>(aManager->GetCompositor());
+//     if (compositor) {
+//       if (mGLCursorImageManager->ShouldDrawGLCursor() &&
+//           mGLCursorImageManager->IsCursorImageReady(mCursor.mDefaultCursor)) {
+//         GLCursorImageManager::GLCursorImage cursorImage =
+//             mGLCursorImageManager->GetGLCursorImage(mCursor.mDefaultCursor);
+//         LayoutDeviceIntPoint position =
+//             mGLCursorImageManager->GetGLCursorPosition();
+//         compositor->DrawGLCursor(aRect, position, cursorImage.mSurface,
+//                                  cursorImage.mImgSize, cursorImage.mHotspot);
+//       }
+//     }
+//   }
+// }
 
 already_AddRefed<DrawTarget> nsWindow::StartRemoteDrawing() {
   RefPtr<DrawTarget> buffer = mScreen->StartRemoteDrawing();
@@ -718,7 +709,9 @@ void nsWindow::EndRemoteDrawing() { mScreen->EndRemoteDrawing(); }
 
 float nsWindow::GetDPI() { return mScreen->GetDpi(); }
 
-bool nsWindow::IsVsyncSupported() { return mScreen->IsVsyncSupported(); }
+bool nsWindow::GetVsyncSupport() { return mScreen->IsVsyncSupported(); }
+
+uint32_t nsWindow::GetScreenId() { return mScreen->GetId(); }
 
 double nsWindow::GetDefaultScaleInternal() {
   float dpi = GetDPI();
@@ -735,23 +728,12 @@ double nsWindow::GetDefaultScaleInternal() {
   return floor(dpi / 150.0 + 0.5);
 }
 
-LayerManager* nsWindow::GetLayerManager(PLayerTransactionChild* aShadowManager,
-                                        LayersBackend aBackendHint,
-                                        LayerManagerPersistence aPersistence) {
+WindowRenderer* nsWindow::GetWindowRenderer() {
   /*if (aAllowRetaining) {
     *aAllowRetaining = true;
   }*/
-  if (mLayerManager) {
-    // This layer manager might be used for painting outside of DoDraw(), so we
-    // need to set the correct rotation on it.
-    if (mLayerManager->GetBackendType() == LayersBackend::LAYERS_CLIENT) {
-      ClientLayerManager* manager =
-          static_cast<ClientLayerManager*>(mLayerManager.get());
-      uint32_t rotation = mScreen->EffectiveScreenRotation();
-      manager->SetDefaultTargetConfiguration(
-          mozilla::layers::BufferMode::BUFFER_NONE, ScreenRotation(rotation));
-    }
-    return mLayerManager;
+  if (mWindowRenderer) {
+    return mWindowRenderer;
   }
 
   const nsTArray<nsWindow*>& windows = mScreen->GetTopWindows();
@@ -770,8 +752,8 @@ LayerManager* nsWindow::GetLayerManager(PLayerTransactionChild* aShadowManager,
       mComposer2D->SetCompositorBridgeParent(mCompositorBridgeParent);
     }
   }
-  MOZ_ASSERT(mLayerManager);
-  return mLayerManager;
+  MOZ_ASSERT(mWindowRenderer);
+  return mWindowRenderer;
 }
 
 void nsWindow::DestroyCompositor() {
@@ -827,8 +809,7 @@ void nsWindow::UserActivity() {
 }
 
 uint32_t nsWindow::GetGLFrameBufferFormat() {
-  if (mLayerManager && mLayerManager->GetBackendType() ==
-                           mozilla::layers::LayersBackend::LAYERS_OPENGL) {
+  if (mWindowRenderer) {
     // We directly map the hardware fb on Gonk.  The hardware fb
     // has RGB format.
     return LOCAL_GL_RGB;
@@ -843,7 +824,7 @@ LayoutDeviceIntRect nsWindow::GetNaturalBounds() {
 nsScreenGonk* nsWindow::GetScreen() { return mScreen; }
 
 bool nsWindow::NeedsPaint() {
-  if (!mLayerManager) {
+  if (!mWindowRenderer) {
     return false;
   }
   return nsIWidget::NeedsPaint();

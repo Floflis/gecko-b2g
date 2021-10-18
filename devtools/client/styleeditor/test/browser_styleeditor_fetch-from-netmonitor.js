@@ -6,8 +6,8 @@
 // A test to ensure Style Editor only issues 1 request for each stylesheet (instead of 2)
 // by using the cache on the platform.
 
-const EMPTY_TEST_URL = TEST_BASE_HTTP + "doc_empty.html";
-const TEST_URL = TEST_BASE_HTTP + "doc_fetch_from_netmonitor.html";
+const EMPTY_TEST_URL = TEST_BASE_HTTPS + "doc_empty.html";
+const TEST_URL = TEST_BASE_HTTPS + "doc_fetch_from_netmonitor.html";
 
 add_task(async function() {
   info("Opening netmonitor");
@@ -18,8 +18,9 @@ add_task(async function() {
   //   in the tab, we might have pending updates in the netmonitor which won't be
   //   awaited for by showToolbox)
   const tab = await addTab(EMPTY_TEST_URL);
-  const target = await TargetFactory.forTab(tab);
-  const toolbox = await gDevTools.showToolbox(target, "netmonitor");
+  const toolbox = await gDevTools.showToolboxForTab(tab, {
+    toolId: "netmonitor",
+  });
   const monitor = toolbox.getPanel("netmonitor");
   const { store, windowRequire } = monitor.panelWin;
   const Actions = windowRequire("devtools/client/netmonitor/src/actions/index");

@@ -11,13 +11,13 @@ const { XPCOMUtils } = ChromeUtils.import(
 const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 
 XPCOMUtils.defineLazyGetter(this, "RIL", function() {
-  // eslint-disable-next-line mozilla/reject-chromeutils-import-null
+  // eslint-disable-next-line mozilla/reject-chromeutils-import-params
   let obj = ChromeUtils.import("resource://gre/modules/ril_consts.js", null);
   return obj;
 });
 
 XPCOMUtils.defineLazyGetter(this, "RIL_DEBUG", function() {
-  // eslint-disable-next-line mozilla/reject-chromeutils-import-null
+  // eslint-disable-next-line mozilla/reject-chromeutils-import-params
   let obj = ChromeUtils.import(
     "resource://gre/modules/ril_consts_debug.js",
     null
@@ -28,6 +28,13 @@ XPCOMUtils.defineLazyGetter(this, "RIL_DEBUG", function() {
 const kSettingsCellBroadcastDisabled = "ril.cellbroadcast.disabled";
 const kSettingsCellBroadcastSearchList = "ril.cellbroadcast.searchlist";
 const kPrefAppCBConfigurationEnabled = "dom.app_cb_configuration";
+//Geo-Fencing Maximum wait time(second).
+const kPrefCellBroadcastMaxWaitTime = "dom.cellbroadcast.maximumWaitTime";
+//GeoFencing Threshold in meters.
+const kPrefCellBroadcastGeoFencingThreshold =
+  "dom.cellbroadcast.geoFencingThreshold";
+
+const DEFAULT_MAXIMUM_WAIT_TIME = 30; // 30 seconds
 
 XPCOMUtils.defineLazyServiceGetter(
   this,
@@ -394,13 +401,13 @@ CellBroadcastService.prototype = {
 
   broadcastGeometryMessage(aServiceId, aGeometryMessage) {
     let callback = (aRv, aDeletedRecord, aCellBroadCastMessage) => {
-      if (DEBUG && Components.isSuccessCode(aRv)) {
+      if (DEBUG && !Components.isSuccessCode(aRv)) {
         debug("Failed to delete cellbroadcast message");
       }
     };
     gMobileMessageDBService.deleteCellBroadcastMessage(
       aGeometryMessage.serialNumber,
-      aGeometryMessage.messageIdentifier,
+      aGeometryMessage.messageId,
       callback
     );
     this._broadcastCellBroadcastMessage(aServiceId, aGeometryMessage);
@@ -412,14 +419,27 @@ CellBroadcastService.prototype = {
     aLatLng,
     aBroadcastArea
   ) {
-    aBroadcastArea.forEach(geo => {
-      if (geo.contains(aLatLng)) {
+    let thresholdInMeters = Services.prefs.getIntPref(
+      kPrefCellBroadcastGeoFencingThreshold,
+      0
+    );
+    for (let geo of aBroadcastArea) {
+      if (geo.contains(aLatLng, thresholdInMeters)) {
+        if (DEBUG) {
+          debug(
+            "Location " +
+              JSON.stringify(aLatLng) +
+              " inside geometry " +
+              JSON.stringify(geo)
+          );
+        }
         this.broadcastGeometryMessage(aServiceId, aCellBroadcastMessage);
+        return;
       }
-    });
+    }
   },
 
-  _handleGeoFencingTrigger(aServiceId, aGeoTriggerMessage) {
+  async _handleGeoFencingTrigger(aServiceId, aGeoTriggerMessage) {
     let cbIdentifiers = aGeoTriggerMessage.cellBroadcastIdentifiers;
     let allBroadcastMessages = [];
 
@@ -437,7 +457,7 @@ CellBroadcastService.prototype = {
         )
       );
     for (let i = 0; i < cbIdentifiers.length; i++) {
-      findCellbroadcastMessage(cbIdentifiers[i]);
+      await findCellbroadcastMessage(cbIdentifiers[i]);
     }
 
     //handle TYPE_ACTIVE_ALERT_SHARE_WAC to share all geometries together
@@ -464,14 +484,35 @@ CellBroadcastService.prototype = {
     aBroadcastArea = aGeometryMessage.geometries
   ) {
     if (aGeometryMessage.maximumWaitingTimeSec > 0) {
+      let timeout = aGeometryMessage.maximumWaitingTimeSec * 1000;
+      if (
+        aGeometryMessage.maximumWaitingTimeSec ==
+        RIL.GEO_FENCING_MAXIMUM_WAIT_TIME_NOT_SET
+      ) {
+        timeout =
+          Services.prefs.getIntPref(
+            kPrefCellBroadcastMaxWaitTime,
+            DEFAULT_MAXIMUM_WAIT_TIME
+          ) * 1000;
+      }
       let options = {
         //TODO: check which accuracy we should use.
         enableHighAccuracy: false,
-        timeout: aGeometryMessage.maximumWaitingTimeSec * 1000,
+        timeout,
         maximumAge: 0,
       };
       let success = pos => {
-        let latLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        let latLng = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.accuracy,
+        };
+        if (DEBUG) {
+          debug(
+            "getCurrentPosition successfully with LatLng: " +
+              JSON.stringify(latLng)
+          );
+        }
         this._performGeoFencing(
           aServiceId,
           aGeometryMessage,
@@ -480,11 +521,14 @@ CellBroadcastService.prototype = {
         );
       };
       let error = err => {
-        debug("geolocation error " + err);
+        if (DEBUG) {
+          debug("getCurrentPosition error: " + err.message);
+        }
+
         // Broadcast the message directly if the location is not available.
         this.broadcastGeometryMessage(aServiceId, aGeometryMessage);
       };
-      gGeolocation.getCurrentPosition(options, success, error);
+      gGeolocation.getCurrentPosition(success, error, options);
     } else {
       // Broadcast the message directly because no geo-fencing required.
       this.broadcastGeometryMessage(aServiceId, aGeometryMessage);
@@ -492,6 +536,7 @@ CellBroadcastService.prototype = {
   },
 
   _broadcastCellBroadcastMessage(aServiceId, aCellBroadcastMessage) {
+    this._acquireCbHandledWakeLock();
     // Broadcast CBS System message
     gCellbroadcastMessenger.notifyCbMessageReceived(
       aServiceId,
@@ -536,12 +581,29 @@ CellBroadcastService.prototype = {
    * nsIGonkCellBroadcastService interface
    */
   notifyMessageReceived(aServiceId, aCellBroadcastMessage) {
-    this._acquireCbHandledWakeLock();
     if (aCellBroadcastMessage.geoFencingTriggerType) {
       this._handleGeoFencingTrigger(aServiceId, aCellBroadcastMessage);
     } else if (aCellBroadcastMessage.geometries) {
-      gMobileMessageDBService.saveCellBroadcastMessage(aCellBroadcastMessage);
-      this._handleGeometryMessage(aServiceId, aCellBroadcastMessage);
+      let callback = (aRv, aSaveedRecord) => {
+        if (Components.isSuccessCode(aRv)) {
+          if (DEBUG) {
+            debug("Cellbroadcast message saved successfully");
+          }
+          this._handleGeometryMessage(aServiceId, aCellBroadcastMessage);
+        } else {
+          if (DEBUG) {
+            debug("Failed to save cellbroadcast message");
+          }
+          this._broadcastCellBroadcastMessage(
+            aServiceId,
+            aCellBroadcastMessage
+          );
+        }
+      };
+      gMobileMessageDBService.saveCellBroadcastMessage(
+        aCellBroadcastMessage,
+        callback
+      );
     } else {
       this._broadcastCellBroadcastMessage(aServiceId, aCellBroadcastMessage);
     }

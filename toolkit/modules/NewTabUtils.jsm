@@ -587,12 +587,6 @@ var BlockedLinks = {
  */
 var PlacesProvider = {
   /**
-   * A count of how many batch updates are under way (batches may be nested, so
-   * we keep a counter instead of a simple bool).
-   **/
-  _batchProcessingDepth: 0,
-
-  /**
    * Set this to change the maximum number of links the provider will provide.
    */
   maxNumLinks: HISTORY_RESULTS_LIMIT,
@@ -601,17 +595,11 @@ var PlacesProvider = {
    * Must be called before the provider is used.
    */
   init: function PlacesProvider_init() {
-    PlacesUtils.history.addObserver(this, true);
     this._placesObserver = new PlacesWeakCallbackWrapper(
       this.handlePlacesEvents.bind(this)
     );
     PlacesObservers.addListener(
-      [
-        "page-visited",
-        "page-title-changed",
-        "history-cleared",
-        "pages-rank-changed",
-      ],
+      ["page-visited", "page-title-changed", "pages-rank-changed"],
       this._placesObserver
     );
   },
@@ -708,67 +696,31 @@ var PlacesProvider = {
 
   _observers: [],
 
-  /**
-   * Called by the history service.
-   */
-  onBeginUpdateBatch() {
-    this._batchProcessingDepth += 1;
-  },
-
-  onEndUpdateBatch() {
-    this._batchProcessingDepth -= 1;
-  },
-
   handlePlacesEvents(aEvents) {
-    if (this._batchProcessingDepth) {
-      return;
-    }
-
     for (let event of aEvents) {
       switch (event.type) {
         case "page-visited": {
           if (event.visitCount == 1 && event.lastKnownTitle) {
-            this.onTitleChanged(
-              event.url,
-              event.lastKnownTitle,
-              event.pageGuid
-            );
+            this._callObservers("onLinkChanged", {
+              url: event.url,
+              title: event.lastKnownTitle,
+            });
           }
           break;
         }
         case "page-title-changed": {
-          this.onTitleChanged(event.url, event.title, event.pageGuid);
-          break;
-        }
-        case "history-cleared": {
-          this.onClearHistory();
+          this._callObservers("onLinkChanged", {
+            url: event.url,
+            title: event.title,
+          });
           break;
         }
         case "pages-rank-changed": {
-          this.onManyFrecenciesChanged();
+          this._callObservers("onManyLinksChanged");
           break;
         }
       }
     }
-  },
-
-  onDeleteURI: function PlacesProvider_onDeleteURI(aURI, aGUID, aReason) {
-    // let observers remove sensetive data associated with deleted visit
-    this._callObservers("onDeleteURI", {
-      url: aURI.spec,
-    });
-  },
-
-  onClearHistory() {
-    this._callObservers("onClearHistory");
-  },
-
-  onManyFrecenciesChanged() {
-    this._callObservers("onManyLinksChanged");
-  },
-
-  onTitleChanged(url, title, guid) {
-    this._callObservers("onLinkChanged", { url, title });
   },
 
   _callObservers: function PlacesProvider__callObservers(aMethodName, aArg) {
@@ -782,11 +734,6 @@ var PlacesProvider = {
       }
     }
   },
-
-  QueryInterface: ChromeUtils.generateQI([
-    "nsINavHistoryObserver",
-    "nsISupportsWeakReference",
-  ]),
 };
 
 /**
@@ -1321,8 +1268,7 @@ var ActivityStreamProvider = {
       didSuccessfulImport &&
       Services.prefs.getBoolPref(
         `browser.newtabpage.activity-stream.${searchShortcuts.SEARCH_SHORTCUTS_EXPERIMENT}`
-      ) &&
-      !Services.prefs.getBoolPref("browser.topsites.useRemoteSetting")
+      )
     ) {
       links.forEach(link => {
         let searchProvider = searchShortcuts.getSearchProvider(
@@ -1393,6 +1339,23 @@ var ActivityStreamProvider = {
     result.lastModified = bookmark.lastModified.getTime();
     result.url = bookmark.url.href;
     return result;
+  },
+
+  /**
+   * Count the number of visited urls grouped by day
+   */
+  getUserMonthlyActivity() {
+    let sqlQuery = `
+      SELECT count(*),
+        strftime('%Y-%m-%d', visit_date/1000000.0, 'unixepoch', 'localtime') as date_format
+      FROM moz_historyvisits
+      WHERE visit_date > 0
+      AND visit_date > strftime('%s','now','localtime','start of day','-27 days','utc') * 1000000
+      GROUP BY date_format
+      ORDER BY date_format ASC
+    `;
+
+    return this.executePlacesQuery(sqlQuery);
   },
 
   /**
@@ -2398,7 +2361,6 @@ var NewTabUtils = {
   allPages: AllPages,
   pinnedLinks: PinnedLinks,
   blockedLinks: BlockedLinks,
-  placesProvider: PlacesProvider,
   activityStreamLinks: ActivityStreamLinks,
   activityStreamProvider: ActivityStreamProvider,
 };

@@ -47,7 +47,6 @@ pub use self::GenericMatrix as Matrix;
 
 #[allow(missing_docs)]
 #[cfg_attr(rustfmt, rustfmt_skip)]
-#[css(comma, function = "matrix3d")]
 #[derive(
     Clone,
     Copy,
@@ -62,6 +61,7 @@ pub use self::GenericMatrix as Matrix;
     ToResolvedValue,
     ToShmem,
 )]
+#[css(comma, function = "matrix3d")]
 #[repr(C)]
 pub struct GenericMatrix3D<T> {
     pub m11: T, pub m12: T, pub m13: T, pub m14: T,
@@ -140,6 +140,41 @@ impl<H, V, D> TransformOrigin<H, V, D> {
 fn is_same<N: PartialEq>(x: &N, y: &N) -> bool {
     x == y
 }
+
+/// A value for the `perspective()` transform function, which is either a
+/// non-negative `<length>` or `none`.
+#[derive(
+    Clone,
+    Debug,
+    Deserialize,
+    MallocSizeOf,
+    PartialEq,
+    Serialize,
+    SpecifiedValueInfo,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C, u8)]
+pub enum GenericPerspectiveFunction<L> {
+    /// `none`
+    None,
+    /// A `<length>`.
+    Length(L),
+}
+
+impl<L> GenericPerspectiveFunction<L> {
+    /// Returns `f32::INFINITY` or the result of a function on the length value.
+    pub fn infinity_or(&self, f: impl FnOnce(&L) -> f32) -> f32 {
+        match *self {
+            Self::None => std::f32::INFINITY,
+            Self::Length(ref l) => f(l),
+        }
+    }
+}
+
+pub use self::GenericPerspectiveFunction as PerspectiveFunction;
 
 #[derive(
     Clone,
@@ -240,7 +275,7 @@ where
     ///
     /// The value must be greater than or equal to zero.
     #[css(function)]
-    Perspective(Length),
+    Perspective(GenericPerspectiveFunction<Length>),
     /// A intermediate type for interpolation of mismatched transform lists.
     #[allow(missing_docs)]
     #[css(comma, function = "interpolatematrix")]
@@ -469,9 +504,12 @@ where
                 let theta = euclid::Angle::radians(theta.radians64());
                 Transform3D::rotation(0., 0., 1., theta)
             },
-            Perspective(ref d) => {
-                let m = create_perspective_matrix(d.to_pixel_length(None)?);
-                m.cast()
+            Perspective(ref p) => {
+                let px = match p {
+                    PerspectiveFunction::None => std::f32::INFINITY,
+                    PerspectiveFunction::Length(ref p) => p.to_pixel_length(None)?,
+                };
+                create_perspective_matrix(px).cast()
             },
             Scale3D(sx, sy, sz) => Transform3D::scale(sx.into(), sy.into(), sz.into()),
             Scale(sx, sy) => Transform3D::scale(sx.into(), sy.into(), 1.),
@@ -582,17 +620,10 @@ impl<T: ToMatrix> Transform<T> {
 /// Return the transform matrix from a perspective length.
 #[inline]
 pub fn create_perspective_matrix(d: CSSFloat) -> Transform3D<CSSFloat> {
-    // TODO(gw): The transforms spec says that perspective length must
-    // be positive. However, there is some confusion between the spec
-    // and browser implementations as to handling the case of 0 for the
-    // perspective value. Until the spec bug is resolved, at least ensure
-    // that a provided perspective value of <= 0.0 doesn't cause panics
-    // and behaves as it does in other browsers.
-    // See https://lists.w3.org/Archives/Public/www-style/2016Jan/0020.html for more details.
-    if d <= 0.0 {
-        Transform3D::identity()
+    if d.is_finite() {
+        Transform3D::perspective(d.max(1.))
     } else {
-        Transform3D::perspective(d)
+        Transform3D::identity()
     }
 }
 
@@ -656,7 +687,7 @@ pub trait IsParallelTo {
 
 impl<Number, Angle> ToCss for Rotate<Number, Angle>
 where
-    Number: Copy + ToCss,
+    Number: Copy + ToCss + Zero,
     Angle: ToCss,
     (Number, Number, Number): IsParallelTo,
 {
@@ -669,25 +700,41 @@ where
             Rotate::None => dest.write_str("none"),
             Rotate::Rotate(ref angle) => angle.to_css(dest),
             Rotate::Rotate3D(x, y, z, ref angle) => {
-                // If a 3d rotation is specified, the property must serialize with an axis
-                // specified. If the axis is parallel with the x, y, or z axises, it must
-                // serialize as the appropriate keyword.
+                // If the axis is parallel with the x or y axes, it must serialize as the
+                // appropriate keyword. If a rotation about the z axis (that is, in 2D) is
+                // specified, the property must serialize as just an <angle>
+                //
                 // https://drafts.csswg.org/css-transforms-2/#individual-transform-serialization
                 let v = (x, y, z);
-                if v.is_parallel_to(&DirectionVector::new(1., 0., 0.)) {
-                    dest.write_char('x')?;
+                let axis = if x.is_zero() && y.is_zero() && z.is_zero() {
+                    // The zero length vector is parallel to every other vector, so
+                    // is_parallel_to() returns true for it. However, it is definitely different
+                    // from x axis, y axis, or z axis, and it's meaningless to perform a rotation
+                    // using that direction vector. So we *have* to serialize it using that same
+                    // vector - we can't simplify to some theoretically parallel axis-aligned
+                    // vector.
+                    None
+                } else if v.is_parallel_to(&DirectionVector::new(1., 0., 0.)) {
+                    Some("x ")
                 } else if v.is_parallel_to(&DirectionVector::new(0., 1., 0.)) {
-                    dest.write_char('y')?;
+                    Some("y ")
                 } else if v.is_parallel_to(&DirectionVector::new(0., 0., 1.)) {
-                    dest.write_char('z')?;
+                    // When we're parallel to the z-axis, we can just serialize the angle.
+                    return angle.to_css(dest);
                 } else {
-                    x.to_css(dest)?;
-                    dest.write_char(' ')?;
-                    y.to_css(dest)?;
-                    dest.write_char(' ')?;
-                    z.to_css(dest)?;
+                    None
+                };
+                match axis {
+                    Some(a) => dest.write_str(a)?,
+                    None => {
+                        x.to_css(dest)?;
+                        dest.write_char(' ')?;
+                        y.to_css(dest)?;
+                        dest.write_char(' ')?;
+                        z.to_css(dest)?;
+                        dest.write_char(' ')?;
+                    }
                 }
-                dest.write_char(' ')?;
                 angle.to_css(dest)
             },
         }

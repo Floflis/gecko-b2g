@@ -57,6 +57,10 @@ class GeckoInstance(object):
         # No slow script dialogs
         "dom.max_chrome_script_run_time": 0,
         "dom.max_script_run_time": 0,
+        # DOM Push
+        "dom.push.connection.enabled": False,
+        # Disable dialog abuse if alerts are triggered too quickly
+        "dom.successive_dialog_time_limit": 0,
         # Only load extensions from the application and user profile
         # AddonManager.SCOPE_PROFILE + AddonManager.SCOPE_APPLICATION
         "extensions.autoDisableScopes": 0,
@@ -82,11 +86,6 @@ class GeckoInstance(object):
         # Disable idle-daily notifications to avoid expensive operations
         # that may cause unexpected test timeouts.
         "idle.lastDailyNotification": -1,
-        "javascript.options.showInConsole": True,
-        # (deprecated and can be removed when Firefox 60 ships)
-        "marionette.defaultPrefs.enabled": True,
-        # Disable recommended automation prefs in CI
-        "marionette.prefs.recommended": False,
         # Disable download and usage of OpenH264, and Widevine plugins
         "media.gmp-manager.updateEnabled": False,
         # Disable the GFX sanity window
@@ -100,6 +99,8 @@ class GeckoInstance(object):
         "network.sntp.pools": "%(server)s",
         # Privacy and Tracking Protection
         "privacy.trackingprotection.enabled": False,
+        # Disable recommended automation prefs in CI
+        "remote.prefs.recommended": False,
         # Don't do network connections for mitm priming
         "security.certerrors.mitm.priming.enabled": False,
         # Tests don't wait for the notification button security delay
@@ -113,6 +114,8 @@ class GeckoInstance(object):
         "toolkit.startup.max_resumed_crashes": -1,
         # Enabling the support for File object creation in the content process.
         "dom.file.createInChild": True,
+        # Don't pull Top Sites content from the network
+        "browser.topsites.contile.enabled": False,
     }
 
     def __init__(
@@ -275,10 +278,9 @@ class GeckoInstance(object):
             args["preferences"].update(
                 {
                     "devtools.browsertoolbox.panel": "jsdebugger",
-                    "devtools.debugger.remote-enabled": True,
                     "devtools.chrome.enabled": True,
                     "devtools.debugger.prompt-connection": False,
-                    "marionette.debugging.clicktostart": True,
+                    "devtools.debugger.remote-enabled": True,
                 }
             )
 
@@ -316,10 +318,10 @@ class GeckoInstance(object):
         }
 
         if self.gecko_log == "-":
-            if six.PY2:
-                process_args["stream"] = codecs.getwriter("utf-8")(sys.stdout)
-            else:
+            if hasattr(sys.stdout, "buffer"):
                 process_args["stream"] = codecs.getwriter("utf-8")(sys.stdout.buffer)
+            else:
+                process_args["stream"] = codecs.getwriter("utf-8")(sys.stdout)
         else:
             process_args["logfile"] = self.gecko_log
 
@@ -588,9 +590,6 @@ class DesktopInstance(GeckoInstance):
         "browser.urlbar.suggest.searches": False,
         # Don't warn when exiting the browser
         "browser.warnOnQuit": False,
-        # Only allow the old modal dialogs. This should be removed when there is
-        # support for the new modal UI (see Bug 1686741).
-        "prompts.contentPromptSubDialog": False,
         # Disable first-run welcome page
         "startup.homepage_welcome_url": "about:blank",
         "startup.homepage_welcome_url.additional": "",

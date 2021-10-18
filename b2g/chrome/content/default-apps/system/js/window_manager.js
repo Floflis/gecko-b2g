@@ -6,14 +6,19 @@
 
 class WindowManager extends HTMLElement {
   constructor() {
-    console.log(`Creating WindowManager`);
+    // console.log(`Creating WindowManager`);
     super();
 
     // Hooks up webview state to the UI.
     // FIXME: Do something fancy instead??
     this.ui_updater = state => {
-      console.log(`Updating UI state with: ${JSON.stringify(state)}`);
-      document.getElementById("statusbar").update_state(state);
+      let statusbar = document.getElementById("statusbar");
+      if (!statusbar) {
+        return;
+      }
+
+      // console.log(`Updating UI state with: ${JSON.stringify(state)}`);
+      statusbar.update_state(state);
 
       if (state.canGoBack) {
         document.getElementById("action-go-back").removeAttribute("disabled");
@@ -61,13 +66,13 @@ class WindowManager extends HTMLElement {
 
     let intersection_callback = (entries, observer) => {
       entries.forEach(entry => {
-        console.log(
-          `Intersection: isIntersecting=${
-            entry.isIntersecting
-          } target=${entry.target.getAttribute("id")} ratio=${
-            entry.intersectionRatio
-          }`
-        );
+        // console.log(
+        //   `Intersection: isIntersecting=${
+        //     entry.isIntersecting
+        //   } target=${entry.target.getAttribute("id")} ratio=${
+        //     entry.intersectionRatio
+        //   }`
+        // );
 
         // Change the active status of the webview based on its visibility in
         // the container.
@@ -99,13 +104,13 @@ class WindowManager extends HTMLElement {
   // Recognized configuration properties:
   // isHomescreen (bool) : the homescreen gets a transparent background and can't be closed.
   // activate (bool) : if true, selects this frame as the active one.
-  open_frame(url = "about:blank", config = {}, aOpenWindowInfo = null) {
+  open_frame(url = "about:blank", config = {}, aParams = null) {
     console.log(`WindowManager::open ${url} ${JSON.stringify(config)}`);
     let attr_id = `frame${this.frame_id}`;
     this.frame_id += 1;
     let webview = document.createElement("web-view");
     // Bug 109000, we must set the openWindowInfo.
-    webview.openWindowInfo = aOpenWindowInfo;
+    webview.openWindowInfo = aParams ? aParams.openWindowInfo : null;
     webview.setAttribute("remote", "true");
     webview.setAttribute("id", attr_id);
     if (config.isHomescreen) {
@@ -204,7 +209,7 @@ class WebViewHandler {
       "visibilitychange",
       "error",
     ].forEach(event_name => {
-      web_view.addEventListener(`mozbrowser${event_name}`, handler);
+      web_view.addEventListener(`${event_name}`, handler);
     });
   }
 
@@ -238,15 +243,15 @@ class WebViewHandler {
     let ui_update_needed = false;
 
     switch (event.type) {
-      case "mozbrowsertitlechange":
+      case "titlechange":
         this.state.title = detail.title;
         ui_update_needed = true;
         break;
-      case "mozbrowsersecuritychange":
+      case "securitychange":
         this.state.secure = detail.state;
         ui_update_needed = true;
         break;
-      case "mozbrowserlocationchange":
+      case "locationchange":
         // We don't reset the icon url until we get a new one.
         this.state.iconSize = 0;
         this.state.canGoBack = detail.canGoBack;
@@ -254,7 +259,7 @@ class WebViewHandler {
         this.state.url = detail.url;
         ui_update_needed = true;
         break;
-      case "mozbrowservisibilitychange":
+      case "visibilitychange":
         this.update_ui();
         break;
     }

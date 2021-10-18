@@ -8,6 +8,7 @@
 #define mozilla_dom_MobileConnection_h
 
 #include "mozilla/DOMEventTargetHelper.h"
+#include "mozilla/dom/DOMMobileSignalStrength.h"
 #include "mozilla/dom/DOMRequest.h"
 #include "mozilla/dom/MobileConnectionInfo.h"
 #include "mozilla/dom/MobileNetworkInfo.h"
@@ -78,7 +79,7 @@ class MobileConnection final : public DOMEventTargetHelper,
 
   Nullable<MobileRadioState> GetRadioState() const;
 
-  already_AddRefed<MobileSignalStrength> SignalStrength() const;
+  already_AddRefed<DOMMobileSignalStrength> SignalStrength() const;
 
   void GetSupportedNetworkTypes(nsTArray<MobileNetworkType>& aTypes) const;
 
@@ -138,6 +139,8 @@ class MobileConnection final : public DOMEventTargetHelper,
 
   already_AddRefed<DOMRequest> SetRadioEnabled(bool aEnabled, ErrorResult& aRv);
 
+  already_AddRefed<DOMRequest> StopNetworkScan(ErrorResult& aRv);
+
   IMPL_EVENT_HANDLER(voicechange)
   IMPL_EVENT_HANDLER(datachange)
   IMPL_EVENT_HANDLER(dataerror)
@@ -162,6 +165,7 @@ class MobileConnection final : public DOMEventTargetHelper,
   RefPtr<Listener> mListener;
   RefPtr<MobileConnectionInfo> mVoice;
   RefPtr<MobileConnectionInfo> mData;
+  RefPtr<DOMMobileSignalStrength> mSignalStrength;
   // mutable for lazy initialization in GetImsRegHandler() const.
   mutable RefPtr<ImsRegHandler> mImsHandler;
 
@@ -172,6 +176,8 @@ class MobileConnection final : public DOMEventTargetHelper,
   void UpdateData();
 
   bool UpdateIccId();
+
+  void UpdateSignalStrength();
 
   nsresult NotifyError(DOMRequest* aRequest, const nsAString& aMessage);
 

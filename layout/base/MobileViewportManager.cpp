@@ -17,13 +17,15 @@
 #include "nsViewportInfo.h"
 #include "UnitTransforms.h"
 
-static mozilla::LazyLogModule sApzMvmLog("apz.mobileviewport");
-#define MVM_LOG(...) MOZ_LOG(sApzMvmLog, LogLevel::Debug, (__VA_ARGS__))
+mozilla::LazyLogModule MobileViewportManager::gLog("apz.mobileviewport");
+#define MVM_LOG(...) \
+  MOZ_LOG(MobileViewportManager::gLog, LogLevel::Debug, (__VA_ARGS__))
 
 NS_IMPL_ISUPPORTS(MobileViewportManager, nsIDOMEventListener, nsIObserver)
 
 #define DOM_META_ADDED u"DOMMetaAdded"_ns
 #define DOM_META_CHANGED u"DOMMetaChanged"_ns
+#define FULLSCREEN_CHANGED u"fullscreenchange"_ns
 #define LOAD u"load"_ns
 #define BEFORE_FIRST_PAINT "before-first-paint"_ns
 
@@ -43,9 +45,14 @@ MobileViewportManager::MobileViewportManager(MVMContext* aContext,
 
   mContext->AddEventListener(DOM_META_ADDED, this, false);
   mContext->AddEventListener(DOM_META_CHANGED, this, false);
+  mContext->AddEventListener(FULLSCREEN_CHANGED, this, false);
   mContext->AddEventListener(LOAD, this, true);
 
   mContext->AddObserver(this, BEFORE_FIRST_PAINT.Data(), false);
+
+  // We need to initialize the display size and the CSS viewport size before
+  // the initial reflow happens.
+  UpdateSizesBeforeReflow();
 }
 
 MobileViewportManager::~MobileViewportManager() = default;
@@ -55,6 +62,7 @@ void MobileViewportManager::Destroy() {
 
   mContext->RemoveEventListener(DOM_META_ADDED, this, false);
   mContext->RemoveEventListener(DOM_META_CHANGED, this, false);
+  mContext->RemoveEventListener(FULLSCREEN_CHANGED, this, false);
   mContext->RemoveEventListener(LOAD, this, true);
 
   mContext->RemoveObserver(this, BEFORE_FIRST_PAINT.Data());
@@ -134,6 +142,9 @@ MobileViewportManager::HandleEvent(dom::Event* event) {
   } else if (type.Equals(DOM_META_CHANGED)) {
     MVM_LOG("%p: got a dom-meta-changed event\n", this);
     RefreshViewportSize(mPainted);
+  } else if (type.Equals(FULLSCREEN_CHANGED)) {
+    MVM_LOG("%p: got a fullscreenchange event\n", this);
+    RefreshViewportSize(mPainted);
   } else if (type.Equals(LOAD)) {
     MVM_LOG("%p: got a load event\n", this);
     if (!mPainted) {
@@ -185,6 +196,8 @@ MobileViewportManager::Observe(nsISupports* aSubject, const char* aTopic,
 
 void MobileViewportManager::SetInitialViewport() {
   MVM_LOG("%p: setting initial viewport\n", this);
+  mRestoreResolution.reset();
+  mRestoreDisplaySize.reset();
   mIsFirstPaint = true;
   mPainted = true;
   RefreshViewportSize(false);
@@ -560,10 +573,6 @@ void MobileViewportManager::RefreshVisualViewportSize() {
 void MobileViewportManager::UpdateSizesBeforeReflow() {
   if (Maybe<LayoutDeviceIntSize> newDisplaySize =
           mContext->GetContentViewerSize()) {
-    if (mDisplaySize == *newDisplaySize) {
-      return;
-    }
-
     mDisplaySize = *newDisplaySize;
     MVM_LOG("%p: Reflow starting, display size updated to %s\n", this,
             ToString(mDisplaySize).c_str());

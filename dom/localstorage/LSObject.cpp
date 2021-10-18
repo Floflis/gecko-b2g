@@ -35,7 +35,6 @@
 #include "mozilla/ipc/BackgroundChild.h"
 #include "mozilla/ipc/BackgroundUtils.h"
 #include "mozilla/ipc/PBackgroundChild.h"
-#include "mozilla/ipc/PBackgroundSharedTypes.h"
 #include "nsCOMPtr.h"
 #include "nsContentUtils.h"
 #include "nsDebug.h"
@@ -337,15 +336,15 @@ nsresult LSObject::CreateForWindow(nsPIDOMWindowInner* aWindow,
   }
 
 #ifdef DEBUG
-  LS_TRY_INSPECT(
-      const auto& quotaInfo,
+  QM_TRY_INSPECT(
+      const auto& principalMetadata,
       quota::QuotaManager::GetInfoFromPrincipal(storagePrincipal.get()));
 
-  MOZ_ASSERT(originAttrSuffix == quotaInfo.mSuffix);
+  MOZ_ASSERT(originAttrSuffix == principalMetadata.mSuffix);
 
-  const auto& origin = quotaInfo.mOrigin;
+  const auto& origin = principalMetadata.mOrigin;
 #else
-  LS_TRY_INSPECT(
+  QM_TRY_INSPECT(
       const auto& origin,
       quota::QuotaManager::GetOriginFromPrincipal(storagePrincipal.get()));
 #endif
@@ -363,6 +362,9 @@ nsresult LSObject::CreateForWindow(nsPIDOMWindowInner* aWindow,
 
   Maybe<nsID> clientId = Some(clientInfo.ref().Id());
 
+  Maybe<PrincipalInfo> clientPrincipalInfo =
+      Some(clientInfo.ref().PrincipalInfo());
+
   nsString documentURI;
   if (nsCOMPtr<Document> doc = aWindow->GetExtantDoc()) {
     rv = doc->GetDocumentURI(documentURI);
@@ -376,6 +378,7 @@ nsresult LSObject::CreateForWindow(nsPIDOMWindowInner* aWindow,
   object->mStoragePrincipalInfo = std::move(storagePrincipalInfo);
   object->mPrivateBrowsingId = privateBrowsingId;
   object->mClientId = clientId;
+  object->mClientPrincipalInfo = clientPrincipalInfo;
   object->mOrigin = origin;
   object->mOriginKey = originKey;
   object->mDocumentURI = documentURI;
@@ -428,23 +431,23 @@ nsresult LSObject::CreateForPrincipal(nsPIDOMWindowInner* aWindow,
   }
 
 #ifdef DEBUG
-  LS_TRY_INSPECT(
-      const auto& quotaInfo,
+  QM_TRY_INSPECT(
+      const auto& principalMetadata,
       ([&storagePrincipalInfo,
-        &aPrincipal]() -> Result<quota::QuotaInfo, nsresult> {
+        &aPrincipal]() -> Result<quota::PrincipalMetadata, nsresult> {
         if (storagePrincipalInfo->type() ==
             PrincipalInfo::TSystemPrincipalInfo) {
           return quota::QuotaManager::GetInfoForChrome();
         }
 
-        LS_TRY_RETURN(quota::QuotaManager::GetInfoFromPrincipal(aPrincipal));
+        QM_TRY_RETURN(quota::QuotaManager::GetInfoFromPrincipal(aPrincipal));
       }()));
 
-  MOZ_ASSERT(originAttrSuffix == quotaInfo.mSuffix);
+  MOZ_ASSERT(originAttrSuffix == principalMetadata.mSuffix);
 
-  const auto& origin = quotaInfo.mOrigin;
+  const auto& origin = principalMetadata.mOrigin;
 #else
-  LS_TRY_INSPECT(
+  QM_TRY_INSPECT(
       const auto& origin, ([&storagePrincipalInfo,
                             &aPrincipal]() -> Result<nsAutoCString, nsresult> {
         if (storagePrincipalInfo->type() ==
@@ -452,7 +455,7 @@ nsresult LSObject::CreateForPrincipal(nsPIDOMWindowInner* aWindow,
           return nsAutoCString{quota::QuotaManager::GetOriginForChrome()};
         }
 
-        LS_TRY_RETURN(quota::QuotaManager::GetOriginFromPrincipal(aPrincipal));
+        QM_TRY_RETURN(quota::QuotaManager::GetOriginFromPrincipal(aPrincipal));
       }()));
 #endif
 
@@ -481,20 +484,6 @@ nsresult LSObject::CreateForPrincipal(nsPIDOMWindowInner* aWindow,
   object.forget(aObject);
   return NS_OK;
 }  // namespace dom
-
-// static
-already_AddRefed<nsISerialEventTarget> LSObject::GetSyncLoopEventTarget() {
-  MOZ_ASSERT(XRE_IsParentProcess());
-
-  nsCOMPtr<nsISerialEventTarget> target;
-
-  {
-    StaticMutexAutoLock lock(gRequestHelperMutex);
-    target = gSyncLoopEventTarget;
-  }
-
-  return target.forget();
-}
 
 // static
 void LSObject::OnSyncMessageReceived() {
@@ -578,6 +567,16 @@ int64_t LSObject::GetOriginQuotaUsage() const {
   // Note: This may change as LocalStorage is repurposed to be the new
   // SessionStorage backend.
   return 0;
+}
+
+void LSObject::Disconnect() {
+  // Explicit snapshots which were not ended in JS, must be ended here while
+  // IPC is still available. We can't do that in DropDatabase because actors
+  // may have been destroyed already at that point.
+  if (mInExplicitSnapshot) {
+    nsresult rv = EndExplicitSnapshotInternal();
+    Unused << NS_WARN_IF(NS_FAILED(rv));
+  }
 }
 
 uint32_t LSObject::GetLength(nsIPrincipal& aSubjectPrincipal,
@@ -936,6 +935,7 @@ nsresult LSObject::EnsureDatabase() {
   LSRequestPrepareDatastoreParams params;
   params.commonParams() = commonParams;
   params.clientId() = mClientId;
+  params.clientPrincipalInfo() = mClientPrincipalInfo;
 
   LSRequestResponse response;
 
@@ -976,11 +976,6 @@ nsresult LSObject::EnsureDatabase() {
 void LSObject::DropDatabase() {
   AssertIsOnOwningThread();
 
-  if (mInExplicitSnapshot) {
-    nsresult rv = EndExplicitSnapshotInternal();
-    Unused << NS_WARN_IF(NS_FAILED(rv));
-  }
-
   mDatabase = nullptr;
 }
 
@@ -1001,6 +996,7 @@ nsresult LSObject::EnsureObserver() {
   params.principalInfo() = *mPrincipalInfo;
   params.storagePrincipalInfo() = *mStoragePrincipalInfo;
   params.clientId() = mClientId;
+  params.clientPrincipalInfo() = mClientPrincipalInfo;
 
   LSRequestResponse response;
 
@@ -1067,11 +1063,11 @@ nsresult LSObject::EndExplicitSnapshotInternal() {
   // An explicit snapshot must have been created.
   MOZ_ASSERT(mInExplicitSnapshot);
 
-  // If an explicit snapshot have been created then mDatabase must be not null.
-  // DropDatabase could be called in the meatime, but that would set
-  // mInExplicitSnapshot to false. EnsureDatabase could be called in the
-  // meantime too, but that can't set mDatabase to null or to a new value. See
-  // the comment below.
+  // If an explicit snapshot has been created then mDatabase must be not null.
+  // DropDatabase could be called in the meatime, but that must be preceded by
+  // Disconnect which sets mInExplicitSnapshot to false. EnsureDatabase could
+  // be called in the meantime too, but that can't set mDatabase to null or to
+  // a new value. See the comment below.
   MOZ_ASSERT(mDatabase);
 
   // Existence of a snapshot prevents the database from allowing to close. See
@@ -1229,6 +1225,7 @@ nsresult RequestHelper::StartAndReturnResponse(LSRequestResponse& aResponse) {
           "RequestHelper::StartAndReturnResponse::SpinEventLoopTimer"));
 
       MOZ_ALWAYS_TRUE(SpinEventLoopUntil(
+          "RequestHelper::StartAndReturnResponse"_ns,
           [&]() {
             if (mCancelled) {
               return true;

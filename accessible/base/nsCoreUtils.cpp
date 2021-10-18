@@ -31,7 +31,9 @@
 #include "nsComponentManagerUtils.h"
 
 #include "XULTreeElement.h"
+#include "nsIContentInlines.h"
 #include "nsTreeColumns.h"
+#include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/HTMLLabelElement.h"
 #include "mozilla/dom/MouseEventBinding.h"
@@ -165,9 +167,10 @@ uint32_t nsCoreUtils::GetAccessKeyFor(nsIContent* aContent) {
   // Accesskeys are registered by @accesskey attribute only. At first check
   // whether it is presented on the given element to avoid the slow
   // EventStateManager::GetRegisteredAccessKey() method.
-  if (!aContent->IsElement() ||
-      !aContent->AsElement()->HasAttr(kNameSpaceID_None, nsGkAtoms::accesskey))
+  if (!aContent->IsElement() || !aContent->AsElement()->HasAttr(
+                                    kNameSpaceID_None, nsGkAtoms::accesskey)) {
     return 0;
+  }
 
   nsPresContext* presContext = aContent->OwnerDoc()->GetPresContext();
   if (!presContext) return 0;
@@ -329,8 +332,9 @@ nsIntPoint nsCoreUtils::GetScreenCoordsForWindow(nsINode* aNode) {
   if (!treeOwner) return coords;
 
   nsCOMPtr<nsIBaseWindow> baseWindow = do_QueryInterface(treeOwner);
-  if (baseWindow)
+  if (baseWindow) {
     baseWindow->GetPosition(&coords.x, &coords.y);  // in device pixels
+  }
 
   return coords;
 }
@@ -350,13 +354,6 @@ bool nsCoreUtils::IsRootDocument(Document* aDocument) {
   docShellTreeItem->GetInProcessParent(getter_AddRefs(parentTreeItem));
 
   return !parentTreeItem;
-}
-
-bool nsCoreUtils::IsContentDocument(Document* aDocument) {
-  nsCOMPtr<nsIDocShellTreeItem> docShellTreeItem = aDocument->GetDocShell();
-  NS_ASSERTION(docShellTreeItem, "No document shell tree item for document!");
-
-  return (docShellTreeItem->ItemType() == nsIDocShellTreeItem::typeContent);
 }
 
 bool nsCoreUtils::IsTopLevelContentDocInProcess(Document* aDocumentNode) {
@@ -419,8 +416,9 @@ void nsCoreUtils::GetLanguageFor(nsIContent* aContent, nsIContent* aRootContent,
   while (walkUp && walkUp != aRootContent &&
          (!walkUp->IsElement() ||
           !walkUp->AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::lang,
-                                        aLanguage)))
+                                        aLanguage))) {
     walkUp = walkUp->GetParent();
+  }
 }
 
 XULTreeElement* nsCoreUtils::GetTree(nsIContent* aContent) {
@@ -584,4 +582,15 @@ void nsCoreUtils::DispatchAccEvent(RefPtr<nsIAccessibleEvent> event) {
 bool nsCoreUtils::IsDisplayContents(nsIContent* aContent) {
   return aContent && aContent->IsElement() &&
          aContent->AsElement()->IsDisplayContents();
+}
+
+bool nsCoreUtils::IsDocumentVisibleConsideringInProcessAncestors(
+    const Document* aDocument) {
+  const Document* parent = aDocument;
+  do {
+    if (!parent->IsVisible()) {
+      return false;
+    }
+  } while ((parent = parent->GetInProcessParentDocument()));
+  return true;
 }

@@ -42,7 +42,6 @@ IPDL Background
 IdentityCrypto
 ImageBridgeChld
 LS Thread
-LayerScope
 MDCDMThread
 MWQThread
 MediaCache
@@ -65,6 +64,8 @@ RemoteLzyStream
 RWLockTester
 RacingServMan
 RemVidChild
+Renderer
+ResetCleanup
 Sandbox Testing
 SaveScripts
 Socket Thread
@@ -74,13 +75,14 @@ StressRunner
 SuicideManager
 SuicideThread
 TEQ AwaitIdle
+TelemetryModule
 Test Thread
 Test thread
 TestPipe
 TestShortWrites
 TestThreadsMain
 Testing Thread
-Timer Thread
+Timer
 ToastBgThread
 TRR Background
 URL Classifier

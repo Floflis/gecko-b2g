@@ -1,5 +1,6 @@
 #include "gdb-tests.h"
 #include "jsapi.h"
+#include "js/GlobalObject.h"
 #include "js/Object.h"  // JS::GetClass
 
 FRAGMENT(JSObject, simple) {
@@ -7,6 +8,7 @@ FRAGMENT(JSObject, simple) {
 
   JS::Rooted<JSObject*> glob(cx, JS::CurrentGlobalOrNull(cx));
   JS::Rooted<JSObject*> plain(cx, JS_NewPlainObject(cx));
+  JS::Rooted<JSObject*> objectProto(cx, JS::GetRealmObjectPrototype(cx));
   JS::Rooted<JSObject*> global(cx, JS::CurrentGlobalOrNull(cx));
   JS::Rooted<JSObject*> func(
       cx, (JSObject*)JS_NewFunction(cx, (JSNative)1, 0, 0, "dys"));
@@ -31,6 +33,7 @@ FRAGMENT(JSObject, simple) {
 
   use(glob);
   use(plain);
+  use(objectProto);
   use(func);
   use(anon);
   use(funcPtr);

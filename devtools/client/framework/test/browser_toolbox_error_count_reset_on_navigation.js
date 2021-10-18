@@ -15,6 +15,12 @@ const TEST_URI = `http://example.org/document-builder.sjs?html=<meta charset=utf
 const { Toolbox } = require("devtools/client/framework/toolbox");
 
 add_task(async function() {
+  // Disable bfcache for Fission for now.
+  // If Fission is disabled, the pref is no-op.
+  await SpecialPowers.pushPrefEnv({
+    set: [["fission.bfcacheInParent", false]],
+  });
+
   // Make sure we start the test with the split console disabled.
   // ⚠️ In this test it's important to _not_ enable the console.
   await pushPref("devtools.toolbox.splitconsoleEnabled", false);
@@ -53,7 +59,7 @@ add_task(async function() {
   info(
     "Reload the page and check that the error icon has the expected content"
   );
-  tab.linkedBrowser.reload();
+  await reloadBrowser();
 
   await waitFor(
     () => getErrorIconCount(toolbox) === expectedErrorCount,
@@ -64,7 +70,7 @@ add_task(async function() {
   info(
     "Navigate to an error-less page and check that the error icon is hidden"
   );
-  navigateTo(`data:text/html;charset=utf8,No errors`);
+  await navigateTo(`data:text/html;charset=utf8,No errors`);
   await waitFor(
     () => !getErrorIcon(toolbox),
     "Error count is cleared on navigation"

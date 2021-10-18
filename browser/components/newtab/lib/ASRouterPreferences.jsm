@@ -52,21 +52,11 @@ class _ASRouterPreferences {
   constructor() {
     Object.assign(this, DEFAULT_STATE);
     this._callbacks = new Set();
-
     XPCOMUtils.defineLazyPreferenceGetter(
       this,
-      "personalizedCfrScores",
-      "browser.messaging-system.personalized-cfr.scores",
-      "{}",
-      null,
-      this._transformPersonalizedCfrScores
-    );
-
-    XPCOMUtils.defineLazyPreferenceGetter(
-      this,
-      "personalizedCfrThreshold",
-      "browser.messaging-system.personalized-cfr.score-threshold",
-      5000
+      "disableCaptivePortalVPNPromo",
+      "browser.newtabpage.activity-stream.asrouter.disable-captive-portal-vpn-promo",
+      false
     );
   }
 

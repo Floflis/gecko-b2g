@@ -240,6 +240,11 @@ this.PermissionsTable = {
     signed: DENY_ACTION,
     core: ALLOW_ACTION,
   },
+  input: {
+    pwa: DENY_ACTION,
+    signed: DENY_ACTION,
+    core: ALLOW_ACTION,
+  },
   mobileconnection: {
     pwa: DENY_ACTION,
     signed: DENY_ACTION,
@@ -289,6 +294,12 @@ this.PermissionsTable = {
     pwa: DENY_ACTION,
     signed: ALLOW_ACTION,
   },
+  "system-time": {
+    pwa: DENY_ACTION,
+    signed: DENY_ACTION,
+    core: ALLOW_ACTION,
+    access: ["read", "write"],
+  },
   systemXHR: {
     pwa: DENY_ACTION,
     signed: ALLOW_ACTION,
@@ -329,7 +340,7 @@ this.PermissionsTable = {
   },
   volumemanager: {
     pwa: DENY_ACTION,
-    signed: DENY_ACTION,
+    signed: ALLOW_ACTION,
     core: ALLOW_ACTION,
   },
   wappush: {

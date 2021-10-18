@@ -477,7 +477,8 @@ nsresult nsScreenGonk::MakeSnapshot(ANativeWindowBuffer* aBuffer) {
   }
 
   gfx::IntRect rect = GetRect().ToUnknownRect();
-  compositorParent->ForceComposeToTarget(mTarget, &rect);
+  compositorParent->ForceComposeToTarget(wr::RenderReasons::SNAPSHOT, mTarget,
+                                         &rect);
 
   // Convert from BGR to RGB
   // XXX this is a temporary solution. It consumes extra cpu cycles,
@@ -763,36 +764,28 @@ already_AddRefed<Screen> ScreenHelperGonk::MakeScreen(
   DisplayType displayType = (DisplayType)id;
   NS_ENSURE_TRUE(!IsScreenConnected(id), nullptr);
   GonkDisplay::NativeData nativeData =
-
       GetGonkDisplay()->GetNativeData(displayType, nullptr);
-  RefPtr<nsScreenGonk> screengonk =
+
+  RefPtr<nsScreenGonk> screenGonk =
       new nsScreenGonk(id, displayType, nativeData, aEventVisibility);
-  mScreenGonks.Put(id, screengonk);
+  mScreenGonks.InsertOrUpdate(id, screenGonk);
 
   if (aEventVisibility == NotifyDisplayChangedEvent::Observable) {
     NotifyDisplayChange(id, true);
   }
 
-// TODO: FIXME
-#if 0
   // By default, non primary screen does mirroring.
-  if (aDisplayType != DisplayType::DISPLAY_PRIMARY) {
-      screen->EnableMirroring();
-  }
+  // if (StaticPrefs::gfx_screen_mirroring_enabled() &&
+  //     displayType != DisplayType::DISPLAY_PRIMARY) {
+  //   screenGonk->EnableMirroring();
+  // }
 
-  VsyncSource::VsyncType vsyncType = (screen->IsVsyncSupported()) ?
-    VsyncSource::VsyncType::HARDWARE_VYSNC :
-    VsyncSource::VsyncType::SORTWARE_VSYNC;
-
-  gfxPlatform::GetPlatform()->GetHardwareVsync()->AddDisplay(id, vsyncType);
-#endif
-
-  LayoutDeviceIntRect bounds = screengonk->GetNaturalBounds();
+  LayoutDeviceIntRect bounds = screenGonk->GetNaturalBounds();
   int32_t depth;
 
-  screengonk->GetColorDepth(&depth);
+  screenGonk->GetColorDepth(&depth);
   float density = 160.0f;  // FIXME: This is the default density
-  float dpi = screengonk->GetDpi();
+  float dpi = screenGonk->GetDpi();
 
   RefPtr<Screen> screen = new Screen(bounds, bounds, depth, depth,
                                      DesktopToLayoutDeviceScale(density),
@@ -807,7 +800,7 @@ void ScreenHelperGonk::Refresh() {
   if (!screen) {
     screen = MakeScreen(id);
     if (screen) {
-      mScreens.Put(id, screen);
+      mScreens.InsertOrUpdate(id, screen);
     }
   }
 
@@ -819,6 +812,16 @@ void ScreenHelperGonk::Refresh() {
   manager.Refresh(std::move(screenList));
 }
 
+void ScreenHelperGonk::AddDisplay(uint32_t aScreenId,
+                                  nsScreenGonk* screenGonk) {
+  VsyncSource::VsyncType vsyncType =
+      (screenGonk->IsVsyncSupported()) ? VsyncSource::VsyncType::HARDWARE_VYSNC
+                                       : VsyncSource::VsyncType::SOFTWARE_VSYNC;
+
+  gfxPlatform::GetPlatform()->GetHardwareVsync()->AddDisplay(aScreenId,
+                                                             vsyncType);
+}
+
 void ScreenHelperGonk::AddScreen(uint32_t aScreenId, DisplayType aDisplayType,
                                  LayoutDeviceIntRect aRect, float aDensity,
                                  NotifyDisplayChangedEvent aEventVisibility) {
@@ -827,7 +830,7 @@ void ScreenHelperGonk::AddScreen(uint32_t aScreenId, DisplayType aDisplayType,
 
   RefPtr<Screen> screen = MakeScreen(aScreenId, aEventVisibility);
 
-  mScreens.Put(aScreenId, screen);
+  mScreens.InsertOrUpdate(aScreenId, screen);
   Refresh();
 }
 
@@ -866,7 +869,7 @@ already_AddRefed<nsScreenGonk> ScreenHelperGonk::ScreenGonkForId(
   if (!screen && aScreenId == 0) {
     RefPtr<Screen> screen2 = MakeScreen(aScreenId);
     if (screen2) {
-      mScreens.Put(0, screen2);
+      mScreens.InsertOrUpdate(0, screen2);
     }
     screen = mScreenGonks.Get(aScreenId);
   }
@@ -911,8 +914,6 @@ void ScreenHelperGonk::SetCompositorVsyncScheduler(
     mozilla::layers::CompositorVsyncScheduler* aObserver) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  // We assume on b2g that there is only 1 CompositorBridgeParent
-  MOZ_ASSERT(mCompositorVsyncScheduler == nullptr);
   MOZ_ASSERT(aObserver);
   mCompositorVsyncScheduler = aObserver;
   mCompositorVsyncScheduler->SetDisplay(mDisplayEnabled);

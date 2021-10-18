@@ -233,16 +233,11 @@ bool nsMixedContentBlocker::IsPotentiallyTrustworthyLoopbackHost(
     return true;
   }
 
-  PRNetAddr tempAddr;
-  memset(&tempAddr, 0, sizeof(PRNetAddr));
-
-  if (PR_StringToNetAddr(PromiseFlatCString(aAsciiHost).get(), &tempAddr) !=
-      PR_SUCCESS) {
+  using namespace mozilla::net;
+  NetAddr addr;
+  if (NS_FAILED(addr.InitFromString(aAsciiHost))) {
     return false;
   }
-
-  using namespace mozilla::net;
-  NetAddr addr(&tempAddr);
 
   // Step 4 of
   // https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy says
@@ -253,6 +248,9 @@ bool nsMixedContentBlocker::IsPotentiallyTrustworthyLoopbackHost(
 }
 
 bool nsMixedContentBlocker::IsPotentiallyTrustworthyLoopbackURL(nsIURI* aURL) {
+  if (!aURL) {
+    return false;
+  }
   nsAutoCString asciiHost;
   nsresult rv = aURL->GetAsciiHost(asciiHost);
   NS_ENSURE_SUCCESS(rv, false);
@@ -370,6 +368,21 @@ bool nsMixedContentBlocker::IsPotentiallyTrustworthyOrigin(nsIURI* aURI) {
     return true;
   }
   return false;
+}
+
+/*
+ * Return the URI of the precusor principal or the URI of aPrincipal if there is
+ * no precursor URI.
+ */
+static already_AddRefed<nsIURI> GetPrincipalURIOrPrecursorPrincialURI(
+    nsIPrincipal* aPrincipal) {
+  nsCOMPtr<nsIURI> precursorURI = nullptr;
+  if (aPrincipal->GetIsNullPrincipal()) {
+    nsCOMPtr<nsIPrincipal> precursorPrin = aPrincipal->GetPrecursorPrincipal();
+    precursorURI = precursorPrin ? precursorPrin->GetURI() : nullptr;
+  }
+
+  return precursorURI ? precursorURI.forget() : aPrincipal->GetURI();
 }
 
 /* Static version of ShouldLoad() that contains all the Mixed Content Blocker
@@ -493,6 +506,11 @@ nsresult nsMixedContentBlocker::ShouldLoad(bool aHadInsecureImageRedirect,
   // properties as WebSockets w.r.t. mixed content. XHR's handling of redirects
   // amplifies these concerns.
   //
+  // TYPE_PROXIED_WEBRTC_MEDIA: Ordinarily, webrtc uses low-level sockets for
+  // peer-to-peer media, which bypasses this code entirely. However, when a
+  // web proxy is being used, the TCP and TLS webrtc connections are routed
+  // through the web proxy (using HTTP CONNECT), which causes these connections
+  // to be checked. We just skip mixed content blocking in that case.
 
   switch (contentType) {
     // The top-level document cannot be mixed content by definition
@@ -519,6 +537,13 @@ nsresult nsMixedContentBlocker::ShouldLoad(bool aHadInsecureImageRedirect,
       return NS_OK;
       break;
 
+    // It does not make sense to subject webrtc media connections to mixed
+    // content blocking, since those connections are peer-to-peer and will
+    // therefore almost never match the origin.
+    case ExtContentPolicy::TYPE_PROXIED_WEBRTC_MEDIA:
+      *aDecision = ACCEPT;
+      return NS_OK;
+
     // Static display content is considered moderate risk for mixed content so
     // these will be blocked according to the mixed display preference
     case ExtContentPolicy::TYPE_IMAGE:
@@ -541,6 +566,7 @@ nsresult nsMixedContentBlocker::ShouldLoad(bool aHadInsecureImageRedirect,
     case ExtContentPolicy::TYPE_DTD:
     case ExtContentPolicy::TYPE_FETCH:
     case ExtContentPolicy::TYPE_FONT:
+    case ExtContentPolicy::TYPE_UA_FONT:
     case ExtContentPolicy::TYPE_IMAGESET:
     case ExtContentPolicy::TYPE_OBJECT:
     case ExtContentPolicy::TYPE_SCRIPT:
@@ -618,12 +644,14 @@ nsresult nsMixedContentBlocker::ShouldLoad(bool aHadInsecureImageRedirect,
   nsCOMPtr<nsIURI> requestingLocation;
   auto* baseLoadingPrincipal = BasePrincipal::Cast(loadingPrincipal);
   if (baseLoadingPrincipal) {
-    baseLoadingPrincipal->GetURI(getter_AddRefs(requestingLocation));
+    requestingLocation =
+        GetPrincipalURIOrPrecursorPrincialURI(baseLoadingPrincipal);
   }
   if (!requestingLocation) {
     auto* baseTriggeringPrincipal = BasePrincipal::Cast(triggeringPrincipal);
     if (baseTriggeringPrincipal) {
-      baseTriggeringPrincipal->GetURI(getter_AddRefs(requestingLocation));
+      requestingLocation =
+          GetPrincipalURIOrPrecursorPrincialURI(baseTriggeringPrincipal);
     }
   }
 
@@ -984,8 +1012,7 @@ void nsMixedContentBlocker::AccumulateMixedContentHSTS(
   if (NS_FAILED(rv)) {
     return;
   }
-  rv = sss->IsSecureURI(nsISiteSecurityService::HEADER_HSTS, aURI, 0,
-                        aOriginAttributes, nullptr, nullptr, &hsts);
+  rv = sss->IsSecureURI(aURI, 0, aOriginAttributes, nullptr, nullptr, &hsts);
   if (NS_FAILED(rv)) {
     return;
   }

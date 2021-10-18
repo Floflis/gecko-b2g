@@ -11,6 +11,8 @@
 #include "nsGlobalWindow.h"
 #include "nsPIDOMWindow.h"
 #include "nsWrapperCache.h"
+#include "mozilla/DOMEventTargetHelper.h"
+#include "mozilla/dom/ActivityUtilsBinding.h"
 #include "mozilla/dom/AlarmManager.h"
 #include "mozilla/dom/DOMVirtualCursor.h"
 #include "mozilla/dom/ExternalAPI.h"
@@ -47,10 +49,12 @@
 #endif
 #ifdef HAS_KOOST_MODULES
 #  include "mozilla/dom/AuthorizationManager.h"
-#  include "mozilla/dom/EngmodeManagerBinding.h"
-#ifdef ENABLE_RSU
-#  include "mozilla/dom/RemoteSimUnlock.h"
-#endif
+#  ifdef MOZ_WIDGET_GONK
+#    include "mozilla/dom/EngmodeManagerBinding.h"
+#  endif
+#  ifdef ENABLE_RSU
+#    include "mozilla/dom/RemoteSimUnlock.h"
+#  endif
 #endif
 
 #include "mozilla/dom/usb/UsbManager.h"
@@ -63,6 +67,7 @@
 #include "mozilla/dom/power/PowerManagerService.h"
 #include "mozilla/dom/powersupply/PowerSupplyManager.h"
 #include "nsIDOMWakeLockListener.h"
+#include "nsIObserver.h"
 
 class nsDOMDeviceStorage;
 
@@ -71,13 +76,16 @@ namespace dom {
 
 class DeviceStorageAreaListener;
 
-class B2G final : public nsIDOMMozWakeLockListener, public nsWrapperCache {
+class B2G final : public DOMEventTargetHelper,
+                  public nsIDOMMozWakeLockListener,
+                  public nsIObserver {
   nsCOMPtr<nsIGlobalObject> mOwner;
 
  public:
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
-  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(B2G)
+  NS_DECL_ISUPPORTS_INHERITED
+  NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(B2G, DOMEventTargetHelper)
   NS_DECL_NSIDOMMOZWAKELOCKLISTENER
+  NS_DECL_NSIOBSERVER
 
   explicit B2G(nsIGlobalObject* aGlobal);
 
@@ -88,10 +96,14 @@ class B2G final : public nsIDOMMozWakeLockListener, public nsWrapperCache {
                               nsPIDOMWindowInner* aWindow);
   static bool CheckPermissionOnWorkerThread(const nsACString& aType);
 
+  ActivityUtils* GetActivityUtils(ErrorResult& aRv);
+  static bool HasWebAppsManagePermission(JSContext* /* unused */,
+                                         JSObject* aGlobal);
   AlarmManager* GetAlarmManager(ErrorResult& aRv);
   already_AddRefed<Promise> GetFlashlightManager(ErrorResult& aRv);
   already_AddRefed<Promise> GetFlipManager(ErrorResult& aRv);
   InputMethod* GetInputMethod(ErrorResult& aRv);
+  static bool HasInputPermission(JSContext* /* unused */, JSObject* aGlobal);
   TetheringManager* GetTetheringManager(ErrorResult& aRv);
 
 #ifdef MOZ_B2G_RIL
@@ -157,14 +169,15 @@ class B2G final : public nsIDOMMozWakeLockListener, public nsWrapperCache {
   AuthorizationManager* GetAuthorizationManager(ErrorResult& aRv);
   static bool HasAuthorizationManagerSupport(JSContext* /* unused */,
                                              JSObject* aGlobal);
+#  ifdef MOZ_WIDGET_GONK
   EngmodeManager* GetEngmodeManager(ErrorResult& aRv);
   static bool HasEngmodeManagerSupport(JSContext* /* unused */,
                                        JSObject* aGlobal);
-#ifdef ENABLE_RSU
+#  endif
+#  ifdef ENABLE_RSU
   RemoteSimUnlock* GetRsu(ErrorResult& aRv);
-  static bool HasRSUSupport(JSContext* /* unused */,
-                            JSObject* aGlobal);
-#endif
+  static bool HasRSUSupport(JSContext* /* unused */, JSObject* aGlobal);
+#  endif
 #endif
 
   UsbManager* GetUsbManager(ErrorResult& aRv);
@@ -195,17 +208,25 @@ class B2G final : public nsIDOMMozWakeLockListener, public nsWrapperCache {
 
   void SetDispatchKeyToContentFirst(bool aEnable);
 
+  IMPL_EVENT_HANDLER(storagefull);
+  IMPL_EVENT_HANDLER(storagefree);
+
+  // Initialization, main thread only
+  nsresult MainThreadInit();
   // Shutting down, main thread only
-  void Shutdown();
-  // Main thread only
-  nsresult Init();
+  void MainThreadShutdown();
 
  private:
-  ~B2G();
+  // Warning: The constructor and destructor are called on both MAIN and WORKER
+  // threads, see Navigator::B2g() in WorkerNavigator::B2g().
+  // For main thread's initialization and cleaup, use MainThreadInit() and
+  // MainThreadShutdown().
+  ~B2G() = default;
   already_AddRefed<nsDOMDeviceStorage> FindDeviceStorage(
       const nsAString& aName, const nsAString& aType);
 
   nsTArray<nsWeakPtr> mDeviceStorageStores;
+  RefPtr<ActivityUtils> mActivityUtils;
   RefPtr<AlarmManager> mAlarmManager;
   RefPtr<DeviceStorageAreaListener> mDeviceStorageAreaListener;
   RefPtr<FlashlightManager> mFlashlightManager;
@@ -247,10 +268,12 @@ class B2G final : public nsIDOMMozWakeLockListener, public nsWrapperCache {
 #endif
 #ifdef HAS_KOOST_MODULES
   RefPtr<AuthorizationManager> mAuthorizationManager;
+#  ifdef MOZ_WIDGET_GONK
   RefPtr<EngmodeManager> mEngmodeManager;
-#ifdef ENABLE_RSU
+#  endif
+#  ifdef ENABLE_RSU
   RefPtr<RemoteSimUnlock> mRSU;
-#endif
+#  endif
 #endif
   RefPtr<UsbManager> mUsbManager;
   RefPtr<PowerSupplyManager> mPowerSupplyManager;

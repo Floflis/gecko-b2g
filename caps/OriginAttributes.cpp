@@ -5,11 +5,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/OriginAttributes.h"
+#include "mozilla/Assertions.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/dom/BlobURLProtocolHandler.h"
 #include "mozilla/dom/quota/QuotaManager.h"
 #include "nsIEffectiveTLDService.h"
 #include "nsIURI.h"
+#include "nsNetCID.h"
+#include "nsNetUtil.h"
 #include "nsURLHelper.h"
 
 static const char kSourceChar = ':';
@@ -255,6 +258,12 @@ void OriginAttributes::CreateSuffix(nsACString& aStr) const {
 #endif
 }
 
+already_AddRefed<nsAtom> OriginAttributes::CreateSuffixAtom() const {
+  nsAutoCString suffix;
+  CreateSuffix(suffix);
+  return NS_Atomize(suffix);
+}
+
 void OriginAttributes::CreateAnonymizedSuffix(nsACString& aStr) const {
   OriginAttributes attrs = *this;
 
@@ -282,6 +291,14 @@ bool OriginAttributes::PopulateFromSuffix(const nsACString& aStr) {
   // suffix, then it will retain the id when it should be default according
   // to the suffix. Set to default before iterating to fix this.
   mPrivateBrowsingId = nsIScriptSecurityManager::DEFAULT_PRIVATE_BROWSING_ID;
+
+  // Checking that we are in a pristine state
+
+  MOZ_RELEASE_ASSERT(mUserContextId == 0);
+  MOZ_RELEASE_ASSERT(mPrivateBrowsingId == 0);
+  MOZ_RELEASE_ASSERT(mFirstPartyDomain.IsEmpty());
+  MOZ_RELEASE_ASSERT(mGeckoViewSessionContextId.IsEmpty());
+  MOZ_RELEASE_ASSERT(mPartitionKey.IsEmpty());
 
   return URLParams::Parse(
       Substring(aStr, 1, aStr.Length() - 1),
@@ -322,7 +339,6 @@ bool OriginAttributes::PopulateFromSuffix(const nsACString& aStr) {
         }
 
         if (aName.EqualsLiteral("firstPartyDomain")) {
-          MOZ_RELEASE_ASSERT(mFirstPartyDomain.IsEmpty());
           nsAutoString firstPartyDomain(aValue);
           firstPartyDomain.ReplaceChar(kSanitizedChar, kSourceChar);
           mFirstPartyDomain.Assign(firstPartyDomain);
@@ -330,13 +346,11 @@ bool OriginAttributes::PopulateFromSuffix(const nsACString& aStr) {
         }
 
         if (aName.EqualsLiteral("geckoViewUserContextId")) {
-          MOZ_RELEASE_ASSERT(mGeckoViewSessionContextId.IsEmpty());
           mGeckoViewSessionContextId.Assign(aValue);
           return true;
         }
 
         if (aName.EqualsLiteral("partitionKey")) {
-          MOZ_RELEASE_ASSERT(mPartitionKey.IsEmpty());
           nsAutoString partitionKey(aValue);
           partitionKey.ReplaceChar(kSanitizedChar, kSourceChar);
           mPartitionKey.Assign(partitionKey);
@@ -377,6 +391,77 @@ bool OriginAttributes::IsPrivateBrowsing(const nsACString& aOrigin) {
   }
 
   return !!attrs.mPrivateBrowsingId;
+}
+
+/* static */
+bool OriginAttributes::ParsePartitionKey(const nsAString& aPartitionKey,
+                                         nsAString& outScheme,
+                                         nsAString& outBaseDomain,
+                                         int32_t& outPort) {
+  outScheme.Truncate();
+  outBaseDomain.Truncate();
+  outPort = -1;
+
+  // Partition keys have the format "(<scheme>,<baseDomain>,[port])". The port
+  // is optional. For example: "(https,example.com,8443)" or
+  // "(http,example.org)".
+  // When privacy.dynamic_firstparty.use_site = false, the partitionKey contains
+  // only the host, e.g. "example.com".
+  // See MakeTopLevelInfo for the partitionKey serialization code.
+
+  if (aPartitionKey.IsEmpty()) {
+    return true;
+  }
+
+  // PartitionKey contains only the host.
+  if (!StaticPrefs::privacy_dynamic_firstparty_use_site()) {
+    outBaseDomain = aPartitionKey;
+    return true;
+  }
+
+  // Smallest possible partitionKey is "(x,x)". Scheme and base domain are
+  // mandatory.
+  if (NS_WARN_IF(aPartitionKey.Length() < 5)) {
+    return false;
+  }
+
+  if (NS_WARN_IF(aPartitionKey.First() != '(' || aPartitionKey.Last() != ')')) {
+    return false;
+  }
+
+  // Remove outer brackets so we can string split.
+  nsAutoString str(Substring(aPartitionKey, 1, aPartitionKey.Length() - 2));
+
+  uint32_t fieldIndex = 0;
+  for (const nsAString& field : str.Split(',')) {
+    if (NS_WARN_IF(field.IsEmpty())) {
+      // There cannot be empty fields.
+      return false;
+    }
+
+    if (fieldIndex == 0) {
+      outScheme.Assign(field);
+    } else if (fieldIndex == 1) {
+      outBaseDomain.Assign(field);
+    } else if (fieldIndex == 2) {
+      // Parse the port which is represented in the partitionKey string as a
+      // decimal (base 10) number.
+      long port = strtol(NS_ConvertUTF16toUTF8(field).get(), nullptr, 10);
+      // Invalid port.
+      if (NS_WARN_IF(port == 0)) {
+        return false;
+      }
+      outPort = static_cast<int32_t>(port);
+    } else {
+      NS_WARNING("Invalid partitionKey. Too many tokens");
+      return false;
+    }
+
+    fieldIndex++;
+  }
+
+  // scheme and base domain are required.
+  return fieldIndex > 1;
 }
 
 }  // namespace mozilla

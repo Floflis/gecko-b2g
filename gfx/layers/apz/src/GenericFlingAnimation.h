@@ -132,7 +132,7 @@ class GenericFlingAnimation : public AsyncPanZoomAnimation,
     ParentLayerPoint adjustedOffset;
     mApzc.mX.AdjustDisplacement(offset.x, adjustedOffset.x, overscroll.x);
     mApzc.mY.AdjustDisplacement(offset.y, adjustedOffset.y, overscroll.y);
-    if (aFrameMetrics.GetZoom() != CSSToParentLayerScale2D(0, 0)) {
+    if (aFrameMetrics.GetZoom() != CSSToParentLayerScale(0)) {
       mApzc.ScrollBy(adjustedOffset / aFrameMetrics.GetZoom());
     }
 
@@ -164,12 +164,13 @@ class GenericFlingAnimation : public AsyncPanZoomAnimation,
       FLING_LOG("%p fling went into overscroll, handing off with velocity %s\n",
                 &mApzc, ToString(velocity).c_str());
       mDeferredTasks.AppendElement(
-          NewRunnableMethod<ParentLayerPoint,
+          NewRunnableMethod<ParentLayerPoint, SideBits,
                             RefPtr<const OverscrollHandoffChain>,
                             RefPtr<const AsyncPanZoomController>>(
               "layers::AsyncPanZoomController::HandleFlingOverscroll", &mApzc,
               &AsyncPanZoomController::HandleFlingOverscroll, velocity,
-              mOverscrollHandoffChain, mScrolledApzc));
+              apz::GetOverscrollSideBits(overscroll), mOverscrollHandoffChain,
+              mScrolledApzc));
 
       // If there is a remaining velocity on this APZC, continue this fling
       // as well. (This fling and the handed-off fling will run concurrently.)

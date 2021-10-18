@@ -37,7 +37,12 @@ let expectedIconURL;
 
 add_task(async function setup() {
   await SpecialPowers.pushPrefEnv({
-    set: [["browser.search.separatePrivateDefault", true]],
+    set: [
+      ["browser.search.separatePrivateDefault", true],
+      // Enable suggestions in this test. Otherwise, the behaviour of the
+      // content search box changes.
+      ["browser.search.suggest.enabled", true],
+    ],
   });
 
   const originalPrivateDefault = await Services.search.getDefaultPrivate();
@@ -90,7 +95,7 @@ add_task(async function test_search_icon() {
   await SpecialPowers.spawn(tab, [expectedIconURL], async function(iconURL) {
     is(
       content.document.body.getAttribute("style"),
-      `--newtab-search-icon:url(${iconURL});`,
+      `--newtab-search-icon: url(${iconURL});`,
       "Should have the correct icon URL for the logo"
     );
   });
@@ -109,7 +114,7 @@ add_task(async function test_search_handoff_on_keydown() {
     btn.click();
     ok(btn.classList.contains("focused"), "in-content search has focus styles");
   });
-  ok(urlBarHasHiddenFocus(win), "url bar has hidden focused");
+  ok(urlBarHasHiddenFocus(win), "Urlbar has hidden focus");
 
   // Expect two searches, one to enter search mode and then another in search
   // mode.
@@ -120,12 +125,112 @@ add_task(async function test_search_handoff_on_keydown() {
     ok(
       content.document
         .getElementById("search-handoff-button")
-        .classList.contains("hidden"),
-      "in-content search is hidden"
+        .classList.contains("disabled"),
+      "in-content search is disabled"
     );
   });
   await searchPromise;
-  ok(urlBarHasNormalFocus(win), "url bar has normal focused");
+  ok(urlBarHasNormalFocus(win), "Urlbar has normal focus");
+  is(win.gURLBar.value, "f", "url bar has search text");
+
+  // Close the popup.
+  await UrlbarTestUtils.promisePopupClose(win);
+
+  // Hitting ESC should reshow the in-content search
+  await new Promise(r => EventUtils.synthesizeKey("KEY_Escape", {}, win, r));
+  await SpecialPowers.spawn(tab, [], async function() {
+    ok(
+      !content.document
+        .getElementById("search-handoff-button")
+        .classList.contains("disabled"),
+      "in-content search is not disabled"
+    );
+  });
+
+  await BrowserTestUtils.closeWindow(win);
+});
+
+/**
+ * Tests the search hand-off on composition start in "about:privatebrowsing".
+ */
+add_task(async function test_search_handoff_on_composition_start() {
+  let { win, tab } = await openAboutPrivateBrowsing();
+
+  await SpecialPowers.spawn(tab, [], async function() {
+    content.document.getElementById("search-handoff-button").click();
+  });
+  ok(urlBarHasHiddenFocus(win), "Urlbar has hidden focus");
+  await new Promise(r =>
+    EventUtils.synthesizeComposition({ type: "compositionstart" }, win, r)
+  );
+  ok(urlBarHasNormalFocus(win), "Urlbar has normal focus");
+
+  await BrowserTestUtils.closeWindow(win);
+});
+
+/**
+ * Tests the search hand-off on paste in "about:privatebrowsing".
+ */
+add_task(async function test_search_handoff_on_paste() {
+  let { win, tab } = await openAboutPrivateBrowsing();
+
+  await SpecialPowers.spawn(tab, [], async function() {
+    content.document.getElementById("search-handoff-button").click();
+  });
+  ok(urlBarHasHiddenFocus(win), "Urlbar has hidden focus");
+  var helper = SpecialPowers.Cc[
+    "@mozilla.org/widget/clipboardhelper;1"
+  ].getService(SpecialPowers.Ci.nsIClipboardHelper);
+  helper.copyString("words");
+
+  // Expect two searches, one to enter search mode and then another in search
+  // mode.
+  let searchPromise = UrlbarTestUtils.promiseSearchComplete(win);
+
+  await new Promise(r =>
+    EventUtils.synthesizeKey("v", { accelKey: true }, win, r)
+  );
+
+  await searchPromise;
+
+  ok(urlBarHasNormalFocus(win), "Urlbar has normal focus");
+  is(win.gURLBar.value, "words", "Urlbar has search text");
+
+  await BrowserTestUtils.closeWindow(win);
+});
+
+/**
+ * Tests that handoff enters search mode when suggestions are disabled.
+ */
+add_task(async function test_search_handoff_search_mode() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.urlbar.suggest.searches", false]],
+  });
+
+  let { win, tab } = await openAboutPrivateBrowsing();
+
+  await SpecialPowers.spawn(tab, [], async function() {
+    let btn = content.document.getElementById("search-handoff-button");
+    btn.click();
+    ok(btn.classList.contains("focused"), "in-content search has focus styles");
+  });
+  ok(urlBarHasHiddenFocus(win), "Urlbar has hidden focus");
+
+  // Expect two searches, one to enter search mode and then another in search
+  // mode.
+  let searchPromise = UrlbarTestUtils.promiseSearchComplete(win);
+
+  await new Promise(r => EventUtils.synthesizeKey("f", {}, win, r));
+  await SpecialPowers.spawn(tab, [], async function() {
+    ok(
+      content.document
+        .getElementById("search-handoff-button")
+        .classList.contains("disabled"),
+      "in-content search is disabled"
+    );
+  });
+  await searchPromise;
+  ok(urlBarHasNormalFocus(win), "Urlbar has normal focus");
   await UrlbarTestUtils.assertSearchMode(win, {
     engineName: "DuckDuckGo",
     source: UrlbarUtils.RESULT_SOURCE.SEARCH,
@@ -143,64 +248,11 @@ add_task(async function test_search_handoff_on_keydown() {
     ok(
       !content.document
         .getElementById("search-handoff-button")
-        .classList.contains("hidden"),
-      "in-content search is not hidden"
+        .classList.contains("disabled"),
+      "in-content search is not disabled"
     );
   });
 
   await BrowserTestUtils.closeWindow(win);
-});
-
-/**
- * Tests the search hand-off on composition start in "about:privatebrowsing".
- */
-add_task(async function test_search_handoff_on_composition_start() {
-  let { win, tab } = await openAboutPrivateBrowsing();
-
-  await SpecialPowers.spawn(tab, [], async function() {
-    content.document.getElementById("search-handoff-button").click();
-  });
-  ok(urlBarHasHiddenFocus(win), "url bar has hidden focused");
-  await new Promise(r =>
-    EventUtils.synthesizeComposition({ type: "compositionstart" }, win, r)
-  );
-  ok(urlBarHasNormalFocus(win), "url bar has normal focused");
-
-  await BrowserTestUtils.closeWindow(win);
-});
-
-/**
- * Tests the search hand-off on paste in "about:privatebrowsing".
- */
-add_task(async function test_search_handoff_on_paste() {
-  let { win, tab } = await openAboutPrivateBrowsing();
-
-  await SpecialPowers.spawn(tab, [], async function() {
-    content.document.getElementById("search-handoff-button").click();
-  });
-  ok(urlBarHasHiddenFocus(win), "url bar has hidden focused");
-  var helper = SpecialPowers.Cc[
-    "@mozilla.org/widget/clipboardhelper;1"
-  ].getService(SpecialPowers.Ci.nsIClipboardHelper);
-  helper.copyString("words");
-
-  // Expect two searches, one to enter search mode and then another in search
-  // mode.
-  let searchPromise = UrlbarTestUtils.promiseSearchComplete(win);
-
-  await new Promise(r =>
-    EventUtils.synthesizeKey("v", { accelKey: true }, win, r)
-  );
-
-  await searchPromise;
-
-  ok(urlBarHasNormalFocus(win), "url bar has normal focused");
-  await UrlbarTestUtils.assertSearchMode(win, {
-    engineName: "DuckDuckGo",
-    source: UrlbarUtils.RESULT_SOURCE.SEARCH,
-    entry: "handoff",
-  });
-  is(win.gURLBar.value, "words", "url bar has search text");
-
-  await BrowserTestUtils.closeWindow(win);
+  await SpecialPowers.popPrefEnv();
 });

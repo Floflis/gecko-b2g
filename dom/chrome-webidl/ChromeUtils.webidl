@@ -46,6 +46,19 @@ dictionary ProfilerMarkerOptions {
   // See ProfilingCategoryList.h for the complete list of valid values.
   // Using an unrecognized value will set the category to "Other".
   ByteString category = "JavaScript";
+
+  // Inner window ID to use for the marker. If the global object is a window,
+  // the inner window id of the marker will be set automatically.
+  // If a marker that relates to a specific window is added from a JS module,
+  // setting the inner window id will allow the profiler to show which window
+  // the marker applies to.
+  unsigned long long innerWindowId = 0;
+};
+
+dictionary InteractionData {
+  unsigned long interactionCount = 0;
+  unsigned long interactionTimeInMilliseconds = 0;
+  unsigned long scrollingDistanceInPixels = 0;
 };
 
 /**
@@ -186,9 +199,20 @@ namespace ChromeUtils {
 #endif // NIGHTLY_BUILD
 
   /**
-   * Clears the stylesheet cache.
+   * Clears the stylesheet cache by baseDomain. This includes associated
+   * state-partitioned cache.
    */
-  void clearStyleSheetCache(optional Principal? principal = null);
+  void clearStyleSheetCacheByBaseDomain(UTF8String baseDomain);
+
+  /**
+   * Clears the stylesheet cache by principal.
+   */
+  void clearStyleSheetCacheByPrincipal(Principal principal);
+
+  /**
+   * Clears the entire stylesheet cache.
+   */
+  void clearStyleSheetCache();
 
   /**
    * If the profiler is currently running and recording the current thread,
@@ -253,6 +277,19 @@ partial namespace ChromeUtils {
   createOriginAttributesFromOrigin(DOMString origin);
 
   /**
+   * Returns an OriginAttributesDictionary with values from the origin |suffix|
+   * and unspecified attributes added and assigned default values.
+   *
+   * @param suffix            The origin suffix to create from.
+   * @returns                 An OriginAttributesDictionary with values from
+   *                          the origin suffix and unspecified attributes
+   *                          added and assigned default values.
+   */
+  [Throws]
+  OriginAttributesDictionary
+  CreateOriginAttributesFromOriginSuffix(DOMString suffix);
+
+  /**
    * Returns an OriginAttributesDictionary that is a copy of |originAttrs| with
    * unspecified attributes added and assigned default values.
    *
@@ -270,6 +307,27 @@ partial namespace ChromeUtils {
   boolean
   isOriginAttributesEqual(optional OriginAttributesDictionary aA = {},
                           optional OriginAttributesDictionary aB = {});
+
+  /**
+   * Returns the base domain portion of a given partitionKey.
+   * Returns the empty string for an empty partitionKey.
+   * Throws for invalid partition keys.
+   */
+  [Throws]
+  DOMString
+  getBaseDomainFromPartitionKey(DOMString partitionKey);
+
+  /**
+   * Returns the partitionKey for a given URL.
+   *
+   * The function will treat the URL as a first party and construct the
+   * partitionKey according to the scheme, site and port in the URL.
+   *
+   * Throws for invalid urls.
+   */
+  [Throws]
+  DOMString
+  getPartitionKeyFromURL(DOMString url);
 
   /**
    * Loads and compiles the script at the given URL and returns an object
@@ -517,6 +575,24 @@ partial namespace ChromeUtils {
    */
   [Throws, ChromeOnly]
   sequence<nsIDOMProcessParent> getAllDOMProcesses();
+
+  /**
+   * Returns a record of user interaction data. Currently only typing,
+   * but will include scrolling and potentially other metrics.
+   *
+   * Valid keys: "Typing"
+   */
+  [Throws, ChromeOnly]
+  record<DOMString, InteractionData> consumeInteractionData();
+
+  /**
+   * Returns a record of user scrolling interactions collected from content processes.
+   *
+   * Valid keys: "Scrolling"
+   */
+  [Throws]
+  Promise<InteractionData> collectScrollingData();
+
 };
 
 /*
@@ -532,7 +608,6 @@ enum WebIDLProcType {
  "webLargeAllocation",
  "withCoopCoep",
  "browser",
- "plugin",
  "ipdlUnitTest",
  "gmpPlugin",
  "gpu",
@@ -556,6 +631,7 @@ enum WebIDLProcType {
 dictionary ThreadInfoDictionary {
   long long tid = 0;
   DOMString name = "";
+  unsigned long long cpuCycleCount = 0;
   unsigned long long cpuUser = 0;
   unsigned long long cpuKernel = 0;
 };
@@ -597,21 +673,22 @@ dictionary ChildProcInfoDictionary {
   // Process filename (without the path name).
   DOMString filename = "";
 
-  // RSS, in bytes, i.e. the total amount of memory allocated
-  // by this process.
-  long long residentSetSize = 0;
-
-  // Resident unique size, i.e. the total amount of memory
-  // allocated by this process *and not shared with other processes*.
-  // Given that we share lots of memory between processes,
-  // this is probably the best end-user measure for "memory used".
-  long long residentUniqueSize = 0;
+  // The best end-user measure for "memory used" that we can obtain without
+  // triggering expensive computations. The value is in bytes.
+  // On Mac and Linux this matches the values shown by the system monitors.
+  // On Windows this will return the Commit Size.
+  unsigned long long memory = 0;
 
   // Time spent by the process in user mode, in ns.
   unsigned long long cpuUser = 0;
 
   // Time spent by the process in kernel mode, in ns.
   unsigned long long cpuKernel = 0;
+
+  // Total CPU cycles used by this process.
+  // On Windows where the resolution of CPU timings is 16ms, this can
+  // be used to determine if a process is idle or slightly active.
+  unsigned long long cpuCycleCount = 0;
 
   // Thread information for this process.
   sequence<ThreadInfoDictionary> threads = [];
@@ -644,21 +721,22 @@ dictionary ParentProcInfoDictionary {
   // Process filename (without the path name).
   DOMString filename = "";
 
-  // RSS, in bytes, i.e. the total amount of memory allocated
-  // by this process.
-  long long residentSetSize = 0;
-
-  // Resident unique size, i.e. the total amount of memory
-  // allocated by this process *and not shared with other processes*.
-  // Given that we share lots of memory between processes,
-  // this is probably the best end-user measure for "memory used".
-  long long residentUniqueSize = 0;
+  // The best end-user measure for "memory used" that we can obtain without
+  // triggering expensive computations. The value is in bytes.
+  // On Mac and Linux this matches the values shown by the system monitors.
+  // On Windows this will return the Commit Size.
+  unsigned long long memory = 0;
 
   // Time spent by the process in user mode, in ns.
   unsigned long long cpuUser = 0;
 
   // Time spent by the process in kernel mode, in ns.
   unsigned long long cpuKernel = 0;
+
+  // Total CPU cycles used by this process.
+  // On Windows where the resolution of CPU timings is 16ms, this can
+  // be used to determine if a process is idle or slightly active.
+  unsigned long long cpuCycleCount = 0;
 
   // Thread information for this process.
   sequence<ThreadInfoDictionary> threads = [];
@@ -753,7 +831,15 @@ dictionary OriginAttributesPatternDictionary {
   DOMString addonId = "";
   DOMString firstPartyDomain;
   DOMString geckoViewSessionContextId;
+  // partitionKey takes precedence over partitionKeyPattern.
   DOMString partitionKey;
+  PartitionKeyPatternDictionary partitionKeyPattern;
+};
+
+dictionary PartitionKeyPatternDictionary {
+  DOMString scheme;
+  DOMString baseDomain;
+  long port;
 };
 
 dictionary CompileScriptOptionsDictionary {

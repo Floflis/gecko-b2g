@@ -26,7 +26,8 @@
 #include "mozilla/gfx/Point.h"
 #include "nsCOMPtr.h"
 #include "nsColor.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
+#include "nsTHashSet.h"
 #include "nsExpirationTracker.h"
 #include "nsFontMetrics.h"
 #include "nsHashKeys.h"
@@ -93,14 +94,16 @@ typedef struct _cairo_scaled_font cairo_scaled_font_t;
 #endif
 
 struct gfxFontStyle {
-  typedef mozilla::FontStretch FontStretch;
-  typedef mozilla::FontSlantStyle FontSlantStyle;
-  typedef mozilla::FontWeight FontWeight;
+  using FontStretch = mozilla::FontStretch;
+  using FontSlantStyle = mozilla::FontSlantStyle;
+  using FontWeight = mozilla::FontWeight;
+  using FontSizeAdjust = mozilla::StyleFontSizeAdjust;
 
   gfxFontStyle();
   gfxFontStyle(FontSlantStyle aStyle, FontWeight aWeight, FontStretch aStretch,
-               gfxFloat aSize, float aSizeAdjust, bool aSystemFont,
-               bool aPrinterFont, bool aWeightSynthesis, bool aStyleSynthesis,
+               gfxFloat aSize, const FontSizeAdjust& aSizeAdjust,
+               bool aSystemFont, bool aPrinterFont, bool aWeightSynthesis,
+               bool aStyleSynthesis, bool aSmallCapsSynthesis,
                uint32_t aLanguageOverride);
   // Features are composed of (1) features from style rules (2) features
   // from feature settings rules and (3) family-specific features.  (1) and
@@ -124,6 +127,9 @@ struct gfxFontStyle {
 
   // The logical size of the font, in pixels
   gfxFloat size;
+
+  // The optical size value to apply (if supported); negative means none.
+  float autoOpticalSize = -1.0f;
 
   // The aspect-value (ie., the ratio actualsize:actualxheight) that any
   // actual physical font created from this font structure must have when
@@ -166,15 +172,18 @@ struct gfxFontStyle {
     return weight.IsNormal() && style.IsNormal() && stretch.IsNormal();
   }
 
-  // We pack these two small-integer fields into a single byte to avoid
+  // We pack these three small-integer fields into a single byte to avoid
   // overflowing an 8-byte boundary [in a 64-bit build] and ending up with
   // 7 bytes of padding at the end of the struct.
 
   // caps variant (small-caps, petite-caps, etc.)
-  uint8_t variantCaps : 4;  // uses range 0..6
+  uint8_t variantCaps : 3;  // uses range 0..6
 
   // sub/superscript variant
-  uint8_t variantSubSuper : 4;  // uses range 0..2
+  uint8_t variantSubSuper : 2;  // uses range 0..2
+
+  // font metric used as basis of font-size-adjust
+  uint8_t sizeAdjustBasis : 3;  // uses range 0..4
 
   // Say that this font is a system font and therefore does not
   // require certain fixup that we do for fonts from untrusted
@@ -190,19 +199,29 @@ struct gfxFontStyle {
   // Whether synthetic styles are allowed
   bool allowSyntheticWeight : 1;
   bool allowSyntheticStyle : 1;
+  bool allowSyntheticSmallCaps : 1;
 
   // some variant features require fallback which complicates the shaping
   // code, so set up a bool to indicate when shaping with fallback is needed
   bool noFallbackVariantFeatures : 1;
 
   // Return the final adjusted font size for the given aspect ratio.
-  // Not meant to be called when sizeAdjust = -1.0.
+  // Not meant to be called when sizeAdjustBasis is NONE.
   gfxFloat GetAdjustedSize(gfxFloat aspect) const {
-    NS_ASSERTION(sizeAdjust >= 0.0,
-                 "Not meant to be called when sizeAdjust = -1.0");
+    MOZ_ASSERT(
+        FontSizeAdjust::Tag(sizeAdjustBasis) != FontSizeAdjust::Tag::None,
+        "Not meant to be called when sizeAdjustBasis is none");
     gfxFloat adjustedSize =
         std::max(NS_round(size * (sizeAdjust / aspect)), 1.0);
     return std::min(adjustedSize, FONT_MAX_SIZE);
+  }
+
+  // Some callers want to take a short-circuit path if they can be sure the
+  // adjusted size will be zero.
+  bool AdjustedSizeMustBeZero() const {
+    return size == 0.0 ||
+           (FontSizeAdjust::Tag(sizeAdjustBasis) != FontSizeAdjust::Tag::None &&
+            sizeAdjust == 0.0);
   }
 
   PLDHashNumber Hash() const;
@@ -218,8 +237,7 @@ struct gfxFontStyle {
   }
 
   bool Equals(const gfxFontStyle& other) const {
-    return (*reinterpret_cast<const uint64_t*>(&size) ==
-            *reinterpret_cast<const uint64_t*>(&other.size)) &&
+    return mozilla::NumbersAreBitwiseIdentical(size, other.size) &&
            (style == other.style) && (weight == other.weight) &&
            (stretch == other.stretch) && (variantCaps == other.variantCaps) &&
            (variantSubSuper == other.variantSubSuper) &&
@@ -229,13 +247,15 @@ struct gfxFontStyle {
            (printerFont == other.printerFont) &&
            (useGrayscaleAntialiasing == other.useGrayscaleAntialiasing) &&
            (baselineOffset == other.baselineOffset) &&
-           (*reinterpret_cast<const uint32_t*>(&sizeAdjust) ==
-            *reinterpret_cast<const uint32_t*>(&other.sizeAdjust)) &&
+           mozilla::NumbersAreBitwiseIdentical(sizeAdjust, other.sizeAdjust) &&
+           (sizeAdjustBasis == other.sizeAdjustBasis) &&
            (featureSettings == other.featureSettings) &&
            (variantAlternates == other.variantAlternates) &&
            (featureValueLookup == other.featureValueLookup) &&
            (variationSettings == other.variationSettings) &&
            (languageOverride == other.languageOverride) &&
+           mozilla::NumbersAreBitwiseIdentical(autoOpticalSize,
+                                               other.autoOpticalSize) &&
            (fontSmoothingBackgroundColor == other.fontSmoothingBackgroundColor);
   }
 };
@@ -1388,14 +1408,15 @@ class gfxFont {
   friend class gfxGraphiteShaper;
 
  protected:
-  typedef mozilla::gfx::DrawTarget DrawTarget;
-  typedef mozilla::unicode::Script Script;
-  typedef mozilla::SVGContextPaint SVGContextPaint;
+  using DrawTarget = mozilla::gfx::DrawTarget;
+  using Script = mozilla::unicode::Script;
+  using SVGContextPaint = mozilla::SVGContextPaint;
 
-  typedef gfxFontShaper::RoundingFlags RoundingFlags;
+  using RoundingFlags = gfxFontShaper::RoundingFlags;
 
  public:
-  typedef mozilla::FontSlantStyle FontSlantStyle;
+  using FontSlantStyle = mozilla::FontSlantStyle;
+  using FontSizeAdjust = mozilla::StyleFontSizeAdjust;
 
   nsrefcnt AddRef(void) {
     MOZ_ASSERT(int32_t(mRefCnt) >= 0, "illegal refcnt");
@@ -1489,8 +1510,15 @@ class gfxFont {
   }
 
   gfxFloat GetAdjustedSize() const {
-    return mAdjustedSize > 0.0 ? mAdjustedSize
-                               : (mStyle.sizeAdjust == 0.0 ? 0.0 : mStyle.size);
+    // mAdjustedSize is cached here if not already set to a non-zero value;
+    // but it may be overridden by a value computed in metrics initialization
+    // from font-size-adjust.
+    if (mAdjustedSize < 0.0) {
+      mAdjustedSize = mStyle.AdjustedSizeMustBeZero()
+                          ? 0.0
+                          : mStyle.size * mFontEntry->mSizeAdjust;
+    }
+    return mAdjustedSize;
   }
 
   float FUnitsToDevUnitsFactor() const {
@@ -1547,8 +1575,13 @@ class gfxFont {
   virtual uint32_t GetGlyph(uint32_t unicode, uint32_t variation_selector) {
     return 0;
   }
-  // Return the horizontal advance of a glyph.
-  gfxFloat GetGlyphHAdvance(DrawTarget* aDrawTarget, uint16_t aGID);
+
+  // Return the advance of a glyph.
+  gfxFloat GetGlyphAdvance(uint16_t aGID, bool aVertical = false);
+
+  // Return the advance of a given Unicode char in isolation.
+  // Returns -1.0 if the char is not supported.
+  gfxFloat GetCharAdvance(uint32_t aUnicode, bool aVertical = false);
 
   gfxFloat SynthesizeSpaceWidth(uint32_t aCh);
 
@@ -1770,7 +1803,8 @@ class gfxFont {
   }
 
   template <typename T>
-  bool InitFakeSmallCapsRun(DrawTarget* aDrawTarget, gfxTextRun* aTextRun,
+  bool InitFakeSmallCapsRun(nsPresContext* aPresContext,
+                            DrawTarget* aDrawTarget, gfxTextRun* aTextRun,
                             const T* aText, uint32_t aOffset, uint32_t aLength,
                             FontMatchType aMatchType,
                             mozilla::gfx::ShapedTextFlags aOrientation,
@@ -1843,6 +1877,10 @@ class gfxFont {
 
   virtual already_AddRefed<mozilla::gfx::ScaledFont> GetScaledFont(
       DrawTarget* aTarget) = 0;
+  virtual already_AddRefed<mozilla::gfx::ScaledFont> GetScaledFontNoGDI(
+      DrawTarget* aTarget) {
+    return GetScaledFont(aTarget);
+  }
 
   void InitializeScaledFont();
 
@@ -2033,8 +2071,8 @@ class gfxFont {
   bool HasFeatureSet(uint32_t aFeature, bool& aFeatureOn);
 
   // used when analyzing whether a font has space contextual lookups
-  static nsDataHashtable<nsUint32HashKey, Script>* sScriptTagToCode;
-  static nsTHashtable<nsUint32HashKey>* sDefaultFeatures;
+  static nsTHashMap<nsUint32HashKey, Script>* sScriptTagToCode;
+  static nsTHashSet<uint32_t>* sDefaultFeatures;
 
   RefPtr<gfxFontEntry> mFontEntry;
 
@@ -2128,8 +2166,7 @@ class gfxFont {
   static const uint32_t kShapedWordCacheMaxAge = 3;
 
   nsTArray<mozilla::UniquePtr<gfxGlyphExtents>> mGlyphExtentsArray;
-  mozilla::UniquePtr<nsTHashtable<nsPtrHashKey<GlyphChangeObserver>>>
-      mGlyphChangeObservers;
+  mozilla::UniquePtr<nsTHashSet<GlyphChangeObserver*>> mGlyphChangeObservers;
 
   // a copy of the font without antialiasing, if needed for separate
   // measurement by mathml code
@@ -2155,7 +2192,7 @@ class gfxFont {
   mozilla::UniquePtr<gfxMathTable> mMathTable;
 
   gfxFontStyle mStyle;
-  gfxFloat mAdjustedSize;
+  mutable gfxFloat mAdjustedSize;
 
   // Conversion factor from font units to dev units; note that this may be
   // zero (in the degenerate case where mAdjustedSize has become zero).
@@ -2250,6 +2287,7 @@ struct MOZ_STACK_CLASS TextRunDrawParams {
   bool isVerticalRun;
   bool isRTL;
   bool paintSVGGlyphs;
+  bool allowGDI;
 };
 
 struct MOZ_STACK_CLASS FontDrawParams {

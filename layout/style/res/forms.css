@@ -21,8 +21,9 @@
   padding: inherit;
   box-decoration-break: inherit;
   block-size: 100%; /* Need this so percentage block-sizes of kids work right */
-  /* Please keep the Multicol/Flex/Grid/Align sections below in sync with
-     ::-moz-scrolled-content in ua.css and ::-moz-button-content below. */
+  /* Please keep the declarations below in sync with ::-moz-scrolled-content in
+     ua.css and ::-moz-button-content below. */
+  content: inherit;
   /* Multicol container */
   column-count: inherit;
   column-width: inherit;
@@ -54,10 +55,6 @@
 }
 
 /* Miscellaneous form elements */
-
-fieldset > legend {
-  inline-size: -moz-fit-content;
-}
 
 legend {
   display: block;
@@ -109,10 +106,11 @@ input::-moz-text-control-editing-root,
 input::placeholder {
   word-wrap: normal;
   /* Make the line-height equal to the available height */
-  line-height: -moz-block-height;
+  line-height: -moz-block-height !important;
 }
 
 textarea {
+  display: inline-block;
   appearance: auto;
   -moz-default-appearance: textarea;
   margin-block: 1px;
@@ -127,7 +125,7 @@ textarea {
   resize: both;
   white-space: pre-wrap;
   word-wrap: break-word;
-  overflow-clip-box: content-box;
+  overflow-clip-box: padding-box content-box;
 }
 
 /* A few properties that we don't want to inherit by default: */
@@ -150,6 +148,7 @@ textarea > scrollbar {
 ::-moz-text-control-preview {
   overflow: auto;
   border: 0;
+  /* This is necessary to make overflow-clip-box work */
   padding: inherit;
   margin: 0;
   text-decoration: inherit;
@@ -159,6 +158,13 @@ textarea > scrollbar {
   scrollbar-width: inherit;
   -moz-control-character-visibility: visible;
   overflow-clip-box: inherit;
+  visibility: hidden;
+}
+
+:not(:-moz-autofill-preview)::-moz-text-control-editing-root,
+:placeholder-shown:not(:autofill)::placeholder,
+:autofill::-moz-text-control-preview {
+  visibility: inherit;
 }
 
 input::-moz-text-control-editing-root,
@@ -200,19 +206,16 @@ textarea::-moz-text-control-editing-root {
   overflow: hidden;
 
   /*
-   * The placeholder or preview should be ignored by pointer otherwise, we might have some
-   * unexpected behavior like the resize handle not being selectable.
+   * The placeholder or preview should be ignored by pointer / selection / etc.
+   * Otherwise, we might have some unexpected behavior like the resize handle
+   * not being selectable.
    */
   pointer-events: none;
+  user-select: none;
 }
 
 ::placeholder {
   opacity: 0.54;
-}
-
-textarea::placeholder,
-textarea::-moz-text-control-preview {
-  white-space: pre-wrap !important;
 }
 
 input:read-write,
@@ -254,6 +257,10 @@ select:-moz-select-list-box {
   vertical-align: text-bottom;
   appearance: auto;
   -moz-default-appearance: listbox;
+%ifdef XP_MACOSX
+  /* TODO(emilio): See if this is still necessary with the non-native theme */
+  scrollbar-width: thin;
+%endif
 }
 
 select > button {
@@ -299,6 +306,7 @@ select > button[orientation="right"]:active {
 }
 
 *|*::-moz-display-comboboxcontrol-frame {
+  content: inherit;
   overflow: clip;
   padding-inline: 4px;
   color: unset;
@@ -342,14 +350,14 @@ select > option {
 }
 
 option:checked {
-  background-color: -moz-html-cellhighlight !important;
-  color: -moz-html-cellhighlighttext !important;
+  background-color: -moz-cellhighlight !important;
+  color: -moz-cellhighlighttext !important;
 }
 
 select:focus > option:checked,
 select:focus > optgroup > option:checked {
-  background-color: Highlight !important;
-  color: HighlightText !important;
+  background-color: SelectedItem !important;
+  color: SelectedItemText !important;
 }
 
 optgroup {
@@ -387,6 +395,7 @@ select optgroup {
 %endif
 
 *|*::-moz-dropdown-list {
+  content: inherit;
   z-index: 2147483647;
   background-color: inherit;
   user-select: none;
@@ -410,7 +419,7 @@ option:disabled,
 optgroup:disabled,
 select:disabled {
   color: GrayText;
-  background-color: ThreeDLightShadow;
+  background-color: -moz-DisabledField;
   cursor: unset;
 }
 
@@ -496,10 +505,10 @@ input:is([type=radio], [type=checkbox]):is(:disabled, :disabled:active, :disable
   cursor: unset;
 }
 
-input:not([type=file], [type=image]):-moz-focusring,
-select:-moz-focusring,
-button:-moz-focusring,
-textarea:-moz-focusring {
+input:not([type=file], [type=image]):focus-visible,
+select:focus-visible,
+button:focus-visible,
+textarea:focus-visible {
   /* These elements can handle outline themselves when themed, so we use
    * outline-style: auto and skip rendering the outline only when themed and
    * the theme allows so */
@@ -574,8 +583,9 @@ button,
 
 *|*::-moz-button-content {
   display: block;
-  /* Please keep the Multicol/Flex/Grid/Align sections below in sync with
-     ::-moz-scrolled-content in ua.css and ::-moz-fieldset-content above. */
+  /* Please keep the declarations below in sync with ::-moz-scrolled-content in
+     ua.css and ::-moz-fieldset-content above. */
+  content: inherit;
   /* Multicol container */
   column-count: inherit;
   column-width: inherit;
@@ -609,29 +619,16 @@ button,
 ::file-selector-button:hover,
 button:hover,
 input:is([type=reset], [type=button], [type=submit], [type=color]):hover {
-  background-color: -moz-buttonhoverface;
-}
-
-::file-selector-button:hover,
-button:hover,
-input:is([type=reset], [type=button], [type=submit]):hover {
   color: -moz-buttonhovertext;
+  background-color: -moz-buttonhoverface;
 }
 
 ::file-selector-button:active:hover,
 button:active:hover,
 input:is([type=reset], [type=button], [type=submit], [type=color]):active:hover {
   border-style: inset;
-}
-
-::file-selector-button:active:hover,
-button:active:hover,
-input:is([type=reset], [type=button], [type=submit]):active:hover {
-%ifdef MOZ_WIDGET_GTK
-  color: -moz-gtk-buttonactivetext;
-%else
-  color: ButtonText;
-%endif
+  color: -moz-buttonactivetext;
+  background-color: -moz-buttonactiveface;
 }
 
 ::-moz-focus-inner {
@@ -641,7 +638,7 @@ input:is([type=reset], [type=button], [type=submit]):active:hover {
   border: 1px dotted transparent;
 }
 
-:-moz-focusring::-moz-focus-inner {
+:focus-visible::-moz-focus-inner {
   border-color: currentColor;
 }
 
@@ -658,6 +655,7 @@ button:is(:disabled, :disabled:active),
 input:is([type=reset], [type=button], [type=submit]):is(:disabled, :disabled:active),
 select:is(:disabled, :disabled:active) > button {
   color: GrayText;
+  background-color: -moz-ButtonDisabledFace;
 }
 
 /* file selector */
@@ -723,22 +721,6 @@ input[type=file] > label {
 optgroup:before {
   unicode-bidi: inherit;
   text-overflow: inherit;
-}
-
-/**
- * Set default style for invalid elements.
- */
-:-moz-ui-invalid {
-  box-shadow: 0 0 1.5px 1px red;
-}
-
-:-moz-ui-invalid:-moz-focusring {
-  box-shadow: 0 0 2px 2px rgba(255,0,0,0.4);
-}
-
-output:-moz-ui-invalid {
-  box-shadow: initial;
-  color: red;
 }
 
 @media print {
@@ -911,54 +893,28 @@ input[type=number] {
   -moz-default-appearance: number-input;
 }
 
-input:is([type=number], [type=search])::-moz-complex-control-wrapper {
-  /* Prevent styling that would change the type of frame we construct. */
-  display: flex;
-  float: none !important;
-  position: static !important;
-  block-size: 100%;
-  /* The align-self: center bit below allows the editor to be potentially
-   * bigger than us. Clip it to match other text fields. */
-  overflow: clip;
-}
-
-input:is([type=number], [type=search])::-moz-text-control-editing-root {
-  display: block; /* Flex items must be block-level. Normally we do fixup in
-                     the style system to ensure this, but that fixup is disabled
-                     inside of form controls. So, we hardcode display here. */
-  flex: 1;
-  min-inline-size: 0;
-  /* This makes it overflow into the flex container padding if needed, instead
-   * of getting squashed or pushed down by it */
-  align-self: center;
-  /* This prevents double-applying the padding, which our flex container gets
-   * via the override in nsTextControlFrame::ReflowTextControlChild */
-  padding: 0;
-}
-
 input[type=number]::-moz-number-spin-box {
   writing-mode: horizontal-tb;
   display: flex;
   flex-direction: column;
-%ifdef XP_WIN
-  /* The Window's Theme's spin buttons have a very narrow minimum width, so
-   * make it something reasonable:
-   */
-  width: 16px;
-%endif
-  /* If the spin-box has auto height, it ends up enlarging the default height
-   * of the control, so we limit it to 1em here. The height doesn't affect
-   * the rendering of the spinner-buttons; it's only for layout purposes.
-   *
-   * This is a temporary hack until we implement better positioning for the
-   * spin-box in vertical mode; it works OK at default size but less well
-   * if the font-size is made substantially larger or smaller. (Bug 1175074.)
-   */
-  height: 1em;
-  max-height: 1em;
+  width: max-content;
   align-self: center;
   justify-content: center;
+  /* Don't allow the spin buttons to create overflow */
+  max-height: 100%;
+  max-width: 100%;
+  overflow: clip;
 }
+
+%ifdef XP_WIN
+@media not (-moz-non-native-content-theme) {
+  input[type=number]::-moz-number-spin-box {
+    /* The Window's Theme's spin buttons have a very narrow minimum width, so
+     * make it something reasonable. */
+    width: 16px;
+  }
+}
+%endif
 
 input[type=number]::-moz-number-spin-up {
   writing-mode: horizontal-tb;
@@ -1001,38 +957,53 @@ input[type=number] > div > div > div:hover {
   background-color: lightblue;
 }
 
-@media (-moz-non-native-content-theme) {
-  input[type=number] {
-    padding-inline-end: 0;
-  }
-}
-
 input[type=search]::-moz-search-clear-button {
   display: block;
   cursor: default;
   width: 1em;
   height: 1em;
-  max-height: 1em;
+  max-height: 100%;
+  max-width: 100%;
   margin-inline-start: 1px;
   align-self: center;
-  background-image: url(chrome://global/skin/icons/searchfield-cancel.svg);
+  background-image: url("resource://gre-resources/searchfield-cancel.svg");
   background-repeat: no-repeat;
   background-position: center;
   background-size: contain;
 }
 
-input:is([type=date], [type=time]) {
+input:is([type=date], [type=time], [type=datetime-local]) {
   overflow: hidden !important;
   font-family: -moz-fixed;
   cursor: default;
 }
 
-input:is([type=date], [type=time]):is(:disabled, :read-only) {
+input:is([type=date], [type=time], [type=datetime-local]):is(:disabled, :read-only) {
   color: GrayText;
 }
 
-input:autofill, input:-moz-autofill-preview {
+input:autofill {
   filter: grayscale(21%) brightness(88%) contrast(161%) invert(10%) sepia(40%) saturate(206%);
+}
+
+@supports -moz-bool-pref("layout.css.autofill.background") {
+  /* We find a few pages where using `filter` causes issues because it
+   * changes the z-order (see bug 1687682, bug 1727950).
+   *
+   * The idea behind using background-image instead of plain background-color,
+   * is that it's less likely to be overridden by the page.
+   *
+   * The color is chosen so that you get the same final color on a white
+   * background as the filter above (#fffcc8), but with some alpha so as to
+   * prevent fully illegible text.
+   *
+   * NOTE(emilio): Keep the color in sync with kAutofillColor in
+   * nsNativeBasicTheme!
+   */
+  input:autofill {
+    filter: none;
+    background-image: linear-gradient(rgba(255, 249, 145, 0.5), rgba(255, 249, 145, 0.5));
+  }
 }
 
 input:-moz-autofill-preview {

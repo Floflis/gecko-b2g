@@ -10,6 +10,7 @@
 #include <utility>
 #include "ScriptLoader.h"
 #include "ScriptTrace.h"
+#include "js/Transcoding.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/DebugOnly.h"
@@ -150,18 +151,6 @@ ScriptLoadHandler::OnIncrementalData(nsIIncrementalStreamLoader* aLoader,
     // bytes.
     rv = DecodeRawData(aData, aDataLength, /* aEndOfStream = */ false);
     NS_ENSURE_SUCCESS(rv, rv);
-
-    // If SRI is required for this load, appending new bytes to the hash.
-    if (mSRIDataVerifier && NS_SUCCEEDED(mSRIStatus)) {
-      mSRIStatus = mSRIDataVerifier->Update(aDataLength, aData);
-    }
-  } else if (mRequest->IsBinASTSource()) {
-    if (!mRequest->ScriptBinASTData().append(aData, aDataLength)) {
-      return NS_ERROR_OUT_OF_MEMORY;
-    }
-
-    // Below we will/shall consume entire data chunk.
-    *aConsumedLength = aDataLength;
 
     // If SRI is required for this load, appending new bytes to the hash.
     if (mSRIDataVerifier && NS_SUCCEEDED(mSRIStatus)) {
@@ -326,28 +315,6 @@ nsresult ScriptLoadHandler::EnsureKnownDataType(
     MOZ_ASSERT(altDataType.IsEmpty());
   }
 
-  if (nsJSUtils::BinASTEncodingEnabled()) {
-    nsCOMPtr<nsIHttpChannel> httpChannel = do_QueryInterface(req);
-    if (httpChannel) {
-      nsAutoCString mimeType;
-      httpChannel->GetContentType(mimeType);
-      if (mimeType.LowerCaseEqualsASCII(APPLICATION_JAVASCRIPT_BINAST)) {
-        if (mRequest->ShouldAcceptBinASTEncoding()) {
-          mRequest->SetBinASTSource();
-          TRACE_FOR_TEST(mRequest->GetScriptElement(),
-                         "scriptloader_load_source");
-          return NS_OK;
-        }
-
-        // If the request isn't allowed to accept BinAST, fallback to text
-        // source.  The possibly binary source will be passed to normal
-        // JS parser and will throw error there.
-        mRequest->SetTextSource();
-        return NS_OK;
-      }
-    }
-  }
-
   mRequest->SetTextSource();
   TRACE_FOR_TEST(mRequest->GetScriptElement(), "scriptloader_load_source");
 
@@ -395,15 +362,6 @@ ScriptLoadHandler::OnStreamComplete(nsIIncrementalStreamLoader* aLoader,
 
       LOG(("ScriptLoadRequest (%p): Source length in code units = %u",
            mRequest.get(), unsigned(mRequest->ScriptTextLength())));
-
-      // If SRI is required for this load, appending new bytes to the hash.
-      if (mSRIDataVerifier && NS_SUCCEEDED(mSRIStatus)) {
-        mSRIStatus = mSRIDataVerifier->Update(aDataLength, aData);
-      }
-    } else if (mRequest->IsBinASTSource()) {
-      if (!mRequest->ScriptBinASTData().append(aData, aDataLength)) {
-        return NS_ERROR_OUT_OF_MEMORY;
-      }
 
       // If SRI is required for this load, appending new bytes to the hash.
       if (mSRIDataVerifier && NS_SUCCEEDED(mSRIStatus)) {

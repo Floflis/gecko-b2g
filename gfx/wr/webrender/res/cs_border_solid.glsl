@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include shared,ellipse
+#include shared,rect,ellipse
 
 #define DONT_MIX 0
 #define MIX_AA 1
@@ -18,7 +18,8 @@ flat varying vec4 vColor1;
 flat varying vec4 vColorLine;
 
 // A boolean indicating that we should be mixing between edge colors.
-flat varying int vMixColors;
+// Packed in to a vector to work around bug 1630356.
+flat varying ivec2 vMixColors;
 
 // xy = Local space position of the clip center.
 // zw = Scale the rect origin by this to get the outer
@@ -85,7 +86,8 @@ void main(void) {
     bool do_aa = ((aFlags >> 24) & 0xf0) != 0;
 
     vec2 outer_scale = get_outer_corner_scale(segment);
-    vec2 outer = outer_scale * aRect.zw;
+    vec2 size = aRect.zw - aRect.xy;
+    vec2 outer = outer_scale * size;
     vec2 clip_sign = 1.0 - 2.0 * outer_scale;
 
     int mix_colors;
@@ -102,8 +104,8 @@ void main(void) {
             break;
     }
 
-    vMixColors = mix_colors;
-    vPos = aRect.zw * aPosition.xy;
+    vMixColors.x = mix_colors;
+    vPos = size * aPosition.xy;
 
     vColor0 = aColor0;
     vColor1 = aColor1;
@@ -130,10 +132,10 @@ void main(void) {
 #ifdef WR_FRAGMENT_SHADER
 void main(void) {
     float aa_range = compute_aa_range(vPos);
-    bool do_aa = vMixColors != MIX_NO_AA;
+    bool do_aa = vMixColors.x != MIX_NO_AA;
 
     float mix_factor = 0.0;
-    if (vMixColors != DONT_MIX) {
+    if (vMixColors.x != DONT_MIX) {
         float d_line = distance_to_line(vColorLine.xy, vColorLine.zw, vPos);
         if (do_aa) {
             mix_factor = distance_aa(aa_range, -d_line);

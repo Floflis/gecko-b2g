@@ -40,6 +40,10 @@ XPCOMUtils.defineLazyGetter(this, "RIL", function() {
   return obj;
 });
 
+XPCOMUtils.defineLazyGetter(this, "SIM", function() {
+  return ChromeUtils.import("resource://gre/modules/simIOHelper.js");
+});
+
 XPCOMUtils.defineLazyModuleGetter(
   this,
   "gPhoneNumberUtils",
@@ -61,7 +65,6 @@ const RIL_GETTHREADSCURSOR_CID = Components.ID(
   "{95ee7c3e-d6f2-4ec4-ade5-0c453c036d35}"
 );
 
-const DEBUG = false;
 const DISABLE_MMS_GROUPING_FOR_RECEIVING = false;
 
 const DB_VERSION = 1;
@@ -114,6 +117,10 @@ const DELIVERY_STATUS_ERROR = "error";
 
 const MESSAGE_CLASS_NORMAL = "normal";
 
+const ATTACHMENT_STATUS_NONE = "none";
+const ATTACHMENT_STATUS_NOT_DOWNLOADED = "not-downloaded";
+const ATTACHMENT_STATUS_DOWNLOADED = "downloaded";
+
 // We can´t create an IDBKeyCursor with a boolean, so we need to use numbers
 // instead.
 const FILTER_READ_UNREAD = 0;
@@ -153,6 +160,12 @@ XPCOMUtils.defineLazyGetter(this, "MMS", function() {
   ChromeUtils.import("resource://gre/modules/MmsPduHelper.jsm", MMS);
   return MMS;
 });
+
+var RIL_DEBUG = ChromeUtils.import(
+  "resource://gre/modules/ril_consts_debug.js"
+);
+
+var DEBUG = RIL_DEBUG.DEBUG_RIL;
 
 /**
  * @typedef {Object} MobileMessageDB.MessageRecord
@@ -301,6 +314,7 @@ XPCOMUtils.defineLazyGetter(this, "MMS", function() {
  * |                                       |
  * | [MMS Only]                            |
  * | lastMessageSubject: String            |
+ * | lastMessageAttachementStatus: String  |
  * +---------------------------------------+
  * </pre>
  */
@@ -502,7 +516,9 @@ XPCOMUtils.defineLazyGetter(this, "MMS", function() {
  * which is deprecated and no longer in use.
  * </p>
  */
-this.MobileMessageDB = function() {};
+this.MobileMessageDB = function() {
+  this._updateDebugFlag();
+};
 MobileMessageDB.prototype = {
   dbName: null,
   dbVersion: null,
@@ -522,6 +538,40 @@ MobileMessageDB.prototype = {
    * @private
    */
   lastMessageId: 0,
+
+  _updateDebugFlag() {
+    try {
+      DEBUG =
+        RIL_DEBUG.DEBUG_RIL ||
+        Services.prefs.getBoolPref(RIL_DEBUG.PREF_RIL_DEBUG_ENABLED);
+    } catch (e) {}
+  },
+
+  getAttachmentStatus(aMessageRecord) {
+    if (aMessageRecord && aMessageRecord.type == "mms") {
+      if (aMessageRecord.delivery == DELIVERY_NOT_DOWNLOADED) {
+        return ATTACHMENT_STATUS_NOT_DOWNLOADED;
+      }
+      let parts = aMessageRecord.parts;
+      if (!parts) {
+        return ATTACHMENT_STATUS_NONE;
+      }
+      for (let i = 0; i < parts.length; i++) {
+        let part = parts[i];
+        if (!part) {
+          continue;
+        }
+        let partHeaders = part.headers;
+        if (
+          partHeaders["content-type"].media != "application/smil" &&
+          partHeaders["content-type"].media != "text/plain"
+        ) {
+          return ATTACHMENT_STATUS_DOWNLOADED;
+        }
+      }
+    }
+    return ATTACHMENT_STATUS_NONE;
+  },
 
   /**
    * @callback MobileMessageDB.EnsureDBCallback
@@ -720,7 +770,9 @@ MobileMessageDB.prototype = {
   init(aDbName, aDbVersion, aCallback) {
     this.dbName = aDbName;
     this.dbVersion = aDbVersion || DB_VERSION;
-
+    if (DEBUG) {
+      debug("MobileMessageDB init");
+    }
     let self = this;
     this.newTxn(READ_ONLY, function(error, txn, messageStore) {
       if (error) {
@@ -819,6 +871,14 @@ MobileMessageDB.prototype = {
         let messageRecord = messageCursor.value;
 
         // Set delivery to error.
+        if (DEBUG) {
+          debug(
+            "updatePendingTransactionToError: update message " +
+              messageRecord.id +
+              " to " +
+              DELIVERY_ERROR
+          );
+        }
         messageRecord.delivery = DELIVERY_ERROR;
         messageRecord.deliveryIndex = [DELIVERY_ERROR, messageRecord.timestamp];
 
@@ -827,6 +887,16 @@ MobileMessageDB.prototype = {
         } else {
           // Set delivery status to error.
           for (let i = 0; i < messageRecord.deliveryInfo.length; i++) {
+            if (DEBUG) {
+              debug(
+                "updatePendingTransactionToError: update message " +
+                  messageRecord.id +
+                  " deliveryStatus from " +
+                  messageRecord.deliveryInfo[i].deliveryStatus +
+                  " to " +
+                  DELIVERY_STATUS_ERROR
+              );
+            }
             messageRecord.deliveryInfo[
               i
             ].deliveryStatus = DELIVERY_STATUS_ERROR;
@@ -1597,33 +1667,11 @@ MobileMessageDB.prototype = {
 
         let deletedInfo = { messageIds: [], threadIds: [] };
 
-        function removeGroupMark() {
-          // Use the no mark recipients after save message successfully.
-          if (aMessageRecord.isGroup) {
-            if (Array.isArray(aMessageRecord.headers.to)) {
-              let firstAddress = aMessageRecord.headers.to[0].address.replace(
-                "group",
-                ""
-              );
-              aMessageRecord.headers.to[0].address = firstAddress;
-            } else {
-              let firstAddress = aMessageRecord.headers.to.address.replace(
-                "group",
-                ""
-              );
-              aMessageRecord.headers.to.address = firstAddress;
-            }
-          }
-        }
-
         txn.oncomplete = function(event) {
           if (aMessageRecord.id > self.lastMessageId) {
             self.lastMessageId = aMessageRecord.id;
           }
 
-          if (aMessageRecord.isGroup) {
-            removeGroupMark();
-          }
           notifyResult(Cr.NS_OK, aMessageRecord);
           self.notifyDeletedInfo(deletedInfo);
         };
@@ -1636,9 +1684,6 @@ MobileMessageDB.prototype = {
               ? Cr.NS_ERROR_FILE_NO_DEVICE_SPACE
               : Cr.NS_ERROR_FAILURE;
 
-          if (aMessageRecord.isGroup) {
-            removeGroupMark();
-          }
           notifyResult(error, aMessageRecord);
         };
 
@@ -1834,11 +1879,6 @@ MobileMessageDB.prototype = {
   ) {
     let self = this;
 
-    // Need distinguish between group and mms which have the same recipients.
-    if (aMessageRecord.isGroup) {
-      aThreadParticipants[0].address += "group";
-    }
-
     this.findThreadRecordByTypedAddresses(
       aThreadStore,
       aParticipantStore,
@@ -1906,6 +1946,9 @@ MobileMessageDB.prototype = {
             threadRecord.body = aMessageRecord.body;
             threadRecord.lastMessageId = aMessageRecord.id;
             threadRecord.lastMessageType = aMessageRecord.type;
+            threadRecord.lastMessageAttachementStatus = self.getAttachmentStatus(
+              aMessageRecord
+            );
             needsUpdate = true;
           }
 
@@ -1927,7 +1970,9 @@ MobileMessageDB.prototype = {
         if (aMessageRecord.type == "mms") {
           lastMessageSubject = aMessageRecord.headers.subject;
         }
-
+        let lastMessageAttachementStatus = self.getAttachmentStatus(
+          aMessageRecord
+        );
         threadRecord = {
           participantIds,
           participantAddresses: aThreadParticipants.map(function(typedAddress) {
@@ -1936,6 +1981,7 @@ MobileMessageDB.prototype = {
           lastMessageId: aMessageRecord.id,
           lastTimestamp: timestamp,
           lastMessageSubject: lastMessageSubject || null,
+          lastMessageAttachementStatus,
           body: aMessageRecord.body,
           unreadCount: aMessageRecord.read ? 0 : 1,
           lastMessageType: aMessageRecord.type,
@@ -2209,10 +2255,18 @@ MobileMessageDB.prototype = {
       );
 
       [aMessage.phoneNumber, normalizedAddress].forEach(function(item) {
-        let found = slicedReceivers.indexOf(item);
-        if (found !== -1) {
-          isSuccess = true;
-          slicedReceivers.splice(found, 1);
+        let foundIndex = -1;
+        for (var i = 0; i < slicedReceivers.length; i++) {
+          if (
+            gPhoneNumberUtils.match(slicedReceivers[i], aMessage.phoneNumber)
+          ) {
+            isSuccess = true;
+            foundIndex = i;
+            break;
+          }
+        }
+        if (foundIndex != -1) {
+          slicedReceivers.splice(foundIndex, 1);
         }
       });
     }
@@ -2264,6 +2318,7 @@ MobileMessageDB.prototype = {
     ignoredUnreadCount,
     deletedInfo
   ) {
+    let self = this;
     threadStore.get(threadId).onsuccess = function(event) {
       // This must exist.
       let threadRecord = event.target.result;
@@ -2309,6 +2364,9 @@ MobileMessageDB.prototype = {
             lastMessageSubject = nextMsg.headers.subject;
           }
           threadRecord.lastMessageSubject = lastMessageSubject || null;
+          threadRecord.lastMessageAttachementStatus = self.getAttachmentStatus(
+            nextMsg
+          );
           threadRecord.lastMessageId = nextMsg.id;
           threadRecord.lastTimestamp = nextMsg.timestamp;
           threadRecord.body = nextMsg.body;
@@ -2390,6 +2448,8 @@ MobileMessageDB.prototype = {
     if (aMessage.type == "mms") {
       if (aMessage.headers.from) {
         aMessage.sender = aMessage.headers.from.address;
+      } else if (aMessage.sourceAddress) {
+        aMessage.sender = aMessage.sourceAddress;
       } else {
         aMessage.sender = "";
       }
@@ -3205,7 +3265,9 @@ MobileMessageDB.prototype = {
    */
   saveCellBroadcastMessage(aCellBroadcastMessage, aCallback) {
     if (DEBUG) {
-      debug("Save CellBroadcast Message ");
+      debug(
+        "Save CellBroadcast Message " + JSON.stringify(aCellBroadcastMessage)
+      );
     }
 
     this.newTxn(
@@ -3237,12 +3299,19 @@ MobileMessageDB.prototype = {
           aCallback.notify(error, null);
         };
 
-        aCellBroadcastMessage.hash =
+        let cellbroadcastRecord = JSON.parse(
+          JSON.stringify(aCellBroadcastMessage)
+        );
+        cellbroadcastRecord.hash =
           aCellBroadcastMessage.serialNumber +
           ":" +
-          aCellBroadcastMessage.messageIdentifier;
+          aCellBroadcastMessage.messageId;
 
-        cellBroadcastStore.add(aCellBroadcastMessage);
+        if (DEBUG) {
+          debug("Save CellBroadcast Message hash " + cellbroadcastRecord.hash);
+        }
+
+        cellBroadcastStore.add(cellbroadcastRecord);
       },
       [CELLBROADCAST_STORE_NAME]
     );
@@ -3251,7 +3320,7 @@ MobileMessageDB.prototype = {
   getCellBroadcastMessage(aSerialNumber, aMessageIdentifier, aCallback) {
     let hash = aSerialNumber + ":" + aMessageIdentifier;
     if (DEBUG) {
-      debug("get Cellbroadcast Message hash: " + hash);
+      debug("Get Cellbroadcast Message hash: " + hash);
     }
 
     this.newTxn(
@@ -3278,6 +3347,26 @@ MobileMessageDB.prototype = {
             aCallback.notify(Cr.NS_ERROR_FILE_NOT_FOUND, null, null);
             return;
           }
+          if (DEBUG) {
+            debug(
+              "Broadcast Message: " +
+                hash +
+                " founded " +
+                JSON.stringify(cellBroadcastRecord)
+            );
+          }
+          let geometries = [];
+          cellBroadcastRecord.geometries.forEach(geo => {
+            if (geo.type === RIL.GEOMETRY_TYPE_POLYGON) {
+              geometries.push(new SIM.Polygon(geo._vertices));
+            } else if (geo.type === RIL.GEOMETRY_TYPE_CIRCLE) {
+              geometries.push(new SIM.Circle(geo._center, geo._radius));
+            } else if (DEBUG) {
+              debug("Invalid geometry type: " + geo.type);
+            }
+          });
+          cellBroadcastRecord.geometries = geometries;
+
           aCallback.notify(Cr.NS_OK, cellBroadcastRecord, null);
         };
 
@@ -3466,10 +3555,13 @@ MobileMessageDB.prototype = {
           if (size === length) {
             messageStore.clear();
             threadStore.clear();
+            let threadsIdSet = new Set();
             for (let i = 0; i < length; i++) {
               deleted[i] = true;
               deletedInfo.messageIds.push(messageIds[i]);
+              threadsIdSet.add(event.target.result[i].threadId);
             }
+            deletedInfo.threadIds.push(...Array.from(threadsIdSet));
             updateThreadInfo();
           } else {
             for (let i = 0; i < length; i++) {
@@ -4857,7 +4949,8 @@ GetThreadsCursor.prototype = {
         threadRecord.body,
         threadRecord.unreadCount,
         threadRecord.lastMessageType,
-        threadRecord.isGroup
+        threadRecord.isGroup,
+        threadRecord.lastMessageAttachementStatus || ATTACHMENT_STATUS_NONE
       );
       collector.notifyResult(txn, threadId, thread);
     };

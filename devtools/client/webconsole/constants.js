@@ -31,7 +31,6 @@ const actionTypes = {
   MESSAGE_REMOVE: "MESSAGE_REMOVE",
   MESSAGES_ADD: "MESSAGES_ADD",
   MESSAGES_CLEAR: "MESSAGES_CLEAR",
-  MESSAGES_CLEAR_LOGPOINT: "MESSAGES_CLEAR_LOGPOINT",
   NETWORK_MESSAGES_UPDATE: "NETWORK_MESSAGES_UPDATE",
   NETWORK_UPDATES_REQUEST: "NETWORK_UPDATES_REQUEST",
   PERSIST_TOGGLE: "PERSIST_TOGGLE",
@@ -174,6 +173,7 @@ const chromeRDPEnums = {
     // output anything (e.g. `console.time()` calls).
     NULL_MESSAGE: "nullMessage",
     NAVIGATION_MARKER: "navigationMarker",
+    SIMPLE_TABLE: "simpleTable",
   },
   MESSAGE_LEVEL: {
     LOG: "log",

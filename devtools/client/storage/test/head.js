@@ -28,7 +28,11 @@ registerCleanupFunction(async () => {
       }
 
       if (win.clear) {
-        await win.clear();
+        // Do not get hung into win.clear() forever
+        await Promise.race([
+          new Promise(r => win.setTimeout(r, 10000)),
+          win.clear(),
+        ]);
       }
     });
   }
@@ -53,6 +57,7 @@ const STORAGE_PREF = "devtools.storage.enabled";
 const DOM_CACHE = "dom.caches.enabled";
 const DUMPEMIT_PREF = "devtools.dump.emit";
 const DEBUGGERLOG_PREF = "devtools.debugger.log";
+
 // Allows Cache API to be working on usage `http` test page
 const CACHES_ON_HTTP_PREF = "dom.caches.testing.enabled";
 const PATH = "browser/devtools/client/storage/test/";
@@ -142,17 +147,18 @@ async function openTabAndSetupStorage(url, options = {}) {
 /**
  * Open the toolbox, with the storage tool visible.
  *
- * @param cb {Function} Optional callback, if you don't want to use the returned
- *                      promise
- * @param target {Object} Optional, the target for the toolbox; defaults to a tab target
+ * @param tab {XULTab} Optional, the tab for the toolbox; defaults to selected tab
+ * @param descriptor {Object} Optional, the descriptor for the toolbox; defaults to a tab descriptor
  * @param hostType {Toolbox.HostType} Optional, type of host that will host the toolbox
  *
  * @return {Promise} a promise that resolves when the storage inspector is ready
  */
-var openStoragePanel = async function(cb, target, hostType) {
+var openStoragePanel = async function({ tab, descriptor, hostType } = {}) {
   info("Opening the storage inspector");
-  if (!target) {
-    target = await TargetFactory.forTab(gBrowser.selectedTab);
+  if (!descriptor) {
+    descriptor = await TabDescriptorFactory.createDescriptorForTab(
+      tab || gBrowser.selectedTab
+    );
   }
 
   let storage, toolbox;
@@ -160,7 +166,7 @@ var openStoragePanel = async function(cb, target, hostType) {
   // Checking if the toolbox and the storage are already loaded
   // The storage-updated event should only be waited for if the storage
   // isn't loaded yet
-  toolbox = gDevTools.getToolbox(target);
+  toolbox = gDevTools.getToolboxForDescriptor(descriptor);
   if (toolbox) {
     storage = toolbox.getPanel("storage");
     if (storage) {
@@ -168,9 +174,6 @@ var openStoragePanel = async function(cb, target, hostType) {
       gUI = storage.UI;
       gToolbox = toolbox;
       info("Toolbox and storage already open");
-      if (cb) {
-        return cb(storage, toolbox);
-      }
 
       return {
         toolbox: toolbox,
@@ -180,7 +183,10 @@ var openStoragePanel = async function(cb, target, hostType) {
   }
 
   info("Opening the toolbox");
-  toolbox = await gDevTools.showToolbox(target, "storage", hostType);
+  toolbox = await gDevTools.showToolbox(descriptor, {
+    toolId: "storage",
+    hostType,
+  });
   storage = toolbox.getPanel("storage");
   gPanelWindow = storage.panelWindow;
   gUI = storage.UI;
@@ -191,10 +197,6 @@ var openStoragePanel = async function(cb, target, hostType) {
   gUI.animationsEnabled = false;
 
   await waitForToolboxFrameFocus(toolbox);
-
-  if (cb) {
-    return cb(storage, toolbox);
-  }
 
   return {
     toolbox: toolbox,
@@ -343,8 +345,7 @@ function findVariableViewProperties(ruleArray, parsed) {
     // Return the results - a promise resolved to hold the updated ruleArray.
     const returnResults = onAllRulesMatched.bind(null, ruleArray);
 
-    return promise
-      .all(outstanding)
+    return Promise.all(outstanding)
       .then(lastStep)
       .then(returnResults);
   }
@@ -439,14 +440,15 @@ function findVariableViewProperties(ruleArray, parsed) {
  */
 function matchVariablesViewProperty(prop, rule) {
   function resolve(result) {
-    return promise.resolve(result);
+    return Promise.resolve(result);
   }
 
   if (!prop) {
     return resolve(false);
   }
 
-  if (rule.name) {
+  // Any kind of string is accepted as name, including empty ones
+  if (typeof rule.name == "string") {
     const match =
       rule.name instanceof RegExp
         ? rule.name.test(prop.name)
@@ -814,12 +816,7 @@ function checkCellUneditable(id, column) {
 function showColumn(id, state) {
   const columns = gUI.table.columns;
   const column = columns.get(id);
-
-  if (state) {
-    column.wrapper.removeAttribute("hidden");
-  } else {
-    column.wrapper.setAttribute("hidden", true);
-  }
+  column.wrapper.hidden = !state;
 }
 
 /**
@@ -940,11 +937,10 @@ async function checkState(state) {
     }
 
     for (const name of names) {
-      ok(items.has(name), `There is item with name '${name}' in ${storeName}`);
-
       if (!items.has(name)) {
         showAvailableIds();
       }
+      ok(items.has(name), `There is item with name '${name}' in ${storeName}`);
     }
   }
 }
@@ -1107,16 +1103,42 @@ function isInTree(doc, path) {
 }
 
 /**
+ * Returns the label of the node for the provided tree path
+ * @param {Document} doc
+ * @param {Array} path
+ * @returns {String}
+ */
+function getTreeNodeLabel(doc, path) {
+  const treeId = JSON.stringify(path);
+  return doc.querySelector(`[data-id='${treeId}'] .tree-widget-item`)
+    .textContent;
+}
+
+/**
  * Checks that the pair <name, value> is displayed at the data table
  * @param {String} name
  * @param {any} value
  */
 function checkStorageData(name, value) {
-  is(
-    gUI.table.items.get(name)?.value,
-    value,
+  ok(
+    hasStorageData(name, value),
     `Table row has an entry for: ${name} with value: ${value}`
   );
+}
+
+async function waitForStorageData(name, value) {
+  info("Waiting for data to appear in the table");
+  await waitFor(() => hasStorageData(name, value));
+  ok(true, `Table row has an entry for: ${name} with value: ${value}`);
+}
+
+/**
+ * Returns whether the pair <name, value> is displayed at the data table
+ * @param {String} name
+ * @param {any} value
+ */
+function hasStorageData(name, value) {
+  return gUI.table.items.get(name)?.value === value;
 }
 
 /**
@@ -1126,4 +1148,29 @@ function checkStorageData(name, value) {
  */
 function buildURLWithContent(domain, html) {
   return `http://${domain}/document-builder.sjs?html=${encodeURI(html)}`;
+}
+
+/**
+ * Asserts that the given cookie holds the provided value in the data table
+ * @param {String} name
+ * @param {String} value
+ */
+function checkCookieData(name, value) {
+  ok(
+    hasCookieData(name, value),
+    `Table row has an entry for: ${name} with value: ${value}`
+  );
+}
+
+/**
+ * Returns whether the given cookie holds the provided value in the data table
+ * @param {String} name
+ * @param {String} value
+ */
+function hasCookieData(name, value) {
+  const rows = Array.from(gUI.table.items);
+  const cookie = rows.map(([, data]) => data).find(x => x.name === name);
+
+  info(`found ${cookie?.value}`);
+  return cookie?.value === value;
 }

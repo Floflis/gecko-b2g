@@ -41,7 +41,7 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
     this.before("new-mutations", this.onMutations.bind(this));
 
     // Those events will be emitted if watchRootNode was called on the
-    // corresponding WalkerActor, which should be handled by the ResourceWatcher
+    // corresponding WalkerActor, which should be handled by the ResourceCommand
     // as long as a consumer is watching for root-node resources.
     // This should be fixed by using watchResources directly from the walker
     // front, either with the ROOT_NODE resource, or with the DOCUMENT_EVENT
@@ -166,53 +166,6 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
   async getNodeFromActor(actorID, path) {
     const response = await super.getNodeFromActor(actorID, path);
     return response ? response.node : null;
-  }
-
-  /*
-   * Incrementally search the document for a given string.
-   * For modern servers, results will be searched with using the WalkerActor
-   * `search` function (includes tag names, attributes, and text contents).
-   * Only 1 result is sent back, and calling the method again with the same
-   * query will send the next result. When there are no more results to be sent
-   * back, null is sent.
-   * @param {String} query
-   * @param {Object} options
-   *    - "reverse": search backwards
-   */
-  async search(query, options = {}) {
-    const searchData = (this.searchData = this.searchData || {});
-    const result = await super.search(query, options);
-    const nodeList = result.list;
-
-    // If this is a new search, start at the beginning.
-    if (searchData.query !== query) {
-      searchData.query = query;
-      searchData.index = -1;
-    }
-
-    if (!nodeList.length) {
-      return null;
-    }
-
-    // Move search result cursor and cycle if necessary.
-    searchData.index = options.reverse
-      ? searchData.index - 1
-      : searchData.index + 1;
-    if (searchData.index >= nodeList.length) {
-      searchData.index = 0;
-    }
-    if (searchData.index < 0) {
-      searchData.index = nodeList.length - 1;
-    }
-
-    // Send back the single node, along with any relevant search data
-    const node = await nodeList.item(searchData.index);
-    return {
-      type: "search",
-      node: node,
-      resultsLength: nodeList.length,
-      resultsIndex: searchData.index,
-    };
   }
 
   _releaseFront(node, force) {
@@ -381,11 +334,11 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
   }
 
   async children(node, options) {
-    if (!node.remoteFrame) {
+    if (!node.useChildTargetToFetchChildren) {
       return super.children(node, options);
     }
-    const remoteTarget = await node.connectToRemoteFrame();
-    const walker = (await remoteTarget.getFront("inspector")).walker;
+    const target = await node.connectToFrame();
+    const walker = (await target.getFront("inspector")).walker;
 
     // Finally retrieve the NodeFront of the remote frame's document
     const documentNode = await walker.getRootNode();
@@ -454,10 +407,12 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
       if (!selector) {
         return nodeFront;
       }
-      nodeFront = await this.querySelector(nodeFront, selector);
-
+      nodeFront = await nodeFront.walkerFront.querySelector(
+        nodeFront,
+        selector
+      );
       // It's possible the containing iframe isn't available by the time
-      // this.querySelector is called, which causes the re-selected node to be
+      // walkerFront.querySelector is called, which causes the re-selected node to be
       // unavailable. There also isn't a way for us to know when all iframes on the page
       // have been created after a reload. Because of this, we should should bail here.
       if (!nodeFront) {
@@ -480,27 +435,17 @@ class WalkerFront extends FrontClassWithSpec(walkerSpec) {
             nodeType === Node.DOCUMENT_NODE
           );
         });
+
+        // The iframe selector might have matched an element which is not an
+        // iframe in the new page (or an iframe with no document?). In this
+        // case, bail out and fallback to the root body element.
+        if (!nodeFront) {
+          return null;
+        }
       }
       return querySelectors(nodeFront) || nodeFront;
     };
     const nodeFront = await this.getRootNode();
-
-    // If rootSelectors are [frameSelector1, ..., frameSelectorN, rootSelector]
-    // we expect that [frameSelector1, ..., frameSelectorN] will also be in
-    // nodeSelectors.
-    // Otherwise it means the nodeSelectors target a node outside of this walker
-    // and we should return null.
-    const rootFrontSelectors = await nodeFront.getAllSelectors();
-    for (let i = 0; i < rootFrontSelectors.length - 1; i++) {
-      if (rootFrontSelectors[i] !== nodeSelectors[i]) {
-        return null;
-      }
-    }
-
-    // The query will start from the walker's rootNode, remove all the
-    // "frameSelectors".
-    nodeSelectors.splice(0, rootFrontSelectors.length - 1);
-
     return querySelectors(nodeFront);
   }
 

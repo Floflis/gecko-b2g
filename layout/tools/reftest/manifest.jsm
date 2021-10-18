@@ -11,6 +11,7 @@ Cu.import("resource://reftest/globals.jsm", this);
 Cu.import("resource://reftest/reftest.jsm", this);
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/NetUtil.jsm");
+Cu.import("resource://gre/modules/AppConstants.jsm");
 
 const NS_SCRIPTSECURITYMANAGER_CONTRACTID = "@mozilla.org/scriptsecuritymanager;1";
 const NS_NETWORK_PROTOCOL_CONTRACTID_PREFIX = "@mozilla.org/network/protocol;1?name=";
@@ -51,7 +52,12 @@ function ReadManifest(aURL, aFilter, aManifestID)
     var listURL = aURL;
     var channel = NetUtil.newChannel({uri: aURL,
                                       loadUsingSystemPrincipal: true});
-    var inputStream = channel.open();
+    try {
+        var inputStream = channel.open();
+    } catch (e) {
+        g.logger.error("failed to open manifest at : " + aURL.spec);
+        throw e;
+    }
     if (channel instanceof Ci.nsIHttpChannel
         && channel.responseStatus != 200) {
       g.logger.error("HTTP ERROR : " + channel.responseStatus);
@@ -473,9 +479,8 @@ function BuildConditionSandbox(aURL) {
       sandbox.embeddedInFirefoxReality = false;
     }
 
-    var info = gfxInfo.getInfo();
-    var canvasBackend = readGfxInfo(info, "AzureCanvasBackend");
-    var contentBackend = readGfxInfo(info, "AzureContentBackend");
+    var canvasBackend = readGfxInfo(gfxInfo, "AzureCanvasBackend");
+    var contentBackend = readGfxInfo(gfxInfo, "AzureContentBackend");
 
     sandbox.gpuProcess = gfxInfo.usingGPUProcess;
     sandbox.azureCairo = canvasBackend == "cairo";
@@ -497,20 +502,14 @@ function BuildConditionSandbox(aURL) {
     sandbox.layersOpenGL =
       g.windowUtils.layerManagerType == "OpenGL";
     sandbox.swgl =
-      g.windowUtils.layerManagerType == "WebRender (Software)"
-      || g.windowUtils.layerManagerType == "WebRender (Software D3D11)";
+      g.windowUtils.layerManagerType.startsWith("WebRender (Software");
     sandbox.webrender =
-      g.windowUtils.layerManagerType == "WebRender" || sandbox.swgl;
+      g.windowUtils.layerManagerType.startsWith("WebRender");
     sandbox.layersOMTC =
       g.windowUtils.layerManagerRemote == true;
     sandbox.advancedLayers =
       g.windowUtils.usingAdvancedLayers == true;
     sandbox.layerChecksEnabled = !sandbox.webrender;
-
-    sandbox.retainedDisplayList =
-      prefs.getBoolPref("layout.display-list.retain");
-
-    sandbox.usesOverlayScrollbars = g.windowUtils.usesOverlayScrollbars;
 
     // Shortcuts for widget toolkits.
     sandbox.Android = xr.OS == "Android";
@@ -520,6 +519,17 @@ function BuildConditionSandbox(aURL) {
     sandbox.winWidget = xr.widgetToolkit == "windows";
 
     sandbox.is64Bit = xr.is64Bit;
+
+    // Use this to annotate reftests that fail in drawSnapshot, but
+    // the reason hasn't been investigated (or fixed) yet.
+    sandbox.useDrawSnapshot = g.useDrawSnapshot;
+    // Use this to annotate reftests that use functionality
+    // that isn't available to drawSnapshot (like any sort of
+    // compositor feature such as async scrolling).
+    sandbox.unsupportedWithDrawSnapshot = g.useDrawSnapshot;
+
+    sandbox.retainedDisplayList =
+      prefs.getBoolPref("layout.display-list.retain") && !sandbox.useDrawSnapshot;
 
     // GeckoView is currently uniquely identified by "android + e10s" but
     // we might want to make this condition more precise in the future.
@@ -540,27 +550,16 @@ function BuildConditionSandbox(aURL) {
 
     sandbox.MinGW = sandbox.winWidget && sysInfo.getPropertyAsBool("isMinGW");
 
-#if MOZ_ASAN
-    sandbox.AddressSanitizer = true;
-#else
-    sandbox.AddressSanitizer = false;
-#endif
-
-#if MOZ_WEBRTC
-    sandbox.webrtc = true;
-#else
-    sandbox.webrtc = false;
-#endif
+    sandbox.AddressSanitizer = AppConstants.ASAN;
+    sandbox.ThreadSanitizer = AppConstants.TSAN;
+    sandbox.webrtc = AppConstants.MOZ_WEBRTC;
+    sandbox.jxl = AppConstants.MOZ_JXL;
 
     let retainedDisplayListsEnabled = prefs.getBoolPref("layout.display-list.retain", false);
-    sandbox.retainedDisplayLists = retainedDisplayListsEnabled && !g.compareRetainedDisplayLists;
+    sandbox.retainedDisplayLists = retainedDisplayListsEnabled && !g.compareRetainedDisplayLists && !sandbox.useDrawSnapshot;
     sandbox.compareRetainedDisplayLists = g.compareRetainedDisplayLists;
 
-#ifdef RELEASE_OR_BETA
-    sandbox.release_or_beta = true;
-#else
-    sandbox.release_or_beta = false;
-#endif
+    sandbox.release_or_beta = AppConstants.RELEASE_OR_BETA;
 
     var hh = Cc[NS_NETWORK_PROTOCOL_CONTRACTID_PREFIX + "http"].
                  getService(Ci.nsIHttpProtocolHandler);
@@ -577,14 +576,14 @@ function BuildConditionSandbox(aURL) {
     var osxmatch = /Mac OS X (\d+).(\d+)$/.exec(hh.oscpu);
     sandbox.OSX = osxmatch ? parseInt(osxmatch[1]) * 100 + parseInt(osxmatch[2]) : undefined;
 
-    // Plugins are no longer supported.  Don't try to use TestPlugin.
-    sandbox.haveTestPlugin = false;
+    // config specific prefs
+    sandbox.appleSilicon = prefs.getBoolPref("sandbox.apple_silicon", false);
 
     // Set a flag on sandbox if the windows default theme is active
     sandbox.windowsDefaultTheme = g.containingWindow.matchMedia("(-moz-windows-default-theme)").matches;
 
     try {
-        sandbox.nativeThemePref = !prefs.getBoolPref("widget.disable-native-theme-for-content");
+        sandbox.nativeThemePref = !prefs.getBoolPref("widget.non-native-theme.enabled");
     } catch (e) {
         sandbox.nativeThemePref = true;
     }
@@ -601,7 +600,7 @@ function BuildConditionSandbox(aURL) {
     sandbox.browserIsFission = g.browserIsFission;
 
     try {
-        sandbox.asyncPan = g.containingWindow.docShell.asyncPanZoomEnabled;
+        sandbox.asyncPan = g.containingWindow.docShell.asyncPanZoomEnabled && !sandbox.useDrawSnapshot;
     } catch (e) {
         sandbox.asyncPan = false;
     }
@@ -614,11 +613,14 @@ function BuildConditionSandbox(aURL) {
 
     // Running with a variant enabled?
     sandbox.fission = Services.appinfo.fissionAutostart;
-    sandbox.serviceWorkerE10s = prefs.getBoolPref("dom.serviceWorkers.parent_intercept", false);
+    sandbox.serviceWorkerE10s = true;
 
     if (!g.dumpedConditionSandbox) {
-        g.logger.info("Dumping JSON representation of sandbox");
-        g.logger.info(JSON.stringify(Cu.waiveXrays(sandbox)));
+        g.logger.info("Dumping representation of sandbox which can be used for expectation annotations");
+        for (let entry of Object.entries(Cu.waiveXrays(sandbox)).sort((a, b) => a[0].localeCompare(b[0]))) {
+            let value = typeof entry[1] === "object" ? JSON.stringify(entry[1]) : entry[1];
+            g.logger.info(`    ${entry[0]}: ${value}`);
+        }
         g.dumpedConditionSandbox = true;
     }
 
@@ -690,6 +692,8 @@ function ServeTestBase(aURL, depth) {
     g.count++;
     var path = "/" + Date.now() + "/" + g.count;
     g.server.registerDirectory(path + "/", directory);
+    // this one is needed so tests can use example.org urls for cross origin testing
+    g.server.registerDirectory("/", directory);
 
     var secMan = Cc[NS_SCRIPTSECURITYMANAGER_CONTRACTID]
                      .getService(Ci.nsIScriptSecurityManager);

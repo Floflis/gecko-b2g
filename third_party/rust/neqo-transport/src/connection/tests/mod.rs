@@ -6,33 +6,38 @@
 
 #![deny(clippy::pedantic)]
 
-use super::{
-    Connection, ConnectionError, ConnectionId, ConnectionIdRef, Output, State, LOCAL_IDLE_TIMEOUT,
-};
+use super::{Connection, ConnectionError, ConnectionId, Output, State};
 use crate::addr_valid::{AddressValidation, ValidateAddress};
-use crate::cc::CWND_INITIAL_PKTS;
+use crate::cc::{CWND_INITIAL_PKTS, CWND_MIN};
+use crate::cid::ConnectionIdRef;
 use crate::events::ConnectionEvent;
 use crate::path::PATH_MTU_V6;
 use crate::recovery::ACK_ONLY_SIZE_LIMIT;
+use crate::stats::{FrameStats, Stats, MAX_PTO_COUNTS};
 use crate::{ConnectionIdDecoder, ConnectionIdGenerator, ConnectionParameters, Error, StreamType};
 
 use std::cell::RefCell;
+use std::cmp::min;
 use std::convert::TryFrom;
 use std::mem;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use neqo_common::{event::Provider, qdebug, qtrace, Datagram, Decoder};
+use neqo_common::{event::Provider, qdebug, qtrace, Datagram, Decoder, Role};
 use neqo_crypto::{random, AllowZeroRtt, AuthenticationStatus, ResumptionToken};
 use test_fixture::{self, addr, fixture_init, now};
 
 // All the tests.
+mod ackrate;
 mod cc;
 mod close;
+mod datagram;
+mod fuzzing;
 mod handshake;
 mod idle;
 mod keys;
 mod migration;
+mod priority;
 mod recovery;
 mod resumption;
 mod stream;
@@ -96,6 +101,7 @@ pub fn new_client(params: ConnectionParameters) -> Connection {
         addr(),
         addr(),
         params,
+        now(),
     )
     .expect("create a default client")
 }
@@ -144,7 +150,12 @@ fn handshake(
     let mut now = now;
 
     let mut input = None;
-    let is_done = |c: &mut Connection| matches!(c.state(), State::Confirmed | State::Closing { .. } | State::Closed(..));
+    let is_done = |c: &mut Connection| {
+        matches!(
+            c.state(),
+            State::Confirmed | State::Closing { .. } | State::Closed(..)
+        )
+    };
 
     while !is_done(a) {
         let _ = maybe_authenticate(a);
@@ -156,7 +167,9 @@ fn handshake(
         now += rtt / 2;
         mem::swap(&mut a, &mut b);
     }
-    let _ = a.process(input, now);
+    if let Some(d) = input {
+        a.process_input(d, now);
+    }
     now
 }
 
@@ -177,12 +190,18 @@ fn connect_with_rtt(
     now: Instant,
     rtt: Duration,
 ) -> Instant {
+    fn check_rtt(stats: &Stats, rtt: Duration) {
+        assert_eq!(stats.rtt, rtt);
+        // Confirmation takes 2 round trips,
+        // so rttvar is reduced by 1/4 (from rtt/2).
+        assert_eq!(stats.rttvar, rtt * 3 / 8);
+    }
     let now = handshake(client, server, now, rtt);
     assert_eq!(*client.state(), State::Confirmed);
     assert_eq!(*server.state(), State::Confirmed);
 
-    assert_eq!(client.loss_recovery.rtt(), rtt);
-    assert_eq!(server.loss_recovery.rtt(), rtt);
+    check_rtt(&client.stats(), rtt);
+    check_rtt(&server.stats(), rtt);
     now
 }
 
@@ -243,15 +262,13 @@ fn force_idle(
     // Delivering s1 should not have the client change its mind about the ACK.
     let ack = client.process(Some(s1), now).dgram();
     assert!(ack.is_some());
-    assert_eq!(
-        client.process_output(now),
-        Output::Callback(LOCAL_IDLE_TIMEOUT)
+    let idle_timeout = min(
+        client.conn_params.get_idle_timeout(),
+        server.conn_params.get_idle_timeout(),
     );
+    assert_eq!(client.process_output(now), Output::Callback(idle_timeout));
     now += rtt / 2;
-    assert_eq!(
-        server.process(ack, now),
-        Output::Callback(LOCAL_IDLE_TIMEOUT)
-    );
+    assert_eq!(server.process(ack, now), Output::Callback(idle_timeout));
     now
 }
 
@@ -262,11 +279,23 @@ fn connect_rtt_idle(client: &mut Connection, server: &mut Connection, rtt: Durat
     // Drain events from both as well.
     let _ = client.events().count();
     let _ = server.events().count();
+    qtrace!("----- connected and idle with RTT {:?}", rtt);
     now
 }
 
 fn connect_force_idle(client: &mut Connection, server: &mut Connection) {
     connect_rtt_idle(client, server, Duration::new(0, 0));
+}
+
+fn fill_stream(c: &mut Connection, stream: u64) {
+    const BLOCK_SIZE: usize = 4_096;
+    loop {
+        let bytes_sent = c.stream_send(stream, &[0x42; BLOCK_SIZE]).unwrap();
+        qtrace!("fill_cwnd wrote {} bytes", bytes_sent);
+        if bytes_sent < BLOCK_SIZE {
+            break;
+        }
+    }
 }
 
 /// This fills the congestion window from a single source.
@@ -275,36 +304,25 @@ fn connect_force_idle(client: &mut Connection, server: &mut Connection) {
 /// from the return value whether a timeout is an ACK delay, PTO, or
 /// pacing, this looks at the congestion window to tell when to stop.
 /// Returns a list of datagrams and the new time.
-fn fill_cwnd(src: &mut Connection, stream: u64, mut now: Instant) -> (Vec<Datagram>, Instant) {
-    const BLOCK_SIZE: usize = 4_096;
-    let mut total_dgrams = Vec::new();
-
-    qtrace!(
-        "fill_cwnd starting cwnd: {}",
-        src.loss_recovery.cwnd_avail()
-    );
-
-    loop {
-        let bytes_sent = src.stream_send(stream, &[0x42; BLOCK_SIZE]).unwrap();
-        qtrace!("fill_cwnd wrote {} bytes", bytes_sent);
-        if bytes_sent < BLOCK_SIZE {
-            break;
-        }
+fn fill_cwnd(c: &mut Connection, stream: u64, mut now: Instant) -> (Vec<Datagram>, Instant) {
+    // Train wreck function to get the remaining congestion window on the primary path.
+    fn cwnd(c: &Connection) -> usize {
+        c.paths.primary().borrow().sender().cwnd_avail()
     }
 
+    qtrace!("fill_cwnd starting cwnd: {}", cwnd(c));
+    fill_stream(c, stream);
+
+    let mut total_dgrams = Vec::new();
     loop {
-        let pkt = src.process_output(now);
-        qtrace!(
-            "fill_cwnd cwnd remaining={}, output: {:?}",
-            src.loss_recovery.cwnd_avail(),
-            pkt
-        );
+        let pkt = c.process_output(now);
+        qtrace!("fill_cwnd cwnd remaining={}, output: {:?}", cwnd(c), pkt);
         match pkt {
             Output::Datagram(dgram) => {
                 total_dgrams.push(dgram);
             }
             Output::Callback(t) => {
-                if src.loss_recovery.cwnd_avail() < ACK_ONLY_SIZE_LIMIT {
+                if cwnd(c) < ACK_ONLY_SIZE_LIMIT {
                     break;
                 }
                 now += t;
@@ -313,7 +331,131 @@ fn fill_cwnd(src: &mut Connection, stream: u64, mut now: Instant) -> (Vec<Datagr
         }
     }
 
+    qtrace!(
+        "fill_cwnd sent {} bytes",
+        total_dgrams.iter().map(|d| d.len()).sum::<usize>()
+    );
     (total_dgrams, now)
+}
+
+/// This function is like the combination of `fill_cwnd` and `ack_bytes`.
+/// However, it acknowledges everything inline and preserves an RTT of `DEFAULT_RTT`.
+fn increase_cwnd(
+    sender: &mut Connection,
+    receiver: &mut Connection,
+    stream: u64,
+    mut now: Instant,
+) -> Instant {
+    fill_stream(sender, stream);
+    loop {
+        let pkt = sender.process_output(now);
+        match pkt {
+            Output::Datagram(dgram) => {
+                receiver.process_input(dgram, now + DEFAULT_RTT / 2);
+            }
+            Output::Callback(t) => {
+                if t < DEFAULT_RTT {
+                    now += t;
+                } else {
+                    break; // We're on PTO now.
+                }
+            }
+            Output::None => panic!(),
+        }
+    }
+
+    // Now acknowledge all those packets at once.
+    now += DEFAULT_RTT / 2;
+    let ack = receiver.process_output(now).dgram();
+    now += DEFAULT_RTT / 2;
+    sender.process_input(ack.unwrap(), now);
+    now
+}
+
+/// Receive multiple packets and generate an ack-only packet.
+/// # Panics
+/// The caller is responsible for ensuring that `dest` has received
+/// enough data that it wants to generate an ACK.  This panics if
+/// no ACK frame is generated.
+fn ack_bytes<D>(dest: &mut Connection, stream: u64, in_dgrams: D, now: Instant) -> Datagram
+where
+    D: IntoIterator<Item = Datagram>,
+    D::IntoIter: ExactSizeIterator,
+{
+    let mut srv_buf = [0; 4_096];
+
+    let in_dgrams = in_dgrams.into_iter();
+    qdebug!([dest], "ack_bytes {} datagrams", in_dgrams.len());
+    for dgram in in_dgrams {
+        dest.process_input(dgram, now);
+    }
+
+    loop {
+        let (bytes_read, _fin) = dest.stream_recv(stream, &mut srv_buf).unwrap();
+        qtrace!([dest], "ack_bytes read {} bytes", bytes_read);
+        if bytes_read == 0 {
+            break;
+        }
+    }
+
+    dest.process_output(now).dgram().unwrap()
+}
+
+// Get the current congestion window for the connection.
+fn cwnd(c: &Connection) -> usize {
+    c.paths.primary().borrow().sender().cwnd()
+}
+fn cwnd_avail(c: &Connection) -> usize {
+    c.paths.primary().borrow().sender().cwnd_avail()
+}
+
+fn induce_persistent_congestion(
+    client: &mut Connection,
+    server: &mut Connection,
+    stream: u64,
+    mut now: Instant,
+) -> Instant {
+    // Note: wait some arbitrary time that should be longer than pto
+    // timer. This is rather brittle.
+    qtrace!([client], "induce_persistent_congestion");
+    now += AT_LEAST_PTO;
+
+    let mut pto_counts = [0; MAX_PTO_COUNTS];
+    assert_eq!(client.stats.borrow().pto_counts, pto_counts);
+
+    qtrace!([client], "first PTO");
+    let (c_tx_dgrams, next_now) = fill_cwnd(client, stream, now);
+    now = next_now;
+    assert_eq!(c_tx_dgrams.len(), 2); // Two PTO packets
+
+    pto_counts[0] = 1;
+    assert_eq!(client.stats.borrow().pto_counts, pto_counts);
+
+    qtrace!([client], "second PTO");
+    now += AT_LEAST_PTO * 2;
+    let (c_tx_dgrams, next_now) = fill_cwnd(client, stream, now);
+    now = next_now;
+    assert_eq!(c_tx_dgrams.len(), 2); // Two PTO packets
+
+    pto_counts[0] = 0;
+    pto_counts[1] = 1;
+    assert_eq!(client.stats.borrow().pto_counts, pto_counts);
+
+    qtrace!([client], "third PTO");
+    now += AT_LEAST_PTO * 4;
+    let (c_tx_dgrams, next_now) = fill_cwnd(client, stream, now);
+    now = next_now;
+    assert_eq!(c_tx_dgrams.len(), 2); // Two PTO packets
+
+    pto_counts[1] = 0;
+    pto_counts[2] = 1;
+    assert_eq!(client.stats.borrow().pto_counts, pto_counts);
+
+    // An ACK for the third PTO causes persistent congestion.
+    let s_ack = ack_bytes(server, stream, c_tx_dgrams, now);
+    client.process_input(s_ack, now);
+    assert_eq!(cwnd(client), CWND_MIN);
+    now
 }
 
 /// This magic number is the size of the client's CWND after the handshake completes.
@@ -385,4 +527,34 @@ fn get_tokens(client: &mut Connection) -> Vec<ResumptionToken> {
             }
         })
         .collect()
+}
+
+fn assert_default_stats(stats: &Stats) {
+    assert_eq!(stats.packets_rx, 0);
+    assert_eq!(stats.packets_tx, 0);
+    let dflt_frames = FrameStats::default();
+    assert_eq!(stats.frame_rx, dflt_frames);
+    assert_eq!(stats.frame_tx, dflt_frames);
+}
+
+#[test]
+fn create_client() {
+    let client = default_client();
+    assert_eq!(client.role(), Role::Client);
+    assert!(matches!(client.state(), State::Init));
+    let stats = client.stats();
+    assert_default_stats(&stats);
+    assert_eq!(stats.rtt, crate::rtt::INITIAL_RTT);
+    assert_eq!(stats.rttvar, crate::rtt::INITIAL_RTT / 2);
+}
+
+#[test]
+fn create_server() {
+    let server = default_server();
+    assert_eq!(server.role(), Role::Server);
+    assert!(matches!(server.state(), State::Init));
+    let stats = server.stats();
+    assert_default_stats(&stats);
+    // Server won't have a default path, so no RTT.
+    assert_eq!(stats.rtt, Duration::from_secs(0));
 }

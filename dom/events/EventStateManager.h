@@ -18,6 +18,7 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/layers/APZPublicUtils.h"
+#include "mozilla/dom/Record.h"
 #include "Units.h"
 #include "WheelHandlingHelper.h"  // for WheelDeltaAdjustmentStrategy
 
@@ -35,11 +36,12 @@ class nsPresContext;
 
 namespace mozilla {
 
+class EditorBase;
 class EnterLeaveDispatcher;
 class EventStates;
 class IMEContentObserver;
 class ScrollbarsForWheel;
-class TextEditor;
+class TextControlElement;
 class WheelTransaction;
 
 namespace dom {
@@ -159,6 +161,19 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   void NativeAnonymousContentRemoved(nsIContent* aAnonContent);
   void ContentRemoved(dom::Document* aDocument, nsIContent* aContent);
 
+  /**
+   * Called when a native anonymous <div> element which is root element of
+   * text editor will be removed.
+   */
+  void TextControlRootWillBeRemoved(TextControlElement& aTextControlElement);
+
+  /**
+   * Called when a native anonymous <div> element which is root element of
+   * text editor is created.
+   */
+  void TextControlRootAdded(dom::Element& aAnonymousDivElement,
+                            TextControlElement& aTextControlElement);
+
   bool EventStatusOK(WidgetGUIEvent* aEvent);
 
   /**
@@ -179,7 +194,7 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
 
   /**
    * Register accesskey on the given element. When accesskey is activated then
-   * the element will be notified via nsIContent::PerformAccesskey() method.
+   * the element will be notified via Element::PerformAccesskey() method.
    *
    * @param  aElement  the given element
    * @param  aKey      accesskey
@@ -244,7 +259,7 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   bool CheckIfEventMatchesAccessKey(WidgetKeyboardEvent* aEvent,
                                     nsPresContext* aPresContext);
 
-  nsresult SetCursor(StyleCursorKind aCursor, imgIContainer* aContainer,
+  nsresult SetCursor(StyleCursorKind, imgIContainer*, const ImageResolution&,
                      const Maybe<gfx::IntPoint>& aHotspot, nsIWidget* aWidget,
                      bool aLockCursor);
 
@@ -332,7 +347,7 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
 
   /**
    * HandleMiddleClickPaste() handles middle mouse button event as pasting
-   * clipboard text.  Note that if aTextEditor is nullptr, this only
+   * clipboard text.  Note that if aEditorBase is nullptr, this only
    * dispatches ePaste event because it's necessary for some web apps which
    * want to implement their own editor and supports middle click paste.
    *
@@ -341,7 +356,7 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
    * @param aMouseEvent             The eMouseClick event which caused the
    *                                paste.
    * @param aStatus                 The event status of aMouseEvent.
-   * @param aTextEditor             TextEditor which may be pasted the
+   * @param aEditorBase             EditorBase which may be pasted the
    *                                clipboard text by the middle click.
    *                                If there is no editor for aMouseEvent,
    *                                set nullptr.
@@ -350,7 +365,15 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   nsresult HandleMiddleClickPaste(PresShell* aPresShell,
                                   WidgetMouseEvent* aMouseEvent,
                                   nsEventStatus* aStatus,
-                                  TextEditor* aTextEditor);
+                                  EditorBase* aEditorBase);
+
+  static void ConsumeInteractionData(
+      dom::Record<nsString, dom::InteractionData>& aInteractions);
+
+  // Stop tracking a possible drag. If aClearInChildProcesses is true, send
+  // a notification to any child processes that are in the drag service that
+  // tried to start a drag.
+  void StopTrackingDragGesture(bool aClearInChildProcesses);
 
  protected:
   /*
@@ -398,8 +421,8 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
    *        in that case the caller is responsible for updating hover state.
    */
   void NotifyMouseOut(WidgetMouseEvent* aMouseEvent, nsIContent* aMovingInto);
-  void GenerateDragDropEnterExit(nsPresContext* aPresContext,
-                                 WidgetDragEvent* aDragEvent);
+  MOZ_CAN_RUN_SCRIPT void GenerateDragDropEnterExit(
+      nsPresContext* aPresContext, WidgetDragEvent* aDragEvent);
 
   /**
    * Return mMouseEnterLeaveHelper or relevant mPointersEnterLeaveHelper
@@ -416,11 +439,12 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
    * @param aTargetContent target to set for the event
    * @param aTargetFrame target frame for the event
    */
-  void FireDragEnterOrExit(nsPresContext* aPresContext,
-                           WidgetDragEvent* aDragEvent, EventMessage aMessage,
-                           nsIContent* aRelatedTarget,
-                           nsIContent* aTargetContent,
-                           AutoWeakFrame& aTargetFrame);
+  MOZ_CAN_RUN_SCRIPT void FireDragEnterOrExit(nsPresContext* aPresContext,
+                                              WidgetDragEvent* aDragEvent,
+                                              EventMessage aMessage,
+                                              nsIContent* aRelatedTarget,
+                                              nsIContent* aTargetContent,
+                                              AutoWeakFrame& aTargetFrame);
   /**
    * Update the initial drag session data transfer with any changes that occur
    * on cloned data transfer objects used for events.
@@ -518,17 +542,17 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   /**
    * The phases of WalkESMTreeToHandleAccessKey processing. See below.
    */
-  typedef enum {
+  enum ProcessingAccessKeyState {
     eAccessKeyProcessingNormal = 0,
     eAccessKeyProcessingUp,
     eAccessKeyProcessingDown
-  } ProcessingAccessKeyState;
+  };
 
   /**
    * Walk EMS to look for access key and execute found access key when aExecute
    * is true.
-   * If there is registered content for the accesskey given by the key event
-   * and modifier mask then call content.PerformAccesskey(), otherwise call
+   * If there is registered element for the accesskey given by the key event
+   * and modifier mask then call element.PerformAccesskey(), otherwise call
    * WalkESMTreeToHandleAccessKey() recursively, on descendant docshells first,
    * then on the ancestor (with |aBubbledFrom| set to the docshell associated
    * with |this|), until something matches.
@@ -579,7 +603,7 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   // DocShell Focus Traversal Methods
   //---------------------------------------------
 
-  nsIContent* GetFocusedContent();
+  dom::Element* GetFocusedElement();
   bool IsShellVisible(nsIDocShell* aShell);
 
   // These functions are for mousewheel and pixel scrolling
@@ -799,18 +823,10 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
     // Default action prefers the scrolled element immediately before if it's
     // still under the mouse cursor.  Otherwise, it prefers the nearest
     // scrollable ancestor which will be scrolled actually.
-    COMPUTE_DEFAULT_ACTION_TARGET_EXCEPT_PLUGIN =
+    COMPUTE_DEFAULT_ACTION_TARGET =
         (PREFER_MOUSE_WHEEL_TRANSACTION |
          PREFER_ACTUAL_SCROLLABLE_TARGET_ALONG_X_AXIS |
          PREFER_ACTUAL_SCROLLABLE_TARGET_ALONG_Y_AXIS),
-    // When this is specified, the result may be nsPluginFrame.  In such case,
-    // the frame doesn't have nsIScrollableFrame interface.
-    COMPUTE_DEFAULT_ACTION_TARGET =
-        (COMPUTE_DEFAULT_ACTION_TARGET_EXCEPT_PLUGIN |
-         INCLUDE_PLUGIN_AS_TARGET),
-    COMPUTE_DEFAULT_ACTION_TARGET_WITH_AUTO_DIR_EXCEPT_PLUGIN =
-        (COMPUTE_DEFAULT_ACTION_TARGET_EXCEPT_PLUGIN |
-         MAY_BE_ADJUSTED_BY_AUTO_DIR),
     COMPUTE_DEFAULT_ACTION_TARGET_WITH_AUTO_DIR =
         (COMPUTE_DEFAULT_ACTION_TARGET | MAY_BE_ADJUSTED_BY_AUTO_DIR),
     // Look for the nearest scrollable ancestor which can be scrollable with
@@ -825,19 +841,10 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
     COMPUTE_SCROLLABLE_ANCESTOR_ALONG_Y_AXIS_WITH_AUTO_DIR =
         (COMPUTE_SCROLLABLE_ANCESTOR_ALONG_Y_AXIS |
          MAY_BE_ADJUSTED_BY_AUTO_DIR),
+    COMPUTE_SCROLLABLE_TARGET_ALONG_X_Y_AXIS =
+        (PREFER_ACTUAL_SCROLLABLE_TARGET_ALONG_X_AXIS |
+         PREFER_ACTUAL_SCROLLABLE_TARGET_ALONG_Y_AXIS),
   };
-  static ComputeScrollTargetOptions RemovePluginFromTarget(
-      ComputeScrollTargetOptions aOptions) {
-    switch (aOptions) {
-      case COMPUTE_DEFAULT_ACTION_TARGET:
-        return COMPUTE_DEFAULT_ACTION_TARGET_EXCEPT_PLUGIN;
-      case COMPUTE_DEFAULT_ACTION_TARGET_WITH_AUTO_DIR:
-        return COMPUTE_DEFAULT_ACTION_TARGET_WITH_AUTO_DIR_EXCEPT_PLUGIN;
-      default:
-        MOZ_ASSERT(!(aOptions & INCLUDE_PLUGIN_AS_TARGET));
-        return aOptions;
-    }
-  }
 
   // Compute the scroll target.
   // The delta values in the wheel event may be changed if the event is for
@@ -989,11 +996,6 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   void BeginTrackingRemoteDragGesture(nsIContent* aContent,
                                       dom::RemoteDragStartData* aDragStartData);
 
-  // Stop tracking a possible drag. If aClearInChildProcesses is true, send
-  // a notification to any child processes that are in the drag service that
-  // tried to start a drag.
-  void StopTrackingDragGesture(bool aClearInChildProcesses);
-
   MOZ_CAN_RUN_SCRIPT
   void GenerateDragGesture(nsPresContext* aPresContext,
                            WidgetInputEvent* aEvent);
@@ -1065,6 +1067,8 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
 
   MOZ_CAN_RUN_SCRIPT
   nsresult DoContentCommandEvent(WidgetContentCommandEvent* aEvent);
+  MOZ_CAN_RUN_SCRIPT
+  nsresult DoContentCommandInsertTextEvent(WidgetContentCommandEvent* aEvent);
   nsresult DoContentCommandScrollEvent(WidgetContentCommandEvent* aEvent);
 
   dom::BrowserParent* GetCrossProcessTarget();
@@ -1111,9 +1115,9 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   static void UpdateAncestorState(nsIContent* aStartNode,
                                   nsIContent* aStopBefore, EventStates aState,
                                   bool aAddState);
-  static void ResetLastOverForContent(const uint32_t& aIdx,
-                                      RefPtr<OverOutElementsWrapper>& aChunk,
-                                      nsIContent* aClosure);
+  static void ResetLastOverForContent(
+      const uint32_t& aIdx, const RefPtr<OverOutElementsWrapper>& aChunk,
+      nsIContent* aClosure);
 
   /**
    * Update the attribute mLastRefPoint of the mouse event. It should be
@@ -1194,6 +1198,11 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   uint32_t mMClickCount;
   uint32_t mRClickCount;
 
+  bool mShouldAlwaysUseLineDeltas : 1;
+  bool mShouldAlwaysUseLineDeltasInitialized : 1;
+
+  bool mGestureDownInTextControl : 1;
+
   bool mInTouchDrag;
 
   bool m_haveShutdown;
@@ -1202,10 +1211,13 @@ class EventStateManager : public nsSupportsWeakReference, public nsIObserver {
   nsRefPtrHashtable<nsUint32HashKey, OverOutElementsWrapper>
       mPointersEnterLeaveHelper;
 
+  // Array for accesskey support
+  nsCOMArray<dom::Element> mAccessKeys;
+
+  bool ShouldAlwaysUseLineDeltas();
+
  public:
   static nsresult UpdateUserActivityTimer(void);
-  // Array for accesskey support
-  nsCOMArray<nsIContent> mAccessKeys;
 
   static bool sNormalLMouseEventInProcess;
   static int16_t sCurrentMouseBtn;

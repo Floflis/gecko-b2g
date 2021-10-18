@@ -27,6 +27,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   TelemetrySession: "resource://gre/modules/TelemetrySession.jsm",
   HomePage: "resource:///modules/HomePage.jsm",
   AboutNewTab: "resource:///modules/AboutNewTab.jsm",
+  BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.jsm",
 });
 
 XPCOMUtils.defineLazyPreferenceGetter(
@@ -93,14 +94,16 @@ XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "snippetsUserPref",
   "browser.newtabpage.activity-stream.feeds.snippets",
-  true
+  false
 );
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "TrackingDBService",
-  "@mozilla.org/tracking-db-service;1",
-  "nsITrackingDBService"
-);
+
+XPCOMUtils.defineLazyServiceGetters(this, {
+  BrowserHandler: ["@mozilla.org/browser/clh;1", "nsIBrowserHandler"],
+  TrackingDBService: [
+    "@mozilla.org/tracking-db-service;1",
+    "nsITrackingDBService",
+  ],
+});
 
 const FXA_USERNAME_PREF = "services.sync.username";
 
@@ -124,7 +127,8 @@ const jexlEvaluationCache = new Map();
 function CachedTargetingGetter(
   property,
   options = null,
-  updateInterval = FRECENT_SITES_UPDATE_INTERVAL
+  updateInterval = FRECENT_SITES_UPDATE_INTERVAL,
+  getter = asProvider
 ) {
   return {
     _lastUpdated: 0,
@@ -137,7 +141,7 @@ function CachedTargetingGetter(
     async get() {
       const now = Date.now();
       if (now - this._lastUpdated >= updateInterval) {
-        this._value = await asProvider[property](options);
+        this._value = await getter[property](options);
         this._lastUpdated = now;
       }
       return this._value;
@@ -191,11 +195,13 @@ function CheckBrowserNeedsUpdate(
       return new Promise((resolve, reject) => {
         const now = Date.now();
         const updateServiceListener = {
-          onCheckComplete(request, updates) {
+          // eslint-disable-next-line require-await
+          async onCheckComplete(request, updates) {
             checker._value = !!updates.length;
             resolve(checker._value);
           },
-          onError(request, update) {
+          // eslint-disable-next-line require-await
+          async onError(request, update) {
             reject(request);
           },
 
@@ -206,8 +212,12 @@ function CheckBrowserNeedsUpdate(
           const checkerInstance = UpdateChecker.createInstance(
             Ci.nsIUpdateChecker
           );
-          checkerInstance.checkForUpdates(updateServiceListener, true);
-          this._lastUpdated = now;
+          if (checkerInstance.canCheckForUpdates) {
+            checkerInstance.checkForUpdates(updateServiceListener, true);
+            this._lastUpdated = now;
+          } else {
+            resolve(false);
+          }
         } else {
           resolve(this._value);
         }
@@ -223,6 +233,9 @@ const QueryCache = {
     Object.keys(this.queries).forEach(query => {
       this.queries[query].expire();
     });
+    Object.keys(this.getters).forEach(key => {
+      this.getters[key].expire();
+    });
   },
   queries: {
     TopFrecentSites: new CachedTargetingGetter("getTopFrecentSites", {
@@ -236,6 +249,15 @@ const QueryCache = {
     CheckBrowserNeedsUpdate: new CheckBrowserNeedsUpdate(),
     RecentBookmarks: new CachedTargetingGetter("getRecentBookmarks"),
     ListAttachedOAuthClients: new CacheListAttachedOAuthClients(),
+    UserMonthlyActivity: new CachedTargetingGetter("getUserMonthlyActivity"),
+  },
+  getters: {
+    doesAppNeedPin: new CachedTargetingGetter(
+      "doesAppNeedPin",
+      null,
+      FRECENT_SITES_UPDATE_INTERVAL,
+      ShellService
+    ),
   },
 };
 
@@ -280,26 +302,12 @@ function sortMessagesByWeightedRank(messages) {
 function getSortedMessages(messages, options = {}) {
   let { ordered } = { ordered: false, ...options };
   let result = messages;
-  let hasScores;
 
   if (!ordered) {
     result = sortMessagesByWeightedRank(result);
   }
 
   result.sort((a, b) => {
-    // If we find at least one score, we need to apply filtering by threshold at the end.
-    if (!isNaN(a.score) || !isNaN(b.score)) {
-      hasScores = true;
-    }
-
-    // First sort by score if we're doing personalization:
-    if (a.score > b.score || (!isNaN(a.score) && isNaN(b.score))) {
-      return -1;
-    }
-    if (a.score < b.score || (isNaN(a.score) && !isNaN(b.score))) {
-      return 1;
-    }
-
     // Next, sort by priority
     if (a.priority > b.priority || (!isNaN(a.priority) && isNaN(b.priority))) {
       return -1;
@@ -328,14 +336,6 @@ function getSortedMessages(messages, options = {}) {
 
     return 0;
   });
-
-  if (hasScores && !isNaN(ASRouterPreferences.personalizedCfrThreshold)) {
-    return result.filter(
-      message =>
-        isNaN(message.score) ||
-        message.score >= ASRouterPreferences.personalizedCfrThreshold
-    );
-  }
 
   return result;
 }
@@ -396,8 +396,6 @@ const TargetingGetters = {
   get browserSettings() {
     const { settings } = TelemetryEnvironment.currentEnvironment;
     return {
-      // This way of getting attribution is deprecated - use atttributionData instead
-      attribution: settings.attribution,
       update: settings.update,
     };
   },
@@ -582,12 +580,6 @@ const TargetingGetters = {
   get platformName() {
     return AppConstants.platform;
   },
-  get scores() {
-    return ASRouterPreferences.personalizedCfrScores;
-  },
-  get scoreThreshold() {
-    return ASRouterPreferences.personalizedCfrThreshold;
-  },
   get isChinaRepack() {
     return (
       Services.prefs
@@ -635,6 +627,41 @@ const TargetingGetters = {
       Services.appinfo.fissionExperimentStatus ===
       Ci.nsIXULRuntime.eExperimentStatusTreatment
     );
+  },
+  get activeNotifications() {
+    let window = BrowserWindowTracker.getTopWindow();
+
+    // Technically this doesn't mean we have active notifications,
+    // but because we use !activeNotifications to check for conflicts, this should return true
+    if (!window) {
+      return true;
+    }
+
+    if (
+      window.gURLBar?.view.isOpen ||
+      window.gNotificationBox?.currentNotification ||
+      window.gBrowser.getNotificationBox()?.currentNotification
+    ) {
+      return true;
+    }
+
+    return false;
+  },
+
+  get isMajorUpgrade() {
+    return BrowserHandler.majorUpgrade;
+  },
+
+  get hasActiveEnterprisePolicies() {
+    return Services.policies.status === Services.policies.ACTIVE;
+  },
+
+  get userMonthlyActivity() {
+    return QueryCache.queries.UserMonthlyActivity.get();
+  },
+
+  get doesAppNeedPin() {
+    return QueryCache.getters.doesAppNeedPin.get();
   },
 };
 
@@ -716,6 +743,9 @@ this.ASRouterTargeting = {
           return result.value;
         }
       }
+      // Used to report the source of the targeting error in the case of
+      // undesired events
+      targetingContext.setTelemetrySource(message.id);
       result = await targetingContext.evalWithDefault(message.targeting);
       if (shouldCache) {
         jexlEvaluationCache.set(message.targeting, {

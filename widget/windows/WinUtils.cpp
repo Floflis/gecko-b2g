@@ -429,10 +429,17 @@ struct CoTaskMemFreePolicy {
 SetThreadDpiAwarenessContextProc WinUtils::sSetThreadDpiAwarenessContext = NULL;
 EnableNonClientDpiScalingProc WinUtils::sEnableNonClientDpiScaling = NULL;
 GetSystemMetricsForDpiProc WinUtils::sGetSystemMetricsForDpi = NULL;
+bool WinUtils::sHasPackageIdentity = false;
+
+using GetDpiForWindowProc = UINT(WINAPI*)(HWND);
+static GetDpiForWindowProc sGetDpiForWindow = NULL;
 
 /* static */
 void WinUtils::Initialize() {
-  if (IsWin10OrLater()) {
+  // Dpi-Awareness is not supported with Win32k Lockdown enabled, so we don't
+  // initialize DPI-related members and assert later that nothing accidently
+  // uses these static members
+  if (IsWin10OrLater() && !IsWin32kLockedDown()) {
     HMODULE user32Dll = ::GetModuleHandleW(L"user32");
     if (user32Dll) {
       auto getThreadDpiAwarenessContext =
@@ -456,6 +463,26 @@ void WinUtils::Initialize() {
 
       sGetSystemMetricsForDpi = (GetSystemMetricsForDpiProc)::GetProcAddress(
           user32Dll, "GetSystemMetricsForDpi");
+      sGetDpiForWindow =
+          (GetDpiForWindowProc)::GetProcAddress(user32Dll, "GetDpiForWindow");
+    }
+  }
+
+  if (IsWin8OrLater()) {
+    HMODULE kernel32Dll = ::GetModuleHandleW(L"kernel32");
+    if (kernel32Dll) {
+      typedef LONG(WINAPI * GetCurrentPackageIdProc)(UINT32*, BYTE*);
+      GetCurrentPackageIdProc pGetCurrentPackageId =
+          (GetCurrentPackageIdProc)::GetProcAddress(kernel32Dll,
+                                                    "GetCurrentPackageId");
+
+      // If there was any package identity to retrieve, we get
+      // ERROR_INSUFFICIENT_BUFFER. If there had been no package identity it
+      // would instead return APPMODEL_ERROR_NO_PACKAGE.
+      UINT32 packageNameSize = 0;
+      sHasPackageIdentity = pGetCurrentPackageId &&
+                            (pGetCurrentPackageId(&packageNameSize, nullptr) ==
+                             ERROR_INSUFFICIENT_BUFFER);
     }
   }
 }
@@ -464,6 +491,8 @@ void WinUtils::Initialize() {
 LRESULT WINAPI WinUtils::NonClientDpiScalingDefWindowProcW(HWND hWnd, UINT msg,
                                                            WPARAM wParam,
                                                            LPARAM lParam) {
+  MOZ_DIAGNOSTIC_ASSERT(!IsWin32kLockedDown());
+
   // NOTE: this function was copied out into the body of the pre-XUL skeleton
   // UI window proc (PreXULSkeletonUI.cpp). If this function changes at any
   // point, we should probably factor this out and use it from both locations.
@@ -639,6 +668,24 @@ int32_t WinUtils::LogToPhys(HMONITOR aMonitor, double aValue) {
 }
 
 /* static */
+double WinUtils::LogToPhysFactor(HWND aWnd) {
+  // if there's an ancestor window, we want to share its DPI setting
+  HWND ancestor = ::GetAncestor(aWnd, GA_ROOTOWNER);
+
+  // The GetDpiForWindow api is not available everywhere where we run as
+  // per-monitor, but if it is available rely on it to tell us the scale
+  // factor of the window.  See bug 1722085.
+  if (sGetDpiForWindow) {
+    UINT dpi = sGetDpiForWindow(ancestor ? ancestor : aWnd);
+    if (dpi > 0) {
+      return static_cast<double>(dpi) / 96.0;
+    }
+  }
+  return LogToPhysFactor(::MonitorFromWindow(ancestor ? ancestor : aWnd,
+                                             MONITOR_DEFAULTTOPRIMARY));
+}
+
+/* static */
 HMONITOR
 WinUtils::GetPrimaryMonitor() {
   const POINT pt = {0, 0};
@@ -662,11 +709,13 @@ WinUtils::MonitorFromRect(const gfx::Rect& rect) {
 
 /* static */
 bool WinUtils::HasSystemMetricsForDpi() {
+  MOZ_DIAGNOSTIC_ASSERT(!IsWin32kLockedDown());
   return (sGetSystemMetricsForDpi != NULL);
 }
 
 /* static */
 int WinUtils::GetSystemMetricsForDpi(int nIndex, UINT dpi) {
+  MOZ_DIAGNOSTIC_ASSERT(!IsWin32kLockedDown());
   if (HasSystemMetricsForDpi()) {
     return sGetSystemMetricsForDpi(nIndex, dpi);
   } else {
@@ -711,7 +760,7 @@ gfx::MarginDouble WinUtils::GetUnwriteableMarginsForDeviceInInches(HDC aHdc) {
 
 #ifdef ACCESSIBILITY
 /* static */
-a11y::Accessible* WinUtils::GetRootAccessibleForHWND(HWND aHwnd) {
+a11y::LocalAccessible* WinUtils::GetRootAccessibleForHWND(HWND aHwnd) {
   nsWindow* window = GetNSWindowPtr(aHwnd);
   if (!window) {
     return nullptr;
@@ -2137,7 +2186,7 @@ const WinUtils::WhitelistVec& WinUtils::GetWhitelistedPaths() {
   static WhitelistVec sWhitelist([]() -> WhitelistVec {
     auto setClearFn = [ptr = &sWhitelist]() -> void {
       RunOnShutdown([ptr]() -> void { ptr->clear(); },
-                    ShutdownPhase::ShutdownFinal);
+                    ShutdownPhase::XPCOMShutdownFinal);
     };
 
     if (NS_IsMainThread()) {
@@ -2265,6 +2314,56 @@ bool WinUtils::PreparePathForTelemetry(nsAString& aPath,
     return false;
   }
 
+  return true;
+}
+
+nsString WinUtils::GetPackageFamilyName() {
+  nsString rv;
+
+  if (!HasPackageIdentity()) {
+    return rv;
+  }
+
+  HMODULE kernel32Dll = ::GetModuleHandleW(L"kernel32");
+  if (!kernel32Dll) {
+    return rv;
+  }
+
+  typedef LONG(WINAPI * GetCurrentPackageFamilyNameProc)(UINT32*, PWSTR);
+  GetCurrentPackageFamilyNameProc pGetCurrentPackageFamilyName =
+      (GetCurrentPackageFamilyNameProc)::GetProcAddress(
+          kernel32Dll, "GetCurrentPackageFamilyName");
+  if (!pGetCurrentPackageFamilyName) {
+    return rv;
+  }
+
+  UINT32 packageNameSize = 0;
+  if (pGetCurrentPackageFamilyName(&packageNameSize, nullptr) !=
+      ERROR_INSUFFICIENT_BUFFER) {
+    return rv;
+  }
+
+  UniquePtr<wchar_t[]> packageIdentity = MakeUnique<wchar_t[]>(packageNameSize);
+  if (pGetCurrentPackageFamilyName(&packageNameSize, packageIdentity.get()) !=
+      ERROR_SUCCESS) {
+    return rv;
+  }
+
+  rv = packageIdentity.get();
+  return rv;
+}
+
+bool WinUtils::GetClassName(HWND aHwnd, nsAString& aClassName) {
+  const int bufferLength = 256;
+  aClassName.SetLength(bufferLength);
+
+  int length = ::GetClassNameW(aHwnd, (char16ptr_t)aClassName.BeginWriting(),
+                               bufferLength);
+  if (length == 0) {
+    return false;
+  }
+  MOZ_RELEASE_ASSERT(length <= (bufferLength - 1));
+  aClassName.Truncate(length);
   return true;
 }
 

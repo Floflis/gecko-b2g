@@ -34,6 +34,7 @@
 #include "mozilla/Logging.h"
 #include "mozilla/MathAlgorithms.h"
 #include "mozilla/ProfileBufferEntrySerialization.h"
+#include "mozilla/ProfilerUtils.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Vector.h"
@@ -56,31 +57,21 @@ extern mozilla::LazyLogModule gProfilerLog;
 #define LOG_TEST MOZ_LOG_TEST(gProfilerLog, mozilla::LogLevel::Info)
 #define LOG(arg, ...)                            \
   MOZ_LOG(gProfilerLog, mozilla::LogLevel::Info, \
-          ("[%d] " arg, profiler_current_process_id(), ##__VA_ARGS__))
+          ("[%" PRIu64 "d] " arg,                \
+           uint64_t(profiler_current_process_id().ToNumber()), ##__VA_ARGS__))
 
 // These are for MOZ_LOG="prof:4" or higher. It should be used for logging that
 // is somewhat more verbose than LOG.
 #define DEBUG_LOG_TEST MOZ_LOG_TEST(gProfilerLog, mozilla::LogLevel::Debug)
 #define DEBUG_LOG(arg, ...)                       \
   MOZ_LOG(gProfilerLog, mozilla::LogLevel::Debug, \
-          ("[%d] " arg, profiler_current_process_id(), ##__VA_ARGS__))
+          ("[%" PRIu64 "] " arg,                  \
+           uint64_t(profiler_current_process_id().ToNumber()), ##__VA_ARGS__))
 
 typedef uint8_t* Address;
 
 // ----------------------------------------------------------------------------
 // Miscellaneous
-
-class PlatformData;
-
-// We can't new/delete the type safely without defining it
-// (-Wdelete-incomplete).  Use these to hide the details from clients.
-struct PlatformDataDestructor {
-  void operator()(PlatformData*);
-};
-
-typedef mozilla::UniquePtr<PlatformData, PlatformDataDestructor>
-    UniquePlatformData;
-UniquePlatformData AllocPlatformData(int aThreadId);
 
 namespace mozilla {
 class JSONWriter;
@@ -102,9 +93,6 @@ enum class JSInstrumentationFlags {
   TraceLogging = 0x2,
   Allocations = 0x4,
 };
-
-// Record an exit profile from a child process.
-void profiler_received_exit_profile(const nsCString& aExitProfile);
 
 // Write out the information of the active profiling configuration.
 void profiler_write_active_configuration(mozilla::JSONWriter& aWriter);
@@ -248,9 +236,17 @@ class RunningTimes {
 template <>
 struct mozilla::ProfileBufferEntryWriter::Serializer<RunningTimes> {
   static Length Bytes(const RunningTimes& aRunningTimes) {
-    return ULEB128Size(aRunningTimes.mKnownBits) +
-           mozilla::CountPopulation32(aRunningTimes.mKnownBits) *
-               sizeof(uint64_t);
+    Length bytes = 0;
+
+#define RUNNING_TIME_SERIALIZATION_BYTES(index, name, unit, jsonProperty) \
+  if (aRunningTimes.Is##name##unit##Known()) {                            \
+    bytes += ULEB128Size(aRunningTimes.m##name##unit);                    \
+  }
+
+    PROFILER_FOR_EACH_RUNNING_TIME(RUNNING_TIME_SERIALIZATION_BYTES)
+
+#undef RUNNING_TIME_SERIALIZATION_BYTES
+    return ULEB128Size(aRunningTimes.mKnownBits) + bytes;
   }
 
   static void Write(ProfileBufferEntryWriter& aEW,
@@ -259,7 +255,7 @@ struct mozilla::ProfileBufferEntryWriter::Serializer<RunningTimes> {
 
 #define RUNNING_TIME_SERIALIZE(index, name, unit, jsonProperty) \
   if (aRunningTimes.Is##name##unit##Known()) {                  \
-    aEW.WriteObject(aRunningTimes.m##name##unit);               \
+    aEW.WriteULEB128(aRunningTimes.m##name##unit);              \
   }
 
     PROFILER_FOR_EACH_RUNNING_TIME(RUNNING_TIME_SERIALIZE)
@@ -284,9 +280,9 @@ struct mozilla::ProfileBufferEntryReader::Deserializer<RunningTimes> {
     times.mKnownBits = aER.ReadULEB128<uint32_t>();
 
     // For each member that should be known, read its value.
-#define RUNNING_TIME_DESERIALIZE(index, name, unit, jsonProperty) \
-  if (times.Is##name##unit##Known()) {                            \
-    aER.ReadIntoObject(times.m##name##unit);                      \
+#define RUNNING_TIME_DESERIALIZE(index, name, unit, jsonProperty)           \
+  if (times.Is##name##unit##Known()) {                                      \
+    times.m##name##unit = aER.ReadULEB128<decltype(times.m##name##unit)>(); \
   }
 
     PROFILER_FOR_EACH_RUNNING_TIME(RUNNING_TIME_DESERIALIZE)

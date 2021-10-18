@@ -4,6 +4,8 @@
 
 #include "builtin/TestingFunctions.h"
 #include "js/ArrayBuffer.h"  // JS::{IsArrayBufferObject,GetArrayBufferLengthAndData,NewExternalArrayBuffer}
+#include "js/GlobalObject.h"        // JS_NewGlobalObject
+#include "js/PropertyAndElement.h"  // JS_GetProperty, JS_SetProperty
 #include "js/StructuredClone.h"
 
 #include "jsapi-tests/tests.h"
@@ -112,7 +114,7 @@ BEGIN_TEST(testStructuredClone_externalArrayBuffer) {
     JS::RootedObject obj(cx, &v2.toObject());
     CHECK(&v1.toObject() != obj);
 
-    uint32_t len;
+    size_t len;
     bool isShared;
     uint8_t* clonedData;
     JS::GetArrayBufferLengthAndData(obj, &len, &isShared, &clonedData);
@@ -157,7 +159,7 @@ bool testStructuredCloneCopy(JS::StructuredCloneScope scope) {
   CHECK(bufferOut);
   CHECK(JS::IsArrayBufferObject(bufferOut));
 
-  uint32_t len;
+  size_t len;
   bool isShared;
   uint8_t* clonedData;
   JS::GetArrayBufferLengthAndData(bufferOut, &len, &isShared, &clonedData);

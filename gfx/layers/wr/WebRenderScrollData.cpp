@@ -23,6 +23,7 @@ namespace layers {
 WebRenderLayerScrollData::WebRenderLayerScrollData()
     : mDescendantCount(-1),
       mTransformIsPerspective(false),
+      mResolution(1.f),
       mEventRegionsOverride(EventRegionsOverride::NoOverride),
       mFixedPositionSides(mozilla::SideBits::eNone),
       mFixedPosScrollContainerId(ScrollableLayerGuid::NULL_SCROLL_ID),
@@ -34,10 +35,15 @@ void WebRenderLayerScrollData::InitializeRoot(int32_t aDescendantCount) {
   mDescendantCount = aDescendantCount;
 }
 
+void WebRenderLayerScrollData::InitializeForTest(int32_t aDescendantCount) {
+  mDescendantCount = aDescendantCount;
+}
+
 void WebRenderLayerScrollData::Initialize(
     WebRenderScrollData& aOwner, nsDisplayItem* aItem, int32_t aDescendantCount,
     const ActiveScrolledRoot* aStopAtAsr,
-    const Maybe<gfx::Matrix4x4>& aAncestorTransform) {
+    const Maybe<gfx::Matrix4x4>& aAncestorTransform,
+    const ViewID& aAncestorTransformId) {
   MOZ_ASSERT(aDescendantCount >= 0);  // Ensure value is valid
   MOZ_ASSERT(mDescendantCount ==
              -1);  // Don't allow re-setting an already set value
@@ -62,7 +68,7 @@ void WebRenderLayerScrollData::Initialize(
     } else {
       Maybe<ScrollMetadata> metadata =
           asr->mScrollableFrame->ComputeScrollMetadata(
-              aOwner.GetManager(), aItem->ReferenceFrame(), Nothing(), nullptr);
+              aOwner.GetManager(), aItem->Frame(), aItem->ToReferenceFrame());
       aOwner.GetBuilder()->AddScrollFrameToNotify(asr->mScrollableFrame);
       if (metadata) {
         MOZ_ASSERT(metadata->GetMetrics().GetScrollId() == scrollId);
@@ -73,6 +79,28 @@ void WebRenderLayerScrollData::Initialize(
     }
     asr = asr->mParent;
   }
+
+#ifdef DEBUG
+  // Sanity check: if we have an ancestor transform, its scroll id should
+  // match one of the scroll metadatas on this node (WebRenderScrollDataWrapper
+  // will then use the ancestor transform at the level of that scroll metadata).
+  // One exception to this is if we have no scroll metadatas, which can happen
+  // if the scroll id of the transform is on an enclosing node.
+  if (aAncestorTransformId != ScrollableLayerGuid::NULL_SCROLL_ID &&
+      !mScrollIds.IsEmpty()) {
+    bool seenAncestorTransformId = false;
+    for (size_t scrollIdIndex : mScrollIds) {
+      if (aAncestorTransformId ==
+          aOwner.GetScrollMetadata(scrollIdIndex).GetMetrics().GetScrollId()) {
+        seenAncestorTransformId = true;
+      }
+    }
+    MOZ_ASSERT(
+        seenAncestorTransformId,
+        "The ancestor transform's view ID should match one of the metrics "
+        "on this node");
+  }
+#endif
 
   // See the comments on StackingContextHelper::mDeferredTransformItem for an
   // overview of what deferred transforms are.
@@ -91,6 +119,7 @@ void WebRenderLayerScrollData::Initialize(
   if (aAncestorTransform &&
       mScrollbarData.mScrollbarLayerType != ScrollbarLayerType::Thumb) {
     mAncestorTransform = *aAncestorTransform;
+    mAncestorTransformId = aAncestorTransformId;
   }
 }
 
@@ -114,6 +143,16 @@ const ScrollMetadata& WebRenderLayerScrollData::GetScrollMetadata(
   return aOwner.GetScrollMetadata(mScrollIds[aIndex]);
 }
 
+ScrollMetadata& WebRenderLayerScrollData::GetScrollMetadataMut(
+    WebRenderScrollData& aOwner, size_t aIndex) {
+  MOZ_ASSERT(aIndex < mScrollIds.Length());
+  return aOwner.GetScrollMetadataMut(mScrollIds[aIndex]);
+}
+
+void WebRenderLayerScrollData::SetEventRegions(const EventRegions& aRegions) {
+  mEventRegions = MakeUnique<EventRegions>(aRegions);
+}
+
 CSSTransformMatrix WebRenderLayerScrollData::GetTransformTyped() const {
   return ViewAs<CSSTransformMatrix>(GetTransform());
 }
@@ -126,13 +165,17 @@ void WebRenderLayerScrollData::Dump(std::ostream& aOut,
     aOut << ", metadata" << i << "=" << aOwner.GetScrollMetadata(mScrollIds[i]);
   }
   if (!mAncestorTransform.IsIdentity()) {
-    aOut << ", ancestorTransform=" << mAncestorTransform;
+    aOut << ", ancestorTransform=" << mAncestorTransform
+         << " (asr=" << mAncestorTransformId << ")";
   }
   if (!mTransform.IsIdentity()) {
     aOut << ", transform=" << mTransform;
     if (mTransformIsPerspective) {
       aOut << ", transformIsPerspective";
     }
+  }
+  if (mResolution != 1.f) {
+    aOut << ", resolution=" << mResolution;
   }
   aOut << ", visible=" << mVisibleRegion;
   if (mReferentId) {
@@ -190,9 +233,8 @@ size_t WebRenderScrollData::AddMetadata(const ScrollMetadata& aMetadata) {
   return p->value();
 }
 
-size_t WebRenderScrollData::AddLayerData(
-    const WebRenderLayerScrollData& aData) {
-  mLayerScrollData.AppendElement(aData);
+size_t WebRenderScrollData::AddLayerData(WebRenderLayerScrollData&& aData) {
+  mLayerScrollData.AppendElement(std::move(aData));
   return mLayerScrollData.Length() - 1;
 }
 
@@ -208,8 +250,20 @@ const WebRenderLayerScrollData* WebRenderScrollData::GetLayerData(
   return &(mLayerScrollData.ElementAt(aIndex));
 }
 
+WebRenderLayerScrollData* WebRenderScrollData::GetLayerData(size_t aIndex) {
+  if (aIndex >= mLayerScrollData.Length()) {
+    return nullptr;
+  }
+  return &(mLayerScrollData.ElementAt(aIndex));
+}
+
 const ScrollMetadata& WebRenderScrollData::GetScrollMetadata(
     size_t aIndex) const {
+  MOZ_ASSERT(aIndex < mScrollMetadatas.Length());
+  return mScrollMetadatas[aIndex];
+}
+
+ScrollMetadata& WebRenderScrollData::GetScrollMetadataMut(size_t aIndex) {
   MOZ_ASSERT(aIndex < mScrollMetadatas.Length());
   return mScrollMetadatas[aIndex];
 }
@@ -308,8 +362,10 @@ void ParamTraits<mozilla::layers::WebRenderLayerScrollData>::Write(
   WriteParam(aMsg, aParam.mDescendantCount);
   WriteParam(aMsg, aParam.mScrollIds);
   WriteParam(aMsg, aParam.mAncestorTransform);
+  WriteParam(aMsg, aParam.mAncestorTransformId);
   WriteParam(aMsg, aParam.mTransform);
   WriteParam(aMsg, aParam.mTransformIsPerspective);
+  WriteParam(aMsg, aParam.mResolution);
   WriteParam(aMsg, aParam.mVisibleRegion);
   WriteParam(aMsg, aParam.mRemoteDocumentSize);
   WriteParam(aMsg, aParam.mReferentId);
@@ -332,8 +388,10 @@ bool ParamTraits<mozilla::layers::WebRenderLayerScrollData>::Read(
   return ReadParam(aMsg, aIter, &aResult->mDescendantCount) &&
          ReadParam(aMsg, aIter, &aResult->mScrollIds) &&
          ReadParam(aMsg, aIter, &aResult->mAncestorTransform) &&
+         ReadParam(aMsg, aIter, &aResult->mAncestorTransformId) &&
          ReadParam(aMsg, aIter, &aResult->mTransform) &&
          ReadParam(aMsg, aIter, &aResult->mTransformIsPerspective) &&
+         ReadParam(aMsg, aIter, &aResult->mResolution) &&
          ReadParam(aMsg, aIter, &aResult->mVisibleRegion) &&
          ReadParam(aMsg, aIter, &aResult->mRemoteDocumentSize) &&
          ReadParam(aMsg, aIter, &aResult->mReferentId) &&

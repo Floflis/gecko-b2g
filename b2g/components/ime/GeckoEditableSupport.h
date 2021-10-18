@@ -14,9 +14,12 @@
 #include "mozilla/TextEventDispatcher.h"
 #include "mozilla/TextEventDispatcherListener.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/WeakPtr.h"
 #include "nsIEditableSupport.h"
 #include "nsIDOMEventListener.h"
 #include "nsIObserver.h"
+#include "nsIWeakReferenceUtils.h"
+#include "nsStubMutationObserver.h"
 
 class nsWindow;
 class nsIGlobalObject;
@@ -38,12 +41,14 @@ namespace widget {
 class GeckoEditableSupport final : public TextEventDispatcherListener,
                                    public nsIEditableSupport,
                                    public nsIDOMEventListener,
-                                   public nsIObserver {
+                                   public nsIObserver,
+                                   public nsStubMutationObserver {
  public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIEDITABLESUPPORT
   NS_DECL_NSIDOMEVENTLISTENER
   NS_DECL_NSIOBSERVER
+  NS_DECL_NSIMUTATIONOBSERVER_CONTENTREMOVED
 
   explicit GeckoEditableSupport(nsPIDOMWindowOuter* aDOMWindow);
 
@@ -64,12 +69,16 @@ class GeckoEditableSupport final : public TextEventDispatcherListener,
   WillDispatchKeyboardEvent(TextEventDispatcher* aTextEventDispatcher,
                             WidgetKeyboardEvent& aKeyboardEvent,
                             uint32_t aIndexOfKeypress, void* aData) override {}
+  dom::Element* GetActiveElement();
 
  protected:
   virtual ~GeckoEditableSupport();
-  void HandleFocus();
-  void HandleBlur();
-  nsresult GetInputContextBag(dom::nsInputContext* aInputContext);
+  void HandleFocus(dom::Element* aFocusedElement);
+  void HandleBlur(dom::Element* aRelatedElement);
+  nsresult GetFocusInputContextBag(dom::nsInputContext* aInputContext,
+                                   dom::Element* aFocusedElement);
+  void GetBlurInputContextBag(dom::nsInputContext* aInputContext,
+                              dom::Element* aFocusedElement);
   void HandleTextChanged();
 
  private:
@@ -79,12 +88,12 @@ class GeckoEditableSupport final : public TextEventDispatcherListener,
   dom::InputMethodServiceChild* mServiceChild;
   nsCOMPtr<dom::EventTarget> mChromeEventHandler;
 
-  // We need this flag to remember whether we already send focus to IME. Can't
-  // fully rely on focus/blur event due to the blur event may be suppressed in
-  // some cases (e.g. content removed)
-  bool mIsFocused;
   bool mIsVoiceInputEnabled;
-  nsTArray<nsString> mVoiceInputSupportedTypes;
+  nsAutoString mLastImeGroup;
+
+  nsTArray<nsCString> mVoiceInputSupportedTypes;
+  nsTArray<nsCString> mVoiceInputExcludedXInputModes;
+  nsWeakPtr mFocusedTarget;
 };
 
 }  // namespace widget

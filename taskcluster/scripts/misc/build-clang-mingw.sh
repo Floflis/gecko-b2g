@@ -22,7 +22,7 @@ else
 fi
 
 TOOLCHAIN_DIR=$MOZ_FETCHES_DIR/llvm-project
-INSTALL_DIR=$TOOLCHAIN_DIR/build/stage4/clang
+INSTALL_DIR=$MOZ_FETCHES_DIR/clang
 CROSS_PREFIX_DIR=$INSTALL_DIR/$machine-w64-mingw32
 
 make_flags="-j$(nproc)"
@@ -39,11 +39,13 @@ cd $GECKO_PATH
 
 patch_file1="$(pwd)/taskcluster/scripts/misc/mingw-winrt.patch"
 patch_file2="$(pwd)/taskcluster/scripts/misc/mingw-dwrite_3.patch"
+patch_file3="$(pwd)/taskcluster/scripts/misc/mingw-unknown.patch"
 
 prepare() {
   pushd $MOZ_FETCHES_DIR/mingw-w64
   patch -p1 <$patch_file1
   patch -p1 <$patch_file2
+  patch -p1 <$patch_file3
   popd
 }
 
@@ -257,7 +259,7 @@ build_libssp() {
   sed -i 's/(CROSS)gcc/(CROSS)clang/' libssp-Makefile
   sed -i 's/\$(CROSS)ar/llvm-ar/' libssp-Makefile
   OLDPATH=$PATH
-  PATH=$INSTALL_DIR/clang/bin:$PATH
+  PATH=$INSTALL_DIR/bin:$PATH
 
   # Run the script
   TOOLCHAIN_ARCHS=$machine $MOZ_FETCHES_DIR/llvm-mingw/build-libssp.sh .
@@ -271,10 +273,9 @@ build_libssp() {
 
 build_utils() {
   pushd $INSTALL_DIR/bin/
-  ln -s llvm-nm $machine-w64-mingw32-nm
-  ln -s llvm-strip $machine-w64-mingw32-strip
-  ln -s llvm-readobj $machine-w64-mingw32-readobj
-  ln -s llvm-objcopy $machine-w64-mingw32-objcopy
+  for prog in ar nm objcopy ranlib readobj strip; do
+    ln -s llvm-$prog $machine-w64-mingw32-$prog
+  done
   ./clang $MOZ_FETCHES_DIR/llvm-mingw/wrappers/windres-wrapper.c -O2 -Wl,-s -o $machine-w64-mingw32-windres
   popd
 }
@@ -283,14 +284,7 @@ export PATH=$INSTALL_DIR/bin:$PATH
 
 prepare
 
-# gets a bit too verbose here
-set +x
-
-cd $TOOLCHAIN_DIR
-python3 $GECKO_PATH/build/build-clang/build-clang.py -c $GECKO_PATH/$2 --skip-tar
-
-set -x
-
+mkdir $TOOLCHAIN_DIR/build
 pushd $TOOLCHAIN_DIR/build
 
 install_wrappers
@@ -306,6 +300,6 @@ popd
 mkdir -p $UPLOAD_DIR
 
 pushd $(dirname $INSTALL_DIR)
-tar c clang | $GECKO_PATH/taskcluster/scripts/misc/zstdpy > clangmingw.tar.zst
+tar caf clangmingw.tar.zst clang
 mv clangmingw.tar.zst $UPLOAD_DIR
 popd

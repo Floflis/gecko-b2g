@@ -16,8 +16,21 @@ export MOZILLA_OFFICIAL=1
 ac_add_options --disable-sandbox
 
 ac_add_options --enable-wasm-simd
+ac_add_options --enable-wasm-function-references
+ac_add_options --enable-wasm-type-reflections
+ac_add_options --enable-wasm-exceptions
 
 # Disable until we figure CI issues
 # ac_add_options --enable-clang-plugin
 
+# Use sccache
+ac_add_options --with-ccache=sccache
+
+# Set the api-daemon port
+ac_add_options --with-api-daemon-port=8081
+
 mk_add_options AUTOCLOBBER=1
+
+if [ -n "$MOZ_SAFE_BROWSING" ]; then
+  ac_add_options --enable-safebrowsing
+fi

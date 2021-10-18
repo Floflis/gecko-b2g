@@ -5,6 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/AntiTrackingUtils.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/ContentBlockingAllowList.h"
 #include "mozilla/dom/BrowsingContext.h"
@@ -21,6 +22,7 @@
 #  include "nsIProtocolHandler.h"
 #endif
 #include "nsIClassInfoImpl.h"
+#include "nsIChannel.h"
 #include "nsICookieManager.h"
 #include "nsICookieService.h"
 #include "nsIObjectInputStream.h"
@@ -98,13 +100,37 @@ already_AddRefed<nsICookieJarSettings> CookieJarSettings::GetBlockingAll() {
 }
 
 // static
-already_AddRefed<nsICookieJarSettings> CookieJarSettings::Create() {
+already_AddRefed<nsICookieJarSettings> CookieJarSettings::Create(
+    CreateMode aMode) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  RefPtr<CookieJarSettings> cookieJarSettings = new CookieJarSettings(
-      nsICookieManager::GetCookieBehavior(),
-      OriginAttributes::IsFirstPartyEnabled(), eProgressive);
+  RefPtr<CookieJarSettings> cookieJarSettings;
+
+  switch (aMode) {
+    case eRegular:
+    case ePrivate:
+      cookieJarSettings = new CookieJarSettings(
+          nsICookieManager::GetCookieBehavior(aMode == ePrivate),
+          OriginAttributes::IsFirstPartyEnabled(), eProgressive);
+      break;
+
+    default:
+      MOZ_CRASH("Unexpected create mode.");
+  }
+
   return cookieJarSettings.forget();
+}
+
+// static
+already_AddRefed<nsICookieJarSettings> CookieJarSettings::Create(
+    nsIPrincipal* aPrincipal) {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  if (aPrincipal && aPrincipal->OriginAttributesRef().mPrivateBrowsingId > 0) {
+    return Create(ePrivate);
+  }
+
+  return Create(eRegular);
 }
 
 // static
@@ -120,6 +146,12 @@ already_AddRefed<nsICookieJarSettings> CookieJarSettings::Create(
       aIsOnContentBlockingAllowList;
 
   return cookieJarSettings.forget();
+}
+
+// static
+already_AddRefed<nsICookieJarSettings> CookieJarSettings::CreateForXPCOM() {
+  MOZ_ASSERT(NS_IsMainThread());
+  return Create(eRegular);
 }
 
 CookieJarSettings::CookieJarSettings(uint32_t aCookieBehavior,
@@ -144,6 +176,16 @@ CookieJarSettings::~CookieJarSettings() {
 
     SchedulerGroup::Dispatch(TaskCategory::Other, r.forget());
   }
+}
+
+NS_IMETHODIMP
+CookieJarSettings::InitWithURI(nsIURI* aURI, bool aIsPrivate) {
+  NS_ENSURE_ARG(aURI);
+
+  mCookieBehavior = nsICookieManager::GetCookieBehavior(aIsPrivate);
+
+  SetPartitionKey(aURI);
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -223,15 +265,9 @@ CookieJarSettings::CookiePermission(nsIPrincipal* aPrincipal,
 
   // Let's see if we know this permission.
   if (!mCookiePermissions.IsEmpty()) {
-    nsCOMPtr<nsIPrincipal> principal =
-        Permission::ClonePrincipalForPermission(aPrincipal);
-    if (NS_WARN_IF(!principal)) {
-      return NS_ERROR_FAILURE;
-    }
-
     for (const RefPtr<nsIPermission>& permission : mCookiePermissions) {
       bool match = false;
-      rv = permission->MatchesPrincipalForPermission(principal, false, &match);
+      rv = permission->Matches(aPrincipal, false, &match);
       if (NS_WARN_IF(NS_FAILED(rv)) || !match) {
         continue;
       }

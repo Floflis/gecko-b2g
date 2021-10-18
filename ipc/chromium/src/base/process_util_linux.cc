@@ -10,10 +10,14 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "algorithm"
 
 #include "nsXULAppAPI.h"  // for XRE_GetProcessType
+#if defined(MOZ_CODE_COVERAGE)
+#  include "nsString.h"
+#endif
 
 #if defined(MOZ_ENABLE_FORKSERVER)
 #  include <stdlib.h>
@@ -28,7 +32,7 @@
 
 #  include "mozilla/Unused.h"
 #  include "mozilla/ScopeExit.h"
-#  include "ProcessUtils.h"
+#  include "mozilla/ipc/ProcessUtils.h"
 
 using namespace mozilla::ipc;
 
@@ -36,6 +40,11 @@ using namespace mozilla::ipc;
 #    include "GLContextEGL.h"
 std::shared_ptr<mozilla::gl::EglDisplay> gEglDpy;
 #  endif
+#endif
+
+#if defined(MOZ_CODE_COVERAGE)
+#  include "prenv.h"
+#  include "mozilla/ipc/EnvironmentMap.h"
 #endif
 
 #include "base/command_line.h"
@@ -252,7 +261,14 @@ void AppProcessBuilder::InitAppProcess(int* argcp, char*** argvp) {
   SetCurrentProcessPrivileges();
 }
 
-static void handle_sigchld(int s) { waitpid(-1, nullptr, WNOHANG); }
+static void handle_sigchld(int s) {
+  while (true) {
+    if (waitpid(-1, nullptr, WNOHANG) <= 0) {
+      // On error, or no process changed state.
+      break;
+    }
+  }
+}
 
 static void InstallChildSignalHandler() {
   // Since content processes are not children of the chrome process
@@ -272,10 +288,32 @@ static void ReserveFileDescriptors() {
   }
 }
 
+#ifdef MOZ_WIDGET_GONK
+#define DEBUGGERD_SIGNO (__SIGRTMIN + 3)
+
+static void WorkaroundDebuggerdSigHandler() {
+  // The signal handler installed by debuggerd blocks all signals.
+  // However, the sandbox need signal SIGSYS to forward syscalls.  If
+  // SIGSYS is blocked by the handler of debuggerd, the debuggerd will
+  // fail for calling syscalls.  Here, we unblock SIGSYS.
+  int signo = DEBUGGERD_SIGNO;
+  struct sigaction act;
+  int r = sigaction(signo, nullptr, &act);
+  MOZ_ASSERT(r >= 0);
+  sigdelset(&act.sa_mask, SIGSYS);
+  r = sigaction(signo, &act, nullptr);
+  MOZ_ASSERT(r >= 0);
+}
+#endif // MOZ_WIDGET_GONK
+
 void InitForkServerProcess() {
   InstallChildSignalHandler();
   ReserveFileDescriptors();
   SetThisProcessName("forkserver");
+
+#ifdef MOZ_WIDGET_GONK
+  WorkaroundDebuggerdSigHandler();
+#endif
 }
 
 static bool LaunchAppWithForkServer(const std::vector<std::string>& argv,
@@ -364,6 +402,18 @@ bool LaunchApp(const std::vector<std::string>& argv,
     argv_cstr[argv.size()] = NULL;
 
     SetCurrentProcessPrivileges();
+#ifdef MOZ_CODE_COVERAGE
+    const char* gcov_child_prefix = PR_GetEnv("GCOV_CHILD_PREFIX");
+    if (gcov_child_prefix) {
+      const pid_t child_pid = getpid();
+      nsAutoCString new_gcov_prefix(gcov_child_prefix);
+      new_gcov_prefix.Append(std::to_string((size_t)child_pid));
+      EnvironmentMap new_map = options.env_map;
+      new_map[ENVIRONMENT_LITERAL("GCOV_PREFIX")] =
+          ENVIRONMENT_STRING(new_gcov_prefix.get());
+      envp = BuildEnvironmentArray(new_map);
+    }
+#endif
 
     execve(argv_cstr[0], argv_cstr.get(), envp.get());
     // if we get here, we're in serious trouble and should complain loudly

@@ -12,7 +12,6 @@
 #include "nsGkAtoms.h"
 #include "nsStyleConsts.h"
 #include "nsIFormControl.h"
-#include "nsIForm.h"
 #include "nsISelectControlFrame.h"
 
 // Notify/query select frame for selected state
@@ -320,7 +319,7 @@ already_AddRefed<HTMLOptionElement> HTMLOptionElement::Option(
 
     textContent->SetText(aText, false);
 
-    aError = option->AppendChildTo(textContent, false);
+    option->AppendChildTo(textContent, false, aError);
     if (aError.Failed()) {
       return nullptr;
     }

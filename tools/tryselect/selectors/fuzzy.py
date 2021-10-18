@@ -2,7 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function, unicode_literals
 
 import os
 import platform
@@ -11,10 +10,8 @@ import six
 import sys
 from distutils.spawn import find_executable
 from distutils.version import StrictVersion
-from six.moves import input
 
 from mozbuild.base import MozbuildObject
-from mozbuild.util import ensure_subprocess_env
 from mozboot.util import get_state_dir
 from mozterm import Terminal
 
@@ -26,7 +23,7 @@ from ..util.manage_estimates import (
     make_trimmed_taskgraph_cache,
 )
 
-from taskgraph.target_tasks import filter_by_uncommon_try_tasks
+from gecko_taskgraph.target_tasks import filter_by_uncommon_try_tasks
 
 terminal = Terminal()
 
@@ -309,7 +306,7 @@ def run_fzf(cmd, tasks):
         cmd,
         stdout=subprocess.PIPE,
         stdin=subprocess.PIPE,
-        env=ensure_subprocess_env(env),
+        env=env,
         universal_newlines=True,
     )
     out = proc.communicate("\n".join(tasks))[0].splitlines()
@@ -375,7 +372,7 @@ def run(
         if not all_tasks:
             return 1
 
-    key_shortcuts = [k + ":" + v for k, v in six.iteritems(fzf_shortcuts)]
+    key_shortcuts = [k + ":" + v for k, v in fzf_shortcuts.items()]
     base_cmd = [
         fzf,
         "-m",

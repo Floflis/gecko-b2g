@@ -5,8 +5,11 @@
 const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
-const { Log } = ChromeUtils.import("chrome://marionette/content/log.js");
-XPCOMUtils.defineLazyGetter(this, "logger", Log.get);
+const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+const { Log } = ChromeUtils.import("chrome://remote/content/shared/Log.jsm");
+XPCOMUtils.defineLazyGetter(this, "logger", () =>
+  Log.get(Log.TYPES.MARIONETTE)
+);
 
 this.EXPORTED_SYMBOLS = ["MarionetteHelper"];
 
@@ -48,6 +51,27 @@ class MarionetteHelper {
     let current = this.selectedTab;
     current.active = false;
     tab.active = true;
+    this.window.dispatchEvent(new Event("TabSelected"));
+  }
+
+  removeTab(tab) {
+    logger.trace(`MarionetteHelper removeTab ${tab.src}\n`);
+    // Never remove the system app.
+    if (tab.src == Services.prefs.getCharPref("b2g.system_startup_url")) {
+      return;
+    }
+    tab.remove();
+    tab = null;
+  }
+
+  addEventListener(eventName, handler) {
+    logger.info(`MarionetteHelper add event listener for ${eventName}`);
+    this.content.addEventListener(...arguments);
+  }
+
+  removeEventListener(eventName, handler) {
+    logger.info(`MarionetteHelper remove event listener for ${eventName}`);
+    this.content.removeEventListener(...arguments);
   }
 }
 

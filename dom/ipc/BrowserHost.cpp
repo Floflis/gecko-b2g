@@ -10,6 +10,7 @@
 #include "mozilla/dom/CancelContentJSOptionsBinding.h"
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/WindowGlobalParent.h"
+#include "mozilla/ProcessPriorityManager.h"
 
 #include "nsIObserverService.h"
 
@@ -116,6 +117,8 @@ BrowserHost::SetRenderLayers(bool aRenderLayers) {
   if (!mRoot) {
     return NS_OK;
   }
+  ProcessPriorityManager::ActivityChanged(GetBrowsingContext()->Canonical(),
+                                          aRenderLayers);
   mRoot->SetRenderLayers(aRenderLayers);
   return NS_OK;
 }
@@ -149,8 +152,8 @@ BrowserHost::Deprioritize(void) {
   if (!mRoot) {
     return NS_OK;
   }
-  VisitAll(
-      [](BrowserParent* aBrowserParent) { aBrowserParent->Deprioritize(); });
+  ProcessPriorityManager::ActivityChanged(GetBrowsingContext()->Canonical(),
+                                          /* aIsActive = */ false);
   return NS_OK;
 }
 
@@ -215,27 +218,24 @@ BrowserHost::TransmitPermissionsForPrincipal(nsIPrincipal* aPrincipal) {
   return GetContentParent()->TransmitPermissionsForPrincipal(aPrincipal);
 }
 
-/* boolean startApzAutoscroll (in float aAnchorX, in float aAnchorY, in nsViewID
- * aScrollId, in uint32_t aPresShellId); */
+/* void createAboutBlankContentViewer(in nsIPrincipal aPrincipal, in
+ * nsIPrincipal aPartitionedPrincipal); */
 NS_IMETHODIMP
-BrowserHost::StartApzAutoscroll(float aAnchorX, float aAnchorY,
-                                nsViewID aScrollId, uint32_t aPresShellId,
-                                bool* _retval) {
+BrowserHost::CreateAboutBlankContentViewer(
+    nsIPrincipal* aPrincipal, nsIPrincipal* aPartitionedPrincipal) {
   if (!mRoot) {
     return NS_OK;
   }
-  *_retval =
-      mRoot->StartApzAutoscroll(aAnchorX, aAnchorY, aScrollId, aPresShellId);
-  return NS_OK;
-}
 
-/* void stopApzAutoscroll (in nsViewID aScrollId, in uint32_t aPresShellId); */
-NS_IMETHODIMP
-BrowserHost::StopApzAutoscroll(nsViewID aScrollId, uint32_t aPresShellId) {
-  if (!mRoot) {
-    return NS_OK;
+  // Ensure the content process has permisisons for the new document we're about
+  // to create in it.
+  nsresult rv = GetContentParent()->TransmitPermissionsForPrincipal(aPrincipal);
+  if (NS_FAILED(rv)) {
+    return rv;
   }
-  mRoot->StopApzAutoscroll(aScrollId, aPresShellId);
+
+  Unused << mRoot->SendCreateAboutBlankContentViewer(aPrincipal,
+                                                     aPartitionedPrincipal);
   return NS_OK;
 }
 

@@ -25,15 +25,21 @@ class WebSocketChannelChild final : public BaseWebSocketChannel,
   friend class PWebSocketChild;
 
  public:
-  explicit WebSocketChannelChild(bool aSecure);
+  explicit WebSocketChannelChild(bool aEncrypted);
 
   NS_DECL_THREADSAFE_ISUPPORTS
 
   // nsIWebSocketChannel methods BaseWebSocketChannel didn't implement for us
   //
   NS_IMETHOD AsyncOpen(nsIURI* aURI, const nsACString& aOrigin,
+                       JS::HandleValue aOriginAttributes,
                        uint64_t aInnerWindowID, nsIWebSocketListener* aListener,
-                       nsISupports* aContext) override;
+                       nsISupports* aContext, JSContext* aCx) override;
+  NS_IMETHOD AsyncOpenNative(nsIURI* aURI, const nsACString& aOrigin,
+                             const OriginAttributes& aOriginAttributes,
+                             uint64_t aInnerWindowID,
+                             nsIWebSocketListener* aListener,
+                             nsISupports* aContext) override;
   NS_IMETHOD Close(uint16_t code, const nsACString& reason) override;
   NS_IMETHOD SendMsg(const nsACString& aMsg) override;
   NS_IMETHOD SendBinaryMsg(const nsACString& aMsg) override;
@@ -54,7 +60,7 @@ class WebSocketChannelChild final : public BaseWebSocketChannel,
   mozilla::ipc::IPCResult RecvOnStart(const nsCString& aProtocol,
                                       const nsCString& aExtensions,
                                       const nsString& aEffectiveURL,
-                                      const bool& aSecure,
+                                      const bool& aEncrypted,
                                       const uint64_t& aHttpChannelId);
   mozilla::ipc::IPCResult RecvOnStop(const nsresult& aStatusCode);
   mozilla::ipc::IPCResult RecvOnMessageAvailable(
@@ -66,7 +72,7 @@ class WebSocketChannelChild final : public BaseWebSocketChannel,
                                             const nsCString& aReason);
 
   void OnStart(const nsCString& aProtocol, const nsCString& aExtensions,
-               const nsString& aEffectiveURL, const bool& aSecure,
+               const nsString& aEffectiveURL, const bool& aEncrypted,
                const uint64_t& aHttpChannelId);
   void OnStop(const nsresult& aStatusCode);
   void OnMessageAvailable(const nsCString& aMsg);

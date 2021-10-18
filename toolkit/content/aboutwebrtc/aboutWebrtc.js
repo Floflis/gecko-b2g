@@ -258,6 +258,8 @@ class ShowTab extends Control {
   const content = document.querySelector("#content");
   content.append(peerConnections, connectionLog, userPrefs);
 
+  // This does not handle the auto-refresh, only the manual refreshes needed
+  // for certain user actions, and the initial population of the data
   function refresh() {
     const pcDiv = renderElements("div", { className: "stats" }, [
       renderElements("span", { className: "section-heading" }, [
@@ -312,22 +314,40 @@ class ShowTab extends Control {
   }
   refresh();
 
+  async function translate(element) {
+    const frag = document.createDocumentFragment();
+    frag.append(element);
+    await document.l10n.translateFragment(frag);
+    return frag;
+  }
+
   window.setInterval(
     async history => {
-      userPrefs.replaceWith((userPrefs = renderUserPrefs()));
       const reports = await getStats();
-      reports.forEach(report => {
-        const replace = (id, renderFunc) => {
-          const elem = document.getElementById(`${id}: ${report.pcid}`);
-          if (elem) {
-            elem.replaceWith(renderFunc(report, history));
-          }
-        };
-        replace("ice-stats", renderICEStats);
-        replace("rtp-stats", renderRTPStats);
-        replace("bandwidth-stats", renderBandwidthStats);
-        replace("frame-stats", renderFrameRateStats);
-      });
+
+      const translateSection = async (report, id, renderFunc) => {
+        const element = document.getElementById(`${id}: ${report.pcid}`);
+        const result =
+          element && (await translate(renderFunc(report, history)));
+        return { element, translated: result };
+      };
+
+      const sections = (
+        await Promise.all(
+          reports.flatMap(report => [
+            translateSection(report, "ice-stats", renderICEStats),
+            translateSection(report, "rtp-stats", renderRTPStats),
+            translateSection(report, "bandwidth-stats", renderBandwidthStats),
+            translateSection(report, "frame-stats", renderFrameRateStats),
+          ])
+        )
+      ).filter(({ element }) => element);
+
+      document.l10n.pauseObserving();
+      for (const { element, translated } of sections) {
+        element.replaceWith(translated);
+      }
+      document.l10n.resumeObserving();
     },
     500,
     {}
@@ -770,7 +790,7 @@ function renderTransportStats(
         { className: "stat-label" },
         "about-webrtc-lost-label",
         {
-          packets: packetsReceived,
+          packets: packetsLost,
         }
       )
     );
@@ -1030,10 +1050,8 @@ function renderICEStats(report) {
     }
     iceDiv.append(statsTable);
   }
-  // add just a bit of vertical space between the restart/rollback
-  // counts and the ICE candidate pair table above.
+  // restart/rollback counts.
   iceDiv.append(
-    renderElement("br"),
     renderIceMetric("about-webrtc-ice-restart-count-label", report.iceRestarts),
     renderIceMetric(
       "about-webrtc-ice-rollback-count-label",
@@ -1161,8 +1179,6 @@ function renderSimpleTable(caption, headings, data) {
 }
 
 class FoldEffect {
-  static allSections = [];
-
   constructor(
     target,
     {
@@ -1176,6 +1192,7 @@ class FoldEffect {
   render() {
     this.target.classList.add("fold-target");
     this.trigger = renderElement("div", { className: "fold-trigger" });
+    this.trigger.classList.add(this.showMsg, this.hideMsg);
     this.collapse();
     this.trigger.onclick = () => {
       if (this.target.classList.contains("fold-closed")) {
@@ -1184,7 +1201,6 @@ class FoldEffect {
         this.collapse();
       }
     };
-    FoldEffect.allSections.push(this);
     return this.trigger;
   }
 
@@ -1199,14 +1215,22 @@ class FoldEffect {
   }
 
   static expandAll() {
-    for (const section of FoldEffect.allSections) {
-      section.expand();
+    for (const target of document.getElementsByClassName("fold-closed")) {
+      target.classList.remove("fold-closed");
+    }
+    for (const trigger of document.getElementsByClassName("fold-trigger")) {
+      const hideMsg = trigger.classList[2];
+      document.l10n.setAttributes(trigger, hideMsg);
     }
   }
 
   static collapseAll() {
-    for (const section of FoldEffect.allSections) {
-      section.collapse();
+    for (const target of document.getElementsByClassName("fold-target")) {
+      target.classList.add("fold-closed");
+    }
+    for (const trigger of document.getElementsByClassName("fold-trigger")) {
+      const showMsg = trigger.classList[1];
+      document.l10n.setAttributes(trigger, showMsg);
     }
   }
 }

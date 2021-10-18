@@ -3,8 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
 
-/* global gTelemetry */
-
 // React
 const { PureComponent } = require("devtools/client/shared/vendor/react");
 const {
@@ -20,13 +18,9 @@ const {
   updateDisplayTabbingOrder,
 } = require("devtools/client/accessibility/actions/ui");
 
-const TELEMETRY_TABBING_ORDER_ACTIVATED =
-  "devtools.accessibility.tabbing_order_activated";
-
 class DisplayTabbingOrder extends PureComponent {
   static get propTypes() {
     return {
-      describedby: PropTypes.string,
       dispatch: PropTypes.func.isRequired,
       tabbingOrderDisplayed: PropTypes.bool.isRequired,
     };
@@ -44,9 +38,6 @@ class DisplayTabbingOrder extends PureComponent {
 
   async onChange() {
     const { dispatch, tabbingOrderDisplayed } = this.props;
-    if (!tabbingOrderDisplayed) {
-      gTelemetry.scalarAdd(TELEMETRY_TABBING_ORDER_ACTIVATED, 1);
-    }
 
     this.setState({ disabled: true });
     await dispatch(updateDisplayTabbingOrder(!tabbingOrderDisplayed));
@@ -54,10 +45,11 @@ class DisplayTabbingOrder extends PureComponent {
   }
 
   render() {
-    const { describedby, tabbingOrderDisplayed } = this.props;
+    const { tabbingOrderDisplayed } = this.props;
     return label(
       {
-        className: "accessibility-tabbing-order devtools-checkbox-label",
+        className:
+          "accessibility-tabbing-order devtools-checkbox-label devtools-ellipsis-text",
         htmlFor: "devtools-display-tabbing-order-checkbox",
         title: L10N.getStr("accessibility.toolbar.displayTabbingOrder.tooltip"),
       },
@@ -68,7 +60,6 @@ class DisplayTabbingOrder extends PureComponent {
         checked: tabbingOrderDisplayed,
         disabled: this.state.disabled,
         onChange: this.onChange,
-        "aria-describedby": describedby,
       }),
       L10N.getStr("accessibility.toolbar.displayTabbingOrder.label")
     );

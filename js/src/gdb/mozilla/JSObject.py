@@ -7,26 +7,30 @@
 import re
 import gdb
 import mozilla.prettyprinters as prettyprinters
+from mozilla.jsval import JSValue
 from mozilla.prettyprinters import ptr_pretty_printer, ref_pretty_printer
-from mozilla.Root import deref
 from mozilla.CellHeader import get_header_ptr
 
 prettyprinters.clear_module_printers(__name__)
 
 
 class JSObjectTypeCache(object):
-    def __init__(self, value, cache):
-        baseshape_flags = gdb.lookup_type("js::BaseShape::Flag")
-        self.flag_DELEGATE = prettyprinters.enum_value(
-            baseshape_flags, "js::BaseShape::DELEGATE"
+    def __init__(self):
+        object_flag = gdb.lookup_type("js::ObjectFlag")
+        self.objectflag_IsUsedAsPrototype = prettyprinters.enum_value(
+            object_flag, "js::ObjectFlag::IsUsedAsPrototype"
         )
-        self.func_ptr_type = gdb.lookup_type("JSFunction").pointer()
+        self.value_ptr_t = gdb.lookup_type("JS::Value").pointer()
+        self.func_ptr_t = gdb.lookup_type("JSFunction").pointer()
         self.class_NON_NATIVE = gdb.parse_and_eval("JSClass::NON_NATIVE")
-        self.NativeObject_ptr_t = gdb.lookup_type("js::NativeObject").pointer()
         self.BaseShape_ptr_t = gdb.lookup_type("js::BaseShape").pointer()
         self.Shape_ptr_t = gdb.lookup_type("js::Shape").pointer()
-        self.ObjectGroup_ptr_t = gdb.lookup_type("js::ObjectGroup").pointer()
         self.JSClass_ptr_t = gdb.lookup_type("JSClass").pointer()
+        self.JSScript_ptr_t = gdb.lookup_type("JSScript").pointer()
+        self.JSFunction_AtomSlot = gdb.parse_and_eval("JSFunction::AtomSlot")
+        self.JSFunction_NativeJitInfoOrInterpretedScriptSlot = gdb.parse_and_eval(
+            "JSFunction::NativeJitInfoOrInterpretedScriptSlot"
+        )
 
 
 # There should be no need to register this for JSFunction as well, since we
@@ -42,12 +46,13 @@ class JSObjectPtrOrRef(prettyprinters.Pointer):
     def __init__(self, value, cache):
         super(JSObjectPtrOrRef, self).__init__(value, cache)
         if not cache.mod_JSObject:
-            cache.mod_JSObject = JSObjectTypeCache(value, cache)
+            cache.mod_JSObject = JSObjectTypeCache()
         self.otc = cache.mod_JSObject
 
     def summary(self):
-        group = get_header_ptr(self.value, self.otc.ObjectGroup_ptr_t)
-        classp = get_header_ptr(group, self.otc.JSClass_ptr_t)
+        shape = get_header_ptr(self.value, self.otc.Shape_ptr_t)
+        baseshape = get_header_ptr(shape, self.otc.BaseShape_ptr_t)
+        classp = get_header_ptr(baseshape, self.otc.JSClass_ptr_t)
         non_native = classp["flags"] & self.otc.class_NON_NATIVE
 
         # Use GDB to format the class name, but then strip off the address
@@ -60,25 +65,51 @@ class JSObjectPtrOrRef(prettyprinters.Pointer):
         if non_native:
             return "[object {}]".format(class_name)
         else:
-            native = self.value.cast(self.otc.NativeObject_ptr_t)
-            shape = deref(native["shape_"])
-            baseshape = get_header_ptr(shape, self.otc.BaseShape_ptr_t)
-            flags = baseshape["flags"]
-            is_delegate = bool(flags & self.otc.flag_DELEGATE)
+            flags = shape["objectFlags_"]["flags_"]
+            used_as_prototype = bool(flags & self.otc.objectflag_IsUsedAsPrototype)
             name = None
             if class_name == "Function":
                 function = self.value
                 concrete_type = function.type.strip_typedefs()
                 if concrete_type.code == gdb.TYPE_CODE_REF:
                     function = function.address
-                function = function.cast(self.otc.func_ptr_type)
-                atom = deref(function["atom_"])
-                name = str(atom) if atom else "<unnamed>"
+                name = get_function_name(function, self.cache)
             return "[object {}{}]{}".format(
                 class_name,
                 " " + name if name else "",
-                " delegate" if is_delegate else "",
+                " used_as_prototype" if used_as_prototype else "",
             )
+
+
+def get_function_name(function, cache):
+    if not cache.mod_JSObject:
+        cache.mod_JSObject = JSObjectTypeCache()
+    otc = cache.mod_JSObject
+
+    function = function.cast(otc.func_ptr_t)
+    fixed_slots = (function + 1).cast(otc.value_ptr_t)
+    atom_value = JSValue(fixed_slots[otc.JSFunction_AtomSlot], cache)
+
+    if atom_value.is_undefined():
+        return "<unnamed>"
+
+    return str(atom_value.get_string())
+
+
+def get_function_script(function, cache):
+    if not cache.mod_JSObject:
+        cache.mod_JSObject = JSObjectTypeCache()
+    otc = cache.mod_JSObject
+
+    function = function.cast(otc.func_ptr_t)
+    fixed_slots = (function + 1).cast(otc.value_ptr_t)
+    slot = otc.JSFunction_NativeJitInfoOrInterpretedScriptSlot
+    script_value = JSValue(fixed_slots[slot], cache)
+
+    if script_value.is_undefined():
+        return 0
+
+    return script_value.get_private()
 
 
 @ref_pretty_printer("JSObject")

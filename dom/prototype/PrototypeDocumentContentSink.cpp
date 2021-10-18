@@ -38,6 +38,7 @@
 #include "nsMimeTypes.h"
 #include "nsHtml5SVGLoadDispatcher.h"
 #include "nsTextNode.h"
+#include "mozilla/dom/AutoEntryScript.h"
 #include "mozilla/dom/CDATASection.h"
 #include "mozilla/dom/Comment.h"
 #include "mozilla/dom/DocumentType.h"
@@ -48,12 +49,14 @@
 #include "mozilla/dom/ScriptLoader.h"
 #include "mozilla/LoadInfo.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ProfilerLabels.h"
+#include "mozilla/RefPtr.h"
 
-#include "GeckoProfiler.h"
 #include "nsXULPrototypeCache.h"
 #include "nsXULElement.h"
 #include "mozilla/CycleCollectedJSContext.h"
 #include "js/CompilationAndEvaluation.h"
+#include "js/experimental/JSStencil.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -120,7 +123,8 @@ nsresult PrototypeDocumentContentSink::Init(Document* aDoc, nsIURI* aURI,
 }
 
 NS_IMPL_CYCLE_COLLECTION(PrototypeDocumentContentSink, mParser, mDocumentURI,
-                         mDocument, mScriptLoader, mCurrentPrototype)
+                         mDocument, mScriptLoader, mContextStack,
+                         mCurrentPrototype)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(PrototypeDocumentContentSink)
   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIContentSink)
@@ -186,13 +190,27 @@ void PrototypeDocumentContentSink::ContinueInterruptedParsingAsync() {
 PrototypeDocumentContentSink::ContextStack::ContextStack()
     : mTop(nullptr), mDepth(0) {}
 
-PrototypeDocumentContentSink::ContextStack::~ContextStack() {
+PrototypeDocumentContentSink::ContextStack::~ContextStack() { Clear(); }
+
+void PrototypeDocumentContentSink::ContextStack::Traverse(
+    nsCycleCollectionTraversalCallback& aCallback, const char* aName,
+    uint32_t aFlags) {
+  aFlags |= CycleCollectionEdgeNameArrayFlag;
+  Entry* current = mTop;
+  while (current) {
+    CycleCollectionNoteChild(aCallback, current->mElement, aName, aFlags);
+    current = current->mNext;
+  }
+}
+
+void PrototypeDocumentContentSink::ContextStack::Clear() {
   while (mTop) {
     Entry* doomed = mTop;
     mTop = mTop->mNext;
     NS_IF_RELEASE(doomed->mElement);
     delete doomed;
   }
+  mDepth = 0;
 }
 
 nsresult PrototypeDocumentContentSink::ContextStack::Push(
@@ -308,8 +326,11 @@ nsresult PrototypeDocumentContentSink::PrepareToWalk() {
   rv = CreateElementFromPrototype(proto, getter_AddRefs(root), nullptr);
   if (NS_FAILED(rv)) return rv;
 
-  rv = mDocument->AppendChildTo(root, false);
-  if (NS_FAILED(rv)) return rv;
+  ErrorResult error;
+  mDocument->AppendChildTo(root, false, error);
+  if (error.Failed()) {
+    return error.StealNSResult();
+  }
 
   // TODO(emilio): Should this really notify? We don't notify of appends anyhow,
   // and we just appended the root so no styles can possibly depend on it.
@@ -349,9 +370,11 @@ nsresult PrototypeDocumentContentSink::CreateAndInsertPI(
     rv = InsertXMLStylesheetPI(aProtoPI, aParent, aBeforeThis, pi);
   } else {
     // No special processing, just add the PI to the document.
-    rv = aParent->InsertChildBefore(
-        node->AsContent(), aBeforeThis ? aBeforeThis->AsContent() : nullptr,
-        false);
+    ErrorResult error;
+    aParent->InsertChildBefore(node->AsContent(),
+                               aBeforeThis ? aBeforeThis->AsContent() : nullptr,
+                               false, error);
+    rv = error.StealNSResult();
   }
 
   return rv;
@@ -360,16 +383,17 @@ nsresult PrototypeDocumentContentSink::CreateAndInsertPI(
 nsresult PrototypeDocumentContentSink::InsertXMLStylesheetPI(
     const nsXULPrototypePI* aProtoPI, nsINode* aParent, nsINode* aBeforeThis,
     XMLStylesheetProcessingInstruction* aPINode) {
-  nsresult rv;
-
   // We want to be notified when the style sheet finishes loading, so
   // disable style sheet loading for now.
   aPINode->SetEnableUpdates(false);
   aPINode->OverrideBaseURI(mCurrentPrototype->GetURI());
 
-  rv = aParent->InsertChildBefore(
-      aPINode, aBeforeThis ? aBeforeThis->AsContent() : nullptr, false);
-  if (NS_FAILED(rv)) return rv;
+  ErrorResult rv;
+  aParent->InsertChildBefore(
+      aPINode, aBeforeThis ? aBeforeThis->AsContent() : nullptr, false, rv);
+  if (rv.Failed()) {
+    return rv.StealNSResult();
+  }
 
   aPINode->SetEnableUpdates(true);
 
@@ -507,8 +531,11 @@ nsresult PrototypeDocumentContentSink::ResumeWalkInternal() {
           if (NS_FAILED(rv)) return rv;
 
           // ...and append it to the content model.
-          rv = nodeToPushTo->AppendChildTo(child, false);
-          if (NS_FAILED(rv)) return rv;
+          ErrorResult error;
+          nodeToPushTo->AppendChildTo(child, false, error);
+          if (error.Failed()) {
+            return error.StealNSResult();
+          }
 
           if (nsIContent::RequiresDoneCreatingElement(
                   protoele->mNodeInfo->NamespaceID(),
@@ -541,7 +568,7 @@ nsresult PrototypeDocumentContentSink::ResumeWalkInternal() {
             // If the script cannot be loaded, just keep going!
 
             if (NS_SUCCEEDED(rv) && blocked) return NS_OK;
-          } else if (scriptproto->HasScriptObject()) {
+          } else if (scriptproto->HasStencil()) {
             // An inline script
             rv = ExecuteScript(scriptproto);
             if (NS_FAILED(rv)) return rv;
@@ -556,8 +583,11 @@ nsresult PrototypeDocumentContentSink::ResumeWalkInternal() {
           auto* textproto = static_cast<nsXULPrototypeText*>(childproto);
           text->SetText(textproto->mValue, false);
 
-          rv = nodeToPushTo->AppendChildTo(text, false);
-          NS_ENSURE_SUCCESS(rv, rv);
+          ErrorResult error;
+          nodeToPushTo->AppendChildTo(text, false, error);
+          if (error.Failed()) {
+            return error.StealNSResult();
+          }
         } break;
 
         case nsXULPrototypeNode::eType_PI: {
@@ -697,7 +727,7 @@ nsresult PrototypeDocumentContentSink::LoadScript(
 
   bool isChromeDoc = IsChromeURI(mDocumentURI);
 
-  if (isChromeDoc && aScriptProto->HasScriptObject()) {
+  if (isChromeDoc && aScriptProto->HasStencil()) {
     rv = ExecuteScript(aScriptProto);
 
     // Ignore return value from execution, and don't block
@@ -711,15 +741,15 @@ nsresult PrototypeDocumentContentSink::LoadScript(
   bool useXULCache = nsXULPrototypeCache::GetInstance()->IsEnabled();
 
   if (isChromeDoc && useXULCache) {
-    JSScript* newScriptObject =
-        nsXULPrototypeCache::GetInstance()->GetScript(aScriptProto->mSrcURI);
-    if (newScriptObject) {
+    RefPtr<JS::Stencil> newStencil =
+        nsXULPrototypeCache::GetInstance()->GetStencil(aScriptProto->mSrcURI);
+    if (newStencil) {
       // The script language for a proto must remain constant - we
       // can't just change it for this unexpected language.
-      aScriptProto->Set(newScriptObject);
+      aScriptProto->Set(newStencil);
     }
 
-    if (aScriptProto->HasScriptObject()) {
+    if (aScriptProto->HasStencil()) {
       rv = ExecuteScript(aScriptProto);
 
       // Ignore return value from execution, and don't block
@@ -728,8 +758,8 @@ nsresult PrototypeDocumentContentSink::LoadScript(
     }
   }
 
-  // Release script objects from FastLoad since we decided against using them
-  aScriptProto->UnlinkJSObjects();
+  // Release stencil from FastLoad since we decided against using them
+  aScriptProto->Set(nullptr);
 
   // Set the current script prototype so that OnStreamComplete can report
   // the right file if there are errors in the script.
@@ -813,7 +843,7 @@ PrototypeDocumentContentSink::OnStreamComplete(nsIStreamLoader* aLoader,
     // be writing a new FastLoad file.  If we were reading this script
     // from the FastLoad file, XULContentSinkImpl::OpenScript (over in
     // nsXULContentSink.cpp) would have already deserialized a non-null
-    // script->mScriptObject, causing control flow at the top of LoadScript
+    // script->mStencil, causing control flow at the top of LoadScript
     // not to reach here.
     nsCOMPtr<nsIURI> uri = mCurrentScriptProto->mSrcURI;
 
@@ -839,7 +869,7 @@ PrototypeDocumentContentSink::OnStreamComplete(nsIStreamLoader* aLoader,
       rv = mCurrentScriptProto->Compile(units, unitsLength,
                                         JS::SourceOwnership::TakeOwnership, uri,
                                         1, mDocument, this);
-      if (NS_SUCCEEDED(rv) && !mCurrentScriptProto->HasScriptObject()) {
+      if (NS_SUCCEEDED(rv) && !mCurrentScriptProto->HasStencil()) {
         mOffThreadCompiling = true;
         mDocument->BlockOnload();
         return NS_OK;
@@ -847,16 +877,23 @@ PrototypeDocumentContentSink::OnStreamComplete(nsIStreamLoader* aLoader,
     }
   }
 
-  return OnScriptCompileComplete(mCurrentScriptProto->GetScriptObject(), rv);
+  return OnScriptCompileComplete(mCurrentScriptProto->GetStencil(), rv);
 }
 
 NS_IMETHODIMP
-PrototypeDocumentContentSink::OnScriptCompileComplete(JSScript* aScript,
+PrototypeDocumentContentSink::OnScriptCompileComplete(JS::Stencil* aStencil,
                                                       nsresult aStatus) {
+  // The mCurrentScriptProto may have been cleared out by another
+  // PrototypeDocumentContentSink.
+  if (!mCurrentScriptProto) {
+    return NS_OK;
+  }
+
   // When compiling off thread the script will not have been attached to the
   // script proto yet.
-  if (aScript && !mCurrentScriptProto->HasScriptObject())
-    mCurrentScriptProto->Set(aScript);
+  if (aStencil && !mCurrentScriptProto->HasStencil()) {
+    mCurrentScriptProto->Set(aStencil);
+  }
 
   // Allow load events to be fired once off thread compilation finishes.
   if (mOffThreadCompiling) {
@@ -909,11 +946,9 @@ PrototypeDocumentContentSink::OnScriptCompileComplete(JSScript* aScript,
     // the true crime story.)
     bool useXULCache = nsXULPrototypeCache::GetInstance()->IsEnabled();
 
-    if (useXULCache && IsChromeURI(mDocumentURI) &&
-        scriptProto->HasScriptObject()) {
-      JS::Rooted<JSScript*> script(RootingCx(), scriptProto->GetScriptObject());
-      nsXULPrototypeCache::GetInstance()->PutScript(scriptProto->mSrcURI,
-                                                    script);
+    if (useXULCache && IsChromeURI(mDocumentURI) && scriptProto->HasStencil()) {
+      nsXULPrototypeCache::GetInstance()->PutStencil(scriptProto->mSrcURI,
+                                                     scriptProto->GetStencil());
     }
     // ignore any evaluation errors
   }
@@ -936,7 +971,7 @@ PrototypeDocumentContentSink::OnScriptCompileComplete(JSScript* aScript,
     *docp = doc->mNextSrcLoadWaiter;
     doc->mNextSrcLoadWaiter = nullptr;
 
-    if (aStatus == NS_BINDING_ABORTED && !scriptProto->HasScriptObject()) {
+    if (aStatus == NS_BINDING_ABORTED && !scriptProto->HasStencil()) {
       // If the previous doc load was aborted, we want to try loading
       // again for the next doc. Otherwise, one abort would lead to all
       // subsequent waiting docs to abort as well.
@@ -947,7 +982,7 @@ PrototypeDocumentContentSink::OnScriptCompileComplete(JSScript* aScript,
     }
 
     // Execute only if we loaded and compiled successfully, then resume
-    if (NS_SUCCEEDED(aStatus) && scriptProto->HasScriptObject()) {
+    if (NS_SUCCEEDED(aStatus) && scriptProto->HasStencil()) {
       doc->ExecuteScript(scriptProto);
     }
     doc->ResumeWalk();
@@ -976,22 +1011,22 @@ nsresult PrototypeDocumentContentSink::ExecuteScript(
   // Execute the precompiled script with the given version
   nsAutoMicroTask mt;
 
-  // We're about to run script via JS::CloneAndExecuteScript, so we need an
+  // We're about to run script via JS_ExecuteScript, so we need an
   // AutoEntryScript. This is Gecko specific and not in any spec.
   AutoEntryScript aes(scriptGlobalObject, "precompiled XUL <script> element");
   JSContext* cx = aes.cx();
 
-  JS::Rooted<JSScript*> scriptObject(cx, aScript->GetScriptObject());
-  NS_ENSURE_TRUE(scriptObject, NS_ERROR_UNEXPECTED);
+  JS::Rooted<JSScript*> scriptObject(cx);
+  rv = aScript->InstantiateScript(cx, &scriptObject);
+  NS_ENSURE_SUCCESS(rv, rv);
 
   JS::Rooted<JSObject*> global(cx, JS::CurrentGlobalOrNull(cx));
   NS_ENSURE_TRUE(xpc::Scriptability::Get(global).Allowed(), NS_OK);
 
-  // The script is in the compilation scope. Clone it into the target scope
-  // and execute it. On failure, ~AutoScriptEntry will handle exceptions, so
+  // On failure, ~AutoScriptEntry will handle exceptions, so
   // there is no need to manually check the return value.
   JS::RootedValue rval(cx);
-  JS::CloneAndExecuteScript(cx, scriptObject, &rval);
+  Unused << JS_ExecuteScript(cx, scriptObject, &rval);
 
   return NS_OK;
 }
@@ -1071,7 +1106,7 @@ nsresult PrototypeDocumentContentSink::CreateElementFromPrototype(
 
   // FIXME(bug 1627474): Is this right if this is inside an <html:template>?
   if (result->HasAttr(kNameSpaceID_None, nsGkAtoms::datal10nid)) {
-    mDocument->mL10nProtoElements.Put(result, RefPtr{aPrototype});
+    mDocument->mL10nProtoElements.InsertOrUpdate(result, RefPtr{aPrototype});
     result->SetElementCreatedFromPrototypeAndHasUnmodifiedL10n();
   }
   result.forget(aResult);

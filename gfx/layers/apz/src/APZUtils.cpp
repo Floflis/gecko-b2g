@@ -7,6 +7,7 @@
 #include "mozilla/layers/APZUtils.h"
 
 #include "mozilla/StaticPrefs_apz.h"
+#include "mozilla/StaticPrefs_layers.h"
 
 namespace mozilla {
 namespace layers {
@@ -83,9 +84,9 @@ bool AboutToCheckerboard(const FrameMetrics& aPaintedMetrics,
   CSSRect visible =
       CSSRect(aCompositorMetrics.GetVisualScrollOffset(),
               aCompositorMetrics.CalculateBoundedCompositedSizeInCssPixels());
-  visible.Inflate(LayerSize(StaticPrefs::apz_danger_zone_x(),
-                            StaticPrefs::apz_danger_zone_y()) /
-                  aCompositorMetrics.LayersPixelsPerCSSPixel());
+  visible.Inflate(ScreenSize(StaticPrefs::apz_danger_zone_x(),
+                             StaticPrefs::apz_danger_zone_y()) /
+                  aCompositorMetrics.DisplayportPixelsPerCSSPixel());
 
   // Clamp both rects to the scrollable rect, because having either of those
   // exceed the scrollable rect doesn't make sense, and could lead to false
@@ -94,6 +95,24 @@ bool AboutToCheckerboard(const FrameMetrics& aPaintedMetrics,
   visible = visible.Intersect(aPaintedMetrics.GetScrollableRect());
 
   return !painted.Contains(visible);
+}
+
+SideBits GetOverscrollSideBits(const ParentLayerPoint& aOverscrollAmount) {
+  SideBits sides = SideBits::eNone;
+
+  if (aOverscrollAmount.x < 0) {
+    sides |= SideBits::eLeft;
+  } else if (aOverscrollAmount.x > 0) {
+    sides |= SideBits::eRight;
+  }
+
+  if (aOverscrollAmount.y < 0) {
+    sides |= SideBits::eTop;
+  } else if (aOverscrollAmount.y > 0) {
+    sides |= SideBits::eBottom;
+  }
+
+  return sides;
 }
 
 }  // namespace apz

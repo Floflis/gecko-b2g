@@ -964,6 +964,13 @@ enum BluetoothHandsfreeWbsConfig {
   HFP_WBS_YES   /* mSBC */
 };
 
+// HF Indicators HFP 1.7
+enum BluetoothHandsfreeHfIndType {
+  HFP_HF_IND_NONE,
+  HFP_HF_IND_ENHANCED_DRIVER_SAFETY,
+  HFP_HF_IND_BATTERY_LEVEL_STATUS,
+};
+
 class BluetoothSignal;
 
 class BluetoothSignalObserver : public mozilla::Observer<BluetoothSignal> {
@@ -1013,6 +1020,7 @@ enum ControlPlayStatus {
 };
 
 enum { AVRCP_UID_SIZE = 8 };
+enum { AVRCP_FEATURE_BIT_MASK_SIZE = 16 };
 
 enum BluetoothAvrcpMediaAttribute {
   AVRCP_MEDIA_ATTRIBUTE_TITLE = 0x01,
@@ -1045,20 +1053,44 @@ enum BluetoothAvrcpPlayerShuffleValue {
 };
 
 enum BluetoothAvrcpStatus {
-  AVRCP_STATUS_BAD_COMMAND,
-  AVRCP_STATUS_BAD_PARAMETER,
-  AVRCP_STATUS_NOT_FOUND,
-  AVRCP_STATUS_INTERNAL_ERROR,
-  AVRCP_STATUS_SUCCESS
+  AVRCP_STATUS_BAD_COMMAND = 0x00,    // Invalid command
+  AVRCP_STATUS_BAD_PARAMETER = 0x01,  // Invalid parameter
+  AVRCP_STATUS_NOT_FOUND = 0x02,  // Specified parameter is wrong or not found
+  AVRCP_STATUS_INTERNAL_ERROR = 0x03,  // Internal Error
+  AVRCP_STATUS_SUCCESS = 0x04,         // Operation Success
+  AVRCP_STATUS_UID_CHANGED = 0x05,     // UIDs changed
+  AVRCP_STATUS_RESERVED = 0x06,        // Reserved
+  AVRCP_STATUS_INV_DIRN = 0x07,        // Invalid direction
+  AVRCP_STATUS_INV_DIRECTORY = 0x08,   // Invalid directory
+  AVRCP_STATUS_INV_ITEM = 0x09,        // Invalid Ite
+
+  AVRCP_STATUS_INV_SCOPE = 0x0a,       // Invalid scope
+  AVRCP_STATUS_INV_RANGE = 0x0b,       // Invalid range
+  AVRCP_STATUS_DIRECTORY = 0x0c,       // UID is a directory
+  AVRCP_STATUS_MEDIA_IN_USE = 0x0d,    // Media in use
+  AVRCP_STATUS_PLAY_LIST_FULL = 0x0e,  // Playing list full
+  AVRCP_STATUS_SRCH_NOT_SPRTD = 0x0f,  // Search not supported
+  AVRCP_STATUS_SRCH_IN_PROG = 0x10,    // Search in progress
+  AVRCP_STATUS_INV_PLAYER = 0x11,      // Invalid player
+  AVRCP_STATUS_PLAY_NOT_BROW = 0x12,   // Player not browsable
+  AVRCP_STATUS_PLAY_NOT_ADDR = 0x13,   // Player not addressed
+  AVRCP_STATUS_INV_RESULTS = 0x14,     // Invalid results
+  AVRCP_STATUS_NO_AVBL_PLAY = 0x15,    // No available players
+  AVRCP_STATUS_ADDR_PLAY_CHGD = 0x16,  // Addressed player changed
 };
 
 enum BluetoothAvrcpEvent {
-  AVRCP_EVENT_PLAY_STATUS_CHANGED,
-  AVRCP_EVENT_TRACK_CHANGE,
-  AVRCP_EVENT_TRACK_REACHED_END,
-  AVRCP_EVENT_TRACK_REACHED_START,
-  AVRCP_EVENT_PLAY_POS_CHANGED,
-  AVRCP_EVENT_APP_SETTINGS_CHANGED
+  AVRCP_EVENT_PLAY_STATUS_CHANGED = 0x01,
+  AVRCP_EVENT_TRACK_CHANGE = 0x02,
+  AVRCP_EVENT_TRACK_REACHED_END = 0x03,
+  AVRCP_EVENT_TRACK_REACHED_START = 0x04,
+  AVRCP_EVENT_PLAY_POS_CHANGED = 0x05,
+  AVRCP_EVENT_APP_SETTINGS_CHANGED = 0x08,
+  AVRCP_EVENT_NOW_PLAYING_CONTENT_CHANGED = 0x09,
+  AVRCP_EVENT_AVAL_PLAYER_CHANGE = 0x0a,
+  AVRCP_EVENT_ADDR_PLAYER_CHANGE = 0x0b,
+  AVRCP_EVENT_UIDS_CHANGED = 0x0c,
+  AVRCP_EVENT_VOL_CHANGED = 0x0d,
 };
 
 enum BluetoothAvrcpNotification { AVRCP_NTF_INTERIM, AVRCP_NTF_CHANGED };
@@ -1068,6 +1100,19 @@ enum BluetoothAvrcpRemoteFeatureBits {
   AVRCP_REMOTE_FEATURE_METADATA = 0x01,
   AVRCP_REMOTE_FEATURE_ABSOLUTE_VOLUME = 0x02,
   AVRCP_REMOTE_FEATURE_BROWSE = 0x04
+};
+
+enum BluetoothAvrcpItemType {
+  AVRCP_ITEM_PLAYER = 0x01,
+  AVRCP_ITEM_FOLDER = 0x02,
+  AVRCP_ITEM_MEDIA = 0x03,
+};
+
+enum BluetoothAvrcpFolderScope : uint8_t {
+  AVRCP_SCOPE_PLAYER_LIST = 0x00,  // Media Player List
+  AVRCP_SCOPE_FILE_SYSTEM = 0x01,  // Virtual File System
+  AVRCP_SCOPE_SEARCH = 0x02,       // Search
+  AVRCP_SCOPE_NOW_PLAYING = 0x03,  // Now Playing
 };
 
 struct BluetoothAvrcpElementAttribute {
@@ -1082,12 +1127,24 @@ struct BluetoothAvrcpNotificationParam {
   uint8_t mNumAttr;
   uint8_t mIds[256];
   uint8_t mValues[256];
+  uint16_t mPlayerId;
+  uint16_t mUidCounter;
 };
 
 struct BluetoothAvrcpPlayerSettings {
   uint8_t mNumAttr;
   uint8_t mIds[256];
   uint8_t mValues[256];
+};
+
+struct BluetoothAvrcpItemPlayer {
+  uint16_t mPlayerId;
+  uint8_t mMajorType;
+  uint32_t mSubType;
+  uint8_t mPlayStatus;
+  uint8_t mFeatures[AVRCP_FEATURE_BIT_MASK_SIZE] = {0};
+  uint16_t mCharsetId;
+  nsString mName;
 };
 
 enum BluetoothAttRole { ATT_SERVER_ROLE, ATT_CLIENT_ROLE };
@@ -1195,15 +1252,6 @@ struct BluetoothGattId {
 
   bool operator==(const BluetoothGattId& aOther) const {
     return mUuid == aOther.mUuid && mInstanceId == aOther.mInstanceId;
-  }
-};
-
-struct BluetoothGattServiceId {
-  BluetoothGattId mId;
-  uint8_t mIsPrimary;
-
-  bool operator==(const BluetoothGattServiceId& aOther) const {
-    return mId == aOther.mId && mIsPrimary == aOther.mIsPrimary;
   }
 };
 

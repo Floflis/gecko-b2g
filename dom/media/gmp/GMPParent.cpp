@@ -12,6 +12,7 @@
 #include "GMPTimerParent.h"
 #include "MediaResult.h"
 #include "mozIGeckoMediaPluginService.h"
+#include "mozilla/dom/KeySystemNames.h"
 #include "mozilla/dom/WidevineCDMManifestBinding.h"
 #include "mozilla/ipc/CrashReporterHost.h"
 #include "mozilla/ipc/Endpoint.h"
@@ -31,7 +32,6 @@
 #include "nsPrintfCString.h"
 #include "nsThreadUtils.h"
 #include "runnable_utils.h"
-#include "VideoUtils.h"
 #ifdef XP_WIN
 #  include "WMFDecoderModule.h"
 #endif
@@ -280,7 +280,7 @@ nsresult GMPParent::LoadProcess() {
     mChildPid = base::GetProcId(mProcess->GetChildProcessHandle());
     GMP_PARENT_LOG_DEBUG("%s: Launched new child process", __FUNCTION__);
 
-    bool opened = Open(mProcess->TakeChannel(),
+    bool opened = Open(mProcess->TakeInitialPort(),
                        base::GetProcId(mProcess->GetChildProcessHandle()));
     if (!opened) {
       GMP_PARENT_LOG_DEBUG("%s: Failed to open channel to new child process",
@@ -539,7 +539,7 @@ bool GMPCapability::Supports(const nsTArray<GMPCapability>& aCapabilities,
         // file, but uses Windows Media Foundation to decode. That's not present
         // on Windows XP, and on some Vista, Windows N, and KN variants without
         // certain services packs.
-        if (tag.EqualsLiteral(EME_KEY_SYSTEM_CLEARKEY)) {
+        if (tag.EqualsLiteral(kClearKeyKeySystemName)) {
           if (capabilities.mAPIName.EqualsLiteral(GMP_API_VIDEO_DECODER)) {
             if (!WMFDecoderModule::HasH264()) {
               continue;
@@ -842,12 +842,14 @@ RefPtr<GenericPromise> GMPParent::ParseChromiumManifest(
   }
 #endif
 
-  nsCString kEMEKeySystem;
+  GMPCapability video;
 
   // We hard code a few of the settings because they can't be stored in the
   // widevine manifest without making our API different to widevine's.
   if (mDisplayName.EqualsASCII("clearkey")) {
-    kEMEKeySystem.AssignLiteral(EME_KEY_SYSTEM_CLEARKEY);
+    video.mAPITags.AppendElement(nsCString{kClearKeyKeySystemName});
+    video.mAPITags.AppendElement(
+        nsCString{kClearKeyWithProtectionQueryKeySystemName});
 #if XP_WIN
     mLibs = nsLiteralCString(
         "dxva2.dll, evr.dll, freebl3.dll, mfh264dec.dll, mfplat.dll, "
@@ -856,16 +858,17 @@ RefPtr<GenericPromise> GMPParent::ParseChromiumManifest(
     mLibs = "libfreeblpriv3.so, libsoftokn3.so"_ns;
 #endif
   } else if (mDisplayName.EqualsASCII("WidevineCdm")) {
-    kEMEKeySystem.AssignLiteral(EME_KEY_SYSTEM_WIDEVINE);
+    video.mAPITags.AppendElement(nsCString{kWidevineKeySystemName});
 #if XP_WIN
     // psapi.dll added for GetMappedFileNameW, which could possibly be avoided
     // in future versions, see bug 1383611 for details.
-    mLibs = "dxva2.dll, psapi.dll"_ns;
+    mLibs = "dxva2.dll, ole32.dll, psapi.dll"_ns;
 #endif
   } else if (mDisplayName.EqualsASCII("fake")) {
-    kEMEKeySystem.AssignLiteral("fake");
+    // The fake CDM just exposes a key system with id "fake".
+    video.mAPITags.AppendElement(nsCString{"fake"});
 #if XP_WIN
-    mLibs = "dxva2.dll"_ns;
+    mLibs = "dxva2.dll, ole32.dll"_ns;
 #endif
   } else {
     GMP_PARENT_LOG_DEBUG("%s: Unrecognized key system: %s, failing.",
@@ -873,7 +876,19 @@ RefPtr<GenericPromise> GMPParent::ParseChromiumManifest(
     return GenericPromise::CreateAndReject(NS_ERROR_FAILURE, __func__);
   }
 
-  GMPCapability video;
+#ifdef XP_LINUX
+  // These glibc libraries were merged into libc.so.6 as of glibc
+  // 2.34; they now exist only as stub libraries for compatibility and
+  // newly linked code won't depend on them, so we need to ensure
+  // they're loaded for plugins that may have been linked against a
+  // different version of glibc.  (See also bug 1725828.)
+  if (!mDisplayName.EqualsASCII("clearkey")) {
+    if (!mLibs.IsEmpty()) {
+      mLibs.AppendLiteral(", ");
+    }
+    mLibs.AppendLiteral("libdl.so.2, libpthread.so.0, librt.so.1");
+  }
+#endif
 
   nsCString codecsString = NS_ConvertUTF16toUTF8(m.mX_cdm_codecs);
   nsTArray<nsCString> codecs;
@@ -884,7 +899,7 @@ RefPtr<GenericPromise> GMPParent::ParseChromiumManifest(
   //
   // Google's code to parse manifests can be used as a reference for strings
   // the manifest may contain
-  // https://cs.chromium.org/chromium/src/chrome/common/media/cdm_manifest.cc?l=73&rcl=393e60bfc2299449db7ef374c0ef1c324716e562
+  // https://source.chromium.org/chromium/chromium/src/+/master:components/cdm/common/cdm_manifest.cc;l=74;drc=775880ced8a989191281e93854c7f2201f25068f
   //
   // Gecko's internal strings can be found at
   // https://searchfox.org/mozilla-central/rev/ea63a0888d406fae720cf24f4727d87569a8cab5/dom/media/eme/MediaKeySystemAccess.cpp#149-155
@@ -892,22 +907,23 @@ RefPtr<GenericPromise> GMPParent::ParseChromiumManifest(
     nsCString codec;
     if (chromiumCodec.EqualsASCII("vp8")) {
       codec = "vp8"_ns;
-    } else if (chromiumCodec.EqualsASCII("vp9.0")) {
+    } else if (chromiumCodec.EqualsASCII("vp9.0") ||  // Legacy string.
+               chromiumCodec.EqualsASCII("vp09")) {
       codec = "vp9"_ns;
     } else if (chromiumCodec.EqualsASCII("avc1")) {
       codec = "h264"_ns;
     } else if (chromiumCodec.EqualsASCII("av01")) {
       codec = "av1"_ns;
     } else {
-      GMP_PARENT_LOG_DEBUG("%s: Unrecognized codec: %s, failing.", __FUNCTION__,
+      GMP_PARENT_LOG_DEBUG("%s: Unrecognized codec: %s.", __FUNCTION__,
                            chromiumCodec.get());
-      return GenericPromise::CreateAndReject(NS_ERROR_FAILURE, __func__);
+      MOZ_ASSERT_UNREACHABLE(
+          "Unhandled codec string! Need to add it to the parser.");
+      continue;
     }
 
     video.mAPITags.AppendElement(codec);
   }
-
-  video.mAPITags.AppendElement(kEMEKeySystem);
 
   video.mAPIName = nsLiteralCString(CHROMIUM_CDM_API);
   mAdapter = u"chromium"_ns;

@@ -175,21 +175,21 @@ struct BD_ConstantValue {
 };
 
 struct BD_ValType {
-  uint32_t packed;
+  size_t packed;
 };
 
 // A subset of the wasm SymbolicAddress enum. This is converted to wasm using
 // ToSymbolicAddress in WasmCraneliftCompile.
 
 enum class BD_SymbolicAddress : uint32_t {
-  MemoryGrow = 0,
-  MemorySize,
-  MemoryCopy,
-  MemoryCopyShared,
+  MemoryGrow = 0,   /* MemoryGrowM32 */
+  MemorySize,       /* MemorySizeM32 */
+  MemoryCopy,       /* MemoryCopyM32 */
+  MemoryCopyShared, /* MemoryCopySharedM32 */
   DataDrop,
-  MemoryFill,
-  MemoryFillShared,
-  MemoryInit,
+  MemoryFill,       /* MemoryFillM32 */
+  MemoryFillShared, /* MemoryFillSharedM32 */
+  MemoryInit,       /* MemoryInitM32 */
   TableSize,
   TableGrow,
   TableGet,
@@ -209,9 +209,9 @@ enum class BD_SymbolicAddress : uint32_t {
   TruncF64,
   PreBarrier,
   PostBarrier,
-  WaitI32,
-  WaitI64,
-  Wake,
+  WaitI32, /* WaitI32M32 */
+  WaitI64, /* WaitI64M32 */
+  Wake,    /* WakeM32 */
   Limit
 };
 
@@ -255,6 +255,7 @@ const js::wasm::GlobalDesc* env_global(const CraneliftModuleEnvironment* env,
                                        size_t globalIndex);
 
 bool global_isConstant(const js::wasm::GlobalDesc*);
+bool global_isMutable(const js::wasm::GlobalDesc*);
 bool global_isIndirect(const js::wasm::GlobalDesc*);
 BD_ConstantValue global_constantValue(const js::wasm::GlobalDesc*);
 js::wasm::TypeCode global_type(const js::wasm::GlobalDesc*);

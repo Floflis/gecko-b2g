@@ -7,6 +7,9 @@ const { TargetingContext } = ChromeUtils.import(
 const { TelemetryTestUtils } = ChromeUtils.import(
   "resource://testing-common/TelemetryTestUtils.jsm"
 );
+const { TestUtils } = ChromeUtils.import(
+  "resource://testing-common/TestUtils.jsm"
+);
 
 add_task(async function instance_with_default() {
   let targeting = new TargetingContext();
@@ -242,4 +245,83 @@ add_task(async function test_default_targeting() {
       `[evalWithDefault] result for ${attribute} should not be null`
     );
   }
+});
+
+add_task(async function test_targeting_os() {
+  const targeting = new TargetingContext();
+  await TestUtils.waitForCondition(() =>
+    targeting.eval("ctx.os.isWindows || ctx.os.isMac || ctx.os.isLinux")
+  );
+  let res = await targeting.eval(
+    `(ctx.os.isWindows && ctx.os.windowsVersion && ctx.os.windowsBuildNumber) ||
+     (ctx.os.isMac && ctx.os.macVersion && ctx.os.darwinVersion) ||
+     (ctx.os.isLinux && os.darwinVersion == null)
+    `
+  );
+  Assert.ok(res, `Should detect platform version got: ${res}`);
+});
+
+add_task(async function test_targeting_source_constructor() {
+  Services.telemetry.clearEvents();
+  const targeting = new TargetingContext(
+    {
+      foo: true,
+      get bar() {
+        throw new Error("bar");
+      },
+    },
+    { source: "unit_testing" }
+  );
+
+  let res = await targeting.eval("ctx.foo");
+  Assert.ok(res, "Should eval to true");
+
+  let expectedEvents = [
+    [
+      "messaging_experiments",
+      "targeting",
+      "attribute_error",
+      "ctx.bar",
+      { source: "unit_testing" },
+    ],
+  ];
+  try {
+    await targeting.eval("ctx.bar");
+  } catch (e) {}
+
+  TelemetryTestUtils.assertEvents(expectedEvents);
+  Services.telemetry.clearEvents();
+});
+
+add_task(async function test_targeting_source_override() {
+  Services.telemetry.clearEvents();
+  const targeting = new TargetingContext(
+    {
+      foo: true,
+      get bar() {
+        throw new Error("bar");
+      },
+    },
+    { source: "unit_testing" }
+  );
+
+  let res = await targeting.eval("ctx.foo");
+  Assert.ok(res, "Should eval to true");
+
+  let expectedEvents = [
+    [
+      "messaging_experiments",
+      "targeting",
+      "attribute_error",
+      "bar",
+      { source: "override" },
+    ],
+  ];
+  try {
+    targeting.setTelemetrySource("override");
+    await targeting.evalWithDefault("bar");
+  } catch (e) {}
+
+  TelemetryTestUtils.assertEvents(expectedEvents);
+  Services.telemetry.clearEvents();
 });

@@ -36,6 +36,7 @@ XPIDL_SOURCES += [
     "nsIPKCS11ModuleDB.idl",
     "nsIPKCS11Slot.idl",
     "nsIProtectedAuthThread.idl",
+    "nsIPublicKeyPinningService.idl",
     "nsISecretDecoderRing.idl",
     "nsISecurityUITelemetry.idl",
     "nsISiteSecurityService.idl",
@@ -103,6 +104,7 @@ EXPORTS.ipc += [
 ]
 
 UNIFIED_SOURCES += [
+    "CertStorageMemoryReporting.cpp",
     "CommonSocketControl.cpp",
     "ContentSignatureVerifier.cpp",
     "CryptoTask.cpp",
@@ -244,3 +246,5 @@ if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     CXXFLAGS += [
         "-Wno-unused-parameter",
     ]
+
+REQUIRES_UNIFIED_BUILD = True

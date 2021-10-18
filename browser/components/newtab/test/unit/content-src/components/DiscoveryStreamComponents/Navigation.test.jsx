@@ -17,7 +17,7 @@ describe("<Navigation>", () => {
   let wrapper;
 
   beforeEach(() => {
-    wrapper = mount(<Navigation header={{}} />);
+    wrapper = mount(<Navigation header={{}} locale="en-US" />);
   });
 
   it("should render", () => {
@@ -72,6 +72,22 @@ describe("<Navigation>", () => {
     });
 
     assert.lengthOf(wrapper.find("ul").children(), 2);
+  });
+
+  it("should render 2 extra Topics", () => {
+    wrapper.setProps({
+      newFooterSection: true,
+      links: [
+        { url: "https://foo.com", name: "foo" },
+        { url: "https://bar.com", name: "bar" },
+      ],
+      extraLinks: [
+        { url: "https://foo.com", name: "foo" },
+        { url: "https://bar.com", name: "bar" },
+      ],
+    });
+
+    assert.lengthOf(wrapper.find("ul").children(), 4);
   });
 });
 

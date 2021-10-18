@@ -17,12 +17,14 @@
 #include "nsThreadUtils.h"
 #include "nsEnumeratorUtils.h"
 #include "xpcpublic.h"
+#include "mozilla/AppShutdown.h"
 #include "mozilla/net/NeckoCommon.h"
+#include "mozilla/ProfilerLabels.h"
+#include "mozilla/ProfilerMarkers.h"
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TimeStamp.h"
 #include "nsString.h"
-#include "GeckoProfiler.h"
 
 static const uint32_t kMinTelemetryNotifyObserversLatencyMs = 1;
 
@@ -185,7 +187,8 @@ nsresult nsObserverService::FilterHttpOnTopics(const char* aTopic) {
   if (mozilla::net::IsNeckoChild() && !strncmp(aTopic, "http-on-", 8) &&
       strcmp(aTopic, "http-on-failed-opening-request") &&
       strcmp(aTopic, "http-on-opening-request") &&
-      strcmp(aTopic, "http-on-stop-request")) {
+      strcmp(aTopic, "http-on-stop-request") &&
+      strcmp(aTopic, "http-on-image-cache-response")) {
     nsCOMPtr<nsIConsoleService> console(
         do_GetService(NS_CONSOLESERVICE_CONTRACTID));
     nsCOMPtr<nsIScriptError> error(
@@ -274,6 +277,8 @@ NS_IMETHODIMP nsObserverService::NotifyObservers(nsISupports* aSubject,
   if (NS_WARN_IF(!aTopic)) {
     return NS_ERROR_INVALID_ARG;
   }
+
+  MOZ_ASSERT(AppShutdown::IsNoOrLegalShutdownTopic(aTopic));
 
   mozilla::TimeStamp start = TimeStamp::Now();
 

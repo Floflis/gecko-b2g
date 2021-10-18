@@ -17,7 +17,7 @@
 #include "mozilla/Mutex.h"
 #include "mozilla/dom/Link.h"
 #include "mozilla/dom/PContentChild.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsIMemoryReporter.h"
 #include "nsIObserver.h"
 #include "nsString.h"
@@ -61,7 +61,7 @@ class History final : public BaseHistory,
   NS_IMETHOD SetURITitle(nsIURI*, const nsAString&) final;
 
   // BaseHistory
-  void StartPendingVisitedQueries(const PendingVisitedQueries&) final;
+  void StartPendingVisitedQueries(PendingVisitedQueries&&) final;
 
   History();
 
@@ -196,7 +196,7 @@ class History final : public BaseHistory,
     bool mHidden;
   };
 
-  nsDataHashtable<nsURIHashKey, RecentURIVisit> mRecentlyVisitedURIs;
+  nsTHashMap<nsURIHashKey, RecentURIVisit> mRecentlyVisitedURIs;
 };
 
 }  // namespace places

@@ -14,7 +14,7 @@ use crate::string_cache::{Atom, Namespace, WeakAtom, WeakNamespace};
 use crate::values::{AtomIdent, AtomString};
 use cssparser::{BasicParseError, BasicParseErrorKind, Parser};
 use cssparser::{CowRcStr, SourceLocation, ToCss, Token};
-use selectors::parser::{ParseErrorRecovery, SelectorParseErrorKind};
+use selectors::parser::SelectorParseErrorKind;
 use selectors::SelectorList;
 use std::fmt;
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss as ToCss_};
@@ -102,6 +102,9 @@ impl NonTSPseudoClass {
                     "-moz-full-screen" => Some(NonTSPseudoClass::Fullscreen),
                     "-moz-read-only" => Some(NonTSPseudoClass::ReadOnly),
                     "-moz-read-write" => Some(NonTSPseudoClass::ReadWrite),
+                    "-moz-focusring" => Some(NonTSPseudoClass::FocusVisible),
+                    "-moz-ui-valid" => Some(NonTSPseudoClass::UserValid),
+                    "-moz-ui-invalid" => Some(NonTSPseudoClass::UserInvalid),
                     "-webkit-autofill" => Some(NonTSPseudoClass::Autofill),
                     _ => None,
                 }
@@ -136,11 +139,11 @@ impl NonTSPseudoClass {
     /// Returns whether the pseudo-class is enabled in content sheets.
     #[inline]
     fn is_enabled_in_content(&self) -> bool {
-        if let NonTSPseudoClass::FocusVisible = *self {
-            return static_prefs::pref!("layout.css.focus-visible.enabled");
-        }
         if let NonTSPseudoClass::Autofill = *self {
             return static_prefs::pref!("layout.css.autofill.enabled");
+        }
+        if let NonTSPseudoClass::MozSubmitInvalid = *self {
+            return static_prefs::pref!("layout.css.moz-submit-invalid.enabled");
         }
         !self.has_any_flag(NonTSPseudoClassFlag::PSEUDO_CLASS_ENABLED_IN_UA_SHEETS_AND_CHROME)
     }
@@ -181,12 +184,13 @@ impl NonTSPseudoClass {
     /// revalidation.
     pub fn needs_cache_revalidation(&self) -> bool {
         self.state_flag().is_empty() &&
-            !matches!(*self,
-                      // :dir() depends on state only, but doesn't use state_flag
-                      // because its semantics don't quite match.  Nevertheless, it
-                      // doesn't need cache revalidation, because we already compare
-                      // states for elements and candidates.
-                      NonTSPseudoClass::Dir(_) |
+            !matches!(
+                *self,
+                // :dir() depends on state only, but doesn't use state_flag
+                // because its semantics don't quite match.  Nevertheless, it
+                // doesn't need cache revalidation, because we already compare
+                // states for elements and candidates.
+                NonTSPseudoClass::Dir(_) |
                       // :-moz-is-html only depends on the state of the document and
                       // the namespace of the element; the former is invariant
                       // across all the elements involved and the latter is already
@@ -243,6 +247,10 @@ impl ::selectors::SelectorImpl for SelectorImpl {
 
     type PseudoElement = PseudoElement;
     type NonTSPseudoClass = NonTSPseudoClass;
+
+    fn should_collect_attr_hash(name: &AtomIdent) -> bool {
+        !crate::bloom::is_attr_name_excluded_from_filter(name)
+    }
 }
 
 impl<'a> SelectorParser<'a> {
@@ -300,15 +308,6 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
     #[inline]
     fn parse_is_and_where(&self) -> bool {
         true
-    }
-
-    #[inline]
-    fn is_and_where_error_recovery(&self) -> ParseErrorRecovery {
-        if static_prefs::pref!("layout.css.is-and-where-better-error-recovery.enabled") {
-            ParseErrorRecovery::IgnoreInvalidSelector
-        } else {
-            ParseErrorRecovery::DiscardList
-        }
     }
 
     #[inline]

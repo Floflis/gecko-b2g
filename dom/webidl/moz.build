@@ -71,10 +71,10 @@ with Files("Client*"):
     BUG_COMPONENT = ("Core", "DOM: Service Workers")
 
 with Files("Clipboard.webidl"):
-    BUG_COMPONENT = ("Core", "DOM: UI Events & Focus Handling")
+    BUG_COMPONENT = ("Core", "DOM: Copy & Paste and Drag & Drop")
 
 with Files("ClipboardEvent.webidl"):
-    BUG_COMPONENT = ("Core", "DOM: UI Events & Focus Handling")
+    BUG_COMPONENT = ("Core", "DOM: Copy & Paste and Drag & Drop")
 
 with Files("ConstantSourceNode.webidl"):
     BUG_COMPONENT = ("Core", "Web Audio")
@@ -95,10 +95,10 @@ with Files("Directory.webidl"):
     BUG_COMPONENT = ("Core", "DOM: Device Interfaces")
 
 with Files("DataTransfer*"):
-    BUG_COMPONENT = ("Core", "DOM: Drag & Drop")
+    BUG_COMPONENT = ("Core", "DOM: Copy & Paste and Drag & Drop")
 
 with Files("DragEvent.webidl"):
-    BUG_COMPONENT = ("Core", "DOM: Drag & Drop")
+    BUG_COMPONENT = ("Core", "DOM: Copy & Paste and Drag & Drop")
 
 with Files("DecoderDoctorNotification.webidl"):
     BUG_COMPONENT = ("Core", "Audio/Video: Playback")
@@ -150,9 +150,6 @@ with Files("HTML*"):
 
 with Files("HashChangeEvent.webidl"):
     BUG_COMPONENT = ("Core", "DOM: Navigation")
-
-with Files("HiddenPluginEvent.webidl"):
-    BUG_COMPONENT = ("Core", "Plug-ins")
 
 with Files("IDB*"):
     BUG_COMPONENT = ("Core", "Storage: IndexedDB")
@@ -235,6 +232,9 @@ with Files("MutationEvent.webidl"):
 with Files("NativeOSFileInternals.webidl"):
     BUG_COMPONENT = ("Toolkit", "OS.File")
 
+with Files("NavigationPreloadManager.webidl"):
+    BUG_COMPONENT = ("Core", "DOM: Service Workers")
+
 with Files("Net*"):
     BUG_COMPONENT = ("Core", "Networking")
 
@@ -302,10 +302,13 @@ with Files("SimpleGestureEvent.webidl"):
     BUG_COMPONENT = ("Core", "DOM: UI Events & Focus Handling")
 
 with Files("SocketCommon.webidl"):
-    BUG_COMPONENT = ("Core", "DOM: Device Interfaces")
+    BUG_COMPONENT = ("Core", "DOM: Networking")
 
 with Files("SourceBuffer*"):
     BUG_COMPONENT = ("Core", "Audio/Video")
+
+with Files("Speech*"):
+    BUG_COMPONENT = ("Core", "Web Speech")
 
 with Files("StereoPannerNode.webidl"):
     BUG_COMPONENT = ("Core", "Web Audio")
@@ -320,7 +323,7 @@ with Files("SubtleCrypto.webidl"):
     BUG_COMPONENT = ("Core", "DOM: Security")
 
 with Files("TCP*"):
-    BUG_COMPONENT = ("Core", "DOM: Device Interfaces")
+    BUG_COMPONENT = ("Core", "DOM: Networking")
 
 with Files("TextTrack*"):
     BUG_COMPONENT = ("Core", "Audio/Video")
@@ -329,10 +332,10 @@ with Files("TrackEvent.webidl"):
     BUG_COMPONENT = ("Core", "Audio/Video")
 
 with Files("U2F.webidl"):
-    BUG_COMPONENT = ("Core", "DOM: Device Interfaces")
+    BUG_COMPONENT = ("Core", "DOM: Web Authentication")
 
 with Files("UDP*"):
-    BUG_COMPONENT = ("Core", "DOM: Device Interfaces")
+    BUG_COMPONENT = ("Core", "DOM: Networking")
 
 with Files("UIEvent.webidl"):
     BUG_COMPONENT = ("Core", "DOM: UI Events & Focus Handling")
@@ -362,7 +365,7 @@ with Files("WaveShaperNode.webidl"):
     BUG_COMPONENT = ("Core", "Web Audio")
 
 with Files("WebAuthentication.webidl"):
-    BUG_COMPONENT = ("Core", "DOM: Device Interfaces")
+    BUG_COMPONENT = ("Core", "DOM: Web Authentication")
 
 with Files("WebGL*"):
     BUG_COMPONENT = ("Core", "Canvas: WebGL")
@@ -391,6 +394,9 @@ with Files("WindowOrWorkerGlobalScope.webidl"):
 with Files("Worker*"):
     BUG_COMPONENT = ("Core", "DOM: Workers")
 
+with Files("Extension*"):
+    BUG_COMPONENT = ("WebExtensions", "General")
+
 GENERATED_WEBIDL_FILES = [
     "CSS2Properties.webidl",
 ]
@@ -408,6 +414,7 @@ WEBIDL_FILES = [
     "AbstractRange.webidl",
     "AbstractWorker.webidl",
     "AccessibilityRole.webidl",
+    "ActivityUtils.webidl",
     "AddonManager.webidl",
     "AnalyserNode.webidl",
     "Animatable.webidl",
@@ -494,6 +501,7 @@ WEBIDL_FILES = [
     "CSSImportRule.webidl",
     "CSSKeyframeRule.webidl",
     "CSSKeyframesRule.webidl",
+    "CSSLayerRule.webidl",
     "CSSMediaRule.webidl",
     "CSSMozDocumentRule.webidl",
     "CSSNamespaceRule.webidl",
@@ -501,6 +509,7 @@ WEBIDL_FILES = [
     "CSSPseudoElement.webidl",
     "CSSRule.webidl",
     "CSSRuleList.webidl",
+    "CSSScrollTimelineRule.webidl",
     "CSSStyleDeclaration.webidl",
     "CSSStyleRule.webidl",
     "CSSStyleSheet.webidl",
@@ -548,6 +557,7 @@ WEBIDL_FILES = [
     "EventTarget.webidl",
     "ExtendableEvent.webidl",
     "ExtendableMessageEvent.webidl",
+    "External.webidl",
     "ExternalAPI.webidl",
     "FailedCertSecurityInfo.webidl",
     "FakePluginTagInit.webidl",
@@ -704,6 +714,8 @@ WEBIDL_FILES = [
     "LoadURIOptions.webidl",
     "Localization.webidl",
     "Location.webidl",
+    "Lock.webidl",
+    "LockManager.webidl",
     "MathMLElement.webidl",
     "MediaCapabilities.webidl",
     "MediaDebugInfo.webidl",
@@ -753,6 +765,7 @@ WEBIDL_FILES = [
     "MutationObserver.webidl",
     "NamedNodeMap.webidl",
     "NativeOSFileInternals.webidl",
+    "NavigationPreloadManager.webidl",
     "Navigator.webidl",
     "NetErrorInfo.webidl",
     "NetworkInformation.webidl",
@@ -779,6 +792,7 @@ WEBIDL_FILES = [
     "PaymentResponse.webidl",
     "Performance.webidl",
     "PerformanceEntry.webidl",
+    "PerformanceEventTiming.webidl",
     "PerformanceMark.webidl",
     "PerformanceMeasure.webidl",
     "PerformanceNavigation.webidl",
@@ -797,12 +811,6 @@ WEBIDL_FILES = [
     "PluginArray.webidl",
     "PointerEvent.webidl",
     "PowerSupplyManager.webidl",
-    "Presentation.webidl",
-    "PresentationAvailability.webidl",
-    "PresentationConnection.webidl",
-    "PresentationConnectionList.webidl",
-    "PresentationReceiver.webidl",
-    "PresentationRequest.webidl",
     "ProcessingInstruction.webidl",
     "ProfileTimelineMarker.webidl",
     "Promise.webidl",
@@ -1019,6 +1027,7 @@ WEBIDL_FILES = [
     "WorkerGlobalScope.webidl",
     "WorkerLocation.webidl",
     "WorkerNavigator.webidl",
+    "WorkerTestUtils.webidl",
     "Worklet.webidl",
     "WorkletGlobalScope.webidl",
     "XMLDocument.webidl",
@@ -1039,6 +1048,15 @@ WEBIDL_FILES = [
 if CONFIG["MOZ_AUDIO_CHANNEL_MANAGER"]:
     WEBIDL_FILES += [
         "AudioChannelManager.webidl",
+    ]
+
+if CONFIG["MOZ_DOM_STREAMS"]:
+    WEBIDL_FILES += [
+        "QueuingStrategy.webidl",
+        "ReadableStream.webidl",
+        "ReadableStreamDefaultController.webidl",
+        "ReadableStreamDefaultReader.webidl",
+        "UnderlyingSource.webidl",
     ]
 
 if CONFIG["MOZ_WEBRTC"]:
@@ -1097,6 +1115,18 @@ WEBIDL_FILES += [
     "StyleSheetApplicableStateChangeEvent.webidl",
 ]
 
+# WebExtensions API.
+WEBIDL_FILES += [
+    "ExtensionAlarms.webidl",
+    "ExtensionBrowser.webidl",
+    "ExtensionEventManager.webidl",
+    # ExtensionMockAPI is not a real WebExtensions API, and it is only enabled in tests.
+    "ExtensionMockAPI.webidl",
+    "ExtensionPort.webidl",
+    "ExtensionRuntime.webidl",
+    "ExtensionTest.webidl",
+]
+
 # We only expose our prefable test interfaces in debug builds, just to be on
 # the safe side.
 if CONFIG["MOZ_DEBUG"] and CONFIG["ENABLE_TESTS"]:
@@ -1130,7 +1160,6 @@ GENERATED_EVENTS_WEBIDL_FILES = [
     "CloseEvent.webidl",
     "DeviceLightEvent.webidl",
     "DeviceOrientationEvent.webidl",
-    "DeviceProximityEvent.webidl",
     "DeviceStorageAreaChangedEvent.webidl",
     "DeviceStorageChangeEvent.webidl",
     "DownloadEvent.webidl",
@@ -1143,7 +1172,6 @@ GENERATED_EVENTS_WEBIDL_FILES = [
     "GamepadEvent.webidl",
     "GPUUncapturedErrorEvent.webidl",
     "HashChangeEvent.webidl",
-    "HiddenPluginEvent.webidl",
     "ImageCaptureErrorEvent.webidl",
     "MediaQueryListEvent.webidl",
     "MediaRecorderErrorEvent.webidl",
@@ -1160,8 +1188,6 @@ GENERATED_EVENTS_WEBIDL_FILES = [
     "PopupPositionedEvent.webidl",
     "PositionStateEvent.webidl",
     "PowerSupplyEvent.webidl",
-    "PresentationConnectionAvailableEvent.webidl",
-    "PresentationConnectionCloseEvent.webidl",
     "ProgressEvent.webidl",
     "PromiseRejectionEvent.webidl",
     "ScrollViewChangeEvent.webidl",
@@ -1223,11 +1249,6 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gonk":
         "WifiScanResultEvent.webidl",
         "WifiStationInfoEvent.webidl",
         "WifiStatusChangeEvent.webidl",
-    ]
-
-if CONFIG["MOZ_BUILD_APP"] in ["browser", "comm/mail", "mobile/android", "xulrunner"]:
-    WEBIDL_FILES += [
-        "External.webidl",
     ]
 
 if CONFIG["ACCESSIBILITY"]:
@@ -1325,7 +1346,6 @@ if CONFIG["MOZ_B2G_RIL"]:
         "TelephonyCallCapabilities.webidl",
         "TelephonyCallGroup.webidl",
         "TelephonyCallId.webidl",
-        "USSDSession.webidl",
         "Voicemail.webidl",
         "VoicemailStatus.webidl",
     ]
@@ -1351,7 +1371,6 @@ if CONFIG["MOZ_B2G_RIL"]:
         "SuppServiceNotificationEvent.webidl",
         "TelephonyCoverageLosingEvent.webidl",
         "TtyModeReceivedEvent.webidl",
-        "USSDReceivedEvent.webidl",
         "VoicemailEvent.webidl",
     ]
 

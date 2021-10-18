@@ -73,12 +73,14 @@ pref_groups = [
     "privacy",
     "prompts",
     "security",
+    "signon",
     "slider",
     "storage",
     "svg",
     "telemetry",
     "test",
     "threads",
+    "timer",
     "toolkit",
     "ui",
     "urlclassifier",
@@ -170,3 +172,5 @@ else:
 
 if CONFIG["MOZ_BACKGROUNDTASKS"]:
     DEFINES["MOZ_BACKGROUNDTASKS"] = True
+
+REQUIRES_UNIFIED_BUILD = True

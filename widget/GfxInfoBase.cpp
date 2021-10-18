@@ -12,7 +12,8 @@
 #include <mutex>  // std::call_once
 
 #include "GfxDriverInfo.h"
-#include "js/Array.h"  // JS::GetArrayLength, JS::NewArrayObject
+#include "js/Array.h"               // JS::GetArrayLength, JS::NewArrayObject
+#include "js/PropertyAndElement.h"  // JS_SetElement, JS_SetProperty
 #include "nsCOMPtr.h"
 #include "nsCOMArray.h"
 #include "nsString.h"
@@ -33,7 +34,6 @@
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/gfx/gfxVars.h"
-#include "mozilla/layers/PaintThread.h"
 
 #include "gfxPlatform.h"
 #include "gfxConfig.h"
@@ -190,9 +190,6 @@ static const char* GetPrefNameForFeature(int32_t aFeature) {
     case nsIGfxInfo::FEATURE_WEBGL2:
       name = BLOCKLIST_PREF_BRANCH "webgl2";
       break;
-    case nsIGfxInfo::FEATURE_ADVANCED_LAYERS:
-      name = BLOCKLIST_PREF_BRANCH "layers.advanced";
-      break;
     case nsIGfxInfo::FEATURE_D3D11_KEYED_MUTEX:
       name = BLOCKLIST_PREF_BRANCH "d3d11.keyed.mutex";
       break;
@@ -228,8 +225,17 @@ static const char* GetPrefNameForFeature(int32_t aFeature) {
     case nsIGfxInfo::FEATURE_THREADSAFE_GL:
       name = BLOCKLIST_PREF_BRANCH "gl.threadsafe";
       break;
-    case nsIGfxInfo::FEATURE_WEBRENDER_SOFTWARE:
-      name = BLOCKLIST_PREF_BRANCH "webrender.software";
+    case nsIGfxInfo::FEATURE_WEBRENDER_OPTIMIZED_SHADERS:
+      name = BLOCKLIST_PREF_BRANCH "webrender.optimized-shaders";
+      break;
+    case nsIGfxInfo::FEATURE_X11_EGL:
+      name = BLOCKLIST_PREF_BRANCH "x11.egl";
+      break;
+    case nsIGfxInfo::FEATURE_DMABUF:
+      name = BLOCKLIST_PREF_BRANCH "dmabuf";
+      break;
+    case nsIGfxInfo::FEATURE_WEBRENDER_SHADER_CACHE:
+      name = BLOCKLIST_PREF_BRANCH "webrender.program-binary-disk";
       break;
     default:
       MOZ_ASSERT_UNREACHABLE("Unexpected nsIGfxInfo feature?!");
@@ -306,44 +312,63 @@ static void RemovePrefForDriverVersion() {
 static OperatingSystem BlocklistOSToOperatingSystem(const nsAString& os) {
   if (os.EqualsLiteral("WINNT 6.1")) {
     return OperatingSystem::Windows7;
-  } else if (os.EqualsLiteral("WINNT 6.2")) {
+  }
+  if (os.EqualsLiteral("WINNT 6.2")) {
     return OperatingSystem::Windows8;
-  } else if (os.EqualsLiteral("WINNT 6.3")) {
+  }
+  if (os.EqualsLiteral("WINNT 6.3")) {
     return OperatingSystem::Windows8_1;
-  } else if (os.EqualsLiteral("WINNT 10.0")) {
+  }
+  if (os.EqualsLiteral("WINNT 10.0")) {
     return OperatingSystem::Windows10;
-  } else if (os.EqualsLiteral("Linux")) {
+  }
+  if (os.EqualsLiteral("Linux")) {
     return OperatingSystem::Linux;
-  } else if (os.EqualsLiteral("Darwin 9")) {
+  }
+  if (os.EqualsLiteral("Darwin 9")) {
     return OperatingSystem::OSX10_5;
-  } else if (os.EqualsLiteral("Darwin 10")) {
+  }
+  if (os.EqualsLiteral("Darwin 10")) {
     return OperatingSystem::OSX10_6;
-  } else if (os.EqualsLiteral("Darwin 11")) {
+  }
+  if (os.EqualsLiteral("Darwin 11")) {
     return OperatingSystem::OSX10_7;
-  } else if (os.EqualsLiteral("Darwin 12")) {
+  }
+  if (os.EqualsLiteral("Darwin 12")) {
     return OperatingSystem::OSX10_8;
-  } else if (os.EqualsLiteral("Darwin 13")) {
+  }
+  if (os.EqualsLiteral("Darwin 13")) {
     return OperatingSystem::OSX10_9;
-  } else if (os.EqualsLiteral("Darwin 14")) {
+  }
+  if (os.EqualsLiteral("Darwin 14")) {
     return OperatingSystem::OSX10_10;
-  } else if (os.EqualsLiteral("Darwin 15")) {
+  }
+  if (os.EqualsLiteral("Darwin 15")) {
     return OperatingSystem::OSX10_11;
-  } else if (os.EqualsLiteral("Darwin 16")) {
+  }
+  if (os.EqualsLiteral("Darwin 16")) {
     return OperatingSystem::OSX10_12;
-  } else if (os.EqualsLiteral("Darwin 17")) {
+  }
+  if (os.EqualsLiteral("Darwin 17")) {
     return OperatingSystem::OSX10_13;
-  } else if (os.EqualsLiteral("Darwin 18")) {
+  }
+  if (os.EqualsLiteral("Darwin 18")) {
     return OperatingSystem::OSX10_14;
-  } else if (os.EqualsLiteral("Darwin 19")) {
+  }
+  if (os.EqualsLiteral("Darwin 19")) {
     return OperatingSystem::OSX10_15;
-  } else if (os.EqualsLiteral("Darwin 20")) {
+  }
+  if (os.EqualsLiteral("Darwin 20")) {
     return OperatingSystem::OSX11_0;
-  } else if (os.EqualsLiteral("Android")) {
+  }
+  if (os.EqualsLiteral("Android")) {
     return OperatingSystem::Android;
     // For historical reasons, "All" in blocklist means "All Windows"
-  } else if (os.EqualsLiteral("All")) {
+  }
+  if (os.EqualsLiteral("All")) {
     return OperatingSystem::Windows;
-  } else if (os.EqualsLiteral("Darwin")) {
+  }
+  if (os.EqualsLiteral("Darwin")) {
     return OperatingSystem::OSX;
   }
 
@@ -369,66 +394,95 @@ static GfxDeviceFamily* BlocklistDevicesToDeviceFamily(
 
 static int32_t BlocklistFeatureToGfxFeature(const nsAString& aFeature) {
   MOZ_ASSERT(!aFeature.IsEmpty());
-  if (aFeature.EqualsLiteral("DIRECT2D"))
+  if (aFeature.EqualsLiteral("DIRECT2D")) {
     return nsIGfxInfo::FEATURE_DIRECT2D;
-  else if (aFeature.EqualsLiteral("DIRECT3D_9_LAYERS"))
+  }
+  if (aFeature.EqualsLiteral("DIRECT3D_9_LAYERS")) {
     return nsIGfxInfo::FEATURE_DIRECT3D_9_LAYERS;
-  else if (aFeature.EqualsLiteral("DIRECT3D_10_LAYERS"))
+  }
+  if (aFeature.EqualsLiteral("DIRECT3D_10_LAYERS")) {
     return nsIGfxInfo::FEATURE_DIRECT3D_10_LAYERS;
-  else if (aFeature.EqualsLiteral("DIRECT3D_10_1_LAYERS"))
+  }
+  if (aFeature.EqualsLiteral("DIRECT3D_10_1_LAYERS")) {
     return nsIGfxInfo::FEATURE_DIRECT3D_10_1_LAYERS;
-  else if (aFeature.EqualsLiteral("DIRECT3D_11_LAYERS"))
+  }
+  if (aFeature.EqualsLiteral("DIRECT3D_11_LAYERS")) {
     return nsIGfxInfo::FEATURE_DIRECT3D_11_LAYERS;
-  else if (aFeature.EqualsLiteral("DIRECT3D_11_ANGLE"))
+  }
+  if (aFeature.EqualsLiteral("DIRECT3D_11_ANGLE")) {
     return nsIGfxInfo::FEATURE_DIRECT3D_11_ANGLE;
-  else if (aFeature.EqualsLiteral("HARDWARE_VIDEO_DECODING"))
+  }
+  if (aFeature.EqualsLiteral("HARDWARE_VIDEO_DECODING")) {
     return nsIGfxInfo::FEATURE_HARDWARE_VIDEO_DECODING;
-  else if (aFeature.EqualsLiteral("OPENGL_LAYERS"))
+  }
+  if (aFeature.EqualsLiteral("OPENGL_LAYERS")) {
     return nsIGfxInfo::FEATURE_OPENGL_LAYERS;
-  else if (aFeature.EqualsLiteral("WEBGL_OPENGL"))
+  }
+  if (aFeature.EqualsLiteral("WEBGL_OPENGL")) {
     return nsIGfxInfo::FEATURE_WEBGL_OPENGL;
-  else if (aFeature.EqualsLiteral("WEBGL_ANGLE"))
+  }
+  if (aFeature.EqualsLiteral("WEBGL_ANGLE")) {
     return nsIGfxInfo::FEATURE_WEBGL_ANGLE;
-  else if (aFeature.EqualsLiteral("WEBGL_MSAA"))
+  }
+  if (aFeature.EqualsLiteral("WEBGL_MSAA")) {
     return nsIGfxInfo::UNUSED_FEATURE_WEBGL_MSAA;
-  else if (aFeature.EqualsLiteral("STAGEFRIGHT"))
+  }
+  if (aFeature.EqualsLiteral("STAGEFRIGHT")) {
     return nsIGfxInfo::FEATURE_STAGEFRIGHT;
-  else if (aFeature.EqualsLiteral("WEBRTC_HW_ACCELERATION_ENCODE"))
+  }
+  if (aFeature.EqualsLiteral("WEBRTC_HW_ACCELERATION_ENCODE")) {
     return nsIGfxInfo::FEATURE_WEBRTC_HW_ACCELERATION_ENCODE;
-  else if (aFeature.EqualsLiteral("WEBRTC_HW_ACCELERATION_DECODE"))
+  }
+  if (aFeature.EqualsLiteral("WEBRTC_HW_ACCELERATION_DECODE")) {
     return nsIGfxInfo::FEATURE_WEBRTC_HW_ACCELERATION_DECODE;
-  else if (aFeature.EqualsLiteral("WEBRTC_HW_ACCELERATION_H264"))
+  }
+  if (aFeature.EqualsLiteral("WEBRTC_HW_ACCELERATION_H264")) {
     return nsIGfxInfo::FEATURE_WEBRTC_HW_ACCELERATION_H264;
-  else if (aFeature.EqualsLiteral("CANVAS2D_ACCELERATION"))
+  }
+  if (aFeature.EqualsLiteral("CANVAS2D_ACCELERATION")) {
     return nsIGfxInfo::FEATURE_CANVAS2D_ACCELERATION;
-  else if (aFeature.EqualsLiteral("DX_INTEROP2"))
+  }
+  if (aFeature.EqualsLiteral("DX_INTEROP2")) {
     return nsIGfxInfo::FEATURE_DX_INTEROP2;
-  else if (aFeature.EqualsLiteral("GPU_PROCESS"))
+  }
+  if (aFeature.EqualsLiteral("GPU_PROCESS")) {
     return nsIGfxInfo::FEATURE_GPU_PROCESS;
-  else if (aFeature.EqualsLiteral("WEBGL2"))
+  }
+  if (aFeature.EqualsLiteral("WEBGL2")) {
     return nsIGfxInfo::FEATURE_WEBGL2;
-  else if (aFeature.EqualsLiteral("ADVANCED_LAYERS"))
-    return nsIGfxInfo::FEATURE_ADVANCED_LAYERS;
-  else if (aFeature.EqualsLiteral("D3D11_KEYED_MUTEX"))
+  }
+  if (aFeature.EqualsLiteral("D3D11_KEYED_MUTEX")) {
     return nsIGfxInfo::FEATURE_D3D11_KEYED_MUTEX;
-  else if (aFeature.EqualsLiteral("WEBRENDER"))
+  }
+  if (aFeature.EqualsLiteral("WEBRENDER")) {
     return nsIGfxInfo::FEATURE_WEBRENDER;
-  else if (aFeature.EqualsLiteral("WEBRENDER_COMPOSITOR"))
+  }
+  if (aFeature.EqualsLiteral("WEBRENDER_COMPOSITOR")) {
     return nsIGfxInfo::FEATURE_WEBRENDER_COMPOSITOR;
-  else if (aFeature.EqualsLiteral("DX_NV12"))
+  }
+  if (aFeature.EqualsLiteral("DX_NV12")) {
     return nsIGfxInfo::FEATURE_DX_NV12;
+  }
   // We do not support FEATURE_VP8_HW_DECODE and FEATURE_VP9_HW_DECODE
   // in downloadable blocklist.
-  else if (aFeature.EqualsLiteral("GL_SWIZZLE"))
+  if (aFeature.EqualsLiteral("GL_SWIZZLE")) {
     return nsIGfxInfo::FEATURE_GL_SWIZZLE;
-  else if (aFeature.EqualsLiteral("WEBRENDER_SCISSORED_CACHE_CLEARS"))
+  }
+  if (aFeature.EqualsLiteral("WEBRENDER_SCISSORED_CACHE_CLEARS")) {
     return nsIGfxInfo::FEATURE_WEBRENDER_SCISSORED_CACHE_CLEARS;
-  else if (aFeature.EqualsLiteral("ALLOW_WEBGL_OUT_OF_PROCESS"))
+  }
+  if (aFeature.EqualsLiteral("ALLOW_WEBGL_OUT_OF_PROCESS")) {
     return nsIGfxInfo::FEATURE_ALLOW_WEBGL_OUT_OF_PROCESS;
-  else if (aFeature.EqualsLiteral("THREADSAFE_GL"))
+  }
+  if (aFeature.EqualsLiteral("THREADSAFE_GL")) {
     return nsIGfxInfo::FEATURE_THREADSAFE_GL;
-  else if (aFeature.EqualsLiteral("WEBRENDER_SOFTWARE"))
-    return nsIGfxInfo::FEATURE_WEBRENDER_SOFTWARE;
+  }
+  if (aFeature.EqualsLiteral("X11_EGL")) {
+    return nsIGfxInfo::FEATURE_X11_EGL;
+  }
+  if (aFeature.EqualsLiteral("DMABUF")) {
+    return nsIGfxInfo::FEATURE_DMABUF;
+  }
 
   // If we don't recognize the feature, it may be new, and something
   // this version doesn't understand.  So, nothing to do.  This is
@@ -440,22 +494,30 @@ static int32_t BlocklistFeatureToGfxFeature(const nsAString& aFeature) {
 
 static int32_t BlocklistFeatureStatusToGfxFeatureStatus(
     const nsAString& aStatus) {
-  if (aStatus.EqualsLiteral("STATUS_OK"))
+  if (aStatus.EqualsLiteral("STATUS_OK")) {
     return nsIGfxInfo::FEATURE_STATUS_OK;
-  else if (aStatus.EqualsLiteral("BLOCKED_DRIVER_VERSION"))
+  }
+  if (aStatus.EqualsLiteral("BLOCKED_DRIVER_VERSION")) {
     return nsIGfxInfo::FEATURE_BLOCKED_DRIVER_VERSION;
-  else if (aStatus.EqualsLiteral("BLOCKED_DEVICE"))
+  }
+  if (aStatus.EqualsLiteral("BLOCKED_DEVICE")) {
     return nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
-  else if (aStatus.EqualsLiteral("DISCOURAGED"))
+  }
+  if (aStatus.EqualsLiteral("DISCOURAGED")) {
     return nsIGfxInfo::FEATURE_DISCOURAGED;
-  else if (aStatus.EqualsLiteral("BLOCKED_OS_VERSION"))
+  }
+  if (aStatus.EqualsLiteral("BLOCKED_OS_VERSION")) {
     return nsIGfxInfo::FEATURE_BLOCKED_OS_VERSION;
-  else if (aStatus.EqualsLiteral("DENIED"))
+  }
+  if (aStatus.EqualsLiteral("DENIED")) {
     return nsIGfxInfo::FEATURE_DENIED;
-  else if (aStatus.EqualsLiteral("ALLOW_QUALIFIED"))
+  }
+  if (aStatus.EqualsLiteral("ALLOW_QUALIFIED")) {
     return nsIGfxInfo::FEATURE_ALLOW_QUALIFIED;
-  else if (aStatus.EqualsLiteral("ALLOW_ALWAYS"))
+  }
+  if (aStatus.EqualsLiteral("ALLOW_ALWAYS")) {
     return nsIGfxInfo::FEATURE_ALLOW_ALWAYS;
+  }
 
   // Do not allow it to set STATUS_UNKNOWN.  Also, we are not
   // expecting the "mismatch" status showing up here.
@@ -465,28 +527,39 @@ static int32_t BlocklistFeatureStatusToGfxFeatureStatus(
 
 static VersionComparisonOp BlocklistComparatorToComparisonOp(
     const nsAString& op) {
-  if (op.EqualsLiteral("LESS_THAN"))
+  if (op.EqualsLiteral("LESS_THAN")) {
     return DRIVER_LESS_THAN;
-  else if (op.EqualsLiteral("BUILD_ID_LESS_THAN"))
+  }
+  if (op.EqualsLiteral("BUILD_ID_LESS_THAN")) {
     return DRIVER_BUILD_ID_LESS_THAN;
-  else if (op.EqualsLiteral("LESS_THAN_OR_EQUAL"))
+  }
+  if (op.EqualsLiteral("LESS_THAN_OR_EQUAL")) {
     return DRIVER_LESS_THAN_OR_EQUAL;
-  else if (op.EqualsLiteral("BUILD_ID_LESS_THAN_OR_EQUAL"))
+  }
+  if (op.EqualsLiteral("BUILD_ID_LESS_THAN_OR_EQUAL")) {
     return DRIVER_BUILD_ID_LESS_THAN_OR_EQUAL;
-  else if (op.EqualsLiteral("GREATER_THAN"))
+  }
+  if (op.EqualsLiteral("GREATER_THAN")) {
     return DRIVER_GREATER_THAN;
-  else if (op.EqualsLiteral("GREATER_THAN_OR_EQUAL"))
+  }
+  if (op.EqualsLiteral("GREATER_THAN_OR_EQUAL")) {
     return DRIVER_GREATER_THAN_OR_EQUAL;
-  else if (op.EqualsLiteral("EQUAL"))
+  }
+  if (op.EqualsLiteral("EQUAL")) {
     return DRIVER_EQUAL;
-  else if (op.EqualsLiteral("NOT_EQUAL"))
+  }
+  if (op.EqualsLiteral("NOT_EQUAL")) {
     return DRIVER_NOT_EQUAL;
-  else if (op.EqualsLiteral("BETWEEN_EXCLUSIVE"))
+  }
+  if (op.EqualsLiteral("BETWEEN_EXCLUSIVE")) {
     return DRIVER_BETWEEN_EXCLUSIVE;
-  else if (op.EqualsLiteral("BETWEEN_INCLUSIVE"))
+  }
+  if (op.EqualsLiteral("BETWEEN_INCLUSIVE")) {
     return DRIVER_BETWEEN_INCLUSIVE;
-  else if (op.EqualsLiteral("BETWEEN_INCLUSIVE_START"))
+  }
+  if (op.EqualsLiteral("BETWEEN_INCLUSIVE_START")) {
     return DRIVER_BETWEEN_INCLUSIVE_START;
+  }
 
   return DRIVER_COMPARISON_IGNORED;
 }
@@ -690,7 +763,9 @@ GfxInfoBase::GetFeatureStatus(int32_t aFeature, nsACString& aFailureId,
     *aStatus = FEATURE_BLOCKED_DEVICE;
     aFailureId = "FEATURE_FAILURE_BLOCK_ALL";
     return NS_OK;
-  } else if (blocklistAll < 0) {
+  }
+
+  if (blocklistAll < 0) {
     gfxCriticalErrorOnce(gfxCriticalError::DefaultOptions(false))
         << "Ignoring any feature blocklisting.";
     *aStatus = FEATURE_STATUS_OK;
@@ -901,7 +976,7 @@ int32_t GfxInfoBase::FindBlocklistedDeviceInList(
     return 0;
   }
 
-#if defined(XP_WIN) || defined(ANDROID) || defined(MOZ_X11)
+#if defined(XP_WIN) || defined(ANDROID) || defined(MOZ_WIDGET_GTK)
   uint64_t driverVersion[2] = {0, 0};
   if (!adapterInfoFailed[0]) {
     ParseDriverVersion(adapterDriverVersionString[0], &driverVersion[0]);
@@ -998,7 +1073,7 @@ int32_t GfxInfoBase::FindBlocklistedDeviceInList(
       continue;
     }
 
-#if defined(XP_WIN) || defined(ANDROID) || defined(MOZ_X11)
+#if defined(XP_WIN) || defined(ANDROID) || defined(MOZ_WIDGET_GTK)
     switch (info[i].mComparisonOp) {
       case DRIVER_LESS_THAN:
         match = driverVersion[infoIndex] < info[i].mDriverVersion;
@@ -1051,8 +1126,7 @@ int32_t GfxInfoBase::FindBlocklistedDeviceInList(
 #endif
 
     if (match || info[i].mDriverVersion == GfxDriverInfo::allDriverVersions) {
-      if ((info[i].mFeature == GfxDriverInfo::allFeatures &&
-           aFeature != nsIGfxInfo::FEATURE_WEBRENDER_SOFTWARE) ||
+      if (info[i].mFeature == GfxDriverInfo::allFeatures ||
           info[i].mFeature == aFeature) {
         status = info[i].mFeatureStatus;
         if (!info[i].mRuleId.IsEmpty()) {
@@ -1150,8 +1224,7 @@ bool GfxInfoBase::DoesDriverVendorMatch(const nsAString& aBlocklistVendor,
 }
 
 bool GfxInfoBase::IsFeatureAllowlisted(int32_t aFeature) const {
-  return aFeature == nsIGfxInfo::FEATURE_WEBRENDER ||
-         aFeature == nsIGfxInfo::FEATURE_WEBRENDER_SOFTWARE;
+  return aFeature == nsIGfxInfo::FEATURE_WEBRENDER;
 }
 
 nsresult GfxInfoBase::GetFeatureStatusImpl(
@@ -1281,16 +1354,16 @@ void GfxInfoBase::EvaluateDownloadedBlocklist(
                         nsIGfxInfo::FEATURE_DX_INTEROP2,
                         nsIGfxInfo::FEATURE_GPU_PROCESS,
                         nsIGfxInfo::FEATURE_WEBGL2,
-                        nsIGfxInfo::FEATURE_ADVANCED_LAYERS,
                         nsIGfxInfo::FEATURE_D3D11_KEYED_MUTEX,
                         nsIGfxInfo::FEATURE_WEBRENDER,
                         nsIGfxInfo::FEATURE_WEBRENDER_COMPOSITOR,
-                        nsIGfxInfo::FEATURE_WEBRENDER_SOFTWARE,
                         nsIGfxInfo::FEATURE_DX_NV12,
                         nsIGfxInfo::FEATURE_DX_P010,
                         nsIGfxInfo::FEATURE_DX_P016,
                         nsIGfxInfo::FEATURE_GL_SWIZZLE,
                         nsIGfxInfo::FEATURE_ALLOW_WEBGL_OUT_OF_PROCESS,
+                        nsIGfxInfo::FEATURE_X11_EGL,
+                        nsIGfxInfo::FEATURE_DMABUF,
                         0};
 
   // For every feature we know about, we evaluate whether this blocklist has a
@@ -1472,6 +1545,9 @@ GfxInfoBase::GetMonitors(JSContext* aCx, JS::MutableHandleValue aResult) {
   aResult.setObject(*array);
   return NS_OK;
 }
+
+NS_IMETHODIMP
+GfxInfoBase::RefreshMonitors() { return NS_ERROR_NOT_IMPLEMENTED; }
 
 static inline bool SetJSPropertyString(JSContext* aCx,
                                        JS::Handle<JSObject*> aObj,
@@ -1657,18 +1733,6 @@ void GfxInfoBase::DescribeFeatures(JSContext* aCx, JS::Handle<JSObject*> aObj) {
 
   gfx::FeatureState& omtp = gfxConfig::GetFeature(gfx::Feature::OMTP);
   InitFeatureObject(aCx, aObj, "omtp", omtp, &obj);
-
-  // Only include AL if the platform attempted to use it.
-  gfx::FeatureState& advancedLayers =
-      gfxConfig::GetFeature(gfx::Feature::ADVANCED_LAYERS);
-  if (advancedLayers.GetValue() != FeatureStatus::Unused) {
-    InitFeatureObject(aCx, aObj, "advancedLayers", advancedLayers, &obj);
-
-    if (gfxConfig::UseFallback(Fallback::NO_CONSTANT_BUFFER_OFFSETTING)) {
-      JS::Rooted<JS::Value> trueVal(aCx, JS::BooleanValue(true));
-      JS_SetProperty(aCx, obj, "noConstantBufferOffsetting", trueVal);
-    }
-  }
 }
 
 bool GfxInfoBase::InitFeatureObject(JSContext* aCx,
@@ -1738,30 +1802,6 @@ GfxInfoBase::GetUsesTiling(bool* aUsesTiling) {
 }
 
 NS_IMETHODIMP
-GfxInfoBase::GetContentUsesTiling(bool* aUsesTiling) {
-  *aUsesTiling = gfxPlatform::GetPlatform()->ContentUsesTiling();
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-GfxInfoBase::GetOffMainThreadPaintEnabled(bool* aOffMainThreadPaintEnabled) {
-  *aOffMainThreadPaintEnabled = gfxConfig::IsEnabled(gfx::Feature::OMTP);
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-GfxInfoBase::GetOffMainThreadPaintWorkerCount(
-    int32_t* aOffMainThreadPaintWorkerCount) {
-  if (gfxConfig::IsEnabled(gfx::Feature::OMTP)) {
-    *aOffMainThreadPaintWorkerCount =
-        layers::PaintThread::CalculatePaintWorkerCount();
-  } else {
-    *aOffMainThreadPaintWorkerCount = 0;
-  }
-  return NS_OK;
-}
-
-NS_IMETHODIMP
 GfxInfoBase::GetTargetFrameRate(uint32_t* aTargetFrameRate) {
   *aTargetFrameRate = gfxPlatform::TargetFrameRate();
   return NS_OK;
@@ -1796,6 +1836,22 @@ GfxInfoBase::GetContentBackend(nsAString& aContentBackend) {
   }
 
   aContentBackend.Assign(outStr);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+GfxInfoBase::GetAzureCanvasBackend(nsAString& aBackend) {
+  CopyASCIItoUTF16(mozilla::MakeStringSpan(
+                       gfxPlatform::GetPlatform()->GetAzureCanvasBackend()),
+                   aBackend);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+GfxInfoBase::GetAzureContentBackend(nsAString& aBackend) {
+  CopyASCIItoUTF16(mozilla::MakeStringSpan(
+                       gfxPlatform::GetPlatform()->GetAzureContentBackend()),
+                   aBackend);
   return NS_OK;
 }
 

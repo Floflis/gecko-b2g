@@ -73,6 +73,7 @@ void ReportUnblockingToConsole(
 
         switch (aReason) {
           case ContentBlockingNotifier::eStorageAccessAPI:
+          case ContentBlockingNotifier::ePrivilegeStorageAccessForOriginAPI:
             messageWithSameOrigin = "CookieAllowedForOriginByStorageAccessAPI";
             break;
 
@@ -171,7 +172,7 @@ void ReportBlockingToConsole(uint64_t aWindowID, nsIURI* aURI,
 
           case uint32_t(
               nsIWebProgressListener::STATE_COOKIES_PARTITIONED_FOREIGN):
-            message = "CookiePartitionedForeign";
+            message = "CookiePartitionedForeign2";
             category = "cookiePartitionedForeign"_ns;
             break;
 

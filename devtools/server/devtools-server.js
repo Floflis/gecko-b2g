@@ -102,7 +102,7 @@ var DevToolsServer = {
 
   /**
    * We run a special server in child process whose main actor is an instance
-   * of FrameTargetActor, but that isn't a root actor. Instead there is no root
+   * of WindowGlobalTargetActor, but that isn't a root actor. Instead there is no root
    * actor registered on DevToolsServer.
    */
   get rootlessServer() {
@@ -126,7 +126,7 @@ var DevToolsServer = {
 
     if (!isWorker) {
       // Mochitests watch this observable in order to register the custom actor
-      // test-actor.js.
+      // highlighter-test-actor.js.
       // Services.obs is not available in workers.
       const subject = { wrappedJSObject: ActorRegistry };
       Services.obs.notifyObservers(subject, "devtools-server-initialized");
@@ -145,6 +145,9 @@ var DevToolsServer = {
     return this._connections && Object.keys(this._connections).length > 0;
   },
 
+  hasConnectionForPrefix(prefix) {
+    return this._connections && !!this._connections[prefix + "/"];
+  },
   /**
    * Performs cleanup tasks before shutting down the devtools server. Such tasks
    * include clearing any actor constructors added at runtime. This method
@@ -157,14 +160,17 @@ var DevToolsServer = {
       return;
     }
 
-    for (const connID of Object.getOwnPropertyNames(this._connections)) {
-      this._connections[connID].close();
+    for (const connection of Object.values(this._connections)) {
+      connection.close();
     }
 
     ActorRegistry.destroy();
 
     this.closeAllSocketListeners();
     this._initialized = false;
+
+    // Unregister all listeners
+    this.off("connectionchange");
 
     dumpn("DevTools server is shut down.");
   },

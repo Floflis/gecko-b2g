@@ -14,8 +14,8 @@ typedef sequence<ClipboardItem> ClipboardItems;
 
 [SecureContext, Exposed=Window, Pref="dom.events.asyncClipboard"]
 interface Clipboard : EventTarget {
-  [Pref="dom.events.asyncClipboard.dataTransfer", Throws, NeedsSubjectPrincipal]
-  Promise<DataTransfer> read();
+  [Pref="dom.events.asyncClipboard.read", Throws, NeedsSubjectPrincipal]
+  Promise<ClipboardItems> read();
   [Func="Clipboard::ReadTextEnabled", Throws, NeedsSubjectPrincipal]
   Promise<DOMString> readText();
 
@@ -26,15 +26,15 @@ interface Clipboard : EventTarget {
   Promise<void> writeText(DOMString data);
 };
 
-// typedef (DOMString or Blob) ClipboardItemDataType;
+typedef (DOMString or Blob) ClipboardItemDataType;
 // typedef Promise<ClipboardItemDataType> ClipboardItemData;
 // callback ClipboardItemDelayedCallback = ClipboardItemData ();
 
 [SecureContext, Exposed=Window, Pref="dom.events.asyncClipboard.clipboardItem"]
 interface ClipboardItem {
-  // Note: The spec uses ClipboardItemData instead of Blob.
+  // Note: The spec uses Promise<ClipboardItemDataType>.
   [Throws]
-  constructor(record<DOMString, Blob> items,
+  constructor(record<DOMString, ClipboardItemDataType> items,
               optional ClipboardItemOptions options = {});
 
   // static ClipboardItem createDelayed(

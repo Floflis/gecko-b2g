@@ -30,7 +30,6 @@ const { libcutils } = ChromeUtils.import(
 );
 
 ChromeUtils.import("resource://gre/modules/systemlibs.js");
-const { Promise } = ChromeUtils.import("resource://gre/modules/Promise.jsm");
 
 XPCOMUtils.defineLazyGetter(this, "SIM", function() {
   return ChromeUtils.import("resource://gre/modules/simIOHelper.js");
@@ -62,7 +61,6 @@ const RADIOINTERFACE_CID = Components.ID(
 );
 
 const NS_XPCOM_SHUTDOWN_OBSERVER_ID = "xpcom-shutdown";
-// const kScreenStateChangedTopic = "screen-state-changed";
 
 const NS_PREFBRANCH_PREFCHANGE_TOPIC_ID = "nsPref:changed";
 
@@ -85,14 +83,9 @@ var DEBUG = RIL_DEBUG.DEBUG_RIL;
 
 function updateDebugFlag() {
   // Read debug setting from pref
-  let debugPref;
-  try {
-    debugPref =
-      debugPref || Services.prefs.getBoolPref(RIL_DEBUG.PREF_RIL_DEBUG_ENABLED);
-  } catch (e) {
-    debugPref = false;
-  }
-  DEBUG = RIL_DEBUG.DEBUG_RIL || debugPref;
+  DEBUG =
+    RIL_DEBUG.DEBUG_RIL ||
+    Services.prefs.getBoolPref(RIL_DEBUG.PREF_RIL_DEBUG_ENABLED, false);
 }
 updateDebugFlag();
 
@@ -174,6 +167,15 @@ XPCOMUtils.defineLazyServiceGetter(
   "@mozilla.org/rilworkerservice;1",
   "nsIRilWorkerService"
 );
+
+if (Ci.nsIOemHook) {
+  XPCOMUtils.defineLazyServiceGetter(
+    this,
+    "gOemHookService",
+    "@mozilla.org/b2g/oemhookservice;1",
+    "nsIOemHookService"
+  );
+}
 
 XPCOMUtils.defineLazyServiceGetter(
   this,
@@ -484,6 +486,10 @@ DataCall.prototype = {
 
 function DataProfile(aAttributes) {
   for (let key in aAttributes) {
+    if (key === "carrier_enabled") {
+      this.enabled = aAttributes[key];
+      break;
+    }
     this[key] = aAttributes[key];
   }
 }
@@ -617,6 +623,8 @@ function RadioInterface(aClientId) {
 
   this._receivedSmsCbPagesMap = null;
 
+  this.oemHook = null;
+
   /**
    * Cell Broadcast Search Lists.
    */
@@ -654,26 +662,28 @@ function RadioInterface(aClientId) {
   this._radioCapability = {};
 
   this._pendingSentSmsMap = {};
-  this._pendingSmsRequest = null;
+  this._pendingSmsRequest = {};
 
   this._isInEmergencyCbMode = false;
 
   this._exitEmergencyCbModeTimer = Cc["@mozilla.org/timer;1"].createInstance(
     Ci.nsITimer
   );
+}
 
-  // Services.obs.addObserver(this, kScreenStateChangedTopic);
+// OemHook.
+let radioInterface_queryInterfaces = [Ci.nsIRadioInterface, Ci.nsIRilCallback];
+if (Ci.nsIOemHookCallback) {
+  radioInterface_queryInterfaces.push(Ci.nsIOemHookCallback);
 }
 
 RadioInterface.prototype = {
   classID: RADIOINTERFACE_CID,
-  QueryInterface: ChromeUtils.generateQI([
-    Ci.nsIRadioInterface,
-    Ci.nsIObserver,
-    Ci.nsIRilCallback,
-  ]),
+  QueryInterface: ChromeUtils.generateQI(radioInterface_queryInterfaces),
 
   rilworker: null,
+
+  oemHook: null,
 
   // This gets incremented each time we send out a message.
   token: 1,
@@ -831,10 +841,6 @@ RadioInterface.prototype = {
 
   debug(s) {
     dump("-*- RadioInterface[" + this.clientId + "]: " + s + "\n");
-  },
-
-  shutdown() {
-    // Services.obs.removeObserver(this, kScreenStateChangedTopic);
   },
 
   _initIccInfo() {
@@ -1085,6 +1091,9 @@ RadioInterface.prototype = {
         this.handleIccMwis(message.mwi);
         break;
       case "isiminfochange":
+        if (DEBUG) {
+          this.debug("isiminfochange message=" + JSON.stringify(message));
+        }
         gIccService.notifyIsimInfoChanged(
           this.clientId,
           message.impi ? message : null
@@ -1183,6 +1192,7 @@ RadioInterface.prototype = {
               JSON.stringify(refreshResult)
           );
         }
+        this.handleSimRefresh(refreshResult);
         break;
       case "restrictedStateChanged":
         let restrictedState = message.restrictedState;
@@ -1259,8 +1269,7 @@ RadioInterface.prototype = {
           pco.cid,
           pco.bearerProto,
           pco.pcoId,
-          pco.contents,
-          pco.contents.length
+          pco.getContents()
         );
         break;
       case "imsNetworkStateChanged":
@@ -2491,16 +2500,6 @@ RadioInterface.prototype = {
         );
       }
     });
-  },
-
-  // nsIObserver
-  observe(subject, topic, data) {
-    // switch (topic) {
-    //   case kScreenStateChangedTopic:
-    //     // Q do not support this command.
-    //     this.workerMessenger.send("setScreenState", { on: (data === "on") });
-    //     // break;
-    // }
   },
 
   // Flag to determine whether to update system clock automatically. It
@@ -3921,8 +3920,8 @@ RadioInterface.prototype = {
               "RILJ: [" + response.rilMessageToken + "] < REQUEST_SEND_SMS"
             );
           }
-          let message = this._pendingSmsRequest;
-          this._pendingSmsRequest = null;
+          let message = this._pendingSmsRequest[response.rilMessageToken];
+          delete this._pendingSmsRequest[response.rilMessageToken];
           result = this.handleSmsSendResult(response, message);
         } else if (DEBUG) {
           this.debug(
@@ -4365,6 +4364,48 @@ RadioInterface.prototype = {
           );
         }
         break;
+      case "stopNetworkScan":
+        if (response.errorMsg == 0) {
+          if (DEBUG) {
+            this.debug(
+              "RILJ: [" +
+                response.rilMessageToken +
+                "] < RIL_REQUEST_STOP_NETWORK_SCAN"
+            );
+          }
+        } else if (DEBUG) {
+          this.debug(
+            "RILJ: [" +
+              response.rilMessageToken +
+              "] < RIL_REQUEST_STOP_NETWORK_SCAN error = " +
+              result.errorMsg +
+              " (" +
+              response.errorMsg +
+              ")"
+          );
+        }
+        break;
+      case "setUnsolResponseFilter":
+        if (response.errorMsg == 0) {
+          if (DEBUG) {
+            this.debug(
+              "RILJ: [" +
+                response.rilMessageToken +
+                "] < RIL_REQUEST_SET_UNSOLICITED_RESPONSE_FILTER"
+            );
+          }
+        } else if (DEBUG) {
+          this.debug(
+            "RILJ: [" +
+              response.rilMessageToken +
+              "] < RIL_REQUEST_SET_UNSOLICITED_RESPONSE_FILTER error = " +
+              result.errorMsg +
+              " (" +
+              response.errorMsg +
+              ")"
+          );
+        }
+        break;
       case "updateICCContact":
         // This is not a ril reponse.
         response.errorMsg = result.errorMsg;
@@ -4411,6 +4452,17 @@ RadioInterface.prototype = {
         response.errorMsg = result.errorMsg;
         result = response;
         break;
+      case "iccUnlockSubsidyLock":
+        // This is not a ril reponse.
+        response.errorMsg = result.errorMsg;
+        result = response;
+        break;
+      case "iccGetSubsidyLockStatus":
+        // This is not a ril reponse.
+        response.errorMsg = result.errorMsg;
+        result = response;
+        break;
+
       default:
         throw new Error(
           "Unknow response message type : " + response.rilMessageType
@@ -4865,6 +4917,58 @@ RadioInterface.prototype = {
   exitEmergencyCbMode() {
     this.cancelEmergencyCbModeTimeout();
     this.sendRilRequest("sendExitEmergencyCbModeRequest", null);
+  },
+
+  handleSimRefresh(aRefreshResult) {
+    if (!aRefreshResult) {
+      if (DEBUG) {
+        this.debug("aRefreshResult null.");
+      }
+      return;
+    }
+
+    // Match the aid.
+    let aid = aRefreshResult.aid;
+    let simRecord;
+    if (this.simIOcontext.SimRecordHelper.aid === aid) {
+      if (DEBUG) {
+        this.debug("SimRecordHelper. aid = " + aid);
+      }
+      simRecord = this.simIOcontext.SimRecordHelper;
+    } else if (this.simIOcontext.ISimRecordHelper.aid === aid) {
+      if (DEBUG) {
+        this.debug("ISimRecordHelper. aid = " + aid);
+      }
+      simRecord = this.simIOcontext.ISimRecordHelper;
+    } else {
+      // TODO: handle ruim later.
+      if (DEBUG) {
+        this.debug("aid not match. aid = " + aid);
+      }
+      return;
+    }
+
+    let efId = aRefreshResult.efId;
+    if (!efId) {
+      if (DEBUG) {
+        this.debug("efId null.");
+      }
+      return;
+    }
+
+    switch (aRefreshResult.type) {
+      case RIL.SIM_FILE_UPDATE:
+        if (DEBUG) {
+          this.debug("handleSimRefresh with SIM_FILE_UPDATED");
+        }
+        simRecord.handleFileUpdate(efId);
+        break;
+      default:
+        if (DEBUG) {
+          this.debug("handleSimRefresh with unknown operation");
+        }
+        break;
+    }
   },
 
   /**
@@ -6018,6 +6122,7 @@ RadioInterface.prototype = {
         this.rilworker.getIccCardStatus(message.rilMessageToken);
         break;
       case "iccUnlockCardLock":
+      case "iccUnlockSubsidyLock":
         this.processIccUnlockCardLock(message);
         break;
       case "iccSetCardLockEnabled":
@@ -6031,6 +6136,11 @@ RadioInterface.prototype = {
         break;
       case "iccGetCardLockRetryCount":
         this.processIccGetCardLockRetryCount(message);
+        break;
+      // For no sim case. OemHook api.
+      case "iccGetSubsidyLockStatus":
+        message.lockType = RIL.GECKO_CARDLOCK_ALL;
+        this.processGetPersonalizationStatus(message);
         break;
       case "enterDepersonalization":
         break;
@@ -6162,7 +6272,7 @@ RadioInterface.prototype = {
             message.body = message.segments[0].body;
             message.encodedBodyLength = message.segments[0].encodedBodyLength;
           }
-          this._pendingSmsRequest = message;
+          this._pendingSmsRequest[message.rilMessageToken] = message;
           let GsmPDUHelper = this.simIOcontext.GsmPDUHelper;
           GsmPDUHelper.initWith();
           GsmPDUHelper.writeMessage(message);
@@ -6307,7 +6417,7 @@ RadioInterface.prototype = {
               " , serviceClass = " +
               message.serviceClass +
               " , number = " +
-              message.number || ""
+              message.number
           );
         }
         let toaNumber = this._toaFromString(message.number);
@@ -6331,7 +6441,9 @@ RadioInterface.prototype = {
               " , serviceClass = " +
               message.serviceClass +
               " , number = " +
-              message.number || ""
+              message.number +
+              " , timeSeconds = " +
+              message.timeSeconds
           );
         }
         let number = this._toaFromString(message.number);
@@ -6340,13 +6452,15 @@ RadioInterface.prototype = {
         this._callForwardOptions.serviceClass = message.serviceClass;
         this._callForwardOptions.number = message.number || "";
         this._callForwardOptions.toaNumner = number || "";
+        this._callForwardOptions.timeSeconds = message.timeSeconds;
         this.rilworker.setCallForwardStatus(
           message.rilMessageToken,
           message.action,
           message.reason,
           message.serviceClass,
           message.number || "",
-          number || ""
+          number || "",
+          message.timeSeconds
         );
         break;
       case "queryCallWaiting":
@@ -6824,10 +6938,10 @@ RadioInterface.prototype = {
             "RILJ: [" +
               message.rilMessageToken +
               "] > RIL_REQUEST_ALLOW_DATA allowed = " +
-              message.allowed
+              message.attach
           );
         }
-        this.rilworker.setDataAllowed(message.rilMessageToken, message.allowed);
+        this.rilworker.setDataAllowed(message.rilMessageToken, message.attach);
         break;
       case "getIccAuthentication":
         this.processGetIccAuthentication(message);
@@ -6888,7 +7002,7 @@ RadioInterface.prototype = {
         this.processSendStkTimerExpiration(message);
         break;
       case "sendStkEventDownload":
-        this.processsendStkEventDownload(message);
+        this.processSendStkEventDownload(message);
         break;
       case "setCellBroadcastDisabled":
         // This is not a ril request.
@@ -6925,7 +7039,34 @@ RadioInterface.prototype = {
         // This is not a ril request.
         this.getIccServiceState(message);
         break;
+      case "stopNetworkScan":
+        if (DEBUG) {
+          this.debug(
+            "RILJ: [" +
+              message.rilMessageToken +
+              "] > RIL_REQUEST_STOP_NETWORK_SCAN"
+          );
+        }
+        this.rilworker.stopNetworkScan(message.rilMessageToken);
+        break;
+      case "setUnsolResponseFilter":
+        if (DEBUG) {
+          this.debug(
+            "RILJ: [" +
+              message.rilMessageToken +
+              "] > RIL_REQUEST_SET_UNSOLICITED_RESPONSE_FILTER filter: " +
+              message.filter
+          );
+        }
+        this.rilworker.setUnsolResponseFilter(
+          message.rilMessageToken,
+          message.filter
+        );
+        break;
       default:
+        this.debug(message.rilMessageType + " not supported.");
+        message.errorMsg = RIL.GECKO_ERROR_REQUEST_NOT_SUPPORTED;
+        this.handleRilResponse(message);
         break;
     }
   },
@@ -7099,10 +7240,12 @@ RadioInterface.prototype = {
           "] > RIL_REQUEST_SEPARATE_CONNECTION"
       );
     }
-    this.rilworker.separateConnection(
-      message.rilMessageToken,
-      message.callIndex
-    );
+    this.telephonyRequestQueue.push("separateCall", () => {
+      this.rilworker.separateConnection(
+        message.rilMessageToken,
+        message.callIndex
+      );
+    });
   },
 
   processGetCurrentCalls(message) {
@@ -7190,32 +7333,9 @@ RadioInterface.prototype = {
         break;
       case RIL.GECKO_CARDLOCK_NCK:
       case RIL.GECKO_CARDLOCK_NSCK:
-      case RIL.GECKO_CARDLOCK_NCK1:
-      case RIL.GECKO_CARDLOCK_NCK2:
-      case RIL.GECKO_CARDLOCK_HNCK:
       case RIL.GECKO_CARDLOCK_CCK:
       case RIL.GECKO_CARDLOCK_SPCK:
-      case RIL.GECKO_CARDLOCK_PCK:
-      case RIL.GECKO_CARDLOCK_RCCK:
-      case RIL.GECKO_CARDLOCK_RSPCK:
-      case RIL.GECKO_CARDLOCK_NCK_PUK:
-      case RIL.GECKO_CARDLOCK_NSCK_PUK:
-      case RIL.GECKO_CARDLOCK_NCK1_PUK:
-      case RIL.GECKO_CARDLOCK_NCK2_PUK:
-      case RIL.GECKO_CARDLOCK_HNCK_PUK:
-      case RIL.GECKO_CARDLOCK_CCK_PUK:
-      case RIL.GECKO_CARDLOCK_SPCK_PUK:
-      case RIL.GECKO_CARDLOCK_PCK_PUK:
-      case RIL.GECKO_CARDLOCK_RCCK_PUK: // Fall through.
-      case RIL.GECKO_CARDLOCK_RSPCK_PUK:
-        message.facility =
-          RIL.GECKO_CARDLOCK_TO_FACILITY_CODE[message.lockType];
-        message.serviceClass =
-          RIL.ICC_SERVICE_CLASS_VOICE |
-          RIL.ICC_SERVICE_CLASS_DATA |
-          RIL.ICC_SERVICE_CLASS_FAX;
-        message.enabled = false;
-        this.setICCFacilityLock(message);
+        this.enterDepersonalizationReq(message);
         break;
       default:
         message.errorMsg = RIL.GECKO_ERROR_REQUEST_NOT_SUPPORTED;
@@ -7328,6 +7448,32 @@ RadioInterface.prototype = {
     );
   },
 
+  // OemHook api
+  enterDepersonalizationReq(message) {
+    this.getOemHook();
+    if (this.oemHook) {
+      if (DEBUG) {
+        this.debug(
+          "OEMHOOK: [" +
+            message.rilMessageToken +
+            "] > OEMHOOK_ENTER_DEPERSONALIZATION_REQ  lockType = " +
+            message.lockType +
+            " , password = " +
+            message.password
+        );
+      }
+      this.oemHook.enterDepersonalizationReq(
+        message.rilMessageToken,
+        message.lockType,
+        message.password
+      );
+    } else {
+      this.debug("can not get OemHook");
+      message.errorMsg = RIL.GECKO_ERROR_REQUEST_NOT_SUPPORTED;
+      this.handleRilResponse(message);
+    }
+  },
+
   /**
    * Helper function for setting the state of ICC locks.
    */
@@ -7355,22 +7501,26 @@ RadioInterface.prototype = {
    */
   processIccGetCardLockEnabled(message) {
     switch (message.lockType) {
-      case RIL.GECKO_CARDLOCK_PIN: // Fall through.
+      case RIL.GECKO_CARDLOCK_PIN:
       case RIL.GECKO_CARDLOCK_FDN:
         message.facility = RIL.GECKO_CARDLOCK_TO_FACILITY[message.lockType];
+        message.password = ""; // For query no need to provide pin.
+        message.serviceClass =
+          RIL.ICC_SERVICE_CLASS_VOICE |
+          RIL.ICC_SERVICE_CLASS_DATA |
+          RIL.ICC_SERVICE_CLASS_FAX;
+        this.queryICCFacilityLock(message);
+        break;
+      case RIL.GECKO_CARDLOCK_NCK:
+      case RIL.GECKO_CARDLOCK_NSCK:
+      case RIL.GECKO_CARDLOCK_CCK:
+      case RIL.GECKO_CARDLOCK_SPCK:
+        this.processGetPersonalizationStatus(message);
         break;
       default:
         message.errorMsg = RIL.GECKO_ERROR_REQUEST_NOT_SUPPORTED;
         this.handleRilResponse(message);
-        return;
     }
-
-    message.password = ""; // For query no need to provide pin.
-    message.serviceClass =
-      RIL.ICC_SERVICE_CLASS_VOICE |
-      RIL.ICC_SERVICE_CLASS_DATA |
-      RIL.ICC_SERVICE_CLASS_FAX;
-    this.queryICCFacilityLock(message);
   },
 
   queryICCFacilityLock(message) {
@@ -7395,6 +7545,29 @@ RadioInterface.prototype = {
       message.serviceClass,
       this.aid
     );
+  },
+
+  // OemHook api
+  processGetPersonalizationStatus(message) {
+    this.getOemHook();
+    if (this.oemHook) {
+      if (DEBUG) {
+        this.debug(
+          "OEMHOOK: [" +
+            message.rilMessageToken +
+            "] > OEMHOOK_PERSONALIZATION_STATUS_REQ  lockType = " +
+            message.lockType
+        );
+      }
+      this.oemHook.personalizationStatusReq(
+        message.rilMessageToken,
+        message.lockType
+      );
+    } else {
+      this.debug("can not get OemHook");
+      message.errorMsg = RIL.GECKO_ERROR_REQUEST_NOT_SUPPORTED;
+      this.handleRilResponse(message);
+    }
   },
 
   /**
@@ -8057,6 +8230,156 @@ RadioInterface.prototype = {
       });
     } else {
       this.sendRilRequest(rilMessageType, message);
+    }
+  },
+
+  getOemHook() {
+    if (this.oemHook) {
+      return;
+    }
+
+    if (Ci.nsIOemHook) {
+      this.debug("Init OemHook module.");
+      this.oemHook = gOemHookService.getOemHook(this.clientId);
+      if (this.oemHook) {
+        this.oemHook.init(this);
+      }
+    }
+  },
+
+  // nsIOemHookCallback
+  handleOemHookResponse(response) {
+    if (DEBUG) {
+      this.debug(
+        "Received message from oemHook handleOemHookResponse:" +
+          JSON.stringify(response.messageType)
+      );
+    }
+
+    if (!response) {
+      return;
+    }
+
+    // For backward avaliable. Intention for not change the origianl parameter naming for the upperlayer.
+    let result = {};
+    result.rilMessageType = response.messageType;
+    result.rilMessageToken = response.messageToken;
+
+    if (typeof response.errorMsg == "string") {
+      result.errorMsg = response.errorMsg;
+    } else {
+      result.errorMsg = RIL.RIL_ERROR_TO_GECKO_ERROR[response.errorMsg];
+    }
+
+    switch (response.messageType) {
+      case "personalizationStatusReq":
+        // This is a oemhook resposne
+        if (response.errorMsg == 0) {
+          let persoStatus = response.persoResp.persoStatus;
+          // For iccGetSubsidyLockStatus response
+          if (persoStatus.length > 1) {
+            if (DEBUG) {
+              this.debug(
+                "OEMHOOK: [" +
+                  response.messageToken +
+                  "] < OEMHOOK_PERSONALIZATION_STATUS_REQ  persoStatus = " +
+                  JSON.stringify(persoStatus)
+              );
+            }
+            result.persoStatus = persoStatus;
+          }
+          // For getCardLockEnabled response
+          else if (persoStatus.length == 1) {
+            if (DEBUG) {
+              this.debug(
+                "OEMHOOK: [" +
+                  response.messageToken +
+                  "] < OEMHOOK_PERSONALIZATION_STATUS_REQ  lock = " +
+                  persoStatus[0].hasPersoStatus +
+                  " , remainingRetries = " +
+                  persoStatus[0].verifyAttempts
+              );
+            }
+            result.enabled = persoStatus[0].hasPersoStatus;
+          } else {
+            if (DEBUG) {
+              this.debug(
+                "OEMHOOK: [" +
+                  response.messageToken +
+                  "] < OEMHOOK_PERSONALIZATION_STATUS_REQ  error = "
+              );
+            }
+            result.errorMsg = RIL.GECKO_ERROR_GENERIC_FAILURE;
+          }
+        } else if (DEBUG) {
+          this.debug(
+            "OEMHOOK: [" +
+              response.messageToken +
+              "] < OEMHOOK_PERSONALIZATION_STATUS_REQ error = " +
+              result.errorMsg +
+              " (" +
+              response.errorMsg +
+              ")"
+          );
+        }
+        break;
+      case "enterDepersonalizationReq":
+        // This is a oemhook resposne
+        if (response.errorMsg == 0) {
+          if (DEBUG) {
+            this.debug(
+              "OEMHOOK: [" +
+                response.messageToken +
+                "] < OEMHOOK_ENTER_DEPERSONALIZATION_REQ"
+            );
+          }
+        } else if (DEBUG) {
+          let remainingRetries = response.depersoResp
+            ? response.depersoResp.depersoRetries
+            : -1;
+          this.debug(
+            "OEMHOOK: [" +
+              response.messageToken +
+              "] < OEMHOOK_ENTER_DEPERSONALIZATION_REQ error = " +
+              result.errorMsg +
+              " (" +
+              response.errorMsg +
+              ")" +
+              "remainingRetries = " +
+              remainingRetries
+          );
+        }
+        result.remainingRetries = response.depersoResp
+          ? response.depersoResp.depersoRetries
+          : -1;
+        break;
+      default:
+        throw new Error(
+          "Unknow response message type : " + response.rilMessageType
+        );
+    }
+
+    let token = response.messageToken;
+    let callback = this.tokenCallbackMap[token];
+
+    if (!callback) {
+      if (DEBUG) {
+        this.debug("Ignore orphan token: " + token);
+      }
+      return;
+    }
+
+    let keep = false;
+    try {
+      keep = callback(result);
+    } catch (e) {
+      if (DEBUG) {
+        this.debug("callback throws an exception: " + e);
+      }
+    }
+
+    if (!keep) {
+      delete this.tokenCallbackMap[token];
     }
   },
 };

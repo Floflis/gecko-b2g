@@ -138,7 +138,7 @@ class LoginManagerPrompter {
   ) {
     log.debug("promptToSavePassword");
     let inPrivateBrowsing = PrivateBrowsingUtils.isBrowserPrivate(aBrowser);
-    LoginManagerPrompter._showLoginCaptureDoorhanger(
+    let notification = LoginManagerPrompter._showLoginCaptureDoorhanger(
       aBrowser,
       aLogin,
       "password-save",
@@ -153,6 +153,13 @@ class LoginManagerPrompter {
       }
     );
     Services.obs.notifyObservers(aLogin, "passwordmgr-prompt-save");
+
+    return {
+      dismiss() {
+        let { PopupNotifications } = aBrowser.ownerGlobal.wrappedJSObject;
+        PopupNotifications.remove(notification);
+      },
+    };
   }
 
   /**
@@ -204,7 +211,7 @@ class LoginManagerPrompter {
     );
 
     let saveMsgNames = {
-      prompt: login.username === "" ? "saveLoginMsgNoUser" : "saveLoginMsg",
+      prompt: login.username === "" ? "saveLoginMsgNoUser2" : "saveLoginMsg2",
       buttonLabel: "saveLoginButtonAllow.label",
       buttonAccessKey: "saveLoginButtonAllow.accesskey",
       secondaryButtonLabel: "saveLoginButtonDeny.label",
@@ -212,7 +219,8 @@ class LoginManagerPrompter {
     };
 
     let changeMsgNames = {
-      prompt: login.username === "" ? "updateLoginMsgNoUser" : "updateLoginMsg",
+      prompt:
+        login.username === "" ? "updateLoginMsgNoUser3" : "updateLoginMsg3",
       buttonLabel: "updateLoginButtonText",
       buttonAccessKey: "updateLoginButtonAccessKey",
       secondaryButtonLabel: "updateLoginButtonDeny.label",
@@ -226,13 +234,11 @@ class LoginManagerPrompter {
       changeMsgNames.prompt = messageStringID;
     }
 
-    let brandBundle = Services.strings.createBundle(BRAND_BUNDLE);
-    let brandShortName = brandBundle.GetStringFromName("brandShortName");
     let host = this._getShortDisplayHost(login.origin);
     let promptMsg =
       type == "password-save"
-        ? this._getLocalizedString(saveMsgNames.prompt, [brandShortName, host])
-        : this._getLocalizedString(changeMsgNames.prompt);
+        ? this._getLocalizedString(saveMsgNames.prompt, [host])
+        : this._getLocalizedString(changeMsgNames.prompt, [host]);
 
     let histogramName =
       type == "password-save"
@@ -713,10 +719,10 @@ class LoginManagerPrompter {
                   // one that is already saved and we don't want to reveal
                   // it as the submitter of this form may not be the account
                   // owner, they may just be using the saved password.
-                  (messageStringID == "updateLoginMsgAddUsername" &&
+                  (messageStringID == "updateLoginMsgAddUsername2" &&
                     login.timePasswordChanged <
                       Date.now() - VISIBILITY_TOGGLE_MAX_PW_AGE_MS);
-                toggleBtn.setAttribute("hidden", hideToggle);
+                toggleBtn.hidden = hideToggle;
               }
 
               let popup = chromeDoc.getElementById("PopupAutoComplete");
@@ -787,6 +793,8 @@ class LoginManagerPrompter {
       log.debug("Showing the ConfirmationHint");
       anchor.ownerGlobal.ConfirmationHint.show(anchor, "passwordSaved");
     }
+
+    return notification;
   }
 
   /**
@@ -838,10 +846,10 @@ class LoginManagerPrompter {
       // If the saved password matches the password we're prompting with then we
       // are only prompting to let the user add a username since there was one in
       // the form. Change the message so the purpose of the prompt is clearer.
-      messageStringID = "updateLoginMsgAddUsername";
+      messageStringID = "updateLoginMsgAddUsername2";
     }
 
-    LoginManagerPrompter._showLoginCaptureDoorhanger(
+    let notification = LoginManagerPrompter._showLoginCaptureDoorhanger(
       aBrowser,
       login,
       "password-change",
@@ -864,6 +872,13 @@ class LoginManagerPrompter {
       "passwordmgr-prompt-change",
       oldGUID
     );
+
+    return {
+      dismiss() {
+        let { PopupNotifications } = aBrowser.ownerGlobal.wrappedJSObject;
+        PopupNotifications.remove(notification);
+      },
+    };
   }
 
   /**

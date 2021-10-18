@@ -33,6 +33,11 @@ else:
             "/accessible/other",
         ]
 
+if CONFIG["ACCESSIBILITY"]:
+    IPDL_SOURCES += [
+        "DocAccessibleTypes.ipdlh",
+    ]
+
 EXPORTS.mozilla.a11y += [
     "IPCTypes.h",
 ]
@@ -44,14 +49,14 @@ if CONFIG["ACCESSIBILITY"]:
     EXPORTS.mozilla.a11y += [
         "DocAccessibleChildBase.h",
         "DocAccessibleParent.h",
-        "ProxyAccessibleBase.h",
-        "ProxyAccessibleShared.h",
+        "RemoteAccessibleBase.h",
+        "RemoteAccessibleShared.h",
     ]
 
     UNIFIED_SOURCES += [
         "DocAccessibleChildBase.cpp",
         "DocAccessibleParent.cpp",
-        "ProxyAccessibleBase.cpp",
+        "RemoteAccessibleBase.cpp",
     ]
 
     LOCAL_INCLUDES += [

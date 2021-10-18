@@ -52,6 +52,9 @@ namespace jit {
   _(SetIntrinsic)                        \
   /* Private Fields */                   \
   _(InitLockedElem)                      \
+  _(GetAliasedDebugVar)                  \
+  /* Non-syntactic scope */              \
+  _(NonSyntacticGlobalThis)              \
   // === !! WARNING WARNING WARNING !! ===
   // Do you really want to sacrifice performance by not implementing this
   // operation in the optimizing compiler?
@@ -276,7 +279,7 @@ class MOZ_STACK_CLASS WarpBuilder : public WarpBuilderShared {
 
   [[nodiscard]] bool buildEnvironmentChain();
   MInstruction* buildNamedLambdaEnv(MDefinition* callee, MDefinition* env,
-                                    LexicalEnvironmentObject* templateObj);
+                                    NamedLambdaObject* templateObj);
   MInstruction* buildCallObject(MDefinition* callee, MDefinition* env,
                                 CallObject* templateObj);
   MInstruction* buildLoadSlot(MDefinition* obj, uint32_t numFixedSlots,
@@ -284,8 +287,6 @@ class MOZ_STACK_CLASS WarpBuilder : public WarpBuilderShared {
 
   MConstant* globalLexicalEnvConstant();
   MDefinition* getCallee();
-
-  MDefinition* maybeGuardNotOptimizedArguments(MDefinition* def);
 
   [[nodiscard]] bool buildUnaryOp(BytecodeLocation loc);
   [[nodiscard]] bool buildBinaryOp(BytecodeLocation loc);

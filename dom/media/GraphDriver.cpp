@@ -79,6 +79,7 @@ class MediaTrackGraphShutdownThreadRunnable : public Runnable {
       already_AddRefed<nsIThread> aThread)
       : Runnable("MediaTrackGraphShutdownThreadRunnable"), mThread(aThread) {}
   NS_IMETHOD Run() override {
+    TRACE("MediaTrackGraphShutdownThreadRunnable");
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(mThread);
 
@@ -104,6 +105,7 @@ class MediaTrackGraphInitThreadRunnable : public Runnable {
   explicit MediaTrackGraphInitThreadRunnable(ThreadedDriver* aDriver)
       : Runnable("MediaTrackGraphInitThreadRunnable"), mDriver(aDriver) {}
   NS_IMETHOD Run() override {
+    TRACE("MediaTrackGraphInitThreadRunnable");
     MOZ_ASSERT(!mDriver->ThreadRunning());
     LOG(LogLevel::Debug, ("Starting a new system driver for graph %p",
                           mDriver->mGraphInterface.get()));
@@ -505,7 +507,7 @@ AudioCallbackDriver::AudioCallbackDriver(
       mStarted(false),
       mInitShutdownThread(SharedThreadPool::Get("CubebOperation"_ns, 1)),
       mAudioChannel(aGraphInterface->AudioChannel()),
-      mAudioThreadId(0),
+      mAudioThreadId(ProfilerThreadId{}),
       mAudioThreadIdInCb(std::thread::id()),
       mAudioStreamState(AudioStreamState::None),
       mFallback("AudioCallbackDriver::mFallback"),
@@ -524,11 +526,6 @@ AudioCallbackDriver::AudioCallbackDriver(
   mInitShutdownThread->SetIdleThreadTimeout(
       PR_MillisecondsToInterval(kIdleThreadTimeoutMs));
 
-#if defined(XP_WIN)
-  if (XRE_IsContentProcess()) {
-    audio::AudioNotificationReceiver::Register(this);
-  }
-#endif
   if (aAudioInputType == AudioInputType::Voice) {
     LOG(LogLevel::Debug, ("VOICE."));
     mInputDevicePreference = CUBEB_DEVICE_PREF_VOICE;
@@ -541,11 +538,6 @@ AudioCallbackDriver::AudioCallbackDriver(
 }
 
 AudioCallbackDriver::~AudioCallbackDriver() {
-#if defined(XP_WIN)
-  if (XRE_IsContentProcess()) {
-    audio::AudioNotificationReceiver::Unregister(this);
-  }
-#endif
   if (mInputDevicePreference == CUBEB_DEVICE_PREF_VOICE) {
     CubebUtils::SetInCommunication(false);
   }
@@ -576,7 +568,7 @@ bool IsMacbookOrMacbookAir() {
 }
 
 void AudioCallbackDriver::Init() {
-  TRACE();
+  TRACE("AudioCallbackDriver::Init");
   MOZ_ASSERT(OnCubebOperationThread());
   MOZ_ASSERT(mAudioStreamState == AudioStreamState::Pending);
   FallbackDriverState fallbackState = mFallbackDriverState;
@@ -620,11 +612,13 @@ void AudioCallbackDriver::Init() {
   (void)mAudioChannel;
 #endif
 
-  if (AUDIO_OUTPUT_FORMAT == AUDIO_FORMAT_S16) {
-    output.format = CUBEB_SAMPLE_S16NE;
-  } else {
-    output.format = CUBEB_SAMPLE_FLOAT32NE;
-  }
+#ifdef MOZ_SAMPLE_TYPE_S16
+  MOZ_ASSERT(AUDIO_OUTPUT_FORMAT == AUDIO_FORMAT_S16);
+  output.format = CUBEB_SAMPLE_S16NE;
+#else
+  MOZ_ASSERT(AUDIO_OUTPUT_FORMAT == AUDIO_FORMAT_FLOAT32);
+  output.format = CUBEB_SAMPLE_FLOAT32NE;
+#endif
 
   if (!mOutputChannelCount) {
     LOG(LogLevel::Warning, ("Output number of channels is 0."));
@@ -794,7 +788,7 @@ void AudioCallbackDriver::Start() {
 }
 
 bool AudioCallbackDriver::StartStream() {
-  TRACE();
+  TRACE("AudioCallbackDriver::StartStream");
   MOZ_ASSERT(!IsStarted() && OnCubebOperationThread());
   // Set mStarted before cubeb_stream_start, since starting the cubeb stream can
   // result in a callback (that may read mStarted) before mStarted would
@@ -810,8 +804,9 @@ bool AudioCallbackDriver::StartStream() {
 }
 
 void AudioCallbackDriver::Stop() {
-  TRACE();
+  TRACE("AudioCallbackDriver::Stop");
   MOZ_ASSERT(OnCubebOperationThread());
+  cubeb_stream_register_device_changed_callback(mAudioStream, nullptr);
   if (cubeb_stream_stop(mAudioStream) != CUBEB_OK) {
     NS_WARNING("Could not stop cubeb stream for MTG.");
   }
@@ -834,19 +829,11 @@ void AudioCallbackDriver::Shutdown() {
   LOG(LogLevel::Debug,
       ("%p: Releasing audio driver off main thread (GraphDriver::Shutdown).",
        Graph()));
+
   RefPtr<AsyncCubebTask> releaseEvent =
       new AsyncCubebTask(this, AsyncCubebOperation::SHUTDOWN);
   releaseEvent->Dispatch(NS_DISPATCH_SYNC);
 }
-
-#if defined(XP_WIN)
-void AudioCallbackDriver::ResetDefaultDevice() {
-  TRACE();
-  if (cubeb_stream_reset_default_device(mAudioStream) != CUBEB_OK) {
-    NS_WARNING("Could not reset cubeb stream to default output device.");
-  }
-}
-#endif
 
 /* static */
 long AudioCallbackDriver::DataCallback_s(cubeb_stream* aStream, void* aUser,
@@ -884,13 +871,11 @@ AudioCallbackDriver::AutoInCallback::~AutoInCallback() {
 }
 
 bool AudioCallbackDriver::CheckThreadIdChanged() {
-#ifdef MOZ_GECKO_PROFILER
-  auto id = profiler_current_thread_id();
+  ProfilerThreadId id = profiler_current_thread_id();
   if (id != mAudioThreadId) {
     mAudioThreadId = id;
     return true;
   }
-#endif
   return false;
 }
 
@@ -931,7 +916,7 @@ long AudioCallbackDriver::DataCallback(const AudioDataValue* aInputBuffer,
 
   MOZ_ASSERT(ThreadRunning());
   TRACE_AUDIO_CALLBACK_BUDGET(aFrames, mSampleRate);
-  TRACE();
+  TRACE("AudioCallbackDriver::DataCallback");
 
 #ifdef DEBUG
   AutoInCallback aic(this);
@@ -1164,7 +1149,7 @@ void AudioCallbackDriver::MixerCallback(AudioDataValue* aMixedBuffer,
 
 void AudioCallbackDriver::PanOutputIfNeeded(bool aMicrophoneActive) {
 #ifdef XP_MACOSX
-  TRACE();
+  TRACE("AudioCallbackDriver::PanOutputIfNeeded");
   cubeb_device* out = nullptr;
   int rv;
   char name[128];
@@ -1253,7 +1238,7 @@ void AudioCallbackDriver::EnsureNextIteration() {
 bool AudioCallbackDriver::IsStarted() { return mStarted; }
 
 TimeDuration AudioCallbackDriver::AudioOutputLatency() {
-  TRACE();
+  TRACE("AudioCallbackDriver::AudioOutputLatency");
   uint32_t latencyFrames;
   int rv = cubeb_stream_get_latency(mAudioStream, &latencyFrames);
   if (rv || mSampleRate == 0) {

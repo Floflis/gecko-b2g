@@ -5,8 +5,8 @@ use {
         buddy::{BuddyAllocator, BuddyBlock},
         config::Config,
         error::AllocationError,
+        freelist::{FreeListAllocator, FreeListBlock},
         heap::Heap,
-        linear::{LinearAllocator, LinearBlock},
         usage::{MemoryForUsage, UsageFlags},
         MemoryBounds, Request,
     },
@@ -21,9 +21,9 @@ use {
 /// Memory allocator for Vulkan-like APIs.
 #[derive(Debug)]
 pub struct GpuAllocator<M> {
-    dedicated_treshold: u64,
-    preferred_dedicated_treshold: u64,
-    transient_dedicated_treshold: u64,
+    dedicated_threshold: u64,
+    preferred_dedicated_threshold: u64,
+    transient_dedicated_threshold: u64,
     max_memory_allocation_size: u64,
     memory_for_usage: MemoryForUsage,
     memory_types: Box<[MemoryType]>,
@@ -31,13 +31,14 @@ pub struct GpuAllocator<M> {
     max_allocation_count: u32,
     allocations_remains: u32,
     non_coherent_atom_mask: u64,
-    linear_chunk: u64,
+    starting_free_list_chunk: u64,
+    final_free_list_chunk: u64,
     minimal_buddy_size: u64,
     initial_buddy_dedicated_size: u64,
     buffer_device_address: bool,
 
-    linear_allocators: Box<[Option<LinearAllocator<M>>]>,
     buddy_allocators: Box<[Option<BuddyAllocator<M>>]>,
+    freelist_allocators: Box<[Option<FreeListAllocator<M>>]>,
 }
 
 /// Hints for allocator to decide on allocation strategy.
@@ -63,7 +64,7 @@ where
     M: MemoryBounds + 'static,
 {
     /// Creates  new instance of `GpuAllocator`.
-    /// Provided `DeviceProperties` should match propertices of `MemoryDevice` that will be used
+    /// Provided `DeviceProperties` should match properties of `MemoryDevice` that will be used
     /// with created `GpuAllocator` instance.
     #[cfg_attr(feature = "tracing", tracing::instrument)]
     pub fn new(config: Config, props: DeviceProperties<'_>) -> Self {
@@ -78,18 +79,14 @@ where
         );
 
         GpuAllocator {
-            dedicated_treshold: config
-                .dedicated_treshold
-                .max(props.max_memory_allocation_size),
-            preferred_dedicated_treshold: config
-                .preferred_dedicated_treshold
-                .min(config.dedicated_treshold)
-                .max(props.max_memory_allocation_size),
+            dedicated_threshold: config.dedicated_threshold,
+            preferred_dedicated_threshold: config
+                .preferred_dedicated_threshold
+                .min(config.dedicated_threshold),
 
-            transient_dedicated_treshold: config
-                .transient_dedicated_treshold
-                .max(config.dedicated_treshold)
-                .max(props.max_memory_allocation_size),
+            transient_dedicated_threshold: config
+                .transient_dedicated_threshold
+                .max(config.dedicated_threshold),
 
             max_memory_allocation_size: props.max_memory_allocation_size,
 
@@ -109,12 +106,13 @@ where
             allocations_remains: props.max_memory_allocation_count,
             non_coherent_atom_mask: props.non_coherent_atom_size - 1,
 
-            linear_chunk: config.linear_chunk,
+            starting_free_list_chunk: config.starting_free_list_chunk,
+            final_free_list_chunk: config.final_free_list_chunk,
             minimal_buddy_size: config.minimal_buddy_size,
             initial_buddy_dedicated_size: config.initial_buddy_dedicated_size,
 
-            linear_allocators: props.memory_types.as_ref().iter().map(|_| None).collect(),
             buddy_allocators: props.memory_types.as_ref().iter().map(|_| None).collect(),
+            freelist_allocators: props.memory_types.as_ref().iter().map(|_| None).collect(),
         }
     }
 
@@ -130,10 +128,7 @@ where
         &mut self,
         device: &impl MemoryDevice<M>,
         request: Request,
-    ) -> Result<MemoryBlock<M>, AllocationError>
-    where
-        M: Clone,
-    {
+    ) -> Result<MemoryBlock<M>, AllocationError> {
         self.alloc_internal(device, request, None)
     }
 
@@ -153,10 +148,7 @@ where
         device: &impl MemoryDevice<M>,
         request: Request,
         dedicated: Dedicated,
-    ) -> Result<MemoryBlock<M>, AllocationError>
-    where
-        M: Clone,
-    {
+    ) -> Result<MemoryBlock<M>, AllocationError> {
         self.alloc_internal(device, request, Some(dedicated))
     }
 
@@ -165,14 +157,11 @@ where
         device: &impl MemoryDevice<M>,
         mut request: Request,
         dedicated: Option<Dedicated>,
-    ) -> Result<MemoryBlock<M>, AllocationError>
-    where
-        M: Clone,
-    {
+    ) -> Result<MemoryBlock<M>, AllocationError> {
         enum Strategy {
-            Linear,
             Buddy,
             Dedicated,
+            FreeList,
         }
 
         request.usage = with_implicit_usage_flags(request.usage);
@@ -227,28 +216,26 @@ where
                 AllocationFlags::empty()
             };
 
-            let linear_chunk = align_down(self.linear_chunk.min(heap.size() / 32), atom_mask);
-
             let strategy = match (dedicated, transient) {
                 (Some(Dedicated::Required), _) => Strategy::Dedicated,
                 (Some(Dedicated::Preferred), _)
-                    if request.size >= self.preferred_dedicated_treshold =>
+                    if request.size >= self.preferred_dedicated_threshold =>
                 {
                     Strategy::Dedicated
                 }
                 (_, true) => {
-                    let treshold = self.transient_dedicated_treshold.min(linear_chunk);
+                    let threshold = self.transient_dedicated_threshold.min(heap.size() / 32);
 
-                    if request.size < treshold {
-                        Strategy::Linear
+                    if request.size < threshold {
+                        Strategy::FreeList
                     } else {
                         Strategy::Dedicated
                     }
                 }
                 (_, false) => {
-                    let treshold = self.dedicated_treshold.min(heap.size() / 32);
+                    let threshold = self.dedicated_threshold.min(heap.size() / 32);
 
-                    if request.size < treshold {
+                    if request.size < threshold {
                         Strategy::Buddy
                     } else {
                         Strategy::Dedicated
@@ -258,10 +245,6 @@ where
 
             match strategy {
                 Strategy::Dedicated => {
-                    if heap.budget() < request.size {
-                        continue;
-                    }
-
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
                         "Allocating memory object `{}@{:?}`",
@@ -275,13 +258,12 @@ where
                             heap.alloc(request.size);
 
                             return Ok(MemoryBlock::new(
-                                memory,
                                 index,
                                 memory_type.props,
                                 0,
                                 request.size,
                                 atom_mask,
-                                MemoryBlockFlavor::Dedicated,
+                                MemoryBlockFlavor::Dedicated { memory },
                             ));
                         }
                         Err(OutOfMemory::OutOfDeviceMemory) => continue,
@@ -290,13 +272,32 @@ where
                         }
                     }
                 }
-                Strategy::Linear => {
-                    let allocator = match &mut self.linear_allocators[index as usize] {
+                Strategy::FreeList => {
+                    let allocator = match &mut self.freelist_allocators[index as usize] {
                         Some(allocator) => allocator,
                         slot => {
-                            let memory_type = &self.memory_types[index as usize];
-                            slot.get_or_insert(LinearAllocator::new(
-                                linear_chunk,
+                            let starting_free_list_chunk = match align_down(
+                                self.starting_free_list_chunk.min(heap.size() / 32),
+                                atom_mask,
+                            ) {
+                                0 => atom_mask,
+                                other => other,
+                            };
+
+                            let final_free_list_chunk = match align_down(
+                                self.final_free_list_chunk
+                                    .max(self.starting_free_list_chunk)
+                                    .max(self.transient_dedicated_threshold)
+                                    .min(heap.size() / 32),
+                                atom_mask,
+                            ) {
+                                0 => atom_mask,
+                                other => other,
+                            };
+
+                            slot.get_or_insert(FreeListAllocator::new(
+                                starting_free_list_chunk,
+                                final_free_list_chunk,
                                 index,
                                 memory_type.props,
                                 if host_visible_non_coherent(memory_type.props) {
@@ -319,15 +320,15 @@ where
                     match result {
                         Ok(block) => {
                             return Ok(MemoryBlock::new(
-                                block.memory,
                                 index,
                                 memory_type.props,
                                 block.offset,
                                 block.size,
                                 atom_mask,
-                                MemoryBlockFlavor::Linear {
+                                MemoryBlockFlavor::FreeList {
                                     chunk: block.chunk,
                                     ptr: block.ptr,
+                                    memory: block.memory,
                                 },
                             ))
                         }
@@ -335,6 +336,7 @@ where
                         Err(err) => return Err(err),
                     }
                 }
+
                 Strategy::Buddy => {
                     let allocator = match &mut self.buddy_allocators[index as usize] {
                         Some(allocator) => allocator,
@@ -349,7 +351,6 @@ where
                                 .min(heap.size() / 32)
                                 .next_power_of_two();
 
-                            let memory_type = &self.memory_types[index as usize];
                             slot.get_or_insert(BuddyAllocator::new(
                                 minimal_buddy_size,
                                 initial_buddy_dedicated_size,
@@ -375,7 +376,6 @@ where
                     match result {
                         Ok(block) => {
                             return Ok(MemoryBlock::new(
-                                block.memory,
                                 index,
                                 memory_type.props,
                                 block.offset,
@@ -385,6 +385,7 @@ where
                                     chunk: block.chunk,
                                     ptr: block.ptr,
                                     index: block.index,
+                                    memory: block.memory,
                                 },
                             ))
                         }
@@ -411,37 +412,20 @@ where
         let memory_type = block.memory_type();
         let offset = block.offset();
         let size = block.size();
-        let (memory, flavor) = block.deallocate();
+        let flavor = block.deallocate();
         match flavor {
-            MemoryBlockFlavor::Dedicated => {
+            MemoryBlockFlavor::Dedicated { memory } => {
                 let heap = self.memory_types[memory_type as usize].heap;
                 device.deallocate_memory(memory);
                 self.allocations_remains += 1;
                 self.memory_heaps[heap as usize].dealloc(size);
             }
-            MemoryBlockFlavor::Linear { chunk, ptr } => {
-                let heap = self.memory_types[memory_type as usize].heap;
-                let heap = &mut self.memory_heaps[heap as usize];
-
-                let allocator = self.linear_allocators[memory_type as usize]
-                    .as_mut()
-                    .expect("Allocator should exist");
-
-                allocator.dealloc(
-                    device,
-                    LinearBlock {
-                        offset,
-                        size,
-                        memory,
-                        ptr,
-                        chunk,
-                    },
-                    heap,
-                    &mut self.allocations_remains,
-                );
-            }
-            MemoryBlockFlavor::Buddy { chunk, ptr, index } => {
-                let memory_type = memory_type;
+            MemoryBlockFlavor::Buddy {
+                chunk,
+                ptr,
+                index,
+                memory,
+            } => {
                 let heap = self.memory_types[memory_type as usize].heap;
                 let heap = &mut self.memory_heaps[heap as usize];
 
@@ -452,12 +436,33 @@ where
                 allocator.dealloc(
                     device,
                     BuddyBlock {
+                        memory,
+                        ptr,
                         offset,
                         size,
-                        memory,
+                        chunk,
                         index,
+                    },
+                    heap,
+                    &mut self.allocations_remains,
+                );
+            }
+            MemoryBlockFlavor::FreeList { chunk, ptr, memory } => {
+                let heap = self.memory_types[memory_type as usize].heap;
+                let heap = &mut self.memory_heaps[heap as usize];
+
+                let allocator = self.freelist_allocators[memory_type as usize]
+                    .as_mut()
+                    .expect("Allocator should exist");
+
+                allocator.dealloc(
+                    device,
+                    FreeListBlock {
+                        memory,
                         ptr,
                         chunk,
+                        offset,
+                        size,
                     },
                     heap,
                     &mut self.allocations_remains,
@@ -476,8 +481,17 @@ where
     ///   and memory blocks allocated from it
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, device)))]
     pub unsafe fn cleanup(&mut self, device: &impl MemoryDevice<M>) {
-        for allocator in self.linear_allocators.iter_mut().filter_map(Option::as_mut) {
-            allocator.cleanup(device);
+        for (index, allocator) in self
+            .freelist_allocators
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, allocator)| Some((index, allocator.as_mut()?)))
+        {
+            let memory_type = &self.memory_types[index];
+            let heap = memory_type.heap;
+            let heap = &mut self.memory_heaps[heap as usize];
+
+            allocator.cleanup(device, heap, &mut self.allocations_remains);
         }
     }
 }

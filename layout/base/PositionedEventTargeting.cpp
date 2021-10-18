@@ -15,6 +15,7 @@
 #include "mozilla/StaticPrefs_ui.h"
 #include "mozilla/ToString.h"
 #include "mozilla/dom/MouseEventBinding.h"
+#include "nsContainerFrame.h"
 #include "nsFrameList.h"  // for DEBUG_FRAME_DUMP
 #include "nsHTMLParts.h"
 #include "nsLayoutUtils.h"
@@ -224,7 +225,7 @@ static nsIContent* GetClickableAncestor(
   // this check to any non-auto cursor. Such a change would also pick up things
   // like contenteditable or input fields, which can then be removed from the
   // loop below, and would have better performance.
-  if (aFrame->StyleUI()->mCursor.keyword == StyleCursorKind::Pointer) {
+  if (aFrame->StyleUI()->Cursor().keyword == StyleCursorKind::Pointer) {
     return aFrame->GetContent();
   }
 

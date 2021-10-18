@@ -16,17 +16,12 @@
 
 "use strict";
 
-const { libcutils } = ChromeUtils.import(
-  "resource://gre/modules/systemlibs.js"
-);
 const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
 const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 const { Sntp } = ChromeUtils.import("resource://gre/modules/Sntp.jsm");
-const { FileUtils } = ChromeUtils.import(
-  "resource://gre/modules/FileUtils.jsm"
-);
+
 var RIL_DEBUG = ChromeUtils.import(
   "resource://gre/modules/ril_consts_debug.js"
 );
@@ -106,16 +101,17 @@ function NetworkTimeService() {
   }
   this._lastNitzData = [];
   this._suggestedTimeRequests = [];
-  // TODO, default auto clock and timezone to true before setting get ready.
-  this._clockAutoUpdateEnabled = /*false*/ true;
-  this._timezoneAutoUpdateEnabled = /*false*/ true;
+  this._clockAutoUpdateEnabled = false;
+  this._timezoneAutoUpdateEnabled = false;
   this._dataDefaultServiceId = -1;
+
+  this._sntpTimeoutInSecs = Services.prefs.getIntPref("network.sntp.timeout");
 
   this._sntp = new Sntp(
     this.onSntpDataAvailable.bind(this),
     Services.prefs.getIntPref("network.sntp.maxRetryCount"),
     Services.prefs.getIntPref("network.sntp.refreshPeriod"),
-    Services.prefs.getIntPref("network.sntp.timeout"),
+    this._sntpTimeoutInSecs,
     Services.prefs.getCharPref("network.sntp.pools").split(";"),
     Services.prefs.getIntPref("network.sntp.port")
   );
@@ -183,6 +179,10 @@ NetworkTimeService.prototype = {
 
   _dataDefaultServiceId: null,
 
+  _sntpTimeoutInSecs: null,
+
+  _sntpTimer: null,
+
   debug(aMessage) {
     console.log("NetworkTimeService: " + aMessage);
   },
@@ -206,42 +206,37 @@ NetworkTimeService.prototype = {
   },
 
   getSuggestedNetworkTime(aCallback) {
-    let suggestion = INVALID_UPTIME;
     if (this._lastNitzData[0]) {
       this._getClockByNitz(this._lastNitzData[0])
         .then(suggestion => {
           aCallback.onSuggestedNetworkTimeResponse(suggestion);
         })
-        .catch();
+        .catch(() => {
+          this.debug("getSuggestedNetworkTime rejected");
+        });
       return;
     }
 
-    // fallback to SNTP
+    // SNTP
     if (
       gNetworkManager.activeNetworkInfo &&
       gNetworkManager.activeNetworkInfo.state ==
         Ci.nsINetworkInfo.NETWORK_STATE_CONNECTED
     ) {
       if (!this._sntp.isExpired()) {
-        suggestion = this._sntp.getOffset();
-        aCallback.onSuggestedNetworkTimeResponse(suggestion);
+        let offset = this._sntp.getOffset();
+        aCallback.onSuggestedNetworkTimeResponse(Date.now() + offset);
       } else {
         this._suggestedTimeRequests.push(aCallback);
         if (this._suggestedTimeRequests.length == 1) {
-          this._sntp.request();
+          this._requestSntp();
         }
       }
       return;
     }
 
-    // Set a sane minimum time.
-    let buildTime = libcutils.property_get("ro.build.date.utc", "0") * 1000;
-    let file = FileUtils.File("/system/b2g/b2g");
-    if (file.lastModifiedTime > buildTime) {
-      buildTime = file.lastModifiedTime;
-    }
-
-    aCallback.onSuggestedNetworkTimeResponse(buildTime);
+    // No network time is available, return now.
+    aCallback.onSuggestedNetworkTimeResponse(Date.now());
   },
 
   handle(aName, aResult) {
@@ -267,17 +262,6 @@ NetworkTimeService.prototype = {
             // Or refresh the SNTP.
             this._sntp.request();
           }
-        } else {
-          // Set a sane minimum time.
-          let buildTime =
-            libcutils.property_get("ro.build.date.utc", "0") * 1000;
-          let file = FileUtils.File("/system/b2g/b2g");
-          if (file.lastModifiedTime > buildTime) {
-            buildTime = file.lastModifiedTime;
-          }
-          if (buildTime > Date.now()) {
-            gTime.setTime(buildTime, this);
-          }
         }
         break;
 
@@ -287,7 +271,7 @@ NetworkTimeService.prototype = {
         if (this._timezoneAutoUpdateEnabled) {
           // Apply the latest cached NITZ for timezone if it's available.
           if (this._timezoneAutoUpdateEnabled && this._lastNitzData[0]) {
-            this.setTimezoneByNitz(this._lastNitzData[0]);
+            this.setTimezoneByNitz(this._lastNitzData[0], true);
           }
         }
         break;
@@ -339,9 +323,9 @@ NetworkTimeService.prototype = {
           }
         }
 
-        // SNTP won't update unless the SNTP is already expired.
         if (this._sntp.isExpired()) {
-          this._sntp.request();
+          this.debug("sntp expired, request");
+          this._requestSntp();
         }
         break;
 
@@ -375,9 +359,8 @@ NetworkTimeService.prototype = {
   notify(aTimeInfo) {
     switch (aTimeInfo.reason) {
       case Ci.nsITime.TIME_CHANGED:
-        // TODO, current TimeService doesn't provide time delta.
-        // let offset = parseInt(aData, 10);
-        // this._sntp.updateOffset(offset);
+        let offset = parseInt(aTimeInfo.delta, 10);
+        this._sntp.updateOffset(offset);
         break;
     }
   },
@@ -475,6 +458,17 @@ NetworkTimeService.prototype = {
         },
       };
 
+      let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+      timer.initWithCallback(
+        () => {
+          if (DEBUG) {
+            self.debug("500ms timeout, force reject");
+          }
+          callback.reject();
+        },
+        500,
+        Ci.nsITimer.TYPE_ONE_SHOT
+      );
       gTime.getElapsedRealTime(callback);
     });
   },
@@ -482,7 +476,7 @@ NetworkTimeService.prototype = {
   /**
    * Set the system time zone by NITZ.
    */
-  setTimezoneByNitz(aNitzData) {
+  setTimezoneByNitz(aNitzData, aForceUpdate = false) {
     // To set the sytem timezone. Note that we need to convert the time zone
     // value to a UTC repesentation string in the format of "UTC(+/-)hh:mm".
     // Ex, time zone -480 is "UTC+08:00"; time zone 630 is "UTC-10:30".
@@ -492,7 +486,7 @@ NetworkTimeService.prototype = {
     // the correct time zone offset by using "time.timezone.dst" value.
     this._updateSetting("time.timezone.dst", aNitzData.dst);
 
-    if (aNitzData.timeZone != new Date().getTimezoneOffset()) {
+    if (aForceUpdate || aNitzData.timeZone != new Date().getTimezoneOffset()) {
       let absTimeZoneInMinutes = Math.abs(aNitzData.timeZone);
       let timeZoneStr = "UTC";
       timeZoneStr += aNitzData.timeZone > 0 ? "-" : "+";
@@ -504,11 +498,17 @@ NetworkTimeService.prototype = {
   },
 
   onSntpDataAvailable(aOffset) {
+    this._cancelSntpTimer();
     this._setClockBySntp(aOffset);
+    this._notifyRequesters(aOffset);
+  },
+
+  _notifyRequesters(aOffset) {
     if (this._suggestedTimeRequests.length) {
+      let suggestion = Date.now() + aOffset;
       for (let index = 0; index < this._suggestedTimeRequests.length; index++) {
-        this._clockAutoUpdateEnabled[index].onSuggestedNetworkTimeResponse(
-          aOffset
+        this._suggestedTimeRequests[index].onSuggestedNetworkTimeResponse(
+          suggestion
         );
       }
 
@@ -619,6 +619,31 @@ NetworkTimeService.prototype = {
         this.debug("Remove SettingObserve " + aKey + " failed");
       },
     });
+  },
+
+  _requestSntp() {
+    this._sntp.request();
+    this._cancelSntpTimer();
+
+    this._sntpTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+    this._sntpTimer.initWithCallback(
+      () => {
+        this._notifyRequesters(0);
+        this._sntpTimer = null;
+      },
+      this._sntpTimeoutInSecs * 1000,
+      Ci.nsITimer.TYPE_ONE_SHOT
+    );
+  },
+
+  _cancelSntpTimer() {
+    if (this._sntpTimer) {
+      if (DEBUG) {
+        this.debug("cancel sntp timer");
+      }
+      this._sntpTimer.cancel();
+      this._sntpTimer = null;
+    }
   },
 };
 

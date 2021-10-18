@@ -186,11 +186,11 @@ class SimpleLayerAttributes final {
     return true;
   }
 
-  bool SetIsAsyncZoomContainer(const Maybe<FrameMetrics::ViewID>& aViewId) {
-    if (mIsAsyncZoomContainerForViewId == aViewId) {
+  bool SetAsyncZoomContainerId(const Maybe<FrameMetrics::ViewID>& aViewId) {
+    if (mAsyncZoomContainerId == aViewId) {
       return false;
     }
-    mIsAsyncZoomContainerForViewId = aViewId;
+    mAsyncZoomContainerId = aViewId;
     return true;
   }
 
@@ -231,14 +231,6 @@ class SimpleLayerAttributes final {
       return false;
     }
     mTransformIsPerspective = aIsPerspective;
-    return true;
-  }
-
-  bool SetScrolledClip(const Maybe<LayerClip>& aScrolledClip) {
-    if (mScrolledClip == aScrolledClip) {
-      return false;
-    }
-    mScrolledClip = aScrolledClip;
     return true;
   }
 
@@ -307,8 +299,8 @@ class SimpleLayerAttributes final {
 
   bool IsFixedPosition() const { return mIsFixedPosition; }
 
-  Maybe<FrameMetrics::ViewID> IsAsyncZoomContainer() const {
-    return mIsAsyncZoomContainerForViewId;
+  Maybe<FrameMetrics::ViewID> GetAsyncZoomContainerId() const {
+    return mAsyncZoomContainerId;
   }
 
   const ScrollbarData& GetScrollbarData() const { return mScrollbarData; }
@@ -320,8 +312,6 @@ class SimpleLayerAttributes final {
   const gfx::Matrix4x4& GetTransform() const { return mTransform; }
 
   bool GetTransformIsPerspective() const { return mTransformIsPerspective; }
-
-  const Maybe<LayerClip>& GetScrolledClip() const { return mScrolledClip; }
 
   ScrollableLayerGuid::ViewID GetFixedPositionScrollContainerId() const {
     return (mIsFixedPosition && mFixedPositionData)
@@ -354,14 +344,12 @@ class SimpleLayerAttributes final {
   bool operator==(const SimpleLayerAttributes& aOther) const {
     return mTransform == aOther.mTransform &&
            mTransformIsPerspective == aOther.mTransformIsPerspective &&
-           mScrolledClip == aOther.mScrolledClip &&
            mPostXScale == aOther.mPostXScale &&
            mPostYScale == aOther.mPostYScale &&
            mContentFlags == aOther.mContentFlags &&
            mOpacity == aOther.mOpacity &&
            mIsFixedPosition == aOther.mIsFixedPosition &&
-           mIsAsyncZoomContainerForViewId ==
-               aOther.mIsAsyncZoomContainerForViewId &&
+           mAsyncZoomContainerId == aOther.mAsyncZoomContainerId &&
            mScrollbarData == aOther.mScrollbarData &&
            mMixBlendMode == aOther.mMixBlendMode &&
            mForceIsolatedGroup == aOther.mForceIsolatedGroup;
@@ -370,13 +358,12 @@ class SimpleLayerAttributes final {
  private:
   gfx::Matrix4x4 mTransform;
   bool mTransformIsPerspective;
-  Maybe<LayerClip> mScrolledClip;
   float mPostXScale;
   float mPostYScale;
   uint32_t mContentFlags;
   float mOpacity;
   bool mIsFixedPosition;
-  Maybe<FrameMetrics::ViewID> mIsAsyncZoomContainerForViewId;
+  Maybe<FrameMetrics::ViewID> mAsyncZoomContainerId;
   ScrollbarData mScrollbarData;
   gfx::CompositionOp mMixBlendMode;
   bool mForceIsolatedGroup;

@@ -226,7 +226,8 @@ class WheelBlockState : public CancelableBlockState {
    * Called from APZCTM when a mouse move or drag+drop event occurs, before
    * the event has been processed.
    */
-  void OnMouseMove(const ScreenIntPoint& aPoint);
+  void OnMouseMove(const ScreenIntPoint& aPoint,
+                   const Maybe<ScrollableLayerGuid>& aTargetGuid);
 
   /**
    * Returns whether or not the block is participating in a wheel transaction.
@@ -274,6 +275,7 @@ class WheelBlockState : public CancelableBlockState {
   TimeStamp mLastMouseMove;
   uint32_t mScrollSeriesCounter;
   bool mTransactionEnded;
+  bool mIsScrollable = true;
   ScrollDirections mAllowedScrollDirections;
 };
 

@@ -9,36 +9,1055 @@
 // happens when calling these functions. They don't do much inspection of
 // profiler internals.
 
-#include "GeckoProfiler.h"
-#include "mozilla/ProfilerMarkerTypes.h"
-#include "mozilla/ProfilerMarkers.h"
-#include "platform.h"
-#include "ProfileBuffer.h"
-
-#include "js/Initialization.h"
-#include "js/Printf.h"
-#include "jsapi.h"
-#include "json/json.h"
-#include "mozilla/Atomics.h"
-#include "mozilla/BlocksRingBuffer.h"
-#include "mozilla/ProfileBufferEntrySerializationGeckoExtensions.h"
-#include "mozilla/ProfileJSONWriter.h"
+#include "mozilla/ProfilerThreadPlatformData.h"
+#include "mozilla/ProfilerThreadRegistration.h"
+#include "mozilla/ProfilerThreadRegistrationInfo.h"
+#include "mozilla/ProfilerThreadRegistry.h"
+#include "mozilla/ProfilerUtils.h"
 #include "mozilla/UniquePtrExtensions.h"
-#include "mozilla/net/HttpBaseChannel.h"
-#include "nsIThread.h"
-#include "nsThreadUtils.h"
 
 #include "gtest/gtest.h"
 
-#include <cstring>
-#include <set>
 #include <thread>
+
+#if defined(_MSC_VER) || defined(__MINGW32__)
+#  include <processthreadsapi.h>
+#  include <realtimeapiset.h>
+#elif defined(__APPLE__)
+#  include <mach/thread_act.h>
+#endif
+
+#ifdef MOZ_GECKO_PROFILER
+
+#  include "GeckoProfiler.h"
+#  include "mozilla/ProfilerMarkerTypes.h"
+#  include "mozilla/ProfilerMarkers.h"
+#  include "NetworkMarker.h"
+#  include "platform.h"
+#  include "ProfileBuffer.h"
+
+#  include "js/Initialization.h"
+#  include "js/Printf.h"
+#  include "jsapi.h"
+#  include "json/json.h"
+#  include "mozilla/Atomics.h"
+#  include "mozilla/BlocksRingBuffer.h"
+#  include "mozilla/DataMutex.h"
+#  include "mozilla/ProfileBufferEntrySerializationGeckoExtensions.h"
+#  include "mozilla/ProfileJSONWriter.h"
+#  include "mozilla/ScopeExit.h"
+#  include "mozilla/net/HttpBaseChannel.h"
+#  include "nsIChannelEventSink.h"
+#  include "nsIThread.h"
+#  include "nsThreadUtils.h"
+
+#  include <cstring>
+#  include <set>
+
+#endif  // MOZ_GECKO_PROFILER
 
 // Note: profiler_init() has already been called in XRE_main(), so we can't
 // test it here. Likewise for profiler_shutdown(), and AutoProfilerInit
 // (which is just an RAII wrapper for profiler_init() and profiler_shutdown()).
 
 using namespace mozilla;
+
+TEST(GeckoProfiler, ProfilerUtils)
+{
+  profiler_init_main_thread_id();
+
+  static_assert(std::is_same_v<decltype(profiler_current_process_id()),
+                               ProfilerProcessId>);
+  static_assert(
+      std::is_same_v<decltype(profiler_current_process_id()),
+                     decltype(baseprofiler::profiler_current_process_id())>);
+  ProfilerProcessId processId = profiler_current_process_id();
+  EXPECT_TRUE(processId.IsSpecified());
+  EXPECT_EQ(processId, baseprofiler::profiler_current_process_id());
+
+  static_assert(
+      std::is_same_v<decltype(profiler_current_thread_id()), ProfilerThreadId>);
+  static_assert(
+      std::is_same_v<decltype(profiler_current_thread_id()),
+                     decltype(baseprofiler::profiler_current_thread_id())>);
+  EXPECT_EQ(profiler_current_thread_id(),
+            baseprofiler::profiler_current_thread_id());
+
+  ProfilerThreadId mainTestThreadId = profiler_current_thread_id();
+  EXPECT_TRUE(mainTestThreadId.IsSpecified());
+
+  ProfilerThreadId mainThreadId = profiler_main_thread_id();
+  EXPECT_TRUE(mainThreadId.IsSpecified());
+
+  EXPECT_EQ(mainThreadId, mainTestThreadId)
+      << "Test should run on the main thread";
+  EXPECT_TRUE(profiler_is_main_thread());
+
+  std::thread testThread([&]() {
+    EXPECT_EQ(profiler_current_process_id(), processId);
+
+    const ProfilerThreadId testThreadId = profiler_current_thread_id();
+    EXPECT_TRUE(testThreadId.IsSpecified());
+    EXPECT_NE(testThreadId, mainThreadId);
+    EXPECT_FALSE(profiler_is_main_thread());
+
+    EXPECT_EQ(baseprofiler::profiler_current_process_id(), processId);
+    EXPECT_EQ(baseprofiler::profiler_current_thread_id(), testThreadId);
+    EXPECT_EQ(baseprofiler::profiler_main_thread_id(), mainThreadId);
+    EXPECT_FALSE(baseprofiler::profiler_is_main_thread());
+  });
+  testThread.join();
+}
+
+TEST(GeckoProfiler, ThreadRegistrationInfo)
+{
+  profiler_init_main_thread_id();
+
+  TimeStamp ts = TimeStamp::Now();
+  {
+    profiler::ThreadRegistrationInfo trInfo{
+        "name", ProfilerThreadId::FromNumber(123), false, ts};
+    EXPECT_STREQ(trInfo.Name(), "name");
+    EXPECT_NE(trInfo.Name(), "name")
+        << "ThreadRegistrationInfo should keep its own copy of the name";
+    EXPECT_EQ(trInfo.RegisterTime(), ts);
+    EXPECT_EQ(trInfo.ThreadId(), ProfilerThreadId::FromNumber(123));
+    EXPECT_EQ(trInfo.IsMainThread(), false);
+  }
+
+  // Make sure the next timestamp will be different from `ts`.
+  while (TimeStamp::Now() == ts) {
+  }
+
+  {
+    profiler::ThreadRegistrationInfo trInfoHere{"Here"};
+    EXPECT_STREQ(trInfoHere.Name(), "Here");
+    EXPECT_NE(trInfoHere.Name(), "Here")
+        << "ThreadRegistrationInfo should keep its own copy of the name";
+    EXPECT_GT(trInfoHere.RegisterTime(), ts);
+    EXPECT_EQ(trInfoHere.ThreadId(), profiler_current_thread_id());
+    EXPECT_EQ(trInfoHere.ThreadId(), profiler_main_thread_id())
+        << "Gtests are assumed to run on the main thread";
+    EXPECT_EQ(trInfoHere.IsMainThread(), true)
+        << "Gtests are assumed to run on the main thread";
+  }
+
+  {
+    // Sub-thread test.
+    // These will receive sub-thread data (to test move at thread end).
+    TimeStamp tsThread;
+    ProfilerThreadId threadThreadId;
+    UniquePtr<profiler::ThreadRegistrationInfo> trInfoThreadPtr;
+
+    std::thread testThread([&]() {
+      profiler::ThreadRegistrationInfo trInfoThread{"Thread"};
+      EXPECT_STREQ(trInfoThread.Name(), "Thread");
+      EXPECT_NE(trInfoThread.Name(), "Thread")
+          << "ThreadRegistrationInfo should keep its own copy of the name";
+      EXPECT_GT(trInfoThread.RegisterTime(), ts);
+      EXPECT_EQ(trInfoThread.ThreadId(), profiler_current_thread_id());
+      EXPECT_NE(trInfoThread.ThreadId(), profiler_main_thread_id());
+      EXPECT_EQ(trInfoThread.IsMainThread(), false);
+
+      tsThread = trInfoThread.RegisterTime();
+      threadThreadId = trInfoThread.ThreadId();
+      trInfoThreadPtr =
+          MakeUnique<profiler::ThreadRegistrationInfo>(std::move(trInfoThread));
+    });
+    testThread.join();
+
+    ASSERT_NE(trInfoThreadPtr, nullptr);
+    EXPECT_STREQ(trInfoThreadPtr->Name(), "Thread");
+    EXPECT_EQ(trInfoThreadPtr->RegisterTime(), tsThread);
+    EXPECT_EQ(trInfoThreadPtr->ThreadId(), threadThreadId);
+    EXPECT_EQ(trInfoThreadPtr->IsMainThread(), false)
+        << "Gtests are assumed to run on the main thread";
+  }
+}
+
+static void TestConstUnlockedConstReader(
+    const profiler::ThreadRegistration::UnlockedConstReader& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  EXPECT_STREQ(aData.Info().Name(), "Test thread");
+  EXPECT_GE(aData.Info().RegisterTime(), aBeforeRegistration);
+  EXPECT_LE(aData.Info().RegisterTime(), aAfterRegistration);
+  EXPECT_EQ(aData.Info().ThreadId(), aThreadId);
+  EXPECT_FALSE(aData.Info().IsMainThread());
+
+#if (defined(_MSC_VER) || defined(__MINGW32__)) && defined(MOZ_GECKO_PROFILER)
+  HANDLE threadHandle = aData.PlatformDataCRef().ProfiledThread();
+  EXPECT_NE(threadHandle, nullptr);
+  EXPECT_EQ(ProfilerThreadId::FromNumber(::GetThreadId(threadHandle)),
+            aThreadId);
+  // Test calling QueryThreadCycleTime, we cannot assume that it will always
+  // work, but at least it shouldn't crash.
+  ULONG64 cycles;
+  (void)QueryThreadCycleTime(threadHandle, &cycles);
+#elif defined(__APPLE__) && defined(MOZ_GECKO_PROFILER)
+  // Test calling thread_info, we cannot assume that it will always work, but at
+  // least it shouldn't crash.
+  thread_basic_info_data_t threadBasicInfo;
+  mach_msg_type_number_t basicCount = THREAD_BASIC_INFO_COUNT;
+  (void)thread_info(
+      aData.PlatformDataCRef().ProfiledThread(), THREAD_BASIC_INFO,
+      reinterpret_cast<thread_info_t>(&threadBasicInfo), &basicCount);
+#elif (defined(__linux__) || defined(__ANDROID__) || defined(__FreeBSD__)) && \
+    defined(MOZ_GECKO_PROFILER)
+  // Test calling GetClockId, we cannot assume that it will always work, but at
+  // least it shouldn't crash.
+  Maybe<clockid_t> maybeClockId = aData.PlatformDataCRef().GetClockId();
+  if (maybeClockId) {
+    // Test calling clock_gettime, we cannot assume that it will always work,
+    // but at least it shouldn't crash.
+    timespec ts;
+    (void)clock_gettime(*maybeClockId, &ts);
+  }
+#else
+  (void)aData.PlatformDataCRef();
+#endif
+
+  EXPECT_GE(aData.StackTop(), aOnStackObject)
+      << "StackTop should be at &onStackChar, or higher on some "
+         "platforms";
+};
+
+static void TestConstUnlockedConstReaderAndAtomicRW(
+    const profiler::ThreadRegistration::UnlockedConstReaderAndAtomicRW& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedConstReader(aData, aBeforeRegistration, aAfterRegistration,
+                               aOnStackObject, aThreadId);
+
+  (void)aData.ProfilingStackCRef();
+
+  EXPECT_FALSE(aData.IsBeingProfiled());
+
+  EXPECT_FALSE(aData.IsSleeping());
+};
+
+static void TestUnlockedConstReaderAndAtomicRW(
+    profiler::ThreadRegistration::UnlockedConstReaderAndAtomicRW& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedConstReaderAndAtomicRW(aData, aBeforeRegistration,
+                                          aAfterRegistration, aOnStackObject,
+                                          aThreadId);
+
+  (void)aData.ProfilingStackRef();
+
+  EXPECT_FALSE(aData.IsSleeping());
+  aData.SetSleeping();
+  EXPECT_TRUE(aData.IsSleeping());
+  aData.SetAwake();
+  EXPECT_FALSE(aData.IsSleeping());
+
+  aData.ReinitializeOnResume();
+
+  EXPECT_FALSE(aData.CanDuplicateLastSampleDueToSleep());
+  EXPECT_FALSE(aData.CanDuplicateLastSampleDueToSleep());
+  aData.SetSleeping();
+  // After sleeping, the 2nd+ calls can duplicate.
+  EXPECT_FALSE(aData.CanDuplicateLastSampleDueToSleep());
+  EXPECT_TRUE(aData.CanDuplicateLastSampleDueToSleep());
+  EXPECT_TRUE(aData.CanDuplicateLastSampleDueToSleep());
+  aData.ReinitializeOnResume();
+  // After reinit (and sleeping), the 2nd+ calls can duplicate.
+  EXPECT_FALSE(aData.CanDuplicateLastSampleDueToSleep());
+  EXPECT_TRUE(aData.CanDuplicateLastSampleDueToSleep());
+  EXPECT_TRUE(aData.CanDuplicateLastSampleDueToSleep());
+  aData.SetAwake();
+  EXPECT_FALSE(aData.CanDuplicateLastSampleDueToSleep());
+  EXPECT_FALSE(aData.CanDuplicateLastSampleDueToSleep());
+};
+
+static void TestConstUnlockedRWForLockedProfiler(
+    const profiler::ThreadRegistration::UnlockedRWForLockedProfiler& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedConstReaderAndAtomicRW(aData, aBeforeRegistration,
+                                          aAfterRegistration, aOnStackObject,
+                                          aThreadId);
+
+  // We can't create a PSAutoLock here, so just verify that the call would
+  // compile and return the expected type.
+  static_assert(
+      std::is_same_v<
+          decltype(aData.IsBeingProfiled(std::declval<PSAutoLock>())), bool>);
+};
+
+static void TestConstUnlockedReaderAndAtomicRWOnThread(
+    const profiler::ThreadRegistration::UnlockedReaderAndAtomicRWOnThread&
+        aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedRWForLockedProfiler(aData, aBeforeRegistration,
+                                       aAfterRegistration, aOnStackObject,
+                                       aThreadId);
+
+  EXPECT_EQ(aData.GetJSContext(), nullptr);
+};
+
+static void TestUnlockedRWForLockedProfiler(
+    profiler::ThreadRegistration::UnlockedRWForLockedProfiler& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedRWForLockedProfiler(aData, aBeforeRegistration,
+                                       aAfterRegistration, aOnStackObject,
+                                       aThreadId);
+  TestUnlockedConstReaderAndAtomicRW(aData, aBeforeRegistration,
+                                     aAfterRegistration, aOnStackObject,
+                                     aThreadId);
+
+  // No functions to test here.
+};
+
+static void TestUnlockedReaderAndAtomicRWOnThread(
+    profiler::ThreadRegistration::UnlockedReaderAndAtomicRWOnThread& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedReaderAndAtomicRWOnThread(aData, aBeforeRegistration,
+                                             aAfterRegistration, aOnStackObject,
+                                             aThreadId);
+  TestUnlockedRWForLockedProfiler(aData, aBeforeRegistration,
+                                  aAfterRegistration, aOnStackObject,
+                                  aThreadId);
+
+  // No functions to test here.
+};
+
+static void TestConstLockedRWFromAnyThread(
+    const profiler::ThreadRegistration::LockedRWFromAnyThread& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstUnlockedReaderAndAtomicRWOnThread(aData, aBeforeRegistration,
+                                             aAfterRegistration, aOnStackObject,
+                                             aThreadId);
+
+  EXPECT_EQ(aData.GetJsFrameBuffer(), nullptr);
+  EXPECT_EQ(aData.GetEventTarget(), nullptr);
+};
+
+static void TestLockedRWFromAnyThread(
+    profiler::ThreadRegistration::LockedRWFromAnyThread& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstLockedRWFromAnyThread(aData, aBeforeRegistration, aAfterRegistration,
+                                 aOnStackObject, aThreadId);
+  TestUnlockedReaderAndAtomicRWOnThread(aData, aBeforeRegistration,
+                                        aAfterRegistration, aOnStackObject,
+                                        aThreadId);
+
+  // We can't create a ProfiledThreadData nor PSAutoLock here, so just verify
+  // that the call would compile and return the expected type.
+  static_assert(
+      std::is_same_v<decltype(aData.SetIsBeingProfiledWithProfiledThreadData(
+                         std::declval<ProfiledThreadData*>(),
+                         std::declval<PSAutoLock>())),
+                     void>);
+
+  aData.ResetMainThread(nullptr);
+
+  TimeDuration delay = TimeDuration::FromSeconds(1);
+  TimeDuration running = TimeDuration::FromSeconds(1);
+  aData.GetRunningEventDelay(TimeStamp::Now(), delay, running);
+  EXPECT_TRUE(delay.IsZero());
+  EXPECT_TRUE(running.IsZero());
+
+  aData.StartJSSampling(123u);
+  aData.StopJSSampling();
+};
+
+static void TestConstLockedRWOnThread(
+    const profiler::ThreadRegistration::LockedRWOnThread& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstLockedRWFromAnyThread(aData, aBeforeRegistration, aAfterRegistration,
+                                 aOnStackObject, aThreadId);
+
+  // No functions to test here.
+};
+
+static void TestLockedRWOnThread(
+    profiler::ThreadRegistration::LockedRWOnThread& aData,
+    const TimeStamp& aBeforeRegistration, const TimeStamp& aAfterRegistration,
+    const void* aOnStackObject,
+    ProfilerThreadId aThreadId = profiler_current_thread_id()) {
+  TestConstLockedRWOnThread(aData, aBeforeRegistration, aAfterRegistration,
+                            aOnStackObject, aThreadId);
+  TestLockedRWFromAnyThread(aData, aBeforeRegistration, aAfterRegistration,
+                            aOnStackObject, aThreadId);
+
+  // We don't want to really call SetJSContext here, so just verify that
+  // the call would compile and return the expected type.
+  static_assert(
+      std::is_same_v<decltype(aData.SetJSContext(std::declval<JSContext*>())),
+                     void>);
+  aData.ClearJSContext();
+  aData.PollJSSampling();
+};
+
+TEST(GeckoProfiler, ThreadRegistration_DataAccess)
+{
+  using TR = profiler::ThreadRegistration;
+
+  profiler_init_main_thread_id();
+  ASSERT_TRUE(profiler_is_main_thread())
+  << "This test assumes it runs on the main thread";
+
+  // Note that the main thread could already be registered, so we work in a new
+  // thread to test an actual registration that we control.
+
+  std::thread testThread([&]() {
+    ASSERT_FALSE(TR::IsRegistered())
+    << "A new std::thread should not start registered";
+    EXPECT_FALSE(TR::GetOnThreadPtr());
+    EXPECT_FALSE(TR::WithOnThreadRefOr([&](auto) { return true; }, false));
+
+    char onStackChar;
+
+    TimeStamp beforeRegistration = TimeStamp::Now();
+    TR tr{"Test thread", &onStackChar};
+    TimeStamp afterRegistration = TimeStamp::Now();
+
+    ASSERT_TRUE(TR::IsRegistered());
+
+    // Note: This test will mostly be about checking the correct access to
+    // thread data, depending on how it's obtained. Not all the functionality
+    // related to that data is tested (e.g., because it involves JS or other
+    // external dependencies that would be difficult to control here.)
+
+    auto TestOnThreadRef = [&](TR::OnThreadRef aOnThreadRef) {
+      // To test const-qualified member functions.
+      const TR::OnThreadRef& onThreadCRef = aOnThreadRef;
+
+      // const UnlockedConstReader (always const)
+
+      TestConstUnlockedConstReader(onThreadCRef.UnlockedConstReaderCRef(),
+                                   beforeRegistration, afterRegistration,
+                                   &onStackChar);
+      onThreadCRef.WithUnlockedConstReader(
+          [&](const TR::UnlockedConstReader& aData) {
+            TestConstUnlockedConstReader(aData, beforeRegistration,
+                                         afterRegistration, &onStackChar);
+          });
+
+      // const UnlockedConstReaderAndAtomicRW
+
+      TestConstUnlockedConstReaderAndAtomicRW(
+          onThreadCRef.UnlockedConstReaderAndAtomicRWCRef(), beforeRegistration,
+          afterRegistration, &onStackChar);
+      onThreadCRef.WithUnlockedConstReaderAndAtomicRW(
+          [&](const TR::UnlockedConstReaderAndAtomicRW& aData) {
+            TestConstUnlockedConstReaderAndAtomicRW(
+                aData, beforeRegistration, afterRegistration, &onStackChar);
+          });
+
+      // non-const UnlockedConstReaderAndAtomicRW
+
+      TestUnlockedConstReaderAndAtomicRW(
+          aOnThreadRef.UnlockedConstReaderAndAtomicRWRef(), beforeRegistration,
+          afterRegistration, &onStackChar);
+      aOnThreadRef.WithUnlockedConstReaderAndAtomicRW(
+          [&](TR::UnlockedConstReaderAndAtomicRW& aData) {
+            TestUnlockedConstReaderAndAtomicRW(aData, beforeRegistration,
+                                               afterRegistration, &onStackChar);
+          });
+
+      // const UnlockedRWForLockedProfiler
+
+      TestConstUnlockedRWForLockedProfiler(
+          onThreadCRef.UnlockedRWForLockedProfilerCRef(), beforeRegistration,
+          afterRegistration, &onStackChar);
+      onThreadCRef.WithUnlockedRWForLockedProfiler(
+          [&](const TR::UnlockedRWForLockedProfiler& aData) {
+            TestConstUnlockedRWForLockedProfiler(
+                aData, beforeRegistration, afterRegistration, &onStackChar);
+          });
+
+      // non-const UnlockedRWForLockedProfiler
+
+      TestUnlockedRWForLockedProfiler(
+          aOnThreadRef.UnlockedRWForLockedProfilerRef(), beforeRegistration,
+          afterRegistration, &onStackChar);
+      aOnThreadRef.WithUnlockedRWForLockedProfiler(
+          [&](TR::UnlockedRWForLockedProfiler& aData) {
+            TestUnlockedRWForLockedProfiler(aData, beforeRegistration,
+                                            afterRegistration, &onStackChar);
+          });
+
+      // const UnlockedReaderAndAtomicRWOnThread
+
+      TestConstUnlockedReaderAndAtomicRWOnThread(
+          onThreadCRef.UnlockedReaderAndAtomicRWOnThreadCRef(),
+          beforeRegistration, afterRegistration, &onStackChar);
+      onThreadCRef.WithUnlockedReaderAndAtomicRWOnThread(
+          [&](const TR::UnlockedReaderAndAtomicRWOnThread& aData) {
+            TestConstUnlockedReaderAndAtomicRWOnThread(
+                aData, beforeRegistration, afterRegistration, &onStackChar);
+          });
+
+      // non-const UnlockedReaderAndAtomicRWOnThread
+
+      TestUnlockedReaderAndAtomicRWOnThread(
+          aOnThreadRef.UnlockedReaderAndAtomicRWOnThreadRef(),
+          beforeRegistration, afterRegistration, &onStackChar);
+      aOnThreadRef.WithUnlockedReaderAndAtomicRWOnThread(
+          [&](TR::UnlockedReaderAndAtomicRWOnThread& aData) {
+            TestUnlockedReaderAndAtomicRWOnThread(
+                aData, beforeRegistration, afterRegistration, &onStackChar);
+          });
+
+      // LockedRWFromAnyThread
+      // Note: It cannot directly be accessed on the thread, this will be
+      // tested through LockedRWOnThread.
+
+      // const LockedRWOnThread
+
+      EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+      {
+        TR::OnThreadRef::ConstRWOnThreadWithLock constRWOnThreadWithLock =
+            onThreadCRef.ConstLockedRWOnThread();
+        EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+        TestConstLockedRWOnThread(constRWOnThreadWithLock.DataCRef(),
+                                  beforeRegistration, afterRegistration,
+                                  &onStackChar);
+      }
+      EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+      onThreadCRef.WithConstLockedRWOnThread(
+          [&](const TR::LockedRWOnThread& aData) {
+            EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+            TestConstLockedRWOnThread(aData, beforeRegistration,
+                                      afterRegistration, &onStackChar);
+          });
+      EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+
+      // non-const LockedRWOnThread
+
+      EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+      {
+        TR::OnThreadRef::RWOnThreadWithLock rwOnThreadWithLock =
+            aOnThreadRef.LockedRWOnThread();
+        EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+        TestConstLockedRWOnThread(rwOnThreadWithLock.DataCRef(),
+                                  beforeRegistration, afterRegistration,
+                                  &onStackChar);
+        TestLockedRWOnThread(rwOnThreadWithLock.DataRef(), beforeRegistration,
+                             afterRegistration, &onStackChar);
+      }
+      EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+      aOnThreadRef.WithLockedRWOnThread([&](TR::LockedRWOnThread& aData) {
+        EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+        TestLockedRWOnThread(aData, beforeRegistration, afterRegistration,
+                             &onStackChar);
+      });
+      EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+    };
+
+    TR::OnThreadPtr onThreadPtr = TR::GetOnThreadPtr();
+    ASSERT_TRUE(onThreadPtr);
+    TestOnThreadRef(*onThreadPtr);
+
+    TR::WithOnThreadRef(
+        [&](TR::OnThreadRef aOnThreadRef) { TestOnThreadRef(aOnThreadRef); });
+
+    EXPECT_TRUE(TR::WithOnThreadRefOr(
+        [&](TR::OnThreadRef aOnThreadRef) {
+          TestOnThreadRef(aOnThreadRef);
+          return true;
+        },
+        false));
+  });
+  testThread.join();
+}
+
+// Thread name if registered, nullptr otherwise.
+static const char* GetThreadName() {
+  return profiler::ThreadRegistration::WithOnThreadRefOr(
+      [](profiler::ThreadRegistration::OnThreadRef onThreadRef) {
+        return onThreadRef.WithUnlockedConstReader(
+            [](const profiler::ThreadRegistration::UnlockedConstReader& aData) {
+              return aData.Info().Name();
+            });
+      },
+      nullptr);
+}
+
+TEST(GeckoProfiler, ThreadRegistration_NestedRegistrations)
+{
+  using TR = profiler::ThreadRegistration;
+
+  profiler_init_main_thread_id();
+  ASSERT_TRUE(profiler_is_main_thread())
+  << "This test assumes it runs on the main thread";
+
+  // Note that the main thread could already be registered, so we work in a new
+  // thread to test actual registrations that we control.
+
+  std::thread testThread([&]() {
+    ASSERT_FALSE(TR::IsRegistered())
+    << "A new std::thread should not start registered";
+
+    char onStackChar;
+
+    // Blocks {} are mostly for clarity, but some control on-stack registration
+    // lifetimes.
+
+    // On-stack registration.
+    {
+      TR rt{"Test thread #1", &onStackChar};
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #1");
+    }
+    ASSERT_FALSE(TR::IsRegistered());
+
+    // Off-stack registration.
+    {
+      TR::RegisterThread("Test thread #2", &onStackChar);
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #2");
+
+      TR::UnregisterThread();
+      ASSERT_FALSE(TR::IsRegistered());
+    }
+
+    // Extra un-registration should be ignored.
+    TR::UnregisterThread();
+    ASSERT_FALSE(TR::IsRegistered());
+
+    // Nested on-stack.
+    {
+      TR rt2{"Test thread #3", &onStackChar};
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #3");
+
+      {
+        TR rt3{"Test thread #4", &onStackChar};
+        ASSERT_TRUE(TR::IsRegistered());
+        EXPECT_STREQ(GetThreadName(), "Test thread #3")
+            << "Nested registration shouldn't change the name";
+      }
+      ASSERT_TRUE(TR::IsRegistered())
+      << "Thread should still be registered after nested un-registration";
+      EXPECT_STREQ(GetThreadName(), "Test thread #3")
+          << "Thread should still be registered after nested un-registration";
+    }
+    ASSERT_FALSE(TR::IsRegistered());
+
+    // Nested off-stack.
+    {
+      TR::RegisterThread("Test thread #5", &onStackChar);
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #5");
+
+      {
+        TR::RegisterThread("Test thread #6", &onStackChar);
+        ASSERT_TRUE(TR::IsRegistered());
+        EXPECT_STREQ(GetThreadName(), "Test thread #5")
+            << "Nested registration shouldn't change the name";
+
+        TR::UnregisterThread();
+        ASSERT_TRUE(TR::IsRegistered())
+        << "Thread should still be registered after nested un-registration";
+        EXPECT_STREQ(GetThreadName(), "Test thread #5")
+            << "Thread should still be registered after nested un-registration";
+      }
+
+      TR::UnregisterThread();
+      ASSERT_FALSE(TR::IsRegistered());
+    }
+
+    // Nested on- and off-stack.
+    {
+      TR rt2{"Test thread #7", &onStackChar};
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #7");
+
+      {
+        TR::RegisterThread("Test thread #8", &onStackChar);
+        ASSERT_TRUE(TR::IsRegistered());
+        EXPECT_STREQ(GetThreadName(), "Test thread #7")
+            << "Nested registration shouldn't change the name";
+
+        TR::UnregisterThread();
+        ASSERT_TRUE(TR::IsRegistered())
+        << "Thread should still be registered after nested un-registration";
+        EXPECT_STREQ(GetThreadName(), "Test thread #7")
+            << "Thread should still be registered after nested un-registration";
+      }
+    }
+    ASSERT_FALSE(TR::IsRegistered());
+
+    // Nested off- and on-stack.
+    {
+      TR::RegisterThread("Test thread #9", &onStackChar);
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #9");
+
+      {
+        TR rt3{"Test thread #10", &onStackChar};
+        ASSERT_TRUE(TR::IsRegistered());
+        EXPECT_STREQ(GetThreadName(), "Test thread #9")
+            << "Nested registration shouldn't change the name";
+      }
+      ASSERT_TRUE(TR::IsRegistered())
+      << "Thread should still be registered after nested un-registration";
+      EXPECT_STREQ(GetThreadName(), "Test thread #9")
+          << "Thread should still be registered after nested un-registration";
+
+      TR::UnregisterThread();
+      ASSERT_FALSE(TR::IsRegistered());
+    }
+
+    // Excess UnregisterThread with on-stack TR.
+    {
+      TR rt2{"Test thread #11", &onStackChar};
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #11");
+
+      TR::UnregisterThread();
+      ASSERT_TRUE(TR::IsRegistered())
+      << "On-stack thread should still be registered after off-stack "
+         "un-registration";
+      EXPECT_STREQ(GetThreadName(), "Test thread #11")
+          << "On-stack thread should still be registered after off-stack "
+             "un-registration";
+    }
+    ASSERT_FALSE(TR::IsRegistered());
+
+    // Excess on-thread TR destruction with already-unregistered root off-thread
+    // registration.
+    {
+      TR::RegisterThread("Test thread #12", &onStackChar);
+      ASSERT_TRUE(TR::IsRegistered());
+      EXPECT_STREQ(GetThreadName(), "Test thread #12");
+
+      {
+        TR rt3{"Test thread #13", &onStackChar};
+        ASSERT_TRUE(TR::IsRegistered());
+        EXPECT_STREQ(GetThreadName(), "Test thread #12")
+            << "Nested registration shouldn't change the name";
+
+        // Note that we unregister the root registration, while nested `rt3` is
+        // still alive.
+        TR::UnregisterThread();
+        ASSERT_FALSE(TR::IsRegistered())
+        << "UnregisterThread() of the root RegisterThread() should always work";
+
+        // At this end of this block, `rt3` will be destroyed, but nothing
+        // should happen.
+      }
+      ASSERT_FALSE(TR::IsRegistered());
+    }
+
+    ASSERT_FALSE(TR::IsRegistered());
+  });
+  testThread.join();
+}
+
+TEST(GeckoProfiler, ThreadRegistry_DataAccess)
+{
+  using TR = profiler::ThreadRegistration;
+  using TRy = profiler::ThreadRegistry;
+
+  profiler_init_main_thread_id();
+  ASSERT_TRUE(profiler_is_main_thread())
+  << "This test assumes it runs on the main thread";
+
+  // Note that the main thread could already be registered, so we work in a new
+  // thread to test an actual registration that we control.
+
+  std::thread testThread([&]() {
+    ASSERT_FALSE(TR::IsRegistered())
+    << "A new std::thread should not start registered";
+    EXPECT_FALSE(TR::GetOnThreadPtr());
+    EXPECT_FALSE(TR::WithOnThreadRefOr([&](auto) { return true; }, false));
+
+    char onStackChar;
+
+    TimeStamp beforeRegistration = TimeStamp::Now();
+    TR tr{"Test thread", &onStackChar};
+    TimeStamp afterRegistration = TimeStamp::Now();
+
+    ASSERT_TRUE(TR::IsRegistered());
+
+    // Note: This test will mostly be about checking the correct access to
+    // thread data, depending on how it's obtained. Not all the functionality
+    // related to that data is tested (e.g., because it involves JS or other
+    // external dependencies that would be difficult to control here.)
+
+    const ProfilerThreadId testThreadId = profiler_current_thread_id();
+
+    auto testThroughRegistry = [&]() {
+      auto TestOffThreadRef = [&](TRy::OffThreadRef aOffThreadRef) {
+        // To test const-qualified member functions.
+        const TRy::OffThreadRef& offThreadCRef = aOffThreadRef;
+
+        // const UnlockedConstReader (always const)
+
+        TestConstUnlockedConstReader(offThreadCRef.UnlockedConstReaderCRef(),
+                                     beforeRegistration, afterRegistration,
+                                     &onStackChar, testThreadId);
+        offThreadCRef.WithUnlockedConstReader(
+            [&](const TR::UnlockedConstReader& aData) {
+              TestConstUnlockedConstReader(aData, beforeRegistration,
+                                           afterRegistration, &onStackChar,
+                                           testThreadId);
+            });
+
+        // const UnlockedConstReaderAndAtomicRW
+
+        TestConstUnlockedConstReaderAndAtomicRW(
+            offThreadCRef.UnlockedConstReaderAndAtomicRWCRef(),
+            beforeRegistration, afterRegistration, &onStackChar, testThreadId);
+        offThreadCRef.WithUnlockedConstReaderAndAtomicRW(
+            [&](const TR::UnlockedConstReaderAndAtomicRW& aData) {
+              TestConstUnlockedConstReaderAndAtomicRW(
+                  aData, beforeRegistration, afterRegistration, &onStackChar,
+                  testThreadId);
+            });
+
+        // non-const UnlockedConstReaderAndAtomicRW
+
+        TestUnlockedConstReaderAndAtomicRW(
+            aOffThreadRef.UnlockedConstReaderAndAtomicRWRef(),
+            beforeRegistration, afterRegistration, &onStackChar, testThreadId);
+        aOffThreadRef.WithUnlockedConstReaderAndAtomicRW(
+            [&](TR::UnlockedConstReaderAndAtomicRW& aData) {
+              TestUnlockedConstReaderAndAtomicRW(aData, beforeRegistration,
+                                                 afterRegistration,
+                                                 &onStackChar, testThreadId);
+            });
+
+        // const UnlockedRWForLockedProfiler
+
+        TestConstUnlockedRWForLockedProfiler(
+            offThreadCRef.UnlockedRWForLockedProfilerCRef(), beforeRegistration,
+            afterRegistration, &onStackChar, testThreadId);
+        offThreadCRef.WithUnlockedRWForLockedProfiler(
+            [&](const TR::UnlockedRWForLockedProfiler& aData) {
+              TestConstUnlockedRWForLockedProfiler(aData, beforeRegistration,
+                                                   afterRegistration,
+                                                   &onStackChar, testThreadId);
+            });
+
+        // non-const UnlockedRWForLockedProfiler
+
+        TestUnlockedRWForLockedProfiler(
+            aOffThreadRef.UnlockedRWForLockedProfilerRef(), beforeRegistration,
+            afterRegistration, &onStackChar, testThreadId);
+        aOffThreadRef.WithUnlockedRWForLockedProfiler(
+            [&](TR::UnlockedRWForLockedProfiler& aData) {
+              TestUnlockedRWForLockedProfiler(aData, beforeRegistration,
+                                              afterRegistration, &onStackChar,
+                                              testThreadId);
+            });
+
+        // UnlockedReaderAndAtomicRWOnThread
+        // Note: It cannot directly be accessed off the thread, this will be
+        // tested through LockedRWFromAnyThread.
+
+        // const LockedRWFromAnyThread
+
+        EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+        {
+          TRy::OffThreadRef::ConstRWFromAnyThreadWithLock
+              constRWFromAnyThreadWithLock =
+                  offThreadCRef.ConstLockedRWFromAnyThread();
+          if (profiler_current_thread_id() == testThreadId) {
+            EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+          }
+          TestConstLockedRWFromAnyThread(
+              constRWFromAnyThreadWithLock.DataCRef(), beforeRegistration,
+              afterRegistration, &onStackChar, testThreadId);
+        }
+        EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+        offThreadCRef.WithConstLockedRWFromAnyThread(
+            [&](const TR::LockedRWFromAnyThread& aData) {
+              if (profiler_current_thread_id() == testThreadId) {
+                EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+              }
+              TestConstLockedRWFromAnyThread(aData, beforeRegistration,
+                                             afterRegistration, &onStackChar,
+                                             testThreadId);
+            });
+        EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+
+        // non-const LockedRWFromAnyThread
+
+        EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+        {
+          TRy::OffThreadRef::RWFromAnyThreadWithLock rwFromAnyThreadWithLock =
+              aOffThreadRef.LockedRWFromAnyThread();
+          if (profiler_current_thread_id() == testThreadId) {
+            EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+          }
+          TestLockedRWFromAnyThread(rwFromAnyThreadWithLock.DataRef(),
+                                    beforeRegistration, afterRegistration,
+                                    &onStackChar, testThreadId);
+        }
+        EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+        aOffThreadRef.WithLockedRWFromAnyThread(
+            [&](TR::LockedRWFromAnyThread& aData) {
+              if (profiler_current_thread_id() == testThreadId) {
+                EXPECT_TRUE(TR::IsDataMutexLockedOnCurrentThread());
+              }
+              TestLockedRWFromAnyThread(aData, beforeRegistration,
+                                        afterRegistration, &onStackChar,
+                                        testThreadId);
+            });
+        EXPECT_FALSE(TR::IsDataMutexLockedOnCurrentThread());
+
+        // LockedRWOnThread
+        // Note: It can never be accessed off the thread.
+      };
+
+      int ranTest = 0;
+      TRy::WithOffThreadRef(testThreadId, [&](TRy::OffThreadRef aOffThreadRef) {
+        TestOffThreadRef(aOffThreadRef);
+        ++ranTest;
+      });
+      EXPECT_EQ(ranTest, 1);
+
+      ranTest = 0;
+      EXPECT_FALSE(TRy::IsRegistryMutexLockedOnCurrentThread());
+      for (TRy::OffThreadRef offThreadRef : TRy::LockedRegistry{}) {
+        EXPECT_TRUE(TRy::IsRegistryMutexLockedOnCurrentThread());
+        if (offThreadRef.UnlockedConstReaderCRef().Info().ThreadId() ==
+            testThreadId) {
+          TestOffThreadRef(offThreadRef);
+          ++ranTest;
+        }
+      }
+      EXPECT_EQ(ranTest, 1);
+      EXPECT_FALSE(TRy::IsRegistryMutexLockedOnCurrentThread());
+
+      {
+        ranTest = 0;
+        EXPECT_FALSE(TRy::IsRegistryMutexLockedOnCurrentThread());
+        TRy::LockedRegistry lockedRegistry{};
+        EXPECT_TRUE(TRy::IsRegistryMutexLockedOnCurrentThread());
+        for (TRy::OffThreadRef offThreadRef : lockedRegistry) {
+          if (offThreadRef.UnlockedConstReaderCRef().Info().ThreadId() ==
+              testThreadId) {
+            TestOffThreadRef(offThreadRef);
+            ++ranTest;
+          }
+        }
+        EXPECT_EQ(ranTest, 1);
+      }
+      EXPECT_FALSE(TRy::IsRegistryMutexLockedOnCurrentThread());
+    };
+
+    // Test on the current thread.
+    testThroughRegistry();
+
+    // Test from another thread.
+    std::thread otherThread([&]() {
+      ASSERT_NE(profiler_current_thread_id(), testThreadId);
+      testThroughRegistry();
+    });
+    otherThread.join();
+  });
+  testThread.join();
+}
+
+TEST(GeckoProfiler, ThreadRegistration_RegistrationEdgeCases)
+{
+  using TR = profiler::ThreadRegistration;
+  using TRy = profiler::ThreadRegistry;
+
+  profiler_init_main_thread_id();
+  ASSERT_TRUE(profiler_is_main_thread())
+  << "This test assumes it runs on the main thread";
+
+  // Note that the main thread could already be registered, so we work in a new
+  // thread to test an actual registration that we control.
+
+  int registrationCount = 0;
+  int otherThreadLoops = 0;
+  int otherThreadReads = 0;
+
+  // This thread will register and unregister in a loop, with some pauses.
+  // Another thread will attempty to access the test thread, and lock its data.
+  // The main goal is to check edges cases around (un)registrations.
+  std::thread testThread([&]() {
+    const ProfilerThreadId testThreadId = profiler_current_thread_id();
+
+    const TimeStamp endTestAt = TimeStamp::Now() + TimeDuration::FromSeconds(1);
+
+    std::thread otherThread([&]() {
+      // Initial sleep so that testThread can start its loop.
+      PR_Sleep(PR_MillisecondsToInterval(1));
+
+      while (TimeStamp::Now() < endTestAt) {
+        ++otherThreadLoops;
+
+        TRy::WithOffThreadRef(testThreadId, [&](TRy::OffThreadRef
+                                                    aOffThreadRef) {
+          if (otherThreadLoops % 1000 == 0) {
+            PR_Sleep(PR_MillisecondsToInterval(1));
+          }
+          TRy::OffThreadRef::RWFromAnyThreadWithLock rwFromAnyThreadWithLock =
+              aOffThreadRef.LockedRWFromAnyThread();
+          ++otherThreadReads;
+          if (otherThreadReads % 1000 == 0) {
+            PR_Sleep(PR_MillisecondsToInterval(1));
+          }
+        });
+      }
+    });
+
+    while (TimeStamp::Now() < endTestAt) {
+      ASSERT_FALSE(TR::IsRegistered())
+      << "A new std::thread should not start registered";
+      EXPECT_FALSE(TR::GetOnThreadPtr());
+      EXPECT_FALSE(TR::WithOnThreadRefOr([&](auto) { return true; }, false));
+
+      char onStackChar;
+
+      TR tr{"Test thread", &onStackChar};
+      ++registrationCount;
+
+      ASSERT_TRUE(TR::IsRegistered());
+
+      int ranTest = 0;
+      TRy::WithOffThreadRef(testThreadId, [&](TRy::OffThreadRef aOffThreadRef) {
+        if (registrationCount % 2000 == 0) {
+          PR_Sleep(PR_MillisecondsToInterval(1));
+        }
+        ++ranTest;
+      });
+      EXPECT_EQ(ranTest, 1);
+
+      if (registrationCount % 1000 == 0) {
+        PR_Sleep(PR_MillisecondsToInterval(1));
+      }
+    }
+
+    otherThread.join();
+  });
+
+  testThread.join();
+
+  // It's difficult to guess what these numbers should be, but they definitely
+  // should be non-zero. The main goal was to test that nothing goes wrong.
+  EXPECT_GT(registrationCount, 0);
+  EXPECT_GT(otherThreadLoops, 0);
+  EXPECT_GT(otherThreadReads, 0);
+}
+
+#ifdef MOZ_GECKO_PROFILER
 
 TEST(BaseProfiler, BlocksRingBuffer)
 {
@@ -86,81 +1105,96 @@ TEST(BaseProfiler, BlocksRingBuffer)
 // Common JSON checks.
 
 // Does the GETTER return a non-null TYPE? (Non-critical)
-#define EXPECT_HAS_JSON(GETTER, TYPE)                                         \
-  do {                                                                        \
-    if ((GETTER).isNull()) {                                                  \
-      EXPECT_FALSE((GETTER).isNull()) << #GETTER " doesn't exist or is null"; \
-    } else if (!(GETTER).is##TYPE()) {                                        \
-      EXPECT_TRUE((GETTER).is##TYPE())                                        \
-          << #GETTER " didn't return type " #TYPE;                            \
-    }                                                                         \
-  } while (false)
+#  define EXPECT_HAS_JSON(GETTER, TYPE)              \
+    do {                                             \
+      if ((GETTER).isNull()) {                       \
+        EXPECT_FALSE((GETTER).isNull())              \
+            << #GETTER " doesn't exist or is null";  \
+      } else if (!(GETTER).is##TYPE()) {             \
+        EXPECT_TRUE((GETTER).is##TYPE())             \
+            << #GETTER " didn't return type " #TYPE; \
+      }                                              \
+    } while (false)
 
 // Does the GETTER return a non-null TYPE? (Critical)
-#define ASSERT_HAS_JSON(GETTER, TYPE) \
-  do {                                \
-    ASSERT_FALSE((GETTER).isNull());  \
-    ASSERT_TRUE((GETTER).is##TYPE()); \
-  } while (false)
+#  define ASSERT_HAS_JSON(GETTER, TYPE) \
+    do {                                \
+      ASSERT_FALSE((GETTER).isNull());  \
+      ASSERT_TRUE((GETTER).is##TYPE()); \
+    } while (false)
 
 // Does the GETTER return a non-null TYPE? (Critical)
-// If yes, store the value into VARIABLE.
-#define GET_JSON(VARIABLE, GETTER, TYPE) \
-  ASSERT_HAS_JSON(GETTER, TYPE);         \
-  const Json::Value& VARIABLE = (GETTER)
+// If yes, store the reference to Json::Value into VARIABLE.
+#  define GET_JSON(VARIABLE, GETTER, TYPE) \
+    ASSERT_HAS_JSON(GETTER, TYPE);         \
+    const Json::Value& VARIABLE = (GETTER)
+
+// Does the GETTER return a non-null TYPE? (Critical)
+// If yes, store the value as `const TYPE` into VARIABLE.
+#  define GET_JSON_VALUE(VARIABLE, GETTER, TYPE) \
+    ASSERT_HAS_JSON(GETTER, TYPE);               \
+    const auto VARIABLE = (GETTER).as##TYPE()
+
+// Non-const GET_JSON_VALUE.
+#  define GET_JSON_MUTABLE_VALUE(VARIABLE, GETTER, TYPE) \
+    ASSERT_HAS_JSON(GETTER, TYPE);                       \
+    auto VARIABLE = (GETTER).as##TYPE()
 
 // Checks that the GETTER's value is present, is of the expected TYPE, and has
 // the expected VALUE. (Non-critical)
-#define EXPECT_EQ_JSON(GETTER, TYPE, VALUE)                                   \
-  do {                                                                        \
-    if ((GETTER).isNull()) {                                                  \
-      EXPECT_FALSE((GETTER).isNull()) << #GETTER " doesn't exist or is null"; \
-    } else if (!(GETTER).is##TYPE()) {                                        \
-      EXPECT_TRUE((GETTER).is##TYPE())                                        \
-          << #GETTER " didn't return type " #TYPE;                            \
-    } else {                                                                  \
-      EXPECT_EQ((GETTER).as##TYPE(), (VALUE));                                \
-    }                                                                         \
-  } while (false)
+#  define EXPECT_EQ_JSON(GETTER, TYPE, VALUE)        \
+    do {                                             \
+      if ((GETTER).isNull()) {                       \
+        EXPECT_FALSE((GETTER).isNull())              \
+            << #GETTER " doesn't exist or is null";  \
+      } else if (!(GETTER).is##TYPE()) {             \
+        EXPECT_TRUE((GETTER).is##TYPE())             \
+            << #GETTER " didn't return type " #TYPE; \
+      } else {                                       \
+        EXPECT_EQ((GETTER).as##TYPE(), (VALUE));     \
+      }                                              \
+    } while (false)
 
 // Checks that the GETTER's value is present, and is a valid index into the
 // STRINGTABLE array, pointing at the expected STRING.
-#define EXPECT_EQ_STRINGTABLE(GETTER, STRINGTABLE, STRING)                    \
-  do {                                                                        \
-    if ((GETTER).isNull()) {                                                  \
-      EXPECT_FALSE((GETTER).isNull()) << #GETTER " doesn't exist or is null"; \
-    } else if (!(GETTER).isUInt()) {                                          \
-      EXPECT_TRUE((GETTER).isUInt()) << #GETTER " didn't return an index";    \
-    } else {                                                                  \
-      EXPECT_LT((GETTER).asUInt(), (STRINGTABLE).size());                     \
-      EXPECT_EQ_JSON((STRINGTABLE)[(GETTER).asUInt()], String, (STRING));     \
-    }                                                                         \
-  } while (false)
+#  define EXPECT_EQ_STRINGTABLE(GETTER, STRINGTABLE, STRING)                 \
+    do {                                                                     \
+      if ((GETTER).isNull()) {                                               \
+        EXPECT_FALSE((GETTER).isNull())                                      \
+            << #GETTER " doesn't exist or is null";                          \
+      } else if (!(GETTER).isUInt()) {                                       \
+        EXPECT_TRUE((GETTER).isUInt()) << #GETTER " didn't return an index"; \
+      } else {                                                               \
+        EXPECT_LT((GETTER).asUInt(), (STRINGTABLE).size());                  \
+        EXPECT_EQ_JSON((STRINGTABLE)[(GETTER).asUInt()], String, (STRING));  \
+      }                                                                      \
+    } while (false)
 
-#define EXPECT_JSON_ARRAY_CONTAINS(GETTER, TYPE, VALUE)                       \
-  do {                                                                        \
-    if ((GETTER).isNull()) {                                                  \
-      EXPECT_FALSE((GETTER).isNull()) << #GETTER " doesn't exist or is null"; \
-    } else if (!(GETTER).isArray()) {                                         \
-      EXPECT_TRUE((GETTER).is##TYPE()) << #GETTER " is not an array";         \
-    } else if (const Json::ArrayIndex size = (GETTER).size(); size == 0u) {   \
-      EXPECT_NE(size, 0u) << #GETTER " is an empty array";                    \
-    } else {                                                                  \
-      bool found = false;                                                     \
-      for (Json::ArrayIndex i = 0; i < size; ++i) {                           \
-        if (!(GETTER)[i].is##TYPE()) {                                        \
-          EXPECT_TRUE((GETTER)[i].is##TYPE())                                 \
-              << #GETTER "[" << i << "] is not " #TYPE;                       \
-          break;                                                              \
+#  define EXPECT_JSON_ARRAY_CONTAINS(GETTER, TYPE, VALUE)                     \
+    do {                                                                      \
+      if ((GETTER).isNull()) {                                                \
+        EXPECT_FALSE((GETTER).isNull())                                       \
+            << #GETTER " doesn't exist or is null";                           \
+      } else if (!(GETTER).isArray()) {                                       \
+        EXPECT_TRUE((GETTER).is##TYPE()) << #GETTER " is not an array";       \
+      } else if (const Json::ArrayIndex size = (GETTER).size(); size == 0u) { \
+        EXPECT_NE(size, 0u) << #GETTER " is an empty array";                  \
+      } else {                                                                \
+        bool found = false;                                                   \
+        for (Json::ArrayIndex i = 0; i < size; ++i) {                         \
+          if (!(GETTER)[i].is##TYPE()) {                                      \
+            EXPECT_TRUE((GETTER)[i].is##TYPE())                               \
+                << #GETTER "[" << i << "] is not " #TYPE;                     \
+            break;                                                            \
+          }                                                                   \
+          if ((GETTER)[i].as##TYPE() == (VALUE)) {                            \
+            found = true;                                                     \
+            break;                                                            \
+          }                                                                   \
         }                                                                     \
-        if ((GETTER)[i].as##TYPE() == (VALUE)) {                              \
-          found = true;                                                       \
-          break;                                                              \
-        }                                                                     \
+        EXPECT_TRUE(found) << #GETTER " doesn't contain " #VALUE;             \
       }                                                                       \
-      EXPECT_TRUE(found) << #GETTER " doesn't contain " #VALUE;               \
-    }                                                                         \
-  } while (false)
+    } while (false)
 
 // Check that the given process root contains all the expected properties.
 static void JSONRootCheck(const Json::Value& aRoot,
@@ -184,13 +1218,60 @@ static void JSONRootCheck(const Json::Value& aRoot,
     EXPECT_HAS_JSON(thread["processType"], String);
     EXPECT_HAS_JSON(thread["name"], String);
     EXPECT_HAS_JSON(thread["registerTime"], Double);
-    EXPECT_HAS_JSON(thread["samples"], Object);
+    GET_JSON(samples, thread["samples"], Object);
     EXPECT_HAS_JSON(thread["markers"], Object);
-    EXPECT_HAS_JSON(thread["pid"], UInt);
-    EXPECT_HAS_JSON(thread["tid"], UInt);
-    EXPECT_HAS_JSON(thread["stackTable"], Object);
-    EXPECT_HAS_JSON(thread["frameTable"], Object);
-    EXPECT_HAS_JSON(thread["stringTable"], Array);
+    EXPECT_HAS_JSON(thread["pid"], Int64);
+    EXPECT_HAS_JSON(thread["tid"], Int64);
+    GET_JSON(stackTable, thread["stackTable"], Object);
+    GET_JSON(frameTable, thread["frameTable"], Object);
+    GET_JSON(stringTable, thread["stringTable"], Array);
+
+    GET_JSON(stackTableSchema, stackTable["schema"], Object);
+    EXPECT_GE(stackTableSchema.size(), 2u);
+    GET_JSON_VALUE(stackTablePrefix, stackTableSchema["prefix"], UInt);
+    GET_JSON_VALUE(stackTableFrame, stackTableSchema["frame"], UInt);
+    GET_JSON(stackTableData, stackTable["data"], Array);
+
+    GET_JSON(frameTableSchema, frameTable["schema"], Object);
+    EXPECT_GE(frameTableSchema.size(), 1u);
+    GET_JSON_VALUE(frameTableLocation, frameTableSchema["location"], UInt);
+    GET_JSON(frameTableData, frameTable["data"], Array);
+
+    GET_JSON(samplesSchema, samples["schema"], Object);
+    GET_JSON_VALUE(sampleStackIndex, samplesSchema["stack"], UInt);
+    GET_JSON(samplesData, samples["data"], Array);
+    for (const Json::Value& sample : samplesData) {
+      ASSERT_TRUE(sample.isArray());
+      if (sample.isValidIndex(sampleStackIndex)) {
+        if (!sample[sampleStackIndex].isNull()) {
+          GET_JSON_MUTABLE_VALUE(stack, sample[sampleStackIndex], UInt);
+          EXPECT_TRUE(stackTableData.isValidIndex(stack));
+          for (;;) {
+            // `stack` (from the sample, or from the callee frame's "prefix" in
+            // the previous loop) points into the stackTable.
+            GET_JSON(stackTableEntry, stackTableData[stack], Array);
+            GET_JSON_VALUE(frame, stackTableEntry[stackTableFrame], UInt);
+
+            // The stackTable entry's "frame" points into the frameTable.
+            EXPECT_TRUE(frameTableData.isValidIndex(frame));
+            GET_JSON(frameTableEntry, frameTableData[frame], Array);
+            GET_JSON_VALUE(location, frameTableEntry[frameTableLocation], UInt);
+
+            // The frameTable entry's "location" points at a string.
+            EXPECT_TRUE(stringTable.isValidIndex(location));
+
+            // The stackTable entry's "prefix" is null for the root frame.
+            if (stackTableEntry[stackTablePrefix].isNull()) {
+              break;
+            }
+            // Otherwise it recursively points at the caller in the stackTable.
+            GET_JSON_VALUE(prefix, stackTableEntry[stackTablePrefix], UInt);
+            EXPECT_TRUE(stackTableData.isValidIndex(prefix));
+            stack = prefix;
+          }
+        }
+      }
+    }
   }
 
   if (aWithMainThread) {
@@ -239,66 +1320,46 @@ static void InactiveFeaturesAndParamsCheck() {
   double interval;
   uint32_t features;
   StrVec filters;
-  uint64_t activeBrowsingContextID;
+  uint64_t activeTabID;
 
   ASSERT_TRUE(!profiler_is_active());
   ASSERT_TRUE(!profiler_feature_active(ProfilerFeature::MainThreadIO));
   ASSERT_TRUE(!profiler_feature_active(ProfilerFeature::NativeAllocations));
 
   profiler_get_start_params(&entries, &duration, &interval, &features, &filters,
-                            &activeBrowsingContextID);
+                            &activeTabID);
 
   ASSERT_TRUE(entries == 0);
   ASSERT_TRUE(duration == Nothing());
   ASSERT_TRUE(interval == 0);
   ASSERT_TRUE(features == 0);
   ASSERT_TRUE(filters.empty());
-  ASSERT_TRUE(activeBrowsingContextID == 0);
+  ASSERT_TRUE(activeTabID == 0);
 }
 
 static void ActiveParamsCheck(int aEntries, double aInterval,
                               uint32_t aFeatures, const char** aFilters,
-                              size_t aFiltersLen,
-                              uint64_t aActiveBrowsingContextID,
+                              size_t aFiltersLen, uint64_t aActiveTabID,
                               const Maybe<double>& aDuration = Nothing()) {
   int entries;
   Maybe<double> duration;
   double interval;
   uint32_t features;
   StrVec filters;
-  uint64_t activeBrowsingContextID;
+  uint64_t activeTabID;
 
   profiler_get_start_params(&entries, &duration, &interval, &features, &filters,
-                            &activeBrowsingContextID);
+                            &activeTabID);
 
   ASSERT_TRUE(entries == aEntries);
   ASSERT_TRUE(duration == aDuration);
   ASSERT_TRUE(interval == aInterval);
   ASSERT_TRUE(features == aFeatures);
   ASSERT_TRUE(filters.length() == aFiltersLen);
-  ASSERT_TRUE(activeBrowsingContextID == aActiveBrowsingContextID);
+  ASSERT_TRUE(activeTabID == aActiveTabID);
   for (size_t i = 0; i < aFiltersLen; i++) {
     ASSERT_TRUE(strcmp(filters[i], aFilters[i]) == 0);
   }
-}
-
-TEST(GeckoProfiler, Utilities)
-{
-  // We'll assume that this test runs in the main thread (which should be true
-  // when called from the `main` function).
-  const int mainThreadId = profiler_current_thread_id();
-
-  MOZ_RELEASE_ASSERT(profiler_main_thread_id() == mainThreadId);
-  MOZ_RELEASE_ASSERT(profiler_is_main_thread());
-
-  std::thread testThread([&]() {
-    const int testThreadId = profiler_current_thread_id();
-    MOZ_RELEASE_ASSERT(testThreadId != mainThreadId);
-
-    MOZ_RELEASE_ASSERT(profiler_main_thread_id() != testThreadId);
-    MOZ_RELEASE_ASSERT(!profiler_is_main_thread());
-  });
-  testThread.join();
 }
 
 TEST(GeckoProfiler, FeaturesAndParams)
@@ -511,8 +1572,6 @@ TEST(GeckoProfiler, MultiRegistration)
 {
   // This whole test only checks that function calls don't crash, they don't
   // actually verify that threads get profiled or not.
-  char top;
-  profiler_register_thread("Main thread again", &top);
 
   {
     std::thread thread([]() {
@@ -783,7 +1842,7 @@ TEST(GeckoProfiler, Markers)
   longstrCut[kMax - 1] = '\0';
 
   // Test basic markers 2.0.
-  MOZ_RELEASE_ASSERT(
+  EXPECT_TRUE(
       profiler_add_marker("default-templated markers 2.0 with empty options",
                           geckoprofiler::category::OTHER, {}));
 
@@ -794,20 +1853,20 @@ TEST(GeckoProfiler, Markers)
   PROFILER_MARKER("explicitly-default-templated markers 2.0 with empty options",
                   OTHER, {}, NoPayload);
 
-  MOZ_RELEASE_ASSERT(profiler_add_marker(
+  EXPECT_TRUE(profiler_add_marker(
       "explicitly-default-templated markers 2.0 with option",
       geckoprofiler::category::OTHER, {},
       ::geckoprofiler::markers::NoPayload{}));
 
   // Used in markers below.
-  TimeStamp ts1 = TimeStamp::NowUnfuzzed();
+  TimeStamp ts1 = TimeStamp::Now();
 
   // Sleep briefly to ensure a sample is taken and the pending markers are
   // processed.
   PR_Sleep(PR_MillisecondsToInterval(500));
 
   // Used in markers below.
-  TimeStamp ts2 = TimeStamp::NowUnfuzzed();
+  TimeStamp ts2 = TimeStamp::Now();
   // ts1 and ts2 should be different thanks to the sleep.
   EXPECT_NE(ts1, ts2);
 
@@ -815,10 +1874,10 @@ TEST(GeckoProfiler, Markers)
 
   // Keep this one first! (It's used to record `ts1` and `ts2`, to compare
   // to serialized numbers in other markers.)
-  MOZ_RELEASE_ASSERT(profiler_add_marker(
-      "FirstMarker", geckoprofiler::category::OTHER,
-      MarkerTiming::Interval(ts1, ts2), geckoprofiler::markers::TextMarker{},
-      "First Marker"));
+  EXPECT_TRUE(profiler_add_marker("FirstMarker", geckoprofiler::category::OTHER,
+                                  MarkerTiming::Interval(ts1, ts2),
+                                  geckoprofiler::markers::TextMarker{},
+                                  "First Marker"));
 
   // User-defined marker type with different properties, and fake schema.
   struct GtestMarker {
@@ -845,38 +1904,38 @@ TEST(GeckoProfiler, Markers)
       // that correctly matches StreamJSONMarkerData data above! Instead we only
       // test that it outputs the expected JSON at the end.
       using MS = mozilla::MarkerSchema;
-      MS schema{MS::Location::markerChart,      MS::Location::markerTable,
-                MS::Location::timelineOverview, MS::Location::timelineMemory,
-                MS::Location::timelineIPC,      MS::Location::timelineFileIO,
-                MS::Location::stackChart};
+      MS schema{MS::Location::MarkerChart,      MS::Location::MarkerTable,
+                MS::Location::TimelineOverview, MS::Location::TimelineMemory,
+                MS::Location::TimelineIPC,      MS::Location::TimelineFileIO,
+                MS::Location::StackChart};
       // All label functions.
       schema.SetChartLabel("chart label");
       schema.SetTooltipLabel("tooltip label");
       schema.SetTableLabel("table label");
       // All data functions, all formats, all "searchable" values.
-      schema.AddKeyFormat("key with url", MS::Format::url);
+      schema.AddKeyFormat("key with url", MS::Format::Url);
       schema.AddKeyLabelFormat("key with label filePath", "label filePath",
-                               MS::Format::filePath);
+                               MS::Format::FilePath);
       schema.AddKeyFormatSearchable("key with string not-searchable",
-                                    MS::Format::string,
-                                    MS::Searchable::notSearchable);
+                                    MS::Format::String,
+                                    MS::Searchable::NotSearchable);
       schema.AddKeyLabelFormatSearchable("key with label duration searchable",
-                                         "label duration", MS::Format::duration,
-                                         MS::Searchable::searchable);
-      schema.AddKeyFormat("key with time", MS::Format::time);
-      schema.AddKeyFormat("key with seconds", MS::Format::seconds);
-      schema.AddKeyFormat("key with milliseconds", MS::Format::milliseconds);
-      schema.AddKeyFormat("key with microseconds", MS::Format::microseconds);
-      schema.AddKeyFormat("key with nanoseconds", MS::Format::nanoseconds);
-      schema.AddKeyFormat("key with bytes", MS::Format::bytes);
-      schema.AddKeyFormat("key with percentage", MS::Format::percentage);
-      schema.AddKeyFormat("key with integer", MS::Format::integer);
-      schema.AddKeyFormat("key with decimal", MS::Format::decimal);
+                                         "label duration", MS::Format::Duration,
+                                         MS::Searchable::Searchable);
+      schema.AddKeyFormat("key with time", MS::Format::Time);
+      schema.AddKeyFormat("key with seconds", MS::Format::Seconds);
+      schema.AddKeyFormat("key with milliseconds", MS::Format::Milliseconds);
+      schema.AddKeyFormat("key with microseconds", MS::Format::Microseconds);
+      schema.AddKeyFormat("key with nanoseconds", MS::Format::Nanoseconds);
+      schema.AddKeyFormat("key with bytes", MS::Format::Bytes);
+      schema.AddKeyFormat("key with percentage", MS::Format::Percentage);
+      schema.AddKeyFormat("key with integer", MS::Format::Integer);
+      schema.AddKeyFormat("key with decimal", MS::Format::Decimal);
       schema.AddStaticLabelValue("static label", "static value");
       return schema;
     }
   };
-  MOZ_RELEASE_ASSERT(
+  EXPECT_TRUE(
       profiler_add_marker("Gtest custom marker", geckoprofiler::category::OTHER,
                           MarkerTiming::Interval(ts1, ts2), GtestMarker{}, 42,
                           43.0, "gtest text", "gtest unique text", ts1));
@@ -892,9 +1951,9 @@ TEST(GeckoProfiler, Markers)
       return mozilla::MarkerSchema::SpecialFrontendLocation{};
     }
   };
-  MOZ_RELEASE_ASSERT(profiler_add_marker("Gtest special marker",
-                                         geckoprofiler::category::OTHER, {},
-                                         GtestSpecialMarker{}));
+  EXPECT_TRUE(profiler_add_marker("Gtest special marker",
+                                  geckoprofiler::category::OTHER, {},
+                                  GtestSpecialMarker{}));
 
   // User-defined marker type that is never used, so it shouldn't appear in the
   // output.
@@ -923,7 +1982,7 @@ TEST(GeckoProfiler, Markers)
       /* const nsACString& aRequestMethod */ "GET"_ns,
       /* int32_t aPriority */ 34,
       /* uint64_t aChannelId */ 1,
-      /* NetworkLoadType aType */ NetworkLoadType::LOAD_START,
+      /* NetworkLoadType aType */ net::NetworkLoadType::LOAD_START,
       /* mozilla::TimeStamp aStart */ ts1,
       /* mozilla::TimeStamp aEnd */ ts2,
       /* int64_t aCount */ 56,
@@ -931,18 +1990,20 @@ TEST(GeckoProfiler, Markers)
       net::kCacheHit,
       /* uint64_t aInnerWindowID */ 78
       /* const mozilla::net::TimingStruct* aTimings = nullptr */
-      /* nsIURI* aRedirectURI = nullptr */
       /* mozilla::UniquePtr<mozilla::ProfileChunkedBuffer> aSource =
          nullptr */
       /* const mozilla::Maybe<nsDependentCString>& aContentType =
-         mozilla::Nothing() */);
+         mozilla::Nothing() */
+      /* nsIURI* aRedirectURI = nullptr */
+      /* uint64_t aRedirectChannelId = 0 */
+  );
 
   profiler_add_network_marker(
       /* nsIURI* aURI */ uri,
       /* const nsACString& aRequestMethod */ "GET"_ns,
       /* int32_t aPriority */ 34,
-      /* uint64_t aChannelId */ 12,
-      /* NetworkLoadType aType */ NetworkLoadType::LOAD_STOP,
+      /* uint64_t aChannelId */ 2,
+      /* NetworkLoadType aType */ net::NetworkLoadType::LOAD_STOP,
       /* mozilla::TimeStamp aStart */ ts1,
       /* mozilla::TimeStamp aEnd */ ts2,
       /* int64_t aCount */ 56,
@@ -950,13 +2011,14 @@ TEST(GeckoProfiler, Markers)
       net::kCacheUnresolved,
       /* uint64_t aInnerWindowID */ 78,
       /* const mozilla::net::TimingStruct* aTimings = nullptr */ nullptr,
-      /* nsIURI* aRedirectURI = nullptr */ nullptr,
       /* mozilla::UniquePtr<mozilla::ProfileChunkedBuffer> aSource =
          nullptr */
       nullptr,
       /* const mozilla::Maybe<nsDependentCString>& aContentType =
          mozilla::Nothing() */
-      Some(nsDependentCString("text/html")));
+      Some(nsDependentCString("text/html")),
+      /* nsIURI* aRedirectURI = nullptr */ nullptr,
+      /* uint64_t aRedirectChannelId = 0 */ 0);
 
   nsCOMPtr<nsIURI> redirectURI;
   ASSERT_TRUE(NS_SUCCEEDED(
@@ -965,8 +2027,8 @@ TEST(GeckoProfiler, Markers)
       /* nsIURI* aURI */ uri,
       /* const nsACString& aRequestMethod */ "GET"_ns,
       /* int32_t aPriority */ 34,
-      /* uint64_t aChannelId */ 123,
-      /* NetworkLoadType aType */ NetworkLoadType::LOAD_REDIRECT,
+      /* uint64_t aChannelId */ 3,
+      /* NetworkLoadType aType */ net::NetworkLoadType::LOAD_REDIRECT,
       /* mozilla::TimeStamp aStart */ ts1,
       /* mozilla::TimeStamp aEnd */ ts2,
       /* int64_t aCount */ 56,
@@ -974,17 +2036,93 @@ TEST(GeckoProfiler, Markers)
       net::kCacheUnresolved,
       /* uint64_t aInnerWindowID */ 78,
       /* const mozilla::net::TimingStruct* aTimings = nullptr */ nullptr,
-      /* nsIURI* aRedirectURI = nullptr */ redirectURI
       /* mozilla::UniquePtr<mozilla::ProfileChunkedBuffer> aSource =
          nullptr */
+      nullptr,
       /* const mozilla::Maybe<nsDependentCString>& aContentType =
-         mozilla::Nothing() */);
+         mozilla::Nothing() */
+      mozilla::Nothing(),
+      /* nsIURI* aRedirectURI = nullptr */ redirectURI,
+      /* uint32_t aRedirectFlags = 0 */
+      nsIChannelEventSink::REDIRECT_TEMPORARY,
+      /* uint64_t aRedirectChannelId = 0 */ 103);
 
-  MOZ_RELEASE_ASSERT(profiler_add_marker(
+  profiler_add_network_marker(
+      /* nsIURI* aURI */ uri,
+      /* const nsACString& aRequestMethod */ "GET"_ns,
+      /* int32_t aPriority */ 34,
+      /* uint64_t aChannelId */ 4,
+      /* NetworkLoadType aType */ net::NetworkLoadType::LOAD_REDIRECT,
+      /* mozilla::TimeStamp aStart */ ts1,
+      /* mozilla::TimeStamp aEnd */ ts2,
+      /* int64_t aCount */ 56,
+      /* mozilla::net::CacheDisposition aCacheDisposition */
+      net::kCacheUnresolved,
+      /* uint64_t aInnerWindowID */ 78,
+      /* const mozilla::net::TimingStruct* aTimings = nullptr */ nullptr,
+      /* mozilla::UniquePtr<mozilla::ProfileChunkedBuffer> aSource =
+         nullptr */
+      nullptr,
+      /* const mozilla::Maybe<nsDependentCString>& aContentType =
+         mozilla::Nothing() */
+      mozilla::Nothing(),
+      /* nsIURI* aRedirectURI = nullptr */ redirectURI,
+      /* uint32_t aRedirectFlags = 0 */
+      nsIChannelEventSink::REDIRECT_PERMANENT,
+      /* uint64_t aRedirectChannelId = 0 */ 104);
+
+  profiler_add_network_marker(
+      /* nsIURI* aURI */ uri,
+      /* const nsACString& aRequestMethod */ "GET"_ns,
+      /* int32_t aPriority */ 34,
+      /* uint64_t aChannelId */ 5,
+      /* NetworkLoadType aType */ net::NetworkLoadType::LOAD_REDIRECT,
+      /* mozilla::TimeStamp aStart */ ts1,
+      /* mozilla::TimeStamp aEnd */ ts2,
+      /* int64_t aCount */ 56,
+      /* mozilla::net::CacheDisposition aCacheDisposition */
+      net::kCacheUnresolved,
+      /* uint64_t aInnerWindowID */ 78,
+      /* const mozilla::net::TimingStruct* aTimings = nullptr */ nullptr,
+      /* mozilla::UniquePtr<mozilla::ProfileChunkedBuffer> aSource =
+         nullptr */
+      nullptr,
+      /* const mozilla::Maybe<nsDependentCString>& aContentType =
+         mozilla::Nothing() */
+      mozilla::Nothing(),
+      /* nsIURI* aRedirectURI = nullptr */ redirectURI,
+      /* uint32_t aRedirectFlags = 0 */ nsIChannelEventSink::REDIRECT_INTERNAL,
+      /* uint64_t aRedirectChannelId = 0 */ 105);
+
+  profiler_add_network_marker(
+      /* nsIURI* aURI */ uri,
+      /* const nsACString& aRequestMethod */ "GET"_ns,
+      /* int32_t aPriority */ 34,
+      /* uint64_t aChannelId */ 6,
+      /* NetworkLoadType aType */ net::NetworkLoadType::LOAD_REDIRECT,
+      /* mozilla::TimeStamp aStart */ ts1,
+      /* mozilla::TimeStamp aEnd */ ts2,
+      /* int64_t aCount */ 56,
+      /* mozilla::net::CacheDisposition aCacheDisposition */
+      net::kCacheUnresolved,
+      /* uint64_t aInnerWindowID */ 78,
+      /* const mozilla::net::TimingStruct* aTimings = nullptr */ nullptr,
+      /* mozilla::UniquePtr<mozilla::ProfileChunkedBuffer> aSource =
+         nullptr */
+      nullptr,
+      /* const mozilla::Maybe<nsDependentCString>& aContentType =
+         mozilla::Nothing() */
+      mozilla::Nothing(),
+      /* nsIURI* aRedirectURI = nullptr */ redirectURI,
+      /* uint32_t aRedirectFlags = 0 */ nsIChannelEventSink::REDIRECT_INTERNAL |
+          nsIChannelEventSink::REDIRECT_STS_UPGRADE,
+      /* uint64_t aRedirectChannelId = 0 */ 106);
+
+  EXPECT_TRUE(profiler_add_marker(
       "Text in main thread with stack", geckoprofiler::category::OTHER,
       {MarkerStack::Capture(), MarkerTiming::Interval(ts1, ts2)},
       geckoprofiler::markers::TextMarker{}, ""));
-  MOZ_RELEASE_ASSERT(profiler_add_marker(
+  EXPECT_TRUE(profiler_add_marker(
       "Text from main thread with stack", geckoprofiler::category::OTHER,
       MarkerOptions(MarkerThreadId::MainThread(), MarkerStack::Capture()),
       geckoprofiler::markers::TextMarker{}, ""));
@@ -992,11 +2130,11 @@ TEST(GeckoProfiler, Markers)
   std::thread registeredThread([]() {
     AUTO_PROFILER_REGISTER_THREAD("Marker test sub-thread");
     // Marker in non-profiled thread won't be stored.
-    MOZ_RELEASE_ASSERT(profiler_add_marker(
+    EXPECT_TRUE(profiler_add_marker(
         "Text in registered thread with stack", geckoprofiler::category::OTHER,
         MarkerStack::Capture(), geckoprofiler::markers::TextMarker{}, ""));
     // Marker will be stored in main thread, with stack from registered thread.
-    MOZ_RELEASE_ASSERT(profiler_add_marker(
+    EXPECT_TRUE(profiler_add_marker(
         "Text from registered thread with stack",
         geckoprofiler::category::OTHER,
         MarkerOptions(MarkerThreadId::MainThread(), MarkerStack::Capture()),
@@ -1006,13 +2144,13 @@ TEST(GeckoProfiler, Markers)
 
   std::thread unregisteredThread([]() {
     // Marker in unregistered thread won't be stored.
-    MOZ_RELEASE_ASSERT(profiler_add_marker(
-        "Text in unregistered thread with stack",
-        geckoprofiler::category::OTHER, MarkerStack::Capture(),
-        geckoprofiler::markers::TextMarker{}, ""));
+    EXPECT_TRUE(profiler_add_marker("Text in unregistered thread with stack",
+                                    geckoprofiler::category::OTHER,
+                                    MarkerStack::Capture(),
+                                    geckoprofiler::markers::TextMarker{}, ""));
     // Marker will be stored in main thread, but stack cannot be captured in an
     // unregistered thread.
-    MOZ_RELEASE_ASSERT(profiler_add_marker(
+    EXPECT_TRUE(profiler_add_marker(
         "Text from unregistered thread with stack",
         geckoprofiler::category::OTHER,
         MarkerOptions(MarkerThreadId::MainThread(), MarkerStack::Capture()),
@@ -1020,15 +2158,15 @@ TEST(GeckoProfiler, Markers)
   });
   unregisteredThread.join();
 
-  MOZ_RELEASE_ASSERT(
-      profiler_add_marker("Tracing", geckoprofiler::category::OTHER, {},
-                          geckoprofiler::markers::Tracing{}, "category"));
+  EXPECT_TRUE(profiler_add_marker("Tracing", geckoprofiler::category::OTHER, {},
+                                  geckoprofiler::markers::Tracing{},
+                                  "category"));
 
-  MOZ_RELEASE_ASSERT(
-      profiler_add_marker("Text", geckoprofiler::category::OTHER, {},
-                          geckoprofiler::markers::TextMarker{}, "Text text"));
+  EXPECT_TRUE(profiler_add_marker("Text", geckoprofiler::category::OTHER, {},
+                                  geckoprofiler::markers::TextMarker{},
+                                  "Text text"));
 
-  MOZ_RELEASE_ASSERT(profiler_add_marker(
+  EXPECT_TRUE(profiler_add_marker(
       "MediaSample", geckoprofiler::category::OTHER, {},
       geckoprofiler::markers::MediaSampleMarker{}, 123, 456));
 
@@ -1059,7 +2197,11 @@ TEST(GeckoProfiler, Markers)
     S_SpecialMarker,
     S_NetworkMarkerPayload_start,
     S_NetworkMarkerPayload_stop,
-    S_NetworkMarkerPayload_redirect,
+    S_NetworkMarkerPayload_redirect_temporary,
+    S_NetworkMarkerPayload_redirect_permanent,
+    S_NetworkMarkerPayload_redirect_internal,
+    S_NetworkMarkerPayload_redirect_internal_sts,
+
     S_TextWithStack,
     S_TextToMTWithStack,
     S_RegThread_TextToMTWithStack,
@@ -1159,39 +2301,39 @@ TEST(GeckoProfiler, Markers)
               EXPECT_TRUE(marker[PHASE].asUInt() < 4);
               EXPECT_TRUE(marker[CATEGORY].isUInt());
 
-#define EXPECT_TIMING_INSTANT                  \
-  EXPECT_NE(marker[START_TIME].asDouble(), 0); \
-  EXPECT_EQ(marker[END_TIME].asDouble(), 0);   \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INSTANT);
-#define EXPECT_TIMING_INTERVAL                 \
-  EXPECT_NE(marker[START_TIME].asDouble(), 0); \
-  EXPECT_NE(marker[END_TIME].asDouble(), 0);   \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INTERVAL);
-#define EXPECT_TIMING_START                    \
-  EXPECT_NE(marker[START_TIME].asDouble(), 0); \
-  EXPECT_EQ(marker[END_TIME].asDouble(), 0);   \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_START);
-#define EXPECT_TIMING_END                      \
-  EXPECT_EQ(marker[START_TIME].asDouble(), 0); \
-  EXPECT_NE(marker[END_TIME].asDouble(), 0);   \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_END);
+#  define EXPECT_TIMING_INSTANT                  \
+    EXPECT_NE(marker[START_TIME].asDouble(), 0); \
+    EXPECT_EQ(marker[END_TIME].asDouble(), 0);   \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INSTANT);
+#  define EXPECT_TIMING_INTERVAL                 \
+    EXPECT_NE(marker[START_TIME].asDouble(), 0); \
+    EXPECT_NE(marker[END_TIME].asDouble(), 0);   \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INTERVAL);
+#  define EXPECT_TIMING_START                    \
+    EXPECT_NE(marker[START_TIME].asDouble(), 0); \
+    EXPECT_EQ(marker[END_TIME].asDouble(), 0);   \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_START);
+#  define EXPECT_TIMING_END                      \
+    EXPECT_EQ(marker[START_TIME].asDouble(), 0); \
+    EXPECT_NE(marker[END_TIME].asDouble(), 0);   \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_END);
 
-#define EXPECT_TIMING_INSTANT_AT(t)            \
-  EXPECT_EQ(marker[START_TIME].asDouble(), t); \
-  EXPECT_EQ(marker[END_TIME].asDouble(), 0);   \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INSTANT);
-#define EXPECT_TIMING_INTERVAL_AT(start, end)      \
-  EXPECT_EQ(marker[START_TIME].asDouble(), start); \
-  EXPECT_EQ(marker[END_TIME].asDouble(), end);     \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INTERVAL);
-#define EXPECT_TIMING_START_AT(start)              \
-  EXPECT_EQ(marker[START_TIME].asDouble(), start); \
-  EXPECT_EQ(marker[END_TIME].asDouble(), 0);       \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_START);
-#define EXPECT_TIMING_END_AT(end)              \
-  EXPECT_EQ(marker[START_TIME].asDouble(), 0); \
-  EXPECT_EQ(marker[END_TIME].asDouble(), end); \
-  EXPECT_EQ(marker[PHASE].asUInt(), PHASE_END);
+#  define EXPECT_TIMING_INSTANT_AT(t)            \
+    EXPECT_EQ(marker[START_TIME].asDouble(), t); \
+    EXPECT_EQ(marker[END_TIME].asDouble(), 0);   \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INSTANT);
+#  define EXPECT_TIMING_INTERVAL_AT(start, end)      \
+    EXPECT_EQ(marker[START_TIME].asDouble(), start); \
+    EXPECT_EQ(marker[END_TIME].asDouble(), end);     \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_INTERVAL);
+#  define EXPECT_TIMING_START_AT(start)              \
+    EXPECT_EQ(marker[START_TIME].asDouble(), start); \
+    EXPECT_EQ(marker[END_TIME].asDouble(), 0);       \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_START);
+#  define EXPECT_TIMING_END_AT(end)              \
+    EXPECT_EQ(marker[START_TIME].asDouble(), 0); \
+    EXPECT_EQ(marker[END_TIME].asDouble(), end); \
+    EXPECT_EQ(marker[PHASE].asUInt(), PHASE_END);
 
               if (marker.size() == SIZE_WITHOUT_PAYLOAD) {
                 // root.threads[0].markers.data[i] is an array with 5 elements,
@@ -1207,12 +2349,12 @@ TEST(GeckoProfiler, Markers)
                   EXPECT_EQ(state, S_Markers2DefaultEmptyOptions);
                   state = State(S_Markers2DefaultEmptyOptions + 1);
 // TODO: Re-enable this when bug 1646714 lands, and check for stack.
-#if 0
+#  if 0
               } else if (nameString ==
                          "default-templated markers 2.0 with option") {
                 EXPECT_EQ(state, S_Markers2DefaultWithOptions);
                 state = State(S_Markers2DefaultWithOptions + 1);
-#endif
+#  endif
                 } else if (nameString ==
                            "explicitly-default-templated markers 2.0 with "
                            "empty "
@@ -1349,30 +2491,36 @@ TEST(GeckoProfiler, Markers)
                   EXPECT_EQ_JSON(payload["count"], Int64, 56);
                   EXPECT_EQ_JSON(payload["cache"], String, "Hit");
                   EXPECT_TRUE(payload["RedirectURI"].isNull());
+                  EXPECT_TRUE(payload["redirectType"].isNull());
+                  EXPECT_TRUE(payload["isHttpToHttpsRedirect"].isNull());
+                  EXPECT_TRUE(payload["redirectId"].isNull());
                   EXPECT_TRUE(payload["contentType"].isNull());
 
-                } else if (nameString == "Load 12: http://mozilla.org/") {
+                } else if (nameString == "Load 2: http://mozilla.org/") {
                   EXPECT_EQ(state, S_NetworkMarkerPayload_stop);
                   state = State(S_NetworkMarkerPayload_stop + 1);
                   EXPECT_EQ(typeString, "Network");
                   EXPECT_EQ_JSON(payload["startTime"], Double, ts1Double);
                   EXPECT_EQ_JSON(payload["endTime"], Double, ts2Double);
-                  EXPECT_EQ_JSON(payload["id"], Int64, 12);
+                  EXPECT_EQ_JSON(payload["id"], Int64, 2);
                   EXPECT_EQ_JSON(payload["URI"], String, "http://mozilla.org/");
                   EXPECT_EQ_JSON(payload["requestMethod"], String, "GET");
                   EXPECT_EQ_JSON(payload["pri"], Int64, 34);
                   EXPECT_EQ_JSON(payload["count"], Int64, 56);
                   EXPECT_EQ_JSON(payload["cache"], String, "Unresolved");
                   EXPECT_TRUE(payload["RedirectURI"].isNull());
+                  EXPECT_TRUE(payload["redirectType"].isNull());
+                  EXPECT_TRUE(payload["isHttpToHttpsRedirect"].isNull());
+                  EXPECT_TRUE(payload["redirectId"].isNull());
                   EXPECT_EQ_JSON(payload["contentType"], String, "text/html");
 
-                } else if (nameString == "Load 123: http://mozilla.org/") {
-                  EXPECT_EQ(state, S_NetworkMarkerPayload_redirect);
-                  state = State(S_NetworkMarkerPayload_redirect + 1);
+                } else if (nameString == "Load 3: http://mozilla.org/") {
+                  EXPECT_EQ(state, S_NetworkMarkerPayload_redirect_temporary);
+                  state = State(S_NetworkMarkerPayload_redirect_temporary + 1);
                   EXPECT_EQ(typeString, "Network");
                   EXPECT_EQ_JSON(payload["startTime"], Double, ts1Double);
                   EXPECT_EQ_JSON(payload["endTime"], Double, ts2Double);
-                  EXPECT_EQ_JSON(payload["id"], Int64, 123);
+                  EXPECT_EQ_JSON(payload["id"], Int64, 3);
                   EXPECT_EQ_JSON(payload["URI"], String, "http://mozilla.org/");
                   EXPECT_EQ_JSON(payload["requestMethod"], String, "GET");
                   EXPECT_EQ_JSON(payload["pri"], Int64, 34);
@@ -1380,6 +2528,68 @@ TEST(GeckoProfiler, Markers)
                   EXPECT_EQ_JSON(payload["cache"], String, "Unresolved");
                   EXPECT_EQ_JSON(payload["RedirectURI"], String,
                                  "http://example.com/");
+                  EXPECT_EQ_JSON(payload["redirectType"], String, "Temporary");
+                  EXPECT_EQ_JSON(payload["isHttpToHttpsRedirect"], Bool, false);
+                  EXPECT_EQ_JSON(payload["redirectId"], Int64, 103);
+                  EXPECT_TRUE(payload["contentType"].isNull());
+
+                } else if (nameString == "Load 4: http://mozilla.org/") {
+                  EXPECT_EQ(state, S_NetworkMarkerPayload_redirect_permanent);
+                  state = State(S_NetworkMarkerPayload_redirect_permanent + 1);
+                  EXPECT_EQ(typeString, "Network");
+                  EXPECT_EQ_JSON(payload["startTime"], Double, ts1Double);
+                  EXPECT_EQ_JSON(payload["endTime"], Double, ts2Double);
+                  EXPECT_EQ_JSON(payload["id"], Int64, 4);
+                  EXPECT_EQ_JSON(payload["URI"], String, "http://mozilla.org/");
+                  EXPECT_EQ_JSON(payload["requestMethod"], String, "GET");
+                  EXPECT_EQ_JSON(payload["pri"], Int64, 34);
+                  EXPECT_EQ_JSON(payload["count"], Int64, 56);
+                  EXPECT_EQ_JSON(payload["cache"], String, "Unresolved");
+                  EXPECT_EQ_JSON(payload["RedirectURI"], String,
+                                 "http://example.com/");
+                  EXPECT_EQ_JSON(payload["redirectType"], String, "Permanent");
+                  EXPECT_EQ_JSON(payload["isHttpToHttpsRedirect"], Bool, false);
+                  EXPECT_EQ_JSON(payload["redirectId"], Int64, 104);
+                  EXPECT_TRUE(payload["contentType"].isNull());
+
+                } else if (nameString == "Load 5: http://mozilla.org/") {
+                  EXPECT_EQ(state, S_NetworkMarkerPayload_redirect_internal);
+                  state = State(S_NetworkMarkerPayload_redirect_internal + 1);
+                  EXPECT_EQ(typeString, "Network");
+                  EXPECT_EQ_JSON(payload["startTime"], Double, ts1Double);
+                  EXPECT_EQ_JSON(payload["endTime"], Double, ts2Double);
+                  EXPECT_EQ_JSON(payload["id"], Int64, 5);
+                  EXPECT_EQ_JSON(payload["URI"], String, "http://mozilla.org/");
+                  EXPECT_EQ_JSON(payload["requestMethod"], String, "GET");
+                  EXPECT_EQ_JSON(payload["pri"], Int64, 34);
+                  EXPECT_EQ_JSON(payload["count"], Int64, 56);
+                  EXPECT_EQ_JSON(payload["cache"], String, "Unresolved");
+                  EXPECT_EQ_JSON(payload["RedirectURI"], String,
+                                 "http://example.com/");
+                  EXPECT_EQ_JSON(payload["redirectType"], String, "Internal");
+                  EXPECT_EQ_JSON(payload["isHttpToHttpsRedirect"], Bool, false);
+                  EXPECT_EQ_JSON(payload["redirectId"], Int64, 105);
+                  EXPECT_TRUE(payload["contentType"].isNull());
+
+                } else if (nameString == "Load 6: http://mozilla.org/") {
+                  EXPECT_EQ(state,
+                            S_NetworkMarkerPayload_redirect_internal_sts);
+                  state =
+                      State(S_NetworkMarkerPayload_redirect_internal_sts + 1);
+                  EXPECT_EQ(typeString, "Network");
+                  EXPECT_EQ_JSON(payload["startTime"], Double, ts1Double);
+                  EXPECT_EQ_JSON(payload["endTime"], Double, ts2Double);
+                  EXPECT_EQ_JSON(payload["id"], Int64, 6);
+                  EXPECT_EQ_JSON(payload["URI"], String, "http://mozilla.org/");
+                  EXPECT_EQ_JSON(payload["requestMethod"], String, "GET");
+                  EXPECT_EQ_JSON(payload["pri"], Int64, 34);
+                  EXPECT_EQ_JSON(payload["count"], Int64, 56);
+                  EXPECT_EQ_JSON(payload["cache"], String, "Unresolved");
+                  EXPECT_EQ_JSON(payload["RedirectURI"], String,
+                                 "http://example.com/");
+                  EXPECT_EQ_JSON(payload["redirectType"], String, "Internal");
+                  EXPECT_EQ_JSON(payload["isHttpToHttpsRedirect"], Bool, true);
+                  EXPECT_EQ_JSON(payload["redirectId"], Int64, 106);
                   EXPECT_TRUE(payload["contentType"].isNull());
 
                 } else if (nameString == "Text in main thread with stack") {
@@ -1672,7 +2882,7 @@ TEST(GeckoProfiler, Markers)
   });
 
   Maybe<ProfilerBufferInfo> info = profiler_get_buffer_info();
-  MOZ_RELEASE_ASSERT(info.isSome());
+  EXPECT_TRUE(info.isSome());
   printf("Profiler buffer range: %llu .. %llu (%llu bytes)\n",
          static_cast<unsigned long long>(info->mRangeStart),
          static_cast<unsigned long long>(info->mRangeEnd),
@@ -1723,10 +2933,10 @@ TEST(GeckoProfiler, Markers)
   profiler_stop();
 }
 
-#define COUNTER_NAME "TestCounter"
-#define COUNTER_DESCRIPTION "Test of counters in profiles"
-#define COUNTER_NAME2 "Counter2"
-#define COUNTER_DESCRIPTION2 "Second Test of counters in profiles"
+#  define COUNTER_NAME "TestCounter"
+#  define COUNTER_DESCRIPTION "Test of counters in profiles"
+#  define COUNTER_NAME2 "Counter2"
+#  define COUNTER_DESCRIPTION2 "Second Test of counters in profiles"
 
 PROFILER_DEFINE_COUNT_TOTAL(TestCounter, COUNTER_NAME, COUNTER_DESCRIPTION);
 PROFILER_DEFINE_COUNT_TOTAL(TestCounter2, COUNTER_NAME2, COUNTER_DESCRIPTION2);
@@ -1985,19 +3195,22 @@ class GTestStackCollector final : public ProfilerStackCollector {
   int mFrames;
 };
 
-void DoSuspendAndSample(int aTid, nsIThread* aThread) {
-  aThread->Dispatch(
-      NS_NewRunnableFunction("GeckoProfiler_SuspendAndSample_Test::TestBody",
-                             [&]() {
-                               uint32_t features = ProfilerFeature::Leaf;
-                               GTestStackCollector collector;
-                               profiler_suspend_and_sample_thread(
-                                   aTid, features, collector,
-                                   /* sampleNative = */ true);
+void DoSuspendAndSample(ProfilerThreadId aTidToSample,
+                        nsIThread* aSamplingThread) {
+  aSamplingThread->Dispatch(
+      NS_NewRunnableFunction(
+          "GeckoProfiler_SuspendAndSample_Test::TestBody",
+          [&]() {
+            uint32_t features = ProfilerFeature::Leaf;
+            GTestStackCollector collector;
+            profiler_suspend_and_sample_thread(aTidToSample, features,
+                                               collector,
+                                               /* sampleNative = */ true);
 
-                               ASSERT_TRUE(collector.mSetIsMainThread == 1);
-                               ASSERT_TRUE(collector.mFrames > 0);
-                             }),
+            ASSERT_TRUE(collector.mSetIsMainThread ==
+                        (aTidToSample == profiler_main_thread_id()));
+            ASSERT_TRUE(collector.mFrames > 0);
+          }),
       NS_DISPATCH_SYNC);
 }
 
@@ -2007,12 +3220,14 @@ TEST(GeckoProfiler, SuspendAndSample)
   nsresult rv = NS_NewNamedThread("GeckoProfGTest", getter_AddRefs(thread));
   ASSERT_TRUE(NS_SUCCEEDED(rv));
 
-  int tid = profiler_current_thread_id();
+  ProfilerThreadId tid = profiler_current_thread_id();
 
   ASSERT_TRUE(!profiler_is_active());
 
   // Suspend and sample while the profiler is inactive.
   DoSuspendAndSample(tid, thread);
+
+  DoSuspendAndSample(ProfilerThreadId{}, thread);
 
   uint32_t features = ProfilerFeature::JS | ProfilerFeature::Threads;
   const char* filters[] = {"GeckoMain", "Compositor"};
@@ -2024,6 +3239,8 @@ TEST(GeckoProfiler, SuspendAndSample)
 
   // Suspend and sample while the profiler is active.
   DoSuspendAndSample(tid, thread);
+
+  DoSuspendAndSample(ProfilerThreadId{}, thread);
 
   profiler_stop();
 
@@ -2127,6 +3344,106 @@ TEST(GeckoProfiler, PostSamplingCallback)
       [&](SamplingState) { ASSERT_TRUE(false); }));
 }
 
+TEST(GeckoProfiler, ProfilingStateCallback)
+{
+  const char* filters[] = {"GeckoMain"};
+
+  ASSERT_TRUE(!profiler_is_active());
+
+  struct ProfilingStateAndId {
+    ProfilingState mProfilingState;
+    int mId;
+  };
+  DataMutex<Vector<ProfilingStateAndId>> states{"Profiling states"};
+  auto CreateCallback = [&states](int id) {
+    return [id, &states](ProfilingState aProfilingState) {
+      auto lockedStates = states.Lock();
+      ASSERT_TRUE(
+          lockedStates->append(ProfilingStateAndId{aProfilingState, id}));
+    };
+  };
+  auto CheckStatesIsEmpty = [&states]() {
+    auto lockedStates = states.Lock();
+    EXPECT_TRUE(lockedStates->empty());
+  };
+  auto CheckStatesOnlyContains = [&states](ProfilingState aProfilingState,
+                                           int aId) {
+    auto lockedStates = states.Lock();
+    EXPECT_EQ(lockedStates->length(), 1u);
+    if (lockedStates->length() >= 1u) {
+      EXPECT_EQ((*lockedStates)[0].mProfilingState, aProfilingState);
+      EXPECT_EQ((*lockedStates)[0].mId, aId);
+    }
+    lockedStates->clear();
+  };
+
+  profiler_add_state_change_callback(AllProfilingStates(), CreateCallback(1),
+                                     1);
+  // This is in case of error, and it also exercises the (allowed) removal of
+  // unknown callback ids.
+  auto cleanup1 = mozilla::MakeScopeExit(
+      []() { profiler_remove_state_change_callback(1); });
+  CheckStatesIsEmpty();
+
+  profiler_start(PROFILER_DEFAULT_ENTRIES, PROFILER_DEFAULT_INTERVAL,
+                 ProfilerFeature::StackWalk, filters, MOZ_ARRAY_LENGTH(filters),
+                 0);
+
+  CheckStatesOnlyContains(ProfilingState::Started, 1);
+
+  profiler_add_state_change_callback(AllProfilingStates(), CreateCallback(2),
+                                     2);
+  // This is in case of error, and it also exercises the (allowed) removal of
+  // unknown callback ids.
+  auto cleanup2 = mozilla::MakeScopeExit(
+      []() { profiler_remove_state_change_callback(2); });
+  CheckStatesOnlyContains(ProfilingState::AlreadyActive, 2);
+
+  profiler_remove_state_change_callback(2);
+  CheckStatesOnlyContains(ProfilingState::RemovingCallback, 2);
+  // Note: The actual removal is effectively tested below, by not seeing any
+  // more invocations of the 2nd callback.
+
+  ASSERT_EQ(WaitForSamplingState(), SamplingState::SamplingCompleted);
+  UniquePtr<char[]> profileCompleted = profiler_get_profile();
+  CheckStatesOnlyContains(ProfilingState::GeneratingProfile, 1);
+  JSONOutputCheck(profileCompleted.get(), [](const Json::Value& aRoot) {});
+
+  profiler_pause();
+  CheckStatesOnlyContains(ProfilingState::Pausing, 1);
+  UniquePtr<char[]> profilePaused = profiler_get_profile();
+  CheckStatesOnlyContains(ProfilingState::GeneratingProfile, 1);
+  JSONOutputCheck(profilePaused.get(), [](const Json::Value& aRoot) {});
+
+  profiler_resume();
+  CheckStatesOnlyContains(ProfilingState::Resumed, 1);
+  ASSERT_EQ(WaitForSamplingState(), SamplingState::SamplingCompleted);
+  UniquePtr<char[]> profileResumed = profiler_get_profile();
+  CheckStatesOnlyContains(ProfilingState::GeneratingProfile, 1);
+  JSONOutputCheck(profileResumed.get(), [](const Json::Value& aRoot) {});
+
+  // This effectively stops the profiler before restarting it, but
+  // ProfilingState::Stopping is not notified. See `profiler_start` for details.
+  profiler_start(PROFILER_DEFAULT_ENTRIES, PROFILER_DEFAULT_INTERVAL,
+                 ProfilerFeature::StackWalk | ProfilerFeature::NoStackSampling,
+                 filters, MOZ_ARRAY_LENGTH(filters), 0);
+  CheckStatesOnlyContains(ProfilingState::Started, 1);
+  ASSERT_EQ(WaitForSamplingState(), SamplingState::NoStackSamplingCompleted);
+  UniquePtr<char[]> profileNoStacks = profiler_get_profile();
+  CheckStatesOnlyContains(ProfilingState::GeneratingProfile, 1);
+  JSONOutputCheck(profileNoStacks.get(), [](const Json::Value& aRoot) {});
+
+  profiler_stop();
+  CheckStatesOnlyContains(ProfilingState::Stopping, 1);
+  ASSERT_TRUE(!profiler_is_active());
+
+  profiler_remove_state_change_callback(1);
+  CheckStatesOnlyContains(ProfilingState::RemovingCallback, 1);
+
+  // Note: ProfilingState::ShuttingDown cannot be tested here, and the profiler
+  // can only be shut down once per process.
+}
+
 TEST(GeckoProfiler, BaseProfilerHandOff)
 {
   const char* filters[] = {"GeckoMain"};
@@ -2187,98 +3504,243 @@ TEST(GeckoProfiler, BaseProfilerHandOff)
   ASSERT_TRUE(!profiler_is_active());
 }
 
+static std::string_view GetFeatureName(uint32_t feature) {
+  switch (feature) {
+#  define FEATURE_NAME(n_, str_, Name_, desc_) \
+    case ProfilerFeature::Name_:               \
+      return str_;
+
+    PROFILER_FOR_EACH_FEATURE(FEATURE_NAME)
+
+#  undef FEATURE_NAME
+
+    default:
+      return "?";
+  }
+}
+
+TEST(GeckoProfiler, FeatureCombinations)
+{
+  const char* filters[] = {"*"};
+
+  // List of features to test. Every combination (from none to all of them) will
+  // be tested, so be careful not to add too many to keep the test run at a
+  // reasonable time.
+  uint32_t featureList[] = {ProfilerFeature::JS,
+                            ProfilerFeature::Screenshots,
+                            ProfilerFeature::StackWalk,
+                            ProfilerFeature::NoStackSampling,
+                            ProfilerFeature::NativeAllocations,
+                            ProfilerFeature::CPUUtilization};
+  constexpr uint32_t featureCount = uint32_t(MOZ_ARRAY_LENGTH(featureList));
+  ASSERT_LT(featureCount, 32u);
+  constexpr uint32_t combinationCount = uint32_t(1) << featureCount;
+
+  std::string featuresString;
+
+  for (uint32_t combination = 0u; combination < combinationCount;
+       ++combination) {
+    uint32_t features = 0u;
+    featuresString = "Features:";
+    for (uint32_t featureIndex = 0u; featureIndex < featureCount;
+         ++featureIndex) {
+      if ((combination & (uint32_t(1) << featureIndex)) != 0u) {
+        features |= featureList[featureIndex];
+        featuresString += " ";
+        featuresString += GetFeatureName(featureList[featureIndex]);
+      }
+    }
+
+    if (features == 0) {
+      featuresString += " (none)";
+    }
+
+    SCOPED_TRACE(featuresString.c_str());
+
+    ASSERT_TRUE(!profiler_is_active());
+
+    profiler_start(PROFILER_DEFAULT_ENTRIES, PROFILER_DEFAULT_INTERVAL,
+                   features, filters, MOZ_ARRAY_LENGTH(filters), 0);
+
+    ASSERT_TRUE(profiler_is_active());
+
+    // Write some Gecko Profiler samples.
+    EXPECT_EQ(WaitForSamplingState(),
+              (((features & ProfilerFeature::NoStackSampling) != 0) &&
+               ((features & ProfilerFeature::CPUUtilization) == 0))
+                  ? SamplingState::NoStackSamplingCompleted
+                  : SamplingState::SamplingCompleted);
+
+    // Check that the profile looks valid. Note that we don't test feature-
+    // specific changes.
+    UniquePtr<char[]> profile = profiler_get_profile();
+    JSONOutputCheck(profile.get(), [](const Json::Value& aRoot) {});
+
+    profiler_stop();
+    ASSERT_TRUE(!profiler_is_active());
+  }
+}
+
 TEST(GeckoProfiler, CPUUsage)
 {
   const char* filters[] = {"GeckoMain"};
 
-  ASSERT_TRUE(!profiler_is_active());
-  ASSERT_TRUE(!profiler_callback_after_sampling(
-      [&](SamplingState) { ASSERT_TRUE(false); }));
+  // We want to ensure that CPU usage numbers are present whether or not we are
+  // collecting stack samples.
+  static constexpr bool scTestsWithOrWithoutStackSampling[] = {false, true};
+  for (const bool testWithNoStackSampling : scTestsWithOrWithoutStackSampling) {
+    ASSERT_TRUE(!profiler_is_active());
+    ASSERT_TRUE(!profiler_callback_after_sampling(
+        [&](SamplingState) { ASSERT_TRUE(false); }));
 
-  profiler_start(PROFILER_DEFAULT_ENTRIES, PROFILER_DEFAULT_INTERVAL,
-                 ProfilerFeature::StackWalk | ProfilerFeature::CPUUtilization,
-                 filters, MOZ_ARRAY_LENGTH(filters), 0);
-  // Grab a few samples.
-  static constexpr unsigned MinSamplings = 10;
-  for (unsigned i = MinSamplings; i != 0; --i) {
-    ASSERT_EQ(WaitForSamplingState(), SamplingState::SamplingCompleted);
-  }
-  UniquePtr<char[]> profile = profiler_get_profile();
-  JSONOutputCheck(profile.get(), [](const Json::Value& aRoot) {
-    // Check that the "cpu" feature is present.
-    GET_JSON(meta, aRoot["meta"], Object);
-    {
-      GET_JSON(configuration, meta["configuration"], Object);
-      {
-        GET_JSON(features, configuration["features"], Array);
-        { EXPECT_JSON_ARRAY_CONTAINS(features, String, "cpu"); }
+    profiler_start(
+        PROFILER_DEFAULT_ENTRIES, PROFILER_DEFAULT_INTERVAL,
+        ProfilerFeature::StackWalk | ProfilerFeature::CPUUtilization |
+            (testWithNoStackSampling ? ProfilerFeature::NoStackSampling : 0),
+        filters, MOZ_ARRAY_LENGTH(filters), 0);
+    // Grab a few samples, each with a different label on the stack.
+#  define SAMPLE_LABEL_PREFIX "CPUUsage sample label "
+    static constexpr const char* scSampleLabels[] = {
+        SAMPLE_LABEL_PREFIX "0", SAMPLE_LABEL_PREFIX "1",
+        SAMPLE_LABEL_PREFIX "2", SAMPLE_LABEL_PREFIX "3",
+        SAMPLE_LABEL_PREFIX "4", SAMPLE_LABEL_PREFIX "5",
+        SAMPLE_LABEL_PREFIX "6", SAMPLE_LABEL_PREFIX "7",
+        SAMPLE_LABEL_PREFIX "8", SAMPLE_LABEL_PREFIX "9"};
+    static constexpr size_t scSampleLabelCount =
+        (sizeof(scSampleLabels) / sizeof(scSampleLabels[0]));
+    // We'll do two samplings for each label.
+    static constexpr size_t scMinSamplings = scSampleLabelCount * 2;
+
+    for (const char* sampleLabel : scSampleLabels) {
+      AUTO_PROFILER_LABEL(sampleLabel, OTHER);
+      ASSERT_EQ(WaitForSamplingState(), SamplingState::SamplingCompleted);
+      // Note: There could have been a delay before this label above, where the
+      // profiler could have sampled the stack and missed the label. By forcing
+      // another sampling now, the label is guaranteed to be present.
+      ASSERT_EQ(WaitForSamplingState(), SamplingState::SamplingCompleted);
+    }
+
+    UniquePtr<char[]> profile = profiler_get_profile();
+
+    if (testWithNoStackSampling) {
+      // If we are testing nostacksampling, we shouldn't find this label prefix
+      // in the profile.
+      EXPECT_FALSE(strstr(profile.get(), SAMPLE_LABEL_PREFIX));
+    } else {
+      // In normal sampling mode, we should find all labels.
+      for (const char* sampleLabel : scSampleLabels) {
+        EXPECT_TRUE(strstr(profile.get(), sampleLabel));
       }
     }
 
-    {
-      GET_JSON(sampleUnits, meta["sampleUnits"], Object);
+    JSONOutputCheck(profile.get(), [testWithNoStackSampling](
+                                       const Json::Value& aRoot) {
+      // Check that the "cpu" feature is present.
+      GET_JSON(meta, aRoot["meta"], Object);
       {
-        EXPECT_EQ_JSON(sampleUnits["time"], String, "ms");
-        EXPECT_EQ_JSON(sampleUnits["eventDelay"], String, "ms");
-#if defined(GP_OS_windows) || defined(GP_OS_darwin) || defined(GP_OS_linux) || \
-    defined(GP_OS_android) || defined(GP_OS_freebsd)
-        // Note: The exact string is not important here.
-        EXPECT_TRUE(sampleUnits["threadCPUDelta"].isString())
-            << "There should be a sampleUnits.threadCPUDelta on this platform";
-#else
+        GET_JSON(configuration, meta["configuration"], Object);
+        {
+          GET_JSON(features, configuration["features"], Array);
+          { EXPECT_JSON_ARRAY_CONTAINS(features, String, "cpu"); }
+        }
+      }
+
+      {
+        GET_JSON(sampleUnits, meta["sampleUnits"], Object);
+        {
+          EXPECT_EQ_JSON(sampleUnits["time"], String, "ms");
+          EXPECT_EQ_JSON(sampleUnits["eventDelay"], String, "ms");
+#  if defined(GP_OS_windows) || defined(GP_OS_darwin) || \
+      defined(GP_OS_linux) || defined(GP_OS_android) || defined(GP_OS_freebsd)
+          // Note: The exact string is not important here.
+          EXPECT_TRUE(sampleUnits["threadCPUDelta"].isString())
+              << "There should be a sampleUnits.threadCPUDelta on this "
+                 "platform";
+#  else
         EXPECT_FALSE(sampleUnits.isMember("threadCPUDelta"))
             << "Unexpected sampleUnits.threadCPUDelta on this platform";;
-#endif
+#  endif
+        }
       }
-    }
 
-    // Check that the sample schema contains "threadCPUDelta".
-    GET_JSON(threads, aRoot["threads"], Array);
-    {
-      GET_JSON(thread0, threads[0], Object);
+      // Check that the sample schema contains "threadCPUDelta".
+      GET_JSON(threads, aRoot["threads"], Array);
       {
-        GET_JSON(samples, thread0["samples"], Object);
+        GET_JSON(thread0, threads[0], Object);
         {
-          Json::ArrayIndex threadCPUDeltaIndex = 0;
-          GET_JSON(schema, samples["schema"], Object);
+          GET_JSON(samples, thread0["samples"], Object);
           {
-            GET_JSON(index, schema["threadCPUDelta"], UInt);
-            threadCPUDeltaIndex = index.asUInt();
-          }
+            Json::ArrayIndex stackIndex = 0;
+            Json::ArrayIndex threadCPUDeltaIndex = 0;
+            GET_JSON(schema, samples["schema"], Object);
+            {
+              GET_JSON(jsonStackIndex, schema["stack"], UInt);
+              stackIndex = jsonStackIndex.asUInt();
+              GET_JSON(jsonThreadCPUDeltaIndex, schema["threadCPUDelta"], UInt);
+              threadCPUDeltaIndex = jsonThreadCPUDeltaIndex.asUInt();
+            }
 
-          unsigned threadCPUDeltaCount = 0;
-          GET_JSON(data, samples["data"], Array);
-          EXPECT_GE(data.size(), MinSamplings);
-          for (const Json::Value& sample : data) {
-            ASSERT_TRUE(sample.isArray());
-            if (sample.isValidIndex(threadCPUDeltaIndex)) {
-              if (!sample[threadCPUDeltaIndex].isNull()) {
-                EXPECT_TRUE(sample[threadCPUDeltaIndex].isUInt64());
-                ++threadCPUDeltaCount;
+            std::set<uint64_t> stackLeaves;  // To count distinct leaves.
+            unsigned threadCPUDeltaCount = 0;
+            GET_JSON(data, samples["data"], Array);
+            if (testWithNoStackSampling) {
+              // When not sampling stacks, the first sampling loop will have no
+              // running times, so it won't output anything.
+              EXPECT_GE(data.size(), scMinSamplings - 1);
+            } else {
+              EXPECT_GE(data.size(), scMinSamplings);
+            }
+            for (const Json::Value& sample : data) {
+              ASSERT_TRUE(sample.isArray());
+              if (sample.isValidIndex(stackIndex)) {
+                if (!sample[stackIndex].isNull()) {
+                  GET_JSON(stack, sample[stackIndex], UInt64);
+                  stackLeaves.insert(stack.asUInt64());
+                }
+              }
+              if (sample.isValidIndex(threadCPUDeltaIndex)) {
+                if (!sample[threadCPUDeltaIndex].isNull()) {
+                  EXPECT_TRUE(sample[threadCPUDeltaIndex].isUInt64());
+                  ++threadCPUDeltaCount;
+                }
               }
             }
-          }
 
-#if defined(GP_OS_windows) || defined(GP_OS_darwin) || defined(GP_OS_linux) || \
-    defined(GP_OS_android) || defined(GP_OS_freebsd)
-          EXPECT_GE(threadCPUDeltaCount, data.size() - 1u)
-              << "There should be 'threadCPUDelta' values in all but 1 samples";
-#else
+            if (testWithNoStackSampling) {
+              // in nostacksampling mode, there should only be one kind of stack
+              // leaf (the root).
+              EXPECT_EQ(stackLeaves.size(), 1u);
+            } else {
+              // in normal sampling mode, there should be at least one kind of
+              // stack leaf for each distinct label.
+              EXPECT_GE(stackLeaves.size(), scSampleLabelCount);
+            }
+
+#  if defined(GP_OS_windows) || defined(GP_OS_darwin) || \
+      defined(GP_OS_linux) || defined(GP_OS_android) || defined(GP_OS_freebsd)
+            EXPECT_GE(threadCPUDeltaCount, data.size() - 1u)
+                << "There should be 'threadCPUDelta' values in all but 1 "
+                   "samples";
+#  else
           // All "threadCPUDelta" data should be absent or null on unsupported
           // platforms.
           EXPECT_EQ(threadCPUDeltaCount, 0u);
-#endif
+#  endif
+          }
         }
       }
-    }
-  });
+    });
 
-  // Note: There is no non-racy way to test for SamplingState::JustStopped, as
-  // it would require coordination between `profiler_stop()` and another thread
-  // doing `profiler_callback_after_sampling()` at just the right moment.
+    // Note: There is no non-racy way to test for SamplingState::JustStopped, as
+    // it would require coordination between `profiler_stop()` and another
+    // thread doing `profiler_callback_after_sampling()` at just the right
+    // moment.
 
-  profiler_stop();
-  ASSERT_TRUE(!profiler_is_active());
-  ASSERT_TRUE(!profiler_callback_after_sampling(
-      [&](SamplingState) { ASSERT_TRUE(false); }));
+    profiler_stop();
+    ASSERT_TRUE(!profiler_is_active());
+    ASSERT_TRUE(!profiler_callback_after_sampling(
+        [&](SamplingState) { ASSERT_TRUE(false); }));
+  }
 }
+
+#endif  // MOZ_GECKO_PROFILER

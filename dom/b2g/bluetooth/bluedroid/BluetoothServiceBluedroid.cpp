@@ -70,6 +70,7 @@ USING_BLUETOOTH_NAMESPACE
 static BluetoothInterface* sBtInterface;
 static BluetoothCoreInterface* sBtCoreInterface;
 static nsTArray<RefPtr<BluetoothProfileController>> sControllerArray;
+static StaticMutex sServiceRecordLock;
 
 class BluetoothServiceBluedroid::EnableResultHandler final
     : public BluetoothCoreResultHandler {
@@ -857,6 +858,10 @@ class BluetoothServiceBluedroid::GetRemoteServiceRecordResultHandler final
         mUuid(aUuid) {}
 
   void OnError(BluetoothStatus aStatus) override {
+    BT_WARNING("Failed to GetRemoteServiceRecord, status: %d", aStatus);
+
+    StaticMutexAutoLock lock(sServiceRecordLock);
+
     // Find call in array
 
     ssize_t i = FindRequest();
@@ -898,6 +903,8 @@ class BluetoothServiceBluedroid::GetRemoteServiceRecordResultHandler final
 nsresult BluetoothServiceBluedroid::GetServiceChannel(
     const BluetoothAddress& aDeviceAddress, const BluetoothUuid& aServiceUuid,
     BluetoothProfileManagerBase* aManager) {
+  StaticMutexAutoLock lock(sServiceRecordLock);
+
   mGetRemoteServiceRecordArray.AppendElement(
       GetRemoteServiceRecordRequest(aDeviceAddress, aServiceUuid, aManager));
 
@@ -1781,7 +1788,7 @@ void BluetoothServiceBluedroid::RemoteDevicePropertiesNotification(
 
       // Update <address, name> mapping
       mDeviceNameMap.Remove(aBdAddr);
-      mDeviceNameMap.Put(aBdAddr, p.mRemoteName);
+      mDeviceNameMap.InsertOrUpdate(aBdAddr, p.mRemoteName);
     } else if (p.mType == PROPERTY_CLASS_OF_DEVICE) {
       uint32_t cod = p.mUint32;
       AppendNamedValue(propertiesArray, "Cod", cod);
@@ -1811,6 +1818,7 @@ void BluetoothServiceBluedroid::RemoteDevicePropertiesNotification(
                        static_cast<uint32_t>(p.mTypeOfDevice));
 
     } else if (p.mType == PROPERTY_SERVICE_RECORD) {
+      StaticMutexAutoLock lock(sServiceRecordLock);
       size_t i;
 
       // Find call in array
@@ -1832,6 +1840,17 @@ void BluetoothServiceBluedroid::RemoteDevicePropertiesNotification(
       /* Bug 1065999: working around unknown properties */
     } else {
       BT_LOGD("Other non-handled device properties. Type: %d", p.mType);
+    }
+  }
+
+  // Append battery level if it's a HFP connected device
+  BluetoothHfpManager* hfp = BluetoothHfpManager::Get();
+  if (hfp) {
+    BluetoothAddress deviceAddress;
+    hfp->GetAddress(deviceAddress);
+    if (deviceAddress == aBdAddr) {
+      int batteryLevel = hfp->GetDeviceBatteryLevel();
+      AppendNamedValue(propertiesArray, "BatteryLevel", batteryLevel);
     }
   }
 
@@ -1920,7 +1939,7 @@ void BluetoothServiceBluedroid::DeviceFoundNotification(
 
   // Update <address, name> mapping
   mDeviceNameMap.Remove(bdAddr);
-  mDeviceNameMap.Put(bdAddr, bdName);
+  mDeviceNameMap.InsertOrUpdate(bdAddr, bdName);
 
   DistributeSignal(u"DeviceFound"_ns, KEY_ADAPTER,
                    BluetoothValue(propertiesArray));
@@ -1964,16 +1983,18 @@ void BluetoothServiceBluedroid::PinRequestNotification(
   // If |aBdName| is empty, get device name from |mDeviceNameMap|;
   // Otherwise update <address, name> mapping with |aBdName|
   if (aBdName.IsCleared()) {
-    mDeviceNameMap.Get(aRemoteBdAddr, &bdName);
+    if (!mDeviceNameMap.Get(aRemoteBdAddr, &bdName)) {
+      BT_LOGD("BD name is unknown");
+    }
   } else {
     bdName.Assign(aBdName.mName, aBdName.mLength);
     mDeviceNameMap.Remove(aRemoteBdAddr);
-    mDeviceNameMap.Put(aRemoteBdAddr, bdName);
+    mDeviceNameMap.InsertOrUpdate(aRemoteBdAddr, bdName);
   }
 
   // Update <address, cod> mapping
   mDeviceCodMap.Remove(aRemoteBdAddr);
-  mDeviceCodMap.Put(aRemoteBdAddr, aCod);
+  mDeviceCodMap.InsertOrUpdate(aRemoteBdAddr, aCod);
 
   AppendNamedValue(propertiesArray, "address", aRemoteBdAddr);
   AppendNamedValue(propertiesArray, "name", bdName);
@@ -2003,16 +2024,18 @@ void BluetoothServiceBluedroid::SspRequestNotification(
   // If |aBdName| is empty, get device name from |mDeviceNameMap|;
   // Otherwise update <address, name> mapping with |aBdName|
   if (aBdName.IsCleared()) {
-    mDeviceNameMap.Get(aRemoteBdAddr, &bdName);
+    if (!mDeviceNameMap.Get(aRemoteBdAddr, &bdName)) {
+      BT_LOGD("BD name is unknown");
+    }
   } else {
     bdName.Assign(aBdName.mName, aBdName.mLength);
     mDeviceNameMap.Remove(aRemoteBdAddr);
-    mDeviceNameMap.Put(aRemoteBdAddr, bdName);
+    mDeviceNameMap.InsertOrUpdate(aRemoteBdAddr, bdName);
   }
 
   // Update <address, cod> mapping
   mDeviceCodMap.Remove(aRemoteBdAddr);
-  mDeviceCodMap.Put(aRemoteBdAddr, aCod);
+  mDeviceCodMap.InsertOrUpdate(aRemoteBdAddr, aCod);
 
   /**
    * Assign pairing request type and passkey based on the pairing variant.
@@ -2065,23 +2088,29 @@ void BluetoothServiceBluedroid::BondStateChangedNotification(
   bool bonded = (aState == BOND_STATE_BONDED);
   if (aStatus != STATUS_SUCCESS) {
     if (!bonded) {  // Active/passive pair failed
-      BT_LOGR("Pair failed! Abort pairing.");
 
-      // Notify adapter of pairing aborted
-      nsAutoString deviceAddressStr;
-      AddressToString(aRemoteBdAddr, deviceAddressStr);
-      DistributeSignal(
-          BluetoothSignal(PAIRING_ABORTED_ID, KEY_ADAPTER, deviceAddressStr));
+      // Abort pairing when the authentication has stopped
+      if (aStatus == STATUS_AUTH_FAILURE || aStatus == STATUS_RMT_DEV_DOWN ||
+          aStatus == STATUS_AUTH_REJECTED) {
+        BT_LOGR("Pair failed! Abort pairing.");
+        // Notify adapter of pairing aborted
+        nsAutoString deviceAddressStr;
+        AddressToString(aRemoteBdAddr, deviceAddressStr);
+        DistributeSignal(
+            BluetoothSignal(PAIRING_ABORTED_ID, KEY_ADAPTER, deviceAddressStr));
 
-      // Query pairing device name from hash table
-      BluetoothRemoteName remotebdName;
-      mDeviceNameMap.Get(aRemoteBdAddr, &remotebdName);
-      // Since mName is not 0-terminated, mLength is required here.
-      NS_ConvertASCIItoUTF16 bdName(reinterpret_cast<char*>(remotebdName.mName),
-                                    remotebdName.mLength);
+        // Query pairing device name from hash table
+        BluetoothRemoteName remotebdName;
+        if (!mDeviceNameMap.Get(aRemoteBdAddr, &remotebdName)) {
+          BT_LOGD("BD name is unknown");
+        }
+        // Since mName is not 0-terminated, mLength is required here.
+        NS_ConvertASCIItoUTF16 bdName(
+            reinterpret_cast<char*>(remotebdName.mName), remotebdName.mLength);
 
-      BT_ENSURE_TRUE_VOID_BROADCAST_SYSMSG(SYS_MSG_BT_PAIRING_ABORTED,
-                                           BluetoothValue(bdName));
+        BT_ENSURE_TRUE_VOID_BROADCAST_SYSMSG(SYS_MSG_BT_PAIRING_ABORTED,
+                                             BluetoothValue(bdName));
+      }
 
       // Reject pair promise
       if (!mCreateBondRunnables.IsEmpty()) {
@@ -2108,7 +2137,9 @@ void BluetoothServiceBluedroid::BondStateChangedNotification(
 
     // Query pairing device name from hash table
     BluetoothRemoteName remotebdName;
-    mDeviceNameMap.Get(aRemoteBdAddr, &remotebdName);
+    if (!mDeviceNameMap.Get(aRemoteBdAddr, &remotebdName)) {
+      BT_LOGD("BD name is unknown");
+    }
 
     // We don't assert |!remotebdName.IsEmpty()| since empty string is also
     // valid, according to Bluetooth Core Spec. v3.0 - Sec. 6.22:
@@ -2118,8 +2149,7 @@ void BluetoothServiceBluedroid::BondStateChangedNotification(
 
     // Use the cached CoD which is got from pairing request
     uint32_t remoteCod = 0;
-    mDeviceCodMap.Get(aRemoteBdAddr, &remoteCod);
-    if (remoteCod) {
+    if (!mDeviceCodMap.Get(aRemoteBdAddr, &remoteCod)) {
       AppendNamedValue(propertiesArray, "Cod", remoteCod);
     }
   }

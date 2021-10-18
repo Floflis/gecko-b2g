@@ -54,7 +54,8 @@ class HttpBackgroundChannelChild final : public PHttpBackgroundChannelChild {
   IPCResult RecvOnStartRequest(const nsHttpResponseHead& aResponseHead,
                                const bool& aUseResponseHead,
                                const nsHttpHeaderArray& aRequestHeaders,
-                               const HttpChannelOnStartRequestArgs& aArgs);
+                               const HttpChannelOnStartRequestArgs& aArgs,
+                               const HttpChannelAltDataStream& aAltData);
 
   IPCResult RecvOnTransportAndData(const nsresult& aChannelStatus,
                                    const nsresult& aTransportStatus,
@@ -139,7 +140,7 @@ class HttpBackgroundChannelChild final : public PHttpBackgroundChannelChild {
   ODASource mFirstODASource;
 
   // Indicate whether HttpChannelChild::ProcessOnStopRequest is called.
-  bool mOnStopRequestCalled;
+  bool mOnStopRequestCalled = false;
 
   // This is used when we receive the console report from parent process, but
   // still not get the OnStopRequest from socket process.

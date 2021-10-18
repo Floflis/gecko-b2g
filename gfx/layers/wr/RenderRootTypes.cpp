@@ -16,7 +16,9 @@ void IPDLParamTraits<mozilla::layers::DisplayListData>::Write(
   WriteIPDLParam(aMsg, aActor, aParam.mIdNamespace);
   WriteIPDLParam(aMsg, aActor, aParam.mRect);
   WriteIPDLParam(aMsg, aActor, aParam.mCommands);
-  WriteIPDLParam(aMsg, aActor, std::move(aParam.mDL));
+  WriteIPDLParam(aMsg, aActor, std::move(aParam.mDLItems));
+  WriteIPDLParam(aMsg, aActor, std::move(aParam.mDLCache));
+  WriteIPDLParam(aMsg, aActor, std::move(aParam.mDLSpatialTree));
   WriteIPDLParam(aMsg, aActor, aParam.mDLDesc);
   WriteIPDLParam(aMsg, aActor, aParam.mRemotePipelineIds);
   WriteIPDLParam(aMsg, aActor, aParam.mResourceUpdates);
@@ -31,7 +33,9 @@ bool IPDLParamTraits<mozilla::layers::DisplayListData>::Read(
   if (ReadIPDLParam(aMsg, aIter, aActor, &aResult->mIdNamespace) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mRect) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mCommands) &&
-      ReadIPDLParam(aMsg, aIter, aActor, &aResult->mDL) &&
+      ReadIPDLParam(aMsg, aIter, aActor, &aResult->mDLItems) &&
+      ReadIPDLParam(aMsg, aIter, aActor, &aResult->mDLCache) &&
+      ReadIPDLParam(aMsg, aIter, aActor, &aResult->mDLSpatialTree) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mDLDesc) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mRemotePipelineIds) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mResourceUpdates) &&
@@ -48,7 +52,7 @@ void WriteScrollUpdates(IPC::Message* aMsg, IProtocol* aActor,
   // ICK: we need to manually serialize this map because
   // nsDataHashTable doesn't support it (and other maps cause other issues)
   WriteIPDLParam(aMsg, aActor, aParam.Count());
-  for (auto it = aParam.Iter(); !it.Done(); it.Next()) {
+  for (auto it = aParam.ConstIter(); !it.Done(); it.Next()) {
     WriteIPDLParam(aMsg, aActor, it.Key());
     WriteIPDLParam(aMsg, aActor, it.Data());
   }
@@ -70,7 +74,7 @@ bool ReadScrollUpdates(const IPC::Message* aMsg, PickleIterator* aIter,
         !ReadIPDLParam(aMsg, aIter, aActor, &data)) {
       return false;
     }
-    map.Put(key, std::move(data));
+    map.InsertOrUpdate(key, std::move(data));
   }
 
   MOZ_RELEASE_ASSERT(map.Count() == count);
@@ -80,6 +84,7 @@ bool ReadScrollUpdates(const IPC::Message* aMsg, PickleIterator* aIter,
 
 void IPDLParamTraits<mozilla::layers::TransactionData>::Write(
     IPC::Message* aMsg, IProtocol* aActor, paramType&& aParam) {
+  WriteIPDLParam(aMsg, aActor, aParam.mIdNamespace);
   WriteIPDLParam(aMsg, aActor, aParam.mCommands);
   WriteIPDLParam(aMsg, aActor, aParam.mResourceUpdates);
   WriteIPDLParam(aMsg, aActor, aParam.mSmallShmems);
@@ -91,7 +96,8 @@ void IPDLParamTraits<mozilla::layers::TransactionData>::Write(
 bool IPDLParamTraits<mozilla::layers::TransactionData>::Read(
     const IPC::Message* aMsg, PickleIterator* aIter, IProtocol* aActor,
     paramType* aResult) {
-  if (ReadIPDLParam(aMsg, aIter, aActor, &aResult->mCommands) &&
+  if (ReadIPDLParam(aMsg, aIter, aActor, &aResult->mIdNamespace) &&
+      ReadIPDLParam(aMsg, aIter, aActor, &aResult->mCommands) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mResourceUpdates) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mSmallShmems) &&
       ReadIPDLParam(aMsg, aIter, aActor, &aResult->mLargeShmems) &&

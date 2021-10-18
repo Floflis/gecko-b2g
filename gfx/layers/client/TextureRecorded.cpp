@@ -28,6 +28,9 @@ RecordedTextureData::RecordedTextureData(
 }
 
 RecordedTextureData::~RecordedTextureData() {
+  // We need the translator to drop its reference for the DrawTarget first,
+  // because the TextureData might need to destroy its DrawTarget within a lock.
+  mDT = nullptr;
   mCanvasChild->RecordEvent(RecordedTextureDestruction(mTextureId));
 }
 
@@ -51,30 +54,46 @@ bool RecordedTextureData::Lock(OpenMode aMode) {
 
     // We lock the TextureData when we create it to get the remote DrawTarget.
     mCanvasChild->OnTextureWriteLock();
+    mLockedMode = aMode;
     return true;
   }
 
   mCanvasChild->RecordEvent(RecordedTextureLock(mTextureId, aMode));
   if (aMode & OpenMode::OPEN_WRITE) {
     mCanvasChild->OnTextureWriteLock();
-    mSnapshot = nullptr;
   }
+  mLockedMode = aMode;
   return true;
 }
 
 void RecordedTextureData::Unlock() {
   mCanvasChild->RecordEvent(RecordedTextureUnlock(mTextureId));
+  mLockedMode = OpenMode::OPEN_NONE;
 }
 
 already_AddRefed<gfx::DrawTarget> RecordedTextureData::BorrowDrawTarget() {
+  mSnapshot = nullptr;
   return do_AddRef(mDT);
+}
+
+void RecordedTextureData::EndDraw() {
+  MOZ_ASSERT(mDT->hasOneRef());
+  MOZ_ASSERT(mLockedMode & OpenMode::OPEN_READ_WRITE);
+
+  if (mCanvasChild->ShouldCacheDataSurface()) {
+    mSnapshot = mDT->Snapshot();
+    mCanvasChild->RecordEvent(RecordedCacheDataSurface(mSnapshot.get()));
+  }
 }
 
 already_AddRefed<gfx::SourceSurface> RecordedTextureData::BorrowSnapshot() {
   MOZ_ASSERT(mDT);
 
-  mSnapshot = mDT->Snapshot();
-  return mCanvasChild->WrapSurface(mSnapshot);
+  if (mSnapshot) {
+    return mCanvasChild->WrapSurface(mSnapshot);
+  }
+
+  return mCanvasChild->WrapSurface(mDT->Snapshot());
 }
 
 void RecordedTextureData::Deallocate(LayersIPCChannel* aAllocator) {}
@@ -86,9 +105,6 @@ bool RecordedTextureData::Serialize(SurfaceDescriptor& aDescriptor) {
 
 void RecordedTextureData::OnForwardedToHost() {
   mCanvasChild->OnTextureForwarded();
-  if (mSnapshot && mCanvasChild->ShouldCacheDataSurface()) {
-    mCanvasChild->RecordEvent(RecordedCacheDataSurface(mSnapshot.get()));
-  }
 }
 
 TextureFlags RecordedTextureData::GetTextureFlags() const {

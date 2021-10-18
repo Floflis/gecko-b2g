@@ -35,11 +35,27 @@
     }
   });
 
+  XPCOMUtils.defineLazyServiceGetter(
+    Services,
+    "virtualcursor",
+    "@mozilla.org/virtualcursor/service;1",
+    "nsIVirtualCursorService"
+  );
+
   // Enable logs when according to the pref value, and listen to changes.
   let webViewLogEnabled = Services.prefs.getBoolPref(
     "webview.log.enabled",
     false
   );
+
+  function defaultUserAgent() {
+    if (window?.navigator?.userAgent) {
+      return window.navigator.userAgent;
+    }
+    return Cc["@mozilla.org/network/protocol;1?name=http"].getService(
+      Ci.nsIHttpProtocolHandler
+    ).userAgent;
+  }
 
   function updateLogStatus() {
     webViewLogEnabled = Services.prefs.getBoolPref(
@@ -57,9 +73,6 @@
     { once: true }
   );
 
-  // Use a prefix to help with backward compatibility and ease UI porting.
-  const EVENT_PREFIX = "mozbrowser";
-
   // The progress listener attached to the webview, managing some events.
   function ProgressListener(webview) {
     this.webview = webview;
@@ -75,8 +88,8 @@
     },
 
     dispatchEvent(name, detail) {
-      this.log(`dispatching ${EVENT_PREFIX}${name}`);
-      let event = new CustomEvent(`${EVENT_PREFIX}${name}`, {
+      this.log(`dispatching ${name}`);
+      let event = new CustomEvent(`${name}`, {
         bubbles: true,
         detail,
       });
@@ -96,7 +109,7 @@
 
     onLocationChange(webProgress, request, location, flags) {
       // Only act on top-level changes.
-      if (!webProgress.isTopLevel && !this.webview.isCreatedByProxy) {
+      if (!webProgress.isTopLevel) {
         return;
       }
 
@@ -122,7 +135,7 @@
     // eslint-disable-next-line complexity
     onStateChange(webProgress, request, stateFlags, status) {
       // Only act on top-level changes.
-      if (!webProgress.isTopLevel && !this.webview.isCreatedByProxy) {
+      if (!webProgress.isTopLevel) {
         return;
       }
 
@@ -319,20 +332,22 @@
     ) {},
   };
 
-  const kRelayedEvents = [
+  const kRegisteredBrowserEvents = [
     "backgroundcolor",
     "close",
-    "contextmenu",
     "documentfirstpaint",
     "iconchange",
     "manifestchange",
     "metachange",
     "opensearch",
     "pagetitlechanged",
+    "processready",
     "promptpermission",
     "recordingstatus",
+    "visibilitychange",
     "resize",
     "scroll",
+    "showmodalprompt",
   ];
 
   class WebView extends HTMLElement {
@@ -355,13 +370,6 @@
 
       this.browser = null;
       this.attrs = [];
-
-      // Mark some functions used by the UI as unimplemented for now.
-      ["addNextPaintListener", "removeNextPaintListener"].forEach(name => {
-        this[name] = () => {
-          this.log(`Unimplemented: ${name}`);
-        };
-      });
 
       this._pid = -1;
     }
@@ -421,9 +429,13 @@
         return;
       }
       this.log(`creating xul:browser`);
-      // Creates a xul:browser with default attributes.
-      this.browser = document.createXULElement("browser");
 
+      // Creates a xul:browser with default attributes or reuse an existed one.
+      if (this._browser) {
+        this.browser = this._browser;
+      } else {
+        this.browser = document.createXULElement("browser");
+      }
       // For chrome, the Browser API is defined and extended the <browser> by
       // customElements.define("browser", MozBrowser) inbrowser-custom-element.js.
       // For content, it does not allow us to extend an existed tag, so we add the API back by ourself.
@@ -446,10 +458,11 @@
 
       this.browser.setAttribute("src", "about:blank");
       this.browser.setAttribute("type", "content");
-      this.browser.setAttribute(
-        "style",
-        "border: none; width: 100%; height: 100%"
-      );
+
+      // We can't set the xul:browser style as an attribute because that is rejected by the CSP.
+      this.browser.style.border = "none";
+      this.browser.style.width = "100%";
+      this.browser.style.height = "100%";
 
       let src = null;
 
@@ -470,20 +483,18 @@
       this.log(`setupBrowser remote=${this.browser.getAttribute("remote")}`);
       this.browser.openWindowInfo = this._openWindowInfo;
 
-      this.browser.addEventListener("processready", evt => {
-        evt.stopPropagation();
-        this._pid = parseInt(evt.target.getAttribute("processid")) || -1;
-        this.dispatchCustomEvent("processready", { processid: this._pid });
-        this.updateDCSState(true);
+      kRegisteredBrowserEvents.forEach(name => {
+        this.browser.addEventListener(name, this);
       });
 
       this.appendChild(this.browser);
       this.progressListener = new ProgressListener(this);
       this.browser.addProgressListener(this.progressListener);
 
-      kRelayedEvents.forEach(name => {
-        this.browser.addEventListener(name, this);
-      });
+      let useragent = this.browser.getAttribute("useragent");
+      if (useragent) {
+        this.browser.browsingContext.customUserAgent = useragent;
+      }
 
       // TODO: figure out why we can't just set `observe()` as a class method.
       // Logic here is similar to the one used in GeckoView:
@@ -492,6 +503,7 @@
       this.crashObserver = {
         observe(subject, topic, _data) {
           this._contentCrashed = false;
+          self._contentCrashedOrKilled = true;
           const browser = subject.ownerElement;
 
           switch (topic) {
@@ -499,20 +511,20 @@
               if (!browser || browser != self.browser) {
                 return;
               }
-              window.setTimeout(() => {
-                if (this._contentCrashed) {
-                  self.dispatchCustomEvent("error", {
-                    type: "fatal",
-                    reason: "content-crash",
-                  });
-                } else {
-                  self.dispatchCustomEvent("error", {
-                    type: "fatal",
-                    reason: "content-kill",
-                  });
-                }
-                self.updateDCSState(false);
-              }, 250);
+              if (this._contentCrashed) {
+                self.dispatchCustomEvent("error", {
+                  type: "fatal",
+                  reason: "content-crash",
+                });
+              } else {
+                self.dispatchCustomEvent("error", {
+                  type: "fatal",
+                  reason: "content-kill",
+                });
+              }
+              self.updateDCSState(false);
+
+              Services.virtualcursor.removeCursor(browser.frameLoader);
               break;
             }
             case "ipc:content-shutdown": {
@@ -536,6 +548,40 @@
       Services.obs.addObserver(this.crashObserver, "oop-frameloader-crashed");
       Services.obs.addObserver(this.crashObserver, "ipc:content-shutdown");
 
+      if (
+        Services.appinfo.processType == Services.appinfo.PROCESS_TYPE_DEFAULT
+      ) {
+        // http-on-modify-request only works in the parent process.
+        this.httpModifyRequest = {
+          observe(subject, topic, _data) {
+            if (topic !== "http-on-modify-request") {
+              // That should never happen.
+              console.error(`Unexpected topic in <web-view>: ${topic}`);
+              return;
+            }
+            let channel = subject.QueryInterface(Ci.nsIHttpChannel);
+            let frameElement =
+              channel.loadInfo.browsingContext?.topFrameElement;
+            if (
+              channel.isMainDocumentChannel &&
+              frameElement &&
+              self.browser == frameElement
+            ) {
+              self.dispatchCustomEvent("beforelocationchange", {
+                uri: channel.URI.spec,
+              });
+              if (self.userAgent) {
+                channel.setRequestHeader("User-Agent", self.userAgent, false);
+              }
+            }
+          },
+        };
+
+        Services.obs.addObserver(
+          this.httpModifyRequest,
+          "http-on-modify-request"
+        );
+      }
       // Set the src to load once we have setup all listeners to not miss progress events
       // like loadstart.
       src && this.browser.setAttribute("src", src);
@@ -555,13 +601,37 @@
       return this._openWindowInfo;
     }
 
+    set browserElement(val) {
+      if (this.browser) {
+        this.log(`too late to set browser element`);
+      } else {
+        this._browser = val;
+      }
+    }
+
     disconnectedCallback() {
-      kRelayedEvents.forEach(name => {
-        this.browser.removeEventListener(name, this);
+      if (!this._cleanedUp) {
+        this.cleanup();
+      }
+    }
+
+    cleanup() {
+      kRegisteredBrowserEvents.forEach(name => {
+        if (this.browser) {
+          this.browser.removeEventListener(name, this);
+        }
       });
 
       this.updateDCSState(false);
-      this.browser.removeProgressListener(this.progressListener);
+      if (!this._contentCrashedOrKilled) {
+        // This line causes nsFrameLoader to create a new content
+        // process, or use a preallocated one, if the old content
+        // process is crashed or killed.  So, skip this line for the
+        // case of crashing.
+        if (this.browser) {
+          this.browser.removeProgressListener(this.progressListener);
+        }
+      }
       this.progressListener = null;
 
       this.browser = null;
@@ -571,11 +641,21 @@
         "oop-frameloader-crashed"
       );
       Services.obs.removeObserver(this.crashObserver, "ipc:content-shutdown");
+
+      if (
+        Services.appinfo.processType == Services.appinfo.PROCESS_TYPE_DEFAULT
+      ) {
+        Services.obs.removeObserver(
+          this.httpModifyRequest,
+          "http-on-modify-request"
+        );
+      }
+      this._cleanedUp = true;
     }
 
     dispatchCustomEvent(name, detail) {
-      this.log(`dispatching ${EVENT_PREFIX}${name}`);
-      let event = new CustomEvent(`${EVENT_PREFIX}${name}`, {
+      this.log(`dispatching ${name}`);
+      let event = new CustomEvent(`${name}`, {
         bubbles: true,
         detail,
       });
@@ -589,12 +669,9 @@
             title: this.browser.contentTitle,
           });
           break;
-        case "documentfirstpaint":
         case "close":
-          this.dispatchCustomEvent(event.type);
-          break;
-
         case "contextmenu":
+        case "documentfirstpaint":
         case "iconchange":
         case "manifestchange":
         case "metachange":
@@ -602,6 +679,7 @@
         case "recordingstatus":
         case "resize":
         case "scroll":
+        case "showmodalprompt":
           this.dispatchCustomEvent(event.type, event.detail);
           break;
         case "backgroundcolor":
@@ -609,9 +687,15 @@
             event.detail.backgroundcolor
           );
           break;
+        case "processready": {
+          event.stopPropagation();
+          this._pid = parseInt(event.target.getAttribute("processid")) || -1;
+          this.dispatchCustomEvent("processready", { processid: this._pid });
+          this.updateDCSState(true);
+          break;
+        }
         case "promptpermission": {
           // Receive "promptpermission" event from ContentPermissionPrompt.
-          // Dispatch "mozbrowserpromptpermission" event to system app,
           // wait for the reply event from system app of event type requestId,
           // and dispatch back to ContentPermissionPrompt through this.browser.
           this.addEventListener(
@@ -626,9 +710,14 @@
             },
             { once: true }
           );
-          this.dispatchCustomEvent(event.type, event.detail);
           break;
         }
+        case "visibilitychange":
+          // We dispatch this event with additional details when the web-view
+          // active status changes, so we need to prevent the default event
+          // from bubbling up.
+          event.stopPropagation();
+          break;
         default:
           this.error(`Unexpected event ${event.type}`);
       }
@@ -643,6 +732,11 @@
       return this.browser;
     }
 
+    // Returns this tab's MediaController object.
+    get mediaController() {
+      return this.browser.browsingContext.mediaController;
+    }
+
     set src(url) {
       this.log(`set src to ${url}`);
       // If we are not yet connected to the DOM, add that action to the list
@@ -651,11 +745,6 @@
         this.attrs.push({ name: "src", new_value: url });
       } else {
         this.browser.setAttribute("src", url);
-        // Setting the "src" attribute doesn't trigger a load if the urls
-        // are the same, so we trigger a reload instead.
-        if (url == this.browser.currentURI?.spec) {
-          this.reload();
-        }
       }
     }
 
@@ -819,6 +908,58 @@
     deactivateKeyForwarding() {
       this.log(`deactivateKeyForwarding`);
       Services.KeyboardAppProxy.deactivate();
+    }
+
+    download(url) {
+      this.log(`download ${url}`);
+      this.browser?.webViewDownload(url);
+    }
+
+    set userAgent(value) {
+      if (!this.nodePrincipal.isSystemPrincipal) {
+        return;
+      }
+      this.log(`set userAgent`);
+      this.setAttribute("useragent", value);
+      // Update the User Agent with new value.
+      if (!this.browser) {
+        this.attrs.push({ name: "useragent", new_value: value });
+      } else {
+        this.browser.browsingContext.customUserAgent = value;
+      }
+    }
+
+    get userAgent() {
+      let default_useragent = defaultUserAgent();
+      return this.browser
+        ? this.browser.browsingContext.customUserAgent || default_useragent
+        : this.getAttribute("useragent") || null;
+    }
+
+    set userAgentExtensions(value) {
+      this.log(`set userAgentExtensions`);
+      this.setAttribute("useragentextensions", value);
+      // Update the User Agent with new token value.
+      let useragent = defaultUserAgent() + " " + value;
+      if (!this.browser) {
+        this.attrs.push({ name: "useragent", new_value: useragent });
+      } else {
+        this.browser.browsingContext.customUserAgent = useragent;
+      }
+    }
+
+    get userAgentExtensions() {
+      return this.getAttribute("useragentextensions") || null;
+    }
+
+    enterModalState() {
+      this.log(`EnterModalState`);
+      this.browser?.enterModalState();
+    }
+
+    leaveModalState() {
+      this.log(`LeaveModalState`);
+      this.browser?.leaveModalState();
     }
   }
 

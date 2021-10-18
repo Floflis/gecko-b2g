@@ -108,8 +108,9 @@ void CacheStreamControlChild::OpenStream(const nsID& aId,
   SendOpenStream(aId)->Then(
       GetCurrentSerialEventTarget(), __func__,
       [aResolver,
-       holder = holder.clonePtr()](RefPtr<nsIInputStream>&& aOptionalStream) {
-        aResolver(nsCOMPtr<nsIInputStream>(std::move(aOptionalStream)));
+       holder = holder.clonePtr()](const Maybe<IPCStream>& aOptionalStream) {
+        nsCOMPtr<nsIInputStream> stream = DeserializeIPCStream(aOptionalStream);
+        aResolver(std::move(stream));
       },
       [aResolver, holder = holder.clonePtr()](ResponseRejectReason&& aReason) {
         aResolver(nullptr);
@@ -118,7 +119,8 @@ void CacheStreamControlChild::OpenStream(const nsID& aId,
 
 void CacheStreamControlChild::NoteClosedAfterForget(const nsID& aId) {
   NS_ASSERT_OWNINGTHREAD(CacheStreamControlChild);
-  Unused << SendNoteClosed(aId);
+
+  QM_WARNONLY_TRY(OkIf(SendNoteClosed(aId)));
 
   // A stream has closed.  If we delayed StartDestry() due to this stream
   // being read, then we should check to see if any of the remaining streams

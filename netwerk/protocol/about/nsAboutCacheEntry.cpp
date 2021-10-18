@@ -14,6 +14,7 @@
 #include "nsEscape.h"
 #include "nsIAsyncInputStream.h"
 #include "nsIAsyncOutputStream.h"
+#include "nsIPipe.h"
 #include "nsAboutProtocolUtils.h"
 #include "nsContentUtils.h"
 #include "nsInputStreamPump.h"
@@ -215,15 +216,17 @@ nsresult nsAboutCacheEntry::Channel::ParseURI(nsIURI* uri,
 
   keyBegin = begin;
   keyEnd = end;
-  if (!FindInReadable("?storage="_ns, keyBegin, keyEnd))
+  if (!FindInReadable("?storage="_ns, keyBegin, keyEnd)) {
     return NS_ERROR_FAILURE;
+  }
 
   valBegin = keyEnd;  // the value of the storage key starts after the key
 
   keyBegin = keyEnd;
   keyEnd = end;
-  if (!FindInReadable("&context="_ns, keyBegin, keyEnd))
+  if (!FindInReadable("&context="_ns, keyBegin, keyEnd)) {
     return NS_ERROR_FAILURE;
+  }
 
   storageName.Assign(Substring(valBegin, keyBegin));
   valBegin = keyEnd;  // the value of the context key starts after the key
@@ -261,17 +264,15 @@ nsresult nsAboutCacheEntry::Channel::ParseURI(nsIURI* uri,
 //-----------------------------------------------------------------------------
 
 NS_IMETHODIMP
-nsAboutCacheEntry::Channel::OnCacheEntryCheck(
-    nsICacheEntry* aEntry, nsIApplicationCache* aApplicationCache,
-    uint32_t* result) {
+nsAboutCacheEntry::Channel::OnCacheEntryCheck(nsICacheEntry* aEntry,
+                                              uint32_t* result) {
   *result = nsICacheEntryOpenCallback::ENTRY_WANTED;
   return NS_OK;
 }
 
 NS_IMETHODIMP
-nsAboutCacheEntry::Channel::OnCacheEntryAvailable(
-    nsICacheEntry* entry, bool isNew, nsIApplicationCache* aApplicationCache,
-    nsresult status) {
+nsAboutCacheEntry::Channel::OnCacheEntryAvailable(nsICacheEntry* entry,
+                                                  bool isNew, nsresult status) {
   nsresult rv;
 
   mWaitingForData = false;

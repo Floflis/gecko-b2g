@@ -27,7 +27,9 @@ TEST(TestInputStreamLengthHelper, NonLengthStream)
     called = true;
   });
 
-  MOZ_ALWAYS_TRUE(SpinEventLoopUntil([&]() { return called; }));
+  MOZ_ALWAYS_TRUE(SpinEventLoopUntil(
+      "xpcom:TEST(TestInputStreamLengthHelper, NonLengthStream)"_ns,
+      [&]() { return called; }));
 }
 
 class LengthStream final : public nsIInputStreamLength,
@@ -62,7 +64,9 @@ class LengthStream final : public nsIInputStreamLength,
 
   NS_IMETHOD AsyncLengthWait(nsIInputStreamLengthCallback* aCallback,
                              nsIEventTarget* aEventTarget) override {
-    aCallback->OnInputStreamLengthReady(this, mLength);
+    if (aCallback) {
+      aCallback->OnInputStreamLengthReady(this, mLength);
+    }
     return NS_OK;
   }
 
@@ -101,7 +105,9 @@ TEST(TestInputStreamLengthHelper, LengthStream)
     called = true;
   });
 
-  MOZ_ALWAYS_TRUE(SpinEventLoopUntil([&]() { return called; }));
+  MOZ_ALWAYS_TRUE(SpinEventLoopUntil(
+      "xpcom:TEST(TestInputStreamLengthHelper, LengthStream)"_ns,
+      [&]() { return called; }));
 }
 
 TEST(TestInputStreamLengthHelper, InvalidLengthStream)
@@ -115,7 +121,9 @@ TEST(TestInputStreamLengthHelper, InvalidLengthStream)
     called = true;
   });
 
-  MOZ_ALWAYS_TRUE(SpinEventLoopUntil([&]() { return called; }));
+  MOZ_ALWAYS_TRUE(SpinEventLoopUntil(
+      "xpcom:TEST(TestInputStreamLengthHelper, InvalidLengthStream)"_ns,
+      [&]() { return called; }));
 }
 
 TEST(TestInputStreamLengthHelper, AsyncLengthStream)
@@ -129,7 +137,9 @@ TEST(TestInputStreamLengthHelper, AsyncLengthStream)
     called = true;
   });
 
-  MOZ_ALWAYS_TRUE(SpinEventLoopUntil([&]() { return called; }));
+  MOZ_ALWAYS_TRUE(SpinEventLoopUntil(
+      "xpcom:TEST(TestInputStreamLengthHelper, AsyncLengthStream)"_ns,
+      [&]() { return called; }));
 }
 
 TEST(TestInputStreamLengthHelper, FallbackLengthStream)
@@ -143,5 +153,7 @@ TEST(TestInputStreamLengthHelper, FallbackLengthStream)
     called = true;
   });
 
-  MOZ_ALWAYS_TRUE(SpinEventLoopUntil([&]() { return called; }));
+  MOZ_ALWAYS_TRUE(SpinEventLoopUntil(
+      "xpcom:TEST(TestInputStreamLengthHelper, FallbackLengthStream)"_ns,
+      [&]() { return called; }));
 }

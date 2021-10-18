@@ -14,7 +14,8 @@
 
 #include "jsapi.h"
 #include "js/friend/DOMProxy.h"  // JS::DOMProxyShadowsResult, JS::ExpandoAndGeneration, JS::SetDOMProxyInformation
-#include "js/Object.h"           // JS::GetCompartment
+#include "js/PropertyAndElement.h"  // JS_AlreadyHasOwnPropertyById, JS_DefineProperty, JS_DefinePropertyById, JS_DeleteProperty, JS_DeletePropertyById
+#include "js/Object.h"              // JS::GetCompartment
 
 using namespace JS;
 
@@ -195,8 +196,8 @@ bool DOMProxyHandler::isExtensible(JSContext* cx, JS::Handle<JSObject*> proxy,
 }
 
 bool BaseDOMProxyHandler::getOwnPropertyDescriptor(
-    JSContext* cx, JS::Handle<JSObject*> proxy, JS::Handle<jsid> id,
-    MutableHandle<PropertyDescriptor> desc) const {
+    JSContext* cx, Handle<JSObject*> proxy, Handle<jsid> id,
+    MutableHandle<Maybe<PropertyDescriptor>> desc) const {
   return getOwnPropDescriptor(cx, proxy, id, /* ignoreNamedProps = */ false,
                               desc);
 }
@@ -238,11 +239,12 @@ bool DOMProxyHandler::set(JSContext* cx, Handle<JSObject*> proxy,
 
   // Make sure to ignore our named properties when checking for own
   // property descriptors for a set.
-  JS::Rooted<PropertyDescriptor> ownDesc(cx);
+  Rooted<Maybe<PropertyDescriptor>> ownDesc(cx);
   if (!getOwnPropDescriptor(cx, proxy, id, /* ignoreNamedProps = */ true,
                             &ownDesc)) {
     return false;
   }
+
   return js::SetPropertyIgnoringNamedGetter(cx, proxy, id, v, receiver, ownDesc,
                                             result);
 }

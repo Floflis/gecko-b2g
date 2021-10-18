@@ -48,13 +48,6 @@ const PING_TYPE_UNINSTALL = "uninstall";
 const REASON_GATHER_PAYLOAD = "gather-payload";
 const REASON_GATHER_SUBSESSION_PAYLOAD = "gather-subsession-payload";
 
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "Telemetry",
-  "@mozilla.org/base/telemetry;1",
-  "nsITelemetry"
-);
-
 ChromeUtils.defineModuleGetter(
   this,
   "jwcrypto",
@@ -78,10 +71,8 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   UpdatePing: "resource://gre/modules/UpdatePing.jsm",
   TelemetryHealthPing: "resource://gre/modules/HealthPing.jsm",
   TelemetryEventPing: "resource://gre/modules/EventPing.jsm",
-  EcosystemTelemetry: "resource://gre/modules/EcosystemTelemetry.jsm",
   TelemetryPrioPing: "resource://gre/modules/PrioPing.jsm",
   UninstallPing: "resource://gre/modules/UninstallPing.jsm",
-  OS: "resource://gre/modules/osfile.jsm",
 });
 
 /**
@@ -93,7 +84,7 @@ var Policy = {
   getCachedClientID: () => ClientID.getCachedClientID(),
 };
 
-var EXPORTED_SYMBOLS = ["TelemetryController"];
+var EXPORTED_SYMBOLS = ["TelemetryController", "Policy"];
 
 var TelemetryController = Object.freeze({
   /**
@@ -311,6 +302,8 @@ var Impl = {
   _shutdownBarrier: new AsyncShutdown.Barrier(
     "TelemetryController: Waiting for clients."
   ),
+  // This state is included in the async shutdown annotation for crash pings and reports.
+  _shutdownState: "Shutdown not started.",
   // This is a private barrier blocked by pending async ping activity (sending & saving).
   _connectionsBarrier: new AsyncShutdown.Barrier(
     "TelemetryController: Waiting for pending ping activity"
@@ -422,11 +415,6 @@ var Impl = {
     if (aOptions.addEnvironment) {
       pingData.environment =
         aOptions.overrideEnvironment || TelemetryEnvironment.currentEnvironment;
-
-      // On Android store a flag if the client ID was reset from a canary ID.
-      if (AppConstants.platform == "android" && ClientID.wasCanaryClientID()) {
-        pingData.environment.profile.wasCanary = true;
-      }
     }
 
     return pingData;
@@ -480,9 +468,9 @@ var Impl = {
     // cached.
     if (!this._clientID && aOptions.addClientId && !aOptions.overrideClientId) {
       this._log.trace("_submitPingLogic - Waiting on client id");
-      Telemetry.getHistogramById(
-        "TELEMETRY_PING_SUBMISSION_WAITING_CLIENTID"
-      ).add();
+      Services.telemetry
+        .getHistogramById("TELEMETRY_PING_SUBMISSION_WAITING_CLIENTID")
+        .add();
       // We can safely call |getClientID| here and during initialization: we would still
       // spawn and return one single loading task.
       this._clientID = await ClientID.getClientID();
@@ -611,7 +599,7 @@ var Impl = {
     const typeUuid = /^[a-z0-9][a-z0-9-]+[a-z0-9]$/i;
     if (!typeUuid.test(aType)) {
       this._log.error("submitExternalPing - invalid ping type: " + aType);
-      let histogram = Telemetry.getKeyedHistogramById(
+      let histogram = Services.telemetry.getKeyedHistogramById(
         "TELEMETRY_INVALID_PING_TYPE_SUBMITTED"
       );
       histogram.add(aType, 1);
@@ -626,17 +614,11 @@ var Impl = {
       this._log.error(
         "submitExternalPing - invalid payload type: " + typeof aPayload
       );
-      let histogram = Telemetry.getHistogramById(
+      let histogram = Services.telemetry.getHistogramById(
         "TELEMETRY_INVALID_PAYLOAD_SUBMITTED"
       );
       histogram.add(1);
       return Promise.reject(new Error("Invalid payload type submitted."));
-    }
-
-    // We're trying to track down missing sync pings (bug 1663573), so record
-    // a temporary cross-checking counter.
-    if (aType == "sync" && aPayload.why == "shutdown") {
-      Telemetry.scalarSet("telemetry.sync_shutdown_ping_sent", true);
     }
 
     let promise = this._submitPingLogic(aType, aPayload, aOptions);
@@ -848,13 +830,13 @@ var Impl = {
             this._log.trace(
               "Upload enabled, but got canary client ID. Resetting."
             );
-            await ClientID.removeClientIDs();
+            await ClientID.removeClientID();
             this._clientID = await ClientID.getClientID();
           } else if (!uploadEnabled && this._clientID != Utils.knownClientID) {
             this._log.trace(
               "Upload disabled, but got a valid client ID. Setting canary client ID."
             );
-            await ClientID.setCanaryClientIDs();
+            await ClientID.setCanaryClientID();
             this._clientID = await ClientID.getClientID();
           }
 
@@ -902,7 +884,6 @@ var Impl = {
           }
 
           TelemetryEventPing.startup();
-          EcosystemTelemetry.startup();
           TelemetryPrioPing.startup();
 
           if (uploadEnabled) {
@@ -942,51 +923,69 @@ var Impl = {
       return;
     }
 
+    let start = TelemetryUtils.monotonicNow();
+    let now = () => " " + (TelemetryUtils.monotonicNow() - start);
+    this._shutdownStep = "_cleanupOnShutdown begin " + now();
+
     this._detachObservers();
 
     // Now do an orderly shutdown.
     try {
       if (this._delayedNewPingTask) {
+        this._shutdownStep = "awaiting delayed new ping task" + now();
         await this._delayedNewPingTask.finalize();
       }
 
+      this._shutdownStep = "Update" + now();
       UpdatePing.shutdown();
 
+      this._shutdownStep = "Event" + now();
       TelemetryEventPing.shutdown();
-      EcosystemTelemetry.shutdown();
+      this._shutdownStep = "Prio" + now();
       await TelemetryPrioPing.shutdown();
 
       // Shutdown the sync ping if it is initialized - this is likely, but not
       // guaranteed, to submit a "shutdown" sync ping.
       if (this._fnSyncPingShutdown) {
+        this._shutdownStep = "Sync" + now();
         this._fnSyncPingShutdown();
       }
 
       // Stop the datachoices infobar display.
+      this._shutdownStep = "Policy" + now();
       TelemetryReportingPolicy.shutdown();
+      this._shutdownStep = "Environment" + now();
       TelemetryEnvironment.shutdown();
 
       // Stop any ping sending.
+      this._shutdownStep = "TelemetrySend" + now();
       await TelemetrySend.shutdown();
 
       // Send latest data.
+      this._shutdownStep = "Health ping" + now();
       await TelemetryHealthPing.shutdown();
 
+      this._shutdownStep = "TelemetrySession" + now();
       await TelemetrySession.shutdown();
+      this._shutdownStep = "Services.telemetry" + now();
       await Services.telemetry.shutdown();
 
       // First wait for clients processing shutdown.
+      this._shutdownStep = "await shutdown barrier" + now();
       await this._shutdownBarrier.wait();
 
       // ... and wait for any outstanding async ping activity.
+      this._shutdownStep = "await connections barrier" + now();
       await this._connectionsBarrier.wait();
 
       if (AppConstants.platform !== "android") {
         // No PingSender on Android.
+        this._shutdownStep = "Flush pingsender batch" + now();
         TelemetrySend.flushPingSenderBatch();
       }
 
       // Perform final shutdown operations.
+      this._shutdownStep = "await TelemetryStorage" + now();
       await TelemetryStorage.shutdown();
     } finally {
       // Reset state.
@@ -1073,6 +1072,7 @@ var Impl = {
       connectionsBarrier: this._connectionsBarrier.state,
       sendModule: TelemetrySend.getShutdownState(),
       haveDelayedNewProfileTask: !!this._delayedNewPingTask,
+      shutdownStep: this._shutdownStep,
     };
   },
 
@@ -1095,10 +1095,10 @@ var Impl = {
 
       // Generate a new client ID and make sure this module uses the new version
       let p = (async () => {
-        await ClientID.removeClientIDs();
+        await ClientID.removeClientID();
         let id = await ClientID.getClientID();
         this._clientID = id;
-        Telemetry.scalarSet("telemetry.data_upload_optin", true);
+        Services.telemetry.scalarSet("telemetry.data_upload_optin", true);
 
         await this.saveUninstallPing().catch(e =>
           this._log.warn("_onUploadPrefChange - saveUninstallPing failed", e)
@@ -1134,14 +1134,14 @@ var Impl = {
 
         // 5. Collect any additional identifiers we want to send in the
         // deletion request.
-        const scalars = Telemetry.getSnapshotForScalars(
+        const scalars = Services.telemetry.getSnapshotForScalars(
           "deletion-request",
           /* clear */ true
         );
 
         // 6. Set ClientID to a known value
         let oldClientId = await ClientID.getClientID();
-        await ClientID.setCanaryClientIDs();
+        await ClientID.setCanaryClientID();
         this._clientID = await ClientID.getClientID();
 
         // 7. Send the deletion-request ping.
@@ -1205,7 +1205,7 @@ var Impl = {
     this._log.trace("getCurrentPingData - subsession: " + aSubsession);
 
     // Telemetry is disabled, don't gather any data.
-    if (!Telemetry.canRecordBase) {
+    if (!Services.telemetry.canRecordBase) {
       return null;
     }
 
@@ -1276,7 +1276,7 @@ var Impl = {
       "sendNewProfilePing - shutting down: " + this._shuttingDown
     );
 
-    const scalars = Telemetry.getSnapshotForScalars(
+    const scalars = Services.telemetry.getSnapshotForScalars(
       "new-profile",
       /* clear */ true
     );
@@ -1344,7 +1344,7 @@ var Impl = {
       return null;
     }
 
-    return OS.File.read(probeFile.path, { encoding: "utf-8" });
+    return IOUtils.readUTF8(probeFile.path);
   },
 
   async registerScalarProbes() {
@@ -1367,13 +1367,13 @@ var Impl = {
         let newValue;
         switch (value) {
           case "nsITelemetry::SCALAR_TYPE_COUNT":
-            newValue = Telemetry.SCALAR_TYPE_COUNT;
+            newValue = Services.telemetry.SCALAR_TYPE_COUNT;
             break;
           case "nsITelemetry::SCALAR_TYPE_BOOLEAN":
-            newValue = Telemetry.SCALAR_TYPE_BOOLEAN;
+            newValue = Services.telemetry.SCALAR_TYPE_BOOLEAN;
             break;
           case "nsITelemetry::SCALAR_TYPE_STRING":
-            newValue = Telemetry.SCALAR_TYPE_STRING;
+            newValue = Services.telemetry.SCALAR_TYPE_STRING;
             break;
         }
         return newValue;
@@ -1404,7 +1404,10 @@ var Impl = {
           def.expired = true;
         }
       }
-      Telemetry.registerBuiltinScalars(category, scalarJSProbes[category]);
+      Services.telemetry.registerBuiltinScalars(
+        category,
+        scalarJSProbes[category]
+      );
     }
   },
 
@@ -1444,7 +1447,10 @@ var Impl = {
           def.expired = true;
         }
       }
-      Telemetry.registerBuiltinEvents(category, eventJSProbes[category]);
+      Services.telemetry.registerBuiltinEvents(
+        category,
+        eventJSProbes[category]
+      );
     }
   },
 };

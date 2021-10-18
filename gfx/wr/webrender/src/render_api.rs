@@ -13,15 +13,15 @@ use std::u32;
 use time::precise_time_ns;
 //use crate::api::peek_poke::PeekPoke;
 use crate::api::channel::{Sender, single_msg_channel, unbounded_channel};
-use crate::api::{ColorF, BuiltDisplayList, IdNamespace, ExternalScrollId};
-use crate::api::{SharedFontInstanceMap, FontKey, FontInstanceKey, NativeFontHandle, ZoomFactor};
+use crate::api::{ColorF, BuiltDisplayList, IdNamespace, ExternalScrollId, Parameter, BoolParameter};
+use crate::api::{SharedFontInstanceMap, FontKey, FontInstanceKey, NativeFontHandle};
 use crate::api::{BlobImageData, BlobImageKey, ImageData, ImageDescriptor, ImageKey, Epoch, QualitySettings};
 use crate::api::{BlobImageParams, BlobImageRequest, BlobImageResult, AsyncBlobImageRasterizer, BlobImageHandler};
 use crate::api::{DocumentId, PipelineId, PropertyBindingId, PropertyBindingKey, ExternalEvent};
 use crate::api::{HitTestResult, HitTesterRequest, ApiHitTester, PropertyValue, DynamicProperties};
-use crate::api::{ScrollClamping, TileSize, NotificationRequest, DebugFlags, ScrollNodeState};
+use crate::api::{ScrollClamping, TileSize, NotificationRequest, DebugFlags};
 use crate::api::{GlyphDimensionRequest, GlyphIndexRequest, GlyphIndex, GlyphDimensions};
-use crate::api::{FontInstanceOptions, FontInstancePlatformOptions, FontVariation};
+use crate::api::{FontInstanceOptions, FontInstancePlatformOptions, FontVariation, RenderReasons};
 use crate::api::DEFAULT_TILE_SIZE;
 use crate::api::units::*;
 use crate::api_resources::ApiResources;
@@ -155,8 +155,13 @@ pub struct Transaction {
     /// Persistent resource updates to apply as part of this transaction.
     pub resource_updates: Vec<ResourceUpdate>,
 
-    /// If true the transaction is piped through the scene building thread, if false
-    /// it will be applied directly on the render backend.
+    /// True if the transaction needs the scene building thread's attention.
+    /// False for things that can skip the scene builder, like APZ changes and
+    /// async images.
+    ///
+    /// Before this `Transaction` is converted to a `TransactionMsg`, we look
+    /// over its contents and set this if we're doing anything the scene builder
+    /// needs to know about, so this is only a default.
     use_scene_builder_thread: bool,
 
     /// Whether to generate a frame, and if so, an id that allows tracking this
@@ -169,6 +174,9 @@ pub struct Transaction {
     pub invalidate_rendered_frame: bool,
 
     low_priority: bool,
+
+    ///
+    pub render_reasons: RenderReasons,
 }
 
 impl Transaction {
@@ -183,6 +191,7 @@ impl Transaction {
             generate_frame: GenerateFrame::No,
             invalidate_rendered_frame: false,
             low_priority: false,
+            render_reasons: RenderReasons::empty(),
         }
     }
 
@@ -264,16 +273,12 @@ impl Transaction {
     /// * `viewport_size`: The size of the viewport for this frame.
     /// * `pipeline_id`: The ID of the pipeline that is supplying this display list.
     /// * `display_list`: The root Display list used in this frame.
-    /// * `preserve_frame_state`: If a previous frame exists which matches this pipeline
-    ///                           id, this setting determines if frame state (such as scrolling
-    ///                           position) should be preserved for this new display list.
     pub fn set_display_list(
         &mut self,
         epoch: Epoch,
         background: Option<ColorF>,
         viewport_size: LayoutSize,
         (pipeline_id, mut display_list): (PipelineId, BuiltDisplayList),
-        preserve_frame_state: bool,
     ) {
         display_list.set_send_time_ns(precise_time_ns());
         self.scene_ops.push(
@@ -283,7 +288,6 @@ impl Transaction {
                 pipeline_id,
                 background,
                 viewport_size,
-                preserve_frame_state,
             }
         );
     }
@@ -312,14 +316,11 @@ impl Transaction {
     pub fn set_document_view(
         &mut self,
         device_rect: DeviceIntRect,
-        device_pixel_ratio: f32,
     ) {
-        assert!(device_pixel_ratio > 0.0);
-        window_size_sanity_check(device_rect.size);
+        window_size_sanity_check(device_rect.size());
         self.scene_ops.push(
             SceneMsg::SetDocumentView {
                 device_rect,
-                device_pixel_ratio,
             },
         );
     }
@@ -350,23 +351,8 @@ impl Transaction {
     }
 
     ///
-    pub fn set_page_zoom(&mut self, page_zoom: ZoomFactor) {
-        self.scene_ops.push(SceneMsg::SetPageZoom(page_zoom));
-    }
-
-    ///
-    pub fn set_pinch_zoom(&mut self, pinch_zoom: ZoomFactor) {
-        self.frame_ops.push(FrameMsg::SetPinchZoom(pinch_zoom));
-    }
-
-    ///
     pub fn set_is_transform_async_zooming(&mut self, is_zooming: bool, animation_id: PropertyBindingId) {
         self.frame_ops.push(FrameMsg::SetIsTransformAsyncZooming(is_zooming, animation_id));
-    }
-
-    ///
-    pub fn set_pan(&mut self, pan: DeviceIntPoint) {
-        self.frame_ops.push(FrameMsg::SetPan(pan));
     }
 
     /// Generate a new frame. When it's done and a RenderNotifier has been set
@@ -376,8 +362,9 @@ impl Transaction {
     /// as to when happened.
     ///
     /// [notifier]: trait.RenderNotifier.html#tymethod.new_frame_ready
-    pub fn generate_frame(&mut self, id: u64) {
+    pub fn generate_frame(&mut self, id: u64, reasons: RenderReasons) {
         self.generate_frame = GenerateFrame::Yes{ id };
+        self.render_reasons |= reasons;
     }
 
     /// Invalidate rendered frame. It ensure that frame will be rendered during
@@ -386,14 +373,21 @@ impl Transaction {
     /// But there are cases that needs to force rendering.
     ///  - Content of image is updated by reusing same ExternalImageId.
     ///  - Platform requests it if pixels become stale (like wakeup from standby).
-    pub fn invalidate_rendered_frame(&mut self) {
+    pub fn invalidate_rendered_frame(&mut self, reasons: RenderReasons) {
         self.invalidate_rendered_frame = true;
+        self.render_reasons |= reasons
     }
 
-    /// Supply a list of animated property bindings that should be used to resolve
+    /// Reset the list of animated property bindings that should be used to resolve
     /// bindings in the current display list.
-    pub fn update_dynamic_properties(&mut self, properties: DynamicProperties) {
-        self.frame_ops.push(FrameMsg::UpdateDynamicProperties(properties));
+    pub fn reset_dynamic_properties(&mut self) {
+        self.frame_ops.push(FrameMsg::ResetDynamicProperties);
+    }
+
+    /// Add to the list of animated property bindings that should be used to resolve
+    /// bindings in the current display list.
+    pub fn append_dynamic_properties(&mut self, properties: DynamicProperties) {
+        self.frame_ops.push(FrameMsg::AppendDynamicProperties(properties));
     }
 
     /// Add to the list of animated property bindings that should be used to
@@ -424,6 +418,7 @@ impl Transaction {
             blob_requests: Vec::new(),
             rasterized_blobs: Vec::new(),
             profile: TransactionProfile::new(),
+            render_reasons: self.render_reasons,
         })
     }
 
@@ -609,6 +604,8 @@ pub struct TransactionMsg {
     pub rasterized_blobs: Vec<(BlobImageRequest, BlobImageResult)>,
     /// Collect various data along the rendering pipeline to display it in the embedded profiler.
     pub profile: TransactionProfile,
+    /// Keep track of who asks rendering to happen.
+    pub render_reasons: RenderReasons,
 }
 
 impl fmt::Debug for TransactionMsg {
@@ -768,8 +765,6 @@ pub enum SceneMsg {
     ///
     UpdateEpoch(PipelineId, Epoch),
     ///
-    SetPageZoom(ZoomFactor),
-    ///
     SetRootPipeline(PipelineId),
     ///
     RemovePipeline(PipelineId),
@@ -785,15 +780,11 @@ pub enum SceneMsg {
         background: Option<ColorF>,
         ///
         viewport_size: LayoutSize,
-        ///
-        preserve_frame_state: bool,
     },
     ///
     SetDocumentView {
         ///
         device_rect: DeviceIntRect,
-        ///
-        device_pixel_ratio: f32,
     },
     /// Set the current quality / performance configuration for this document.
     SetQualitySettings {
@@ -807,21 +798,17 @@ pub enum FrameMsg {
     ///
     UpdateEpoch(PipelineId, Epoch),
     ///
-    HitTest(Option<PipelineId>, WorldPoint, Sender<HitTestResult>),
+    HitTest(WorldPoint, Sender<HitTestResult>),
     ///
     RequestHitTester(Sender<Arc<dyn ApiHitTester>>),
     ///
-    SetPan(DeviceIntPoint),
-    ///
     ScrollNodeWithId(LayoutPoint, ExternalScrollId, ScrollClamping),
     ///
-    GetScrollNodeState(Sender<Vec<ScrollNodeState>>),
+    ResetDynamicProperties,
     ///
-    UpdateDynamicProperties(DynamicProperties),
+    AppendDynamicProperties(DynamicProperties),
     ///
     AppendDynamicTransformProperties(Vec<PropertyValue<LayoutTransform>>),
-    ///
-    SetPinchZoom(ZoomFactor),
     ///
     SetIsTransformAsyncZooming(bool, PropertyBindingId),
 }
@@ -831,7 +818,6 @@ impl fmt::Debug for SceneMsg {
         f.write_str(match *self {
             SceneMsg::UpdateEpoch(..) => "SceneMsg::UpdateEpoch",
             SceneMsg::SetDisplayList { .. } => "SceneMsg::SetDisplayList",
-            SceneMsg::SetPageZoom(..) => "SceneMsg::SetPageZoom",
             SceneMsg::RemovePipeline(..) => "SceneMsg::RemovePipeline",
             SceneMsg::SetDocumentView { .. } => "SceneMsg::SetDocumentView",
             SceneMsg::SetRootPipeline(..) => "SceneMsg::SetRootPipeline",
@@ -846,12 +832,10 @@ impl fmt::Debug for FrameMsg {
             FrameMsg::UpdateEpoch(..) => "FrameMsg::UpdateEpoch",
             FrameMsg::HitTest(..) => "FrameMsg::HitTest",
             FrameMsg::RequestHitTester(..) => "FrameMsg::RequestHitTester",
-            FrameMsg::SetPan(..) => "FrameMsg::SetPan",
             FrameMsg::ScrollNodeWithId(..) => "FrameMsg::ScrollNodeWithId",
-            FrameMsg::GetScrollNodeState(..) => "FrameMsg::GetScrollNodeState",
-            FrameMsg::UpdateDynamicProperties(..) => "FrameMsg::UpdateDynamicProperties",
+            FrameMsg::ResetDynamicProperties => "FrameMsg::ResetDynamicProperties",
+            FrameMsg::AppendDynamicProperties(..) => "FrameMsg::AppendDynamicProperties",
             FrameMsg::AppendDynamicTransformProperties(..) => "FrameMsg::AppendDynamicTransformProperties",
-            FrameMsg::SetPinchZoom(..) => "FrameMsg::SetPinchZoom",
             FrameMsg::SetIsTransformAsyncZooming(..) => "FrameMsg::SetIsTransformAsyncZooming",
         })
     }
@@ -907,19 +891,6 @@ pub enum DebugCommand {
     SetFlags(DebugFlags),
     /// Configure if dual-source blending is used, if available.
     EnableDualSourceBlending(bool),
-    /// Fetch current documents and display lists.
-    FetchDocuments,
-    /// Fetch current passes and batches.
-    FetchPasses,
-    // TODO: This should be called FetchClipScrollTree. However, that requires making
-    // changes to webrender's web debugger ui, touching a 4Mb minified file that
-    // is too big to submit through the conventional means.
-    /// Fetch the spatial tree.
-    FetchClipScrollTree,
-    /// Fetch render tasks.
-    FetchRenderTasks,
-    /// Fetch screenshot.
-    FetchScreenshot,
     /// Save a capture of all the documents state.
     SaveCapture(PathBuf, CaptureBits),
     /// Load a capture of all the documents state.
@@ -932,8 +903,6 @@ pub enum DebugCommand {
     ClearCaches(ClearCache),
     /// Enable/disable native compositor usage
     EnableNativeCompositor(bool),
-    /// Enable/disable parallel job execution with rayon.
-    EnableMultithreading(bool),
     /// Sets the maximum amount of existing batches to visit before creating a new one.
     SetBatchingLookback(u32),
     /// Invalidate GPU cache, forcing the update from the CPU mirror.
@@ -941,9 +910,6 @@ pub enum DebugCommand {
     /// Causes the scene builder to pause for a given amount of milliseconds each time it
     /// processes a transaction.
     SimulateLongSceneBuild(u32),
-    /// Causes the low priority scene builder to pause for a given amount of milliseconds
-    /// each time it processes a transaction.
-    SimulateLongLowPrioritySceneBuild(u32),
     /// Set an override tile size to use for picture caches
     SetPictureTileSize(Option<DeviceIntSize>),
 }
@@ -964,9 +930,6 @@ pub enum ApiMsg {
     ReportMemory(Sender<Box<MemoryReport>>),
     /// Change debugging options.
     DebugCommand(DebugCommand),
-    /// Wakes the render backend's event loop up. Needed when an event is communicated
-    /// through another channel.
-    WakeUp,
     /// Message from the scene builder thread.
     SceneBuilderResult(SceneBuilderResult),
 }
@@ -981,7 +944,6 @@ impl fmt::Debug for ApiMsg {
             ApiMsg::MemoryPressure => "ApiMsg::MemoryPressure",
             ApiMsg::ReportMemory(..) => "ApiMsg::ReportMemory",
             ApiMsg::DebugCommand(..) => "ApiMsg::DebugCommand",
-            ApiMsg::WakeUp => "ApiMsg::WakeUp",
             ApiMsg::SceneBuilderResult(..) => "ApiMsg::SceneBuilderResult",
         })
     }
@@ -1022,18 +984,7 @@ impl RenderApiSender {
         let (sync_tx, sync_rx) = single_msg_channel();
         let msg = ApiMsg::CloneApi(sync_tx);
         self.api_sender.send(msg).expect("Failed to send CloneApi message");
-        let namespace_id = match sync_rx.recv() {
-            Ok(id) => id,
-            Err(e) => {
-                // This is used to discover the underlying cause of https://github.com/servo/servo/issues/13480.
-                let webrender_is_alive = self.api_sender.send(ApiMsg::WakeUp);
-                if webrender_is_alive.is_err() {
-                    panic!("WebRender was shut down before processing CloneApi: {}", e);
-                } else {
-                    panic!("CloneApi message response was dropped while WebRender was still alive: {}", e);
-                }
-            }
-        };
+        let namespace_id = sync_rx.recv().expect("Failed to receive CloneApi reply");
         RenderApi {
             api_sender: self.api_sender.clone(),
             scene_sender: self.scene_sender.clone(),
@@ -1219,6 +1170,11 @@ impl RenderApi {
         self.api_sender.send(ApiMsg::DebugCommand(cmd)).unwrap();
     }
 
+    /// Stop RenderBackend's task until shut down
+    pub fn stop_render_backend(&self) {
+        self.low_priority_scene_sender.send(SceneBuilderRequest::StopRenderBackend).unwrap();
+    }
+
     /// Shut the WebRender instance down.
     pub fn shut_down(&self, synchronously: bool) {
         if synchronously {
@@ -1272,36 +1228,8 @@ impl RenderApi {
             blob_requests: Vec::new(),
             rasterized_blobs: Vec::new(),
             profile: TransactionProfile::new(),
+            render_reasons: RenderReasons::empty(),
         })
-    }
-
-    /// Creates a transaction message from a single scene message.
-    fn scene_message(&self, msg: SceneMsg, document_id: DocumentId) -> Box<TransactionMsg> {
-        Box::new(TransactionMsg {
-            document_id,
-            scene_ops: vec![msg],
-            frame_ops: Vec::new(),
-            resource_updates: Vec::new(),
-            notifications: Vec::new(),
-            generate_frame: GenerateFrame::No,
-            invalidate_rendered_frame: false,
-            use_scene_builder_thread: false,
-            low_priority: false,
-            blob_rasterizer: None,
-            blob_requests: Vec::new(),
-            rasterized_blobs: Vec::new(),
-            profile: TransactionProfile::new(),
-        })
-    }
-
-    /// A helper method to send document messages.
-    fn send_scene_msg(&self, document_id: DocumentId, msg: SceneMsg) {
-        // This assertion fails on Servo use-cases, because it creates different
-        // `RenderApi` instances for layout and compositor.
-        //assert_eq!(document_id.0, self.namespace_id);
-        self.api_sender
-            .send(ApiMsg::UpdateDocuments(vec![self.scene_message(msg, document_id)]))
-            .unwrap()
     }
 
     /// A helper method to send document messages.
@@ -1320,7 +1248,6 @@ impl RenderApi {
 
         self.resources.update(&mut transaction);
 
-        transaction.use_scene_builder_thread |= !transaction.scene_ops.is_empty();
         if transaction.generate_frame.as_bool() {
             transaction.profile.start_time(profiler::API_SEND_TIME);
             transaction.profile.start_time(profiler::TOTAL_FRAME_CPU_TIME);
@@ -1339,43 +1266,6 @@ impl RenderApi {
         }
     }
 
-    /// Send multiple transactions.
-    pub fn send_transactions(&mut self, document_ids: Vec<DocumentId>, mut transactions: Vec<Transaction>) {
-        debug_assert!(document_ids.len() == transactions.len());
-        let msgs: Vec<Box<TransactionMsg>> = transactions.drain(..).zip(document_ids)
-            .map(|(txn, id)| {
-                let mut txn = txn.finalize(id);
-                self.resources.update(&mut txn);
-                if txn.generate_frame.as_bool() {
-                    txn.profile.start_time(profiler::API_SEND_TIME);
-                    txn.profile.start_time(profiler::TOTAL_FRAME_CPU_TIME);
-                }
-
-                txn
-            })
-            .collect();
-
-        let use_scene_builder = msgs.iter().any(
-            |msg| msg.use_scene_builder_thread
-        );
-
-        let high_priority = msgs.iter().any(
-            |msg| !msg.low_priority
-        );
-
-        if use_scene_builder {
-            let sender = if high_priority {
-                &mut self.scene_sender
-            } else {
-                &mut self.low_priority_scene_sender
-            };
-
-            sender.send(SceneBuilderRequest::Transactions(msgs)).unwrap();
-        } else {
-            self.api_sender.send(ApiMsg::UpdateDocuments(msgs)).unwrap();
-        }
-    }
-
     /// Does a hit test on display items in the specified document, at the given
     /// point. If a pipeline_id is specified, it is used to further restrict the
     /// hit results so that only items inside that pipeline are matched. The vector
@@ -1383,14 +1273,13 @@ impl RenderApi {
     /// front to back.
     pub fn hit_test(&self,
         document_id: DocumentId,
-        pipeline_id: Option<PipelineId>,
         point: WorldPoint,
     ) -> HitTestResult {
         let (tx, rx) = single_msg_channel();
 
         self.send_frame_msg(
             document_id,
-            FrameMsg::HitTest(pipeline_id, point, tx)
+            FrameMsg::HitTest(point, tx)
         );
         rx.recv().unwrap()
     }
@@ -1404,28 +1293,6 @@ impl RenderApi {
         );
 
         HitTesterRequest { rx }
-    }
-
-    /// Setup the output region in the framebuffer for a given document.
-    pub fn set_document_view(
-        &self,
-        document_id: DocumentId,
-        device_rect: DeviceIntRect,
-        device_pixel_ratio: f32,
-    ) {
-        assert!(device_pixel_ratio > 0.0);
-        window_size_sanity_check(device_rect.size);
-        self.send_scene_msg(
-            document_id,
-            SceneMsg::SetDocumentView { device_rect, device_pixel_ratio },
-        );
-    }
-
-    ///
-    pub fn get_scroll_node_state(&self, document_id: DocumentId) -> Vec<ScrollNodeState> {
-        let (tx, rx) = single_msg_channel();
-        self.send_frame_msg(document_id, FrameMsg::GetScrollNodeState(tx));
-        rx.recv().unwrap()
     }
 
     // Some internal scheduling magic that leaked into the API.
@@ -1480,13 +1347,20 @@ impl RenderApi {
     }
 
     /// Update the state of builtin debugging facilities.
-    pub fn send_debug_cmd(&mut self, cmd: DebugCommand) {
-        if let DebugCommand::EnableMultithreading(enable) = cmd {
-            // TODO(nical) we should enable it for all RenderApis.
-            self.resources.enable_multithreading(enable);
-        }
+    pub fn send_debug_cmd(&self, cmd: DebugCommand) {
         let msg = ApiMsg::DebugCommand(cmd);
         self.send_message(msg);
+    }
+
+    /// Update a instance-global parameter.
+    pub fn set_parameter(&mut self, parameter: Parameter) {
+        if let Parameter::Bool(BoolParameter::Multithreading, enabled) = parameter {
+            self.resources.enable_multithreading(enabled);
+        }
+
+        let _ = self.low_priority_scene_sender.send(
+            SceneBuilderRequest::SetParameter(parameter)
+        );
     }
 }
 
@@ -1501,7 +1375,7 @@ impl Drop for RenderApi {
 fn window_size_sanity_check(size: DeviceIntSize) {
     // Anything bigger than this will crash later when attempting to create
     // a render task.
-    use crate::render_task::MAX_RENDER_TASK_SIZE;
+    use crate::api::MAX_RENDER_TASK_SIZE;
     if size.width > MAX_RENDER_TASK_SIZE || size.height > MAX_RENDER_TASK_SIZE {
         panic!("Attempting to create a {}x{} window/document", size.width, size.height);
     }
@@ -1529,6 +1403,8 @@ pub struct MemoryReport {
     pub shader_cache: usize,
     pub interning: InterningMemoryReport,
     pub display_list: usize,
+    pub upload_staging_memory: usize,
+    pub swgl: usize,
 
     //
     // GPU memory.
@@ -1536,10 +1412,13 @@ pub struct MemoryReport {
     pub gpu_cache_textures: usize,
     pub vertex_data_textures: usize,
     pub render_target_textures: usize,
-    pub texture_cache_textures: usize,
+    pub picture_tile_textures: usize,
+    pub atlas_textures: usize,
+    pub standalone_textures: usize,
     pub texture_cache_structures: usize,
     pub depth_target_textures: usize,
     pub texture_upload_pbos: usize,
     pub swap_chain: usize,
     pub render_texture_hosts: usize,
+    pub upload_staging_textures: usize,
 }

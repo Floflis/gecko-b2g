@@ -29,7 +29,9 @@ NS_IMPL_ADDREF(MaybeCloseWindowHelper)
 NS_IMPL_RELEASE(MaybeCloseWindowHelper)
 
 NS_INTERFACE_MAP_BEGIN(MaybeCloseWindowHelper)
-  NS_INTERFACE_MAP_ENTRY(nsISupports)
+  NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsITimerCallback)
+  NS_INTERFACE_MAP_ENTRY(nsITimerCallback)
+  NS_INTERFACE_MAP_ENTRY(nsINamed)
 NS_INTERFACE_MAP_END
 
 MaybeCloseWindowHelper::MaybeCloseWindowHelper(BrowsingContext* aContentContext)
@@ -99,6 +101,12 @@ MaybeCloseWindowHelper::Notify(nsITimer* timer) {
   return NS_OK;
 }
 
+NS_IMETHODIMP
+MaybeCloseWindowHelper::GetName(nsACString& aName) {
+  aName.AssignLiteral("MaybeCloseWindowHelper");
+  return NS_OK;
+}
+
 nsDSURIContentListener::nsDSURIContentListener(nsDocShell* aDocShell)
     : mDocShell(aDocShell),
       mExistingJPEGRequest(nullptr),
@@ -124,6 +132,7 @@ nsDSURIContentListener::DoContent(const nsACString& aContentType,
   nsresult rv;
   NS_ENSURE_ARG_POINTER(aContentHandler);
   NS_ENSURE_TRUE(mDocShell, NS_ERROR_FAILURE);
+  RefPtr<nsDocShell> docShell = mDocShell;
 
   *aAbortProcess = false;
 
@@ -153,9 +162,9 @@ nsDSURIContentListener::DoContent(const nsACString& aContentType,
 
   if (loadFlags & nsIChannel::LOAD_RETARGETED_DOCUMENT_URI) {
     // XXX: Why does this not stop the content too?
-    mDocShell->Stop(nsIWebNavigation::STOP_NETWORK);
-
-    mDocShell->SetLoadType(aIsContentPreferred ? LOAD_LINK : LOAD_NORMAL);
+    docShell->Stop(nsIWebNavigation::STOP_NETWORK);
+    NS_ENSURE_TRUE(mDocShell, NS_ERROR_FAILURE);
+    docShell->SetLoadType(aIsContentPreferred ? LOAD_LINK : LOAD_NORMAL);
   }
 
   // In case of multipart jpeg request (mjpeg) we don't really want to
@@ -174,8 +183,7 @@ nsDSURIContentListener::DoContent(const nsACString& aContentType,
     copy.forget(aContentHandler);
     rv = NS_OK;
   } else {
-    rv =
-        mDocShell->CreateContentViewer(aContentType, aRequest, aContentHandler);
+    rv = docShell->CreateContentViewer(aContentType, aRequest, aContentHandler);
     if (NS_SUCCEEDED(rv) && reuseCV) {
       mExistingJPEGStreamListener = *aContentHandler;
     } else {
@@ -248,8 +256,8 @@ nsDSURIContentListener::CanHandleContent(const char* aContentType,
   *aDesiredContentType = nullptr;
 
   if (aContentType) {
-    uint32_t canHandle = nsWebNavigationInfo::IsTypeSupported(
-        nsDependentCString(aContentType), mDocShell);
+    uint32_t canHandle =
+        nsWebNavigationInfo::IsTypeSupported(nsDependentCString(aContentType));
     *aCanHandleContent = (canHandle != nsIWebNavigationInfo::UNSUPPORTED);
   }
 

@@ -5,13 +5,13 @@ const { ASRouter } = ChromeUtils.import(
   "resource://activity-stream/lib/ASRouter.jsm"
 );
 const { RemoteSettingsExperimentLoader } = ChromeUtils.import(
-  "resource://messaging-system/lib/RemoteSettingsExperimentLoader.jsm"
+  "resource://nimbus/lib/RemoteSettingsExperimentLoader.jsm"
 );
 const { ExperimentAPI } = ChromeUtils.import(
-  "resource://messaging-system/experiments/ExperimentAPI.jsm"
+  "resource://nimbus/ExperimentAPI.jsm"
 );
 const { ExperimentFakes } = ChromeUtils.import(
-  "resource://testing-common/MSTestUtils.jsm"
+  "resource://testing-common/NimbusTestUtils.jsm"
 );
 const { TelemetryFeed } = ChromeUtils.import(
   "resource://activity-stream/lib/TelemetryFeed.jsm"
@@ -154,7 +154,7 @@ async function setup(getPayload = EXPERIMENT_PAYLOAD) {
       ["app.shield.optoutstudies.enabled", true],
       [
         "browser.newtabpage.activity-stream.asrouter.providers.messaging-experiments",
-        `{"id":"messaging-experiments","enabled":true,"type":"remote-experiments","messageGroups":["cfr","whats-new-panel","moments-page","snippets","cfr-fxa"],"updateCycleInMs":0}`,
+        `{"id":"messaging-experiments","enabled":true,"type":"remote-experiments","messageGroups":["cfr","whats-new-panel","moments-page","snippets"],"updateCycleInMs":0}`,
       ],
     ],
   });
@@ -239,7 +239,7 @@ add_task(async function test_exposure_ping() {
   TelemetryTestUtils.assertKeyedScalar(
     scalars,
     "telemetry.event_counts",
-    "normandy#expose#feature_study",
+    "normandy#expose#nimbus_experiment",
     1
   );
 

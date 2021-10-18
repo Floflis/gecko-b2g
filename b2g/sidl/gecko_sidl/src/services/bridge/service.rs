@@ -18,7 +18,7 @@ use crate::common::traits::{Shared, TrackerId};
 use crate::common::uds_transport::*;
 use crate::services::core::service::*;
 use log::{debug, error};
-use moz_task::{TaskRunnable, ThreadPtrHandle, ThreadPtrHolder};
+use moz_task::{ThreadPtrHandle, ThreadPtrHolder};
 use nserror::{nsresult, NS_ERROR_INVALID_ARG, NS_OK};
 use nsstring::*;
 use parking_lot::Mutex;
@@ -158,6 +158,25 @@ impl ServiceClientImpl<GeckoBridgeTask> for GeckoBridgeImpl {
         }
     }
 
+    fn run_task(&mut self, task: GeckoBridgeTask) -> Result<(), nsresult> {
+        match task {
+            GeckoBridgeTask::SetAppsServiceDelegate(task) => self.set_apps_service_delegate(task),
+            GeckoBridgeTask::SetMobileManagerDelegate(task) => {
+                self.set_mobile_manager_delegate(task)
+            }
+            GeckoBridgeTask::SetNetworkManagerDelegate(task) => {
+                self.set_network_manager_delegate(task)
+            }
+            GeckoBridgeTask::SetPowerManagerDelegate(task) => self.set_power_manager_delegate(task),
+            GeckoBridgeTask::SetPreferenceDelegate(task) => self.set_preference_delegate(task),
+            GeckoBridgeTask::CharPrefChanged(task) => self.char_pref_changed(task),
+            GeckoBridgeTask::IntPrefChanged(task) => self.int_pref_changed(task),
+            GeckoBridgeTask::BoolPrefChanged(task) => self.bool_pref_changed(task),
+            GeckoBridgeTask::RegisterToken(task) => self.register_token(task),
+            GeckoBridgeTask::ImportSimContacts(task) => self.import_sim_contacts(task),
+        }
+    }
+
     fn dispatch_queue(
         &mut self,
         task_queue: &Shared<Vec<GeckoBridgeTask>>,
@@ -168,38 +187,7 @@ impl ServiceClientImpl<GeckoBridgeTask> for GeckoBridgeImpl {
 
         // drain the queue.
         for task in task_queue.drain(..) {
-            match task {
-                GeckoBridgeTask::SetAppsServiceDelegate(task) => {
-                    let _ = self.set_apps_service_delegate(task);
-                }
-                GeckoBridgeTask::SetMobileManagerDelegate(task) => {
-                    let _ = self.set_mobile_manager_delegate(task);
-                }
-                GeckoBridgeTask::SetNetworkManagerDelegate(task) => {
-                    let _ = self.set_network_manager_delegate(task);
-                }
-                GeckoBridgeTask::SetPowerManagerDelegate(task) => {
-                    let _ = self.set_power_manager_delegate(task);
-                }
-                GeckoBridgeTask::SetPreferenceDelegate(task) => {
-                    let _ = self.set_preference_delegate(task);
-                }
-                GeckoBridgeTask::CharPrefChanged(task) => {
-                    let _ = self.char_pref_changed(task);
-                }
-                GeckoBridgeTask::IntPrefChanged(task) => {
-                    let _ = self.int_pref_changed(task);
-                }
-                GeckoBridgeTask::BoolPrefChanged(task) => {
-                    let _ = self.bool_pref_changed(task);
-                }
-                GeckoBridgeTask::RegisterToken(task) => {
-                    let _ = self.register_token(task);
-                }
-                GeckoBridgeTask::ImportSimContacts(task) => {
-                    let _ = self.import_sim_contacts(task);
-                }
-            }
+            let _ = self.run_task(task);
         }
     }
 }
@@ -566,9 +554,12 @@ impl GeckoBridgeXpcom {
         });
 
         let obs = instance.coerce::<nsISidlConnectionObserver>();
-        transport.add_connection_observer(
-            ThreadPtrHolder::new(cstr!("nsISidlConnectionObserver"), RefPtr::new(obs)).unwrap(),
-        );
+        match ThreadPtrHolder::new(cstr!("nsISidlConnectionObserver"), RefPtr::new(obs)) {
+            Ok(obs) => {
+                transport.add_connection_observer(obs);
+            }
+            Err(err) => error!("Failed to create connection observer: {}", err),
+        }
 
         instance
     }
@@ -585,23 +576,13 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::set_apps_service_delegate");
 
         let delegate =
-            ThreadPtrHolder::new(cstr!("nsIAppsServiceDelegate"), RefPtr::new(delegate)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsIAppsServiceDelegate"), RefPtr::new(delegate))?;
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), delegate);
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::SetAppsServiceDelegate(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().set_apps_service_delegate(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::SetAppsServiceDelegate(task)));
         Ok(())
     }
 
@@ -614,23 +595,13 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::set_mobile_manager_delegate");
 
         let delegate =
-            ThreadPtrHolder::new(cstr!("nsIMobileManagerDelegate"), RefPtr::new(delegate)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsIMobileManagerDelegate"), RefPtr::new(delegate))?;
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), delegate);
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::SetMobileManagerDelegate(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().set_mobile_manager_delegate(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::SetMobileManagerDelegate(task)));
         Ok(())
     }
 
@@ -643,24 +614,13 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::set_network_manager_delegate");
 
         let delegate =
-            ThreadPtrHolder::new(cstr!("nsINetworkManagerDelegate"), RefPtr::new(delegate))
-                .unwrap();
+            ThreadPtrHolder::new(cstr!("nsINetworkManagerDelegate"), RefPtr::new(delegate))?;
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), delegate);
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::SetNetworkManagerDelegate(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().set_network_manager_delegate(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::SetNetworkManagerDelegate(task)));
         Ok(())
     }
 
@@ -673,23 +633,13 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::set_power_manager_delegate");
 
         let delegate =
-            ThreadPtrHolder::new(cstr!("nsIPowerManagerDelegate"), RefPtr::new(delegate)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsIPowerManagerDelegate"), RefPtr::new(delegate))?;
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), delegate);
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::SetPowerManagerDelegate(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().set_power_manager_delegate(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::SetPowerManagerDelegate(task)));
         Ok(())
     }
 
@@ -701,24 +651,13 @@ impl GeckoBridgeXpcom {
     ) -> Result<(), nsresult> {
         debug!("GeckoBridgeXpcom::set_preference_delegate");
 
-        let delegate =
-            ThreadPtrHolder::new(cstr!("nsIPreferenceDelegate"), RefPtr::new(delegate)).unwrap();
+        let delegate = ThreadPtrHolder::new(cstr!("nsIPreferenceDelegate"), RefPtr::new(delegate))?;
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), delegate);
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::SetPreferenceDelegate(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().set_preference_delegate(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::SetPreferenceDelegate(task)));
         Ok(())
     }
 
@@ -732,23 +671,13 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::char_pref_changed");
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (
             SidlCallTask::new(callback),
             (name.to_string(), value.to_string()),
         );
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::CharPrefChanged(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().char_pref_changed(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::CharPrefChanged(task)));
         Ok(())
     }
 
@@ -762,20 +691,10 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::int_pref_changed");
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), (name.to_string(), value));
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::IntPrefChanged(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().int_pref_changed(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::IntPrefChanged(task)));
         Ok(())
     }
 
@@ -789,20 +708,10 @@ impl GeckoBridgeXpcom {
         debug!("GeckoBridgeXpcom::bool_pref_changed");
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), (name.to_string(), value));
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::BoolPrefChanged(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().bool_pref_changed(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::BoolPrefChanged(task)));
         Ok(())
     }
 
@@ -819,23 +728,13 @@ impl GeckoBridgeXpcom {
             .map(|item| item.to_string())
             .collect();
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (
             SidlCallTask::new(callback),
             (token.to_string(), url.to_string(), permissions),
         );
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::RegisterToken(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().register_token(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
-
+        self.run_or_queue_task(Some(GeckoBridgeTask::RegisterToken(task)));
         Ok(())
     }
 
@@ -891,25 +790,14 @@ impl GeckoBridgeXpcom {
         }
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), contacts_info);
 
-        if !self.ensure_service() {
-            self.queue_task(GeckoBridgeTask::ImportSimContacts(task));
-            return Ok(());
-        }
-
-        // The service is ready, send the request right away.
-        debug!("GeckoBridgeXpcom::set direct call");
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().import_sim_contacts(task);
-        } else {
-            error!("Unable to get GeckoBridgeImpl");
-        }
+        self.run_or_queue_task(Some(GeckoBridgeTask::ImportSimContacts(task)));
         Ok(())
     }
 
-    ensure_service_and_queue!(GeckoBridgeTask, "GeckoBridge", SERVICE_FINGERPRINT);
+    task_runner!(GeckoBridgeTask, "GeckoBridge", SERVICE_FINGERPRINT);
 }
 
 impl Drop for GeckoBridgeXpcom {

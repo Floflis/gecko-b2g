@@ -209,6 +209,12 @@ macro_rules! with_all_bounds {
 
             /// pseudo-elements
             type PseudoElement: $($CommonBounds)* + PseudoElement<Impl = Self>;
+
+            /// Whether attribute hashes should be collected for filtering
+            /// purposes.
+            fn should_collect_attr_hash(_name: &Self::LocalName) -> bool {
+                false
+            }
         }
     }
 }
@@ -245,11 +251,6 @@ pub trait Parser<'i> {
     /// Whether to parse the `:where` pseudo-class.
     fn parse_is_and_where(&self) -> bool {
         false
-    }
-
-    /// The error recovery that selector lists inside :is() and :where() have.
-    fn is_and_where_error_recovery(&self) -> ParseErrorRecovery {
-        ParseErrorRecovery::IgnoreInvalidSelector
     }
 
     /// Whether the given function name is an alias for the `:is()` function.
@@ -331,7 +332,7 @@ pub struct SelectorList<Impl: SelectorImpl>(
 );
 
 /// How to treat invalid selectors in a selector list.
-pub enum ParseErrorRecovery {
+enum ParseErrorRecovery {
     /// Discard the entire selector list, this is the default behavior for
     /// almost all of CSS.
     DiscardList,
@@ -353,7 +354,12 @@ impl<Impl: SelectorImpl> SelectorList<Impl> {
     where
         P: Parser<'i, Impl = Impl>,
     {
-        Self::parse_with_state(parser, input, SelectorParsingState::empty(), ParseErrorRecovery::DiscardList)
+        Self::parse_with_state(
+            parser,
+            input,
+            SelectorParsingState::empty(),
+            ParseErrorRecovery::DiscardList,
+        )
     }
 
     #[inline]
@@ -387,7 +393,7 @@ impl<Impl: SelectorImpl> SelectorList<Impl> {
                     Ok(&Token::Comma) => break,
                     Ok(_) => {
                         debug_assert!(!was_ok, "Shouldn't have got a selector if getting here");
-                    }
+                    },
                 }
             }
         }
@@ -470,11 +476,33 @@ where
             Component::Class(ref class) if quirks_mode != QuirksMode::Quirks => {
                 class.precomputed_hash()
             },
+            Component::AttributeInNoNamespace { ref local_name, .. } if Impl::should_collect_attr_hash(local_name) => {
+                // AttributeInNoNamespace is only used when local_name ==
+                // local_name_lower.
+                local_name.precomputed_hash()
+            },
+            Component::AttributeInNoNamespaceExists { ref local_name, ref local_name_lower, .. } => {
+                // Only insert the local-name into the filter if it's all
+                // lowercase.  Otherwise we would need to test both hashes, and
+                // our data structures aren't really set up for that.
+                if local_name != local_name_lower || !Impl::should_collect_attr_hash(local_name) {
+                    continue;
+                }
+                local_name.precomputed_hash()
+            },
+            Component::AttributeOther(ref selector) => {
+                if selector.local_name != selector.local_name_lower || !Impl::should_collect_attr_hash(&selector.local_name) {
+                    continue;
+                }
+                selector.local_name.precomputed_hash()
+            },
             Component::Is(ref list) | Component::Where(ref list) => {
                 // :where and :is OR their selectors, so we can't put any hash
                 // in the filter if there's more than one selector, as that'd
                 // exclude elements that may match one of the other selectors.
-                if list.len() == 1 && !collect_ancestor_hashes(list[0].iter(), quirks_mode, hashes, len) {
+                if list.len() == 1 &&
+                    !collect_ancestor_hashes(list[0].iter(), quirks_mode, hashes, len)
+                {
                     return false;
                 }
                 continue;
@@ -809,7 +837,7 @@ impl<'a, Impl: 'a + SelectorImpl> SelectorIter<'a, Impl> {
     #[inline]
     pub(crate) fn is_featureless_host_selector(&mut self) -> bool {
         self.selector_length() > 0 &&
-            self.all(|component| matches!(*component, Component::Host(..))) &&
+            self.all(|component| component.is_host()) &&
             self.next_sequence().is_none()
     }
 
@@ -1071,8 +1099,15 @@ pub enum Component<Impl: SelectorImpl> {
 
 impl<Impl: SelectorImpl> Component<Impl> {
     /// Returns true if this is a combinator.
+    #[inline]
     pub fn is_combinator(&self) -> bool {
         matches!(*self, Component::Combinator(_))
+    }
+
+    /// Returns true if this is a :host() selector.
+    #[inline]
+    pub fn is_host(&self) -> bool {
+        matches!(*self, Component::Host(..))
     }
 
     /// Returns the value as a combinator if applicable, None otherwise.
@@ -1090,13 +1125,11 @@ impl<Impl: SelectorImpl> Component<Impl> {
             Component::NonTSPseudoClass(..) => true,
             Component::Negation(ref selectors) |
             Component::Is(ref selectors) |
-            Component::Where(ref selectors) => {
-                selectors.iter().all(|selector| {
-                    selector
-                        .iter_raw_match_order()
-                        .all(|c| c.maybe_allowed_after_pseudo_element())
-                })
-            },
+            Component::Where(ref selectors) => selectors.iter().all(|selector| {
+                selector
+                    .iter_raw_match_order()
+                    .all(|c| c.maybe_allowed_after_pseudo_element())
+            }),
             _ => false,
         }
     }
@@ -1114,13 +1147,11 @@ impl<Impl: SelectorImpl> Component<Impl> {
             *self
         );
         match *self {
-            Component::Negation(ref selectors) => {
-                !selectors.iter().all(|selector| {
-                    selector
-                        .iter_raw_match_order()
-                        .all(|c| c.matches_for_stateless_pseudo_element())
-                })
-            },
+            Component::Negation(ref selectors) => !selectors.iter().all(|selector| {
+                selector
+                    .iter_raw_match_order()
+                    .all(|c| c.matches_for_stateless_pseudo_element())
+            }),
             Component::Is(ref selectors) | Component::Where(ref selectors) => {
                 selectors.iter().any(|selector| {
                     selector
@@ -1822,9 +1853,9 @@ where
     };
 
     let start = input.state();
-    // FIXME: remove clone() when lifetimes are non-lexical
-    match input.next_including_whitespace().map(|t| t.clone()) {
+    match input.next_including_whitespace() {
         Ok(Token::Ident(value)) => {
+            let value = value.clone();
             let after_ident = input.state();
             match input.next_including_whitespace() {
                 Ok(&Token::Delim('|')) => {
@@ -1852,28 +1883,25 @@ where
         },
         Ok(Token::Delim('*')) => {
             let after_star = input.state();
-            // FIXME: remove clone() when lifetimes are non-lexical
-            match input.next_including_whitespace().map(|t| t.clone()) {
-                Ok(Token::Delim('|')) => {
+            match input.next_including_whitespace() {
+                Ok(&Token::Delim('|')) => {
                     explicit_namespace(input, QNamePrefix::ExplicitAnyNamespace)
                 },
-                result => {
+                _ if !in_attr_selector => {
                     input.reset(&after_star);
-                    if in_attr_selector {
-                        match result {
-                            Ok(t) => Err(after_star
-                                .source_location()
-                                .new_custom_error(SelectorParseErrorKind::ExpectedBarInAttr(t))),
-                            Err(e) => Err(e.into()),
-                        }
-                    } else {
-                        default_namespace(None)
-                    }
+                    default_namespace(None)
+                }
+                result => {
+                    let t = result?;
+                    Err(after_star
+                        .source_location()
+                        .new_custom_error(SelectorParseErrorKind::ExpectedBarInAttr(t.clone())))
                 },
             }
         },
         Ok(Token::Delim('|')) => explicit_namespace(input, QNamePrefix::ExplicitNoNamespace),
         Ok(t) => {
+            let t = t.clone();
             input.reset(&start);
             Ok(OptionalQName::None(t))
         },
@@ -2091,8 +2119,10 @@ where
     let list = SelectorList::parse_with_state(
         parser,
         input,
-        state | SelectorParsingState::SKIP_DEFAULT_NAMESPACE | SelectorParsingState::DISALLOW_PSEUDOS,
-        ParseErrorRecovery::DiscardList
+        state |
+            SelectorParsingState::SKIP_DEFAULT_NAMESPACE |
+            SelectorParsingState::DISALLOW_PSEUDOS,
+        ParseErrorRecovery::DiscardList,
     )?;
 
     Ok(Component::Negation(list.0.into_vec().into_boxed_slice()))
@@ -2156,8 +2186,8 @@ where
                 //
                 //     (Similar quotes for :where() / :not())
                 //
-                let ignore_default_ns =
-                    state.intersects(SelectorParsingState::SKIP_DEFAULT_NAMESPACE) ||
+                let ignore_default_ns = state
+                    .intersects(SelectorParsingState::SKIP_DEFAULT_NAMESPACE) ||
                     matches!(
                         result,
                         SimpleSelectorParseResult::SimpleSelector(Component::Host(..))
@@ -2216,8 +2246,10 @@ where
     let inner = SelectorList::parse_with_state(
         parser,
         input,
-        state | SelectorParsingState::SKIP_DEFAULT_NAMESPACE | SelectorParsingState::DISALLOW_PSEUDOS,
-        parser.is_and_where_error_recovery(),
+        state |
+            SelectorParsingState::SKIP_DEFAULT_NAMESPACE |
+            SelectorParsingState::DISALLOW_PSEUDOS,
+        ParseErrorRecovery::IgnoreInvalidSelector,
     )?;
     Ok(component(inner.0.into_vec().into_boxed_slice()))
 }
@@ -2626,10 +2658,6 @@ pub mod tests {
             true
         }
 
-        fn is_and_where_error_recovery(&self) -> ParseErrorRecovery {
-            ParseErrorRecovery::DiscardList
-        }
-
         fn parse_part(&self) -> bool {
             true
         }
@@ -3015,13 +3043,12 @@ pub mod tests {
                 vec![
                     Component::DefaultNamespace(MATHML.into()),
                     Component::Negation(
-                        vec![
-                            Selector::from_vec(
-                                vec![Component::Class(DummyAtom::from("cl"))],
-                                specificity(0, 1, 0),
-                                Default::default(),
-                            )
-                        ].into_boxed_slice()
+                        vec![Selector::from_vec(
+                            vec![Component::Class(DummyAtom::from("cl"))],
+                            specificity(0, 1, 0),
+                            Default::default(),
+                        )]
+                        .into_boxed_slice()
                     ),
                 ],
                 specificity(0, 1, 0),
@@ -3034,16 +3061,14 @@ pub mod tests {
                 vec![
                     Component::DefaultNamespace(MATHML.into()),
                     Component::Negation(
-                        vec![
-                            Selector::from_vec(
-                                vec![
-                                    Component::DefaultNamespace(MATHML.into()),
-                                    Component::ExplicitUniversalType,
-                                ],
-                                specificity(0, 0, 0),
-                                Default::default(),
-                            )
-                        ]
+                        vec![Selector::from_vec(
+                            vec![
+                                Component::DefaultNamespace(MATHML.into()),
+                                Component::ExplicitUniversalType,
+                            ],
+                            specificity(0, 0, 0),
+                            Default::default(),
+                        )]
                         .into_boxed_slice(),
                     ),
                 ],
@@ -3057,19 +3082,17 @@ pub mod tests {
                 vec![
                     Component::DefaultNamespace(MATHML.into()),
                     Component::Negation(
-                        vec![
-                            Selector::from_vec(
-                                vec![
-                                    Component::DefaultNamespace(MATHML.into()),
-                                    Component::LocalName(LocalName {
-                                        name: DummyAtom::from("e"),
-                                        lower_name: DummyAtom::from("e"),
-                                    }),
-                                ],
-                                specificity(0, 0, 1),
-                                Default::default(),
-                            ),
-                        ]
+                        vec![Selector::from_vec(
+                            vec![
+                                Component::DefaultNamespace(MATHML.into()),
+                                Component::LocalName(LocalName {
+                                    name: DummyAtom::from("e"),
+                                    lower_name: DummyAtom::from("e"),
+                                }),
+                            ],
+                            specificity(0, 0, 1),
+                            Default::default(),
+                        ),]
                         .into_boxed_slice()
                     ),
                 ],
@@ -3173,15 +3196,12 @@ pub mod tests {
             parse_ns(":not(*)", &parser),
             Ok(SelectorList::from_vec(vec![Selector::from_vec(
                 vec![Component::Negation(
-                    vec![
-                        Selector::from_vec(
-                            vec![
-                                Component::ExplicitUniversalType
-                            ],
-                            specificity(0, 0, 0),
-                            Default::default(),
-                        )
-                    ].into_boxed_slice()
+                    vec![Selector::from_vec(
+                        vec![Component::ExplicitUniversalType],
+                        specificity(0, 0, 0),
+                        Default::default(),
+                    )]
+                    .into_boxed_slice()
                 )],
                 specificity(0, 0, 0),
                 Default::default(),
@@ -3191,16 +3211,14 @@ pub mod tests {
             parse_ns(":not(|*)", &parser),
             Ok(SelectorList::from_vec(vec![Selector::from_vec(
                 vec![Component::Negation(
-                    vec![
-                        Selector::from_vec(
-                            vec![
-                                Component::ExplicitNoNamespace,
-                                Component::ExplicitUniversalType,
-                            ],
-                            specificity(0, 0, 0),
-                            Default::default(),
-                        )
-                    ]
+                    vec![Selector::from_vec(
+                        vec![
+                            Component::ExplicitNoNamespace,
+                            Component::ExplicitUniversalType,
+                        ],
+                        specificity(0, 0, 0),
+                        Default::default(),
+                    )]
                     .into_boxed_slice(),
                 )],
                 specificity(0, 0, 0),
@@ -3213,15 +3231,12 @@ pub mod tests {
             parse_ns_expected(":not(*|*)", &parser, Some(":not(*)")),
             Ok(SelectorList::from_vec(vec![Selector::from_vec(
                 vec![Component::Negation(
-                    vec![
-                        Selector::from_vec(
-                            vec![
-                                Component::ExplicitUniversalType
-                            ],
-                            specificity(0, 0, 0),
-                            Default::default()
-                        )
-                    ].into_boxed_slice()
+                    vec![Selector::from_vec(
+                        vec![Component::ExplicitUniversalType],
+                        specificity(0, 0, 0),
+                        Default::default()
+                    )]
+                    .into_boxed_slice()
                 )],
                 specificity(0, 0, 0),
                 Default::default(),
@@ -3247,9 +3262,9 @@ pub mod tests {
         assert!(parse("::slotted(div)::before").is_ok());
         assert!(parse("slot::slotted(div,foo)").is_err());
 
-        assert!(parse("foo:where()").is_err());
+        assert!(parse("foo:where()").is_ok());
         assert!(parse("foo:where(div, foo, .bar baz)").is_ok());
-        assert!(parse("foo:where(::before)").is_err());
+        assert!(parse_expected("foo:where(::before)", Some("foo:where()")).is_ok());
     }
 
     #[test]

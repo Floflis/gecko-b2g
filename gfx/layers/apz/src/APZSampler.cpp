@@ -12,7 +12,6 @@
 #include "mozilla/layers/APZThreadUtils.h"
 #include "mozilla/layers/APZUtils.h"
 #include "mozilla/layers/CompositorThread.h"
-#include "mozilla/layers/LayerMetricsWrapper.h"
 #include "mozilla/layers/SynchronousTask.h"
 #include "TreeTraversal.h"
 #include "mozilla/webrender/WebRenderAPI.h"
@@ -96,31 +95,8 @@ void APZSampler::SampleForWebRender(const Maybe<VsyncId>& aVsyncId,
     // WebRenderBridgeParent hasn't yet provided us with a sample time.
     // If we're that early there probably aren't any APZ animations happening
     // anyway, so using Timestamp::Now() should be fine.
-    //
-    // If mSampleTime is in the past, then this is a "delayed sampling", i.e.
-    // we have passed the vsync interval during which SetSampleTime was called.
-    // We know this because SetSampleTime is called with the timestamp for the
-    // next vsync (i.e. the time at which the then-ongoing vsync interval ends)
-    // and we expect that SampleForWebRender gets called within that same vsync
-    // interval. If it does not, then the SampleForWebRender call has been
-    // delayed. This can happen if e.g. there was a very long scene build,
-    // or WR decided to generate a frame after an idle period for whatever
-    // random reason without Gecko requesting it explicitly. In these cases
-    // we shouldn't use mSampleTime, because the current frame will be presented
-    // at the end of the *current* vsync interval rather than the vsync interval
-    // SetSampleTime was called in. Ideally we would be able to know when the
-    // *current* vsync interval ends, and use that timestamp, but plumbing that
-    // here is hard, so instead we use Now() which will at least get us pretty
-    // close.
-    // The exception is if we're in a test situation, where the test is
-    // expecting us to use a specific timestamp and we shouldn't arbitrarily
-    // fiddle with it.
     SampleTime now = SampleTime::FromNow();
-    sampleTime =
-        (mSampleTime.IsNull() ||
-         (mSampleTime.Type() != SampleTime::eTest && mSampleTime < now))
-            ? now
-            : mSampleTime;
+    sampleTime = mSampleTime.IsNull() ? now : mSampleTime;
   }
   mApz->SampleForWebRender(aVsyncId, aTxn, sampleTime);
 }
@@ -129,50 +105,6 @@ bool APZSampler::AdvanceAnimations(const SampleTime& aSampleTime) {
   MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
   AssertOnSamplerThread();
   return mApz->AdvanceAnimations(aSampleTime);
-}
-
-LayerToParentLayerMatrix4x4 APZSampler::ComputeTransformForScrollThumb(
-    const LayerToParentLayerMatrix4x4& aCurrentTransform,
-    const LayerMetricsWrapper& aContent, const ScrollbarData& aThumbData,
-    bool aScrollbarIsDescendant,
-    AsyncTransformComponentMatrix* aOutClipTransform) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  return mApz->ComputeTransformForScrollThumb(
-      aCurrentTransform, aContent.GetTransform(), aContent.GetApzc(),
-      aContent.Metrics(), aThumbData, aScrollbarIsDescendant,
-      aOutClipTransform);
-}
-
-CSSRect APZSampler::GetCurrentAsyncLayoutViewport(
-    const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetCurrentAsyncLayoutViewport(
-      AsyncPanZoomController::eForCompositing);
-}
-
-ParentLayerPoint APZSampler::GetCurrentAsyncScrollOffset(
-    const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetCurrentAsyncScrollOffset(
-      AsyncPanZoomController::eForCompositing);
-}
-
-AsyncTransform APZSampler::GetCurrentAsyncTransform(
-    const LayerMetricsWrapper& aLayer, AsyncTransformComponents aComponents) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetCurrentAsyncTransform(
-      AsyncPanZoomController::eForCompositing, aComponents);
 }
 
 AsyncTransform APZSampler::GetCurrentAsyncTransform(
@@ -194,73 +126,6 @@ AsyncTransform APZSampler::GetCurrentAsyncTransform(
 
   return apzc->GetCurrentAsyncTransform(AsyncPanZoomController::eForCompositing,
                                         aComponents);
-}
-
-Maybe<CompositionPayload> APZSampler::NotifyScrollSampling(
-    const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->NotifyScrollSampling();
-}
-
-AsyncTransformComponentMatrix APZSampler::GetOverscrollTransform(
-    const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetOverscrollTransform(
-      AsyncPanZoomController::eForCompositing);
-}
-
-AsyncTransformComponentMatrix
-APZSampler::GetCurrentAsyncTransformWithOverscroll(
-    const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetCurrentAsyncTransformWithOverscroll(
-      AsyncPanZoomController::eForCompositing);
-}
-
-void APZSampler::MarkAsyncTransformAppliedToContent(
-    const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  aLayer.GetApzc()->MarkAsyncTransformAppliedToContent();
-}
-
-bool APZSampler::HasUnusedAsyncTransform(const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  AsyncPanZoomController* apzc = aLayer.GetApzc();
-  return apzc && !apzc->GetAsyncTransformAppliedToContent() &&
-         !AsyncTransformComponentMatrix(
-              apzc->GetCurrentAsyncTransform(
-                  AsyncPanZoomController::eForCompositing))
-              .IsIdentity();
-}
-
-ScrollableLayerGuid APZSampler::GetGuid(const LayerMetricsWrapper& aLayer) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetGuid();
-}
-
-GeckoViewMetrics APZSampler::GetGeckoViewMetrics(
-    const LayerMetricsWrapper& aLayer) const {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
-  AssertOnSamplerThread();
-
-  MOZ_ASSERT(aLayer.GetApzc());
-  return aLayer.GetApzc()->GetGeckoViewMetrics();
 }
 
 ScreenMargin APZSampler::GetGeckoFixedLayerMargins() const {

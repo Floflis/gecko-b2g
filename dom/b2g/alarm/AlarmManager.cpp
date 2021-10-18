@@ -5,8 +5,8 @@
 
 #include "mozilla/dom/AlarmManager.h"
 #include "mozilla/dom/AlarmManagerWorker.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/Logging.h"
-#include "mozilla/Preferences.h"
 #include "nsComponentManagerUtils.h"
 #include "nsContentUtils.h"
 #include "nsIPermissionManager.h"
@@ -103,58 +103,58 @@ AlarmAddCallback::OnAdd(nsresult aStatus, JS::HandleValue aResult,
   return NS_OK;
 }
 
-AlarmManagerMain::AlarmManagerMain(nsCString aUrl,
-                                   nsIGlobalObject* aOuterGlobal)
-    : AlarmManagerImpl(aUrl, aOuterGlobal) {
-  LOG("AlarmManagerMain constructor.");
+nsresult AlarmManagerMain::Init(nsIGlobalObject* aGlobal) {
+  LOG("AlarmManagerMain::Init");
   if (NS_WARN_IF(!NS_IsMainThread())) {
-    LOG("Error! AlarmManagerWorker should be on main thread.");
+    LOG("Error! AlarmManagerMain should be on main thread.");
+    return NS_ERROR_DOM_ABORT_ERR;
   }
+
+  if (NS_WARN_IF(!aGlobal)) {
+    LOG("!aGlobal");
+    return NS_ERROR_DOM_ABORT_ERR;
+  }
+
+  nsCOMPtr<nsIPrincipal> principal = aGlobal->PrincipalOrNull();
+  if (NS_WARN_IF(!principal)) {
+    LOG("!principal");
+    return NS_ERROR_DOM_ABORT_ERR;
+  }
+
+  return alarm::Initialize(principal, mUrl);
 }
 
-already_AddRefed<Promise> AlarmManagerMain::GetAll() {
+void AlarmManagerMain::GetAll(Promise* aPromise) {
   LOG("AlarmManagerMain::GetAll mUrl:[%s]", mUrl.get());
-
-  if (NS_WARN_IF(!mOuterGlobal)) {
-    LOG("!mOuterGlobal");
-    return nullptr;
+  if (NS_WARN_IF(!aPromise)) {
+    LOG("!aPromise");
+    return;
   }
-
-  ErrorResult rv;
-  RefPtr<Promise> promise = Promise::Create(mOuterGlobal, rv);
-  ENSURE_SUCCESS(rv, nullptr);
 
   nsCOMPtr<nsIAlarmProxy> alarmProxy = alarm::CreateAlarmProxy();
   if (NS_WARN_IF(!alarmProxy)) {
     LOG("!alarmProxy");
-    promise->MaybeReject(NS_ERROR_DOM_ABORT_ERR);
-    return promise.forget();
+    aPromise->MaybeReject(NS_ERROR_DOM_ABORT_ERR);
+    return;
   }
 
-  nsCOMPtr<nsIAlarmGetAllCallback> callback = new AlarmGetAllCallback(promise);
+  nsCOMPtr<nsIAlarmGetAllCallback> callback = new AlarmGetAllCallback(aPromise);
   alarmProxy->GetAll(mUrl, callback);
-
-  return promise.forget();
 }
 
-already_AddRefed<Promise> AlarmManagerMain::Add(JSContext* aCx,
-                                                const AlarmOptions& aOptions) {
+void AlarmManagerMain::Add(Promise* aPromise, JSContext* aCx,
+                           const AlarmOptions& aOptions) {
   LOG("AlarmManagerMain::Add mUrl:[%s]", mUrl.get());
-
-  if (NS_WARN_IF(!mOuterGlobal)) {
-    LOG("!mOuterGlobal");
-    return nullptr;
+  if (NS_WARN_IF(!aPromise)) {
+    LOG("!aPromise");
+    return;
   }
-
-  ErrorResult rv;
-  RefPtr<Promise> promise = Promise::Create(mOuterGlobal, rv);
-  ENSURE_SUCCESS(rv, nullptr);
 
   nsCOMPtr<nsIAlarmProxy> alarmProxy = alarm::CreateAlarmProxy();
   if (NS_WARN_IF(!alarmProxy)) {
     LOG("!alarmProxy");
-    promise->MaybeReject(NS_ERROR_DOM_ABORT_ERR);
-    return promise.forget();
+    aPromise->MaybeReject(NS_ERROR_DOM_ABORT_ERR);
+    return;
   }
 
   // We're about to pass the dictionary to a JS-implemented component, so
@@ -166,19 +166,17 @@ already_AddRefed<Promise> AlarmManagerMain::Add(JSContext* aCx,
     JSAutoRealm ar(aCx, xpc::PrivilegedJunkScope());
     ok = ToJSValue(aCx, aOptions, &optionsValue);
     if (!ok) {
-      promise->MaybeReject(NS_ERROR_DOM_OPERATION_ERR);
-      return promise.forget();
+      aPromise->MaybeReject(NS_ERROR_DOM_OPERATION_ERR);
+      return;
     }
   }
   ok = JS_WrapValue(aCx, &optionsValue);
   if (!ok) {
-    promise->MaybeReject(NS_ERROR_DOM_OPERATION_ERR);
-    return promise.forget();
+    aPromise->MaybeReject(NS_ERROR_DOM_OPERATION_ERR);
   }
 
-  nsCOMPtr<nsIAlarmAddCallback> callback = new AlarmAddCallback(promise);
+  nsCOMPtr<nsIAlarmAddCallback> callback = new AlarmAddCallback(aPromise);
   alarmProxy->Add(mUrl, optionsValue, callback);
-  return promise.forget();
 }
 
 void AlarmManagerMain::Remove(long aId) {
@@ -204,13 +202,7 @@ already_AddRefed<AlarmManager> AlarmManager::Create(nsIGlobalObject* aGlobal,
 
   aRv = alarmManager->Init();
   if (NS_WARN_IF(NS_FAILED(aRv))) {
-    LOG("Init failed. rv:[%u]", uint(aRv));
-    return nullptr;
-  }
-
-  if (!alarmManager->CheckPermission()) {
-    LOG("!CheckPermission");
-    aRv = NS_ERROR_DOM_SECURITY_ERR;
+    LOG("Init failed. rv:[%x]", uint(aRv));
     return nullptr;
   }
 
@@ -221,100 +213,75 @@ AlarmManager::AlarmManager(nsIGlobalObject* aGlobal) : mGlobal(aGlobal) {
   LOG("AlarmManager constructor.");
 }
 
-NS_IMETHODIMP AlarmManager::Init() {
+nsresult AlarmManager::Init() {
   LOG("AlarmManager Init. NS_IsMainThread:[%s]",
+      NS_IsMainThread() ? "true" : "false");
+
+  if (NS_IsMainThread()) {
+    mImpl = new AlarmManagerMain();
+  } else {
+    mImpl = new AlarmManagerWorker();
+  }
+
+  return mImpl->Init(mGlobal);
+}
+
+already_AddRefed<Promise> AlarmManager::GetAll() {
+  LOG("AlarmManager::GetAll NS_IsMainThread:[%s]",
       NS_IsMainThread() ? "true" : "false");
 
   if (NS_WARN_IF(!mGlobal)) {
     LOG("!mGlobal");
-    return NS_ERROR_DOM_ABORT_ERR;
-  }
-
-  Maybe<ClientInfo> clientInfo = mGlobal->GetClientInfo();
-  if (clientInfo.isSome()) {
-    // System app might call AlarmManager from the system startup chrome url.
-    // To ensure proper system message receiver, replace the url with system
-    // app's origin.
-    // Other modules or services in Gecko of chrome origins should call
-    // AlarmService directly, not through AlarmManager or AlarmProxy.
-    LOG("clientInfo->URL() [%s]", clientInfo->URL().get());
-    if (nsContentUtils::IsCallerChrome()) {
-      nsAutoCString systemStartupUrl;
-      nsresult rv =
-          Preferences::GetCString("b2g.system_startup_url", systemStartupUrl);
-      if (NS_SUCCEEDED(rv) && clientInfo->URL().Equals(systemStartupUrl)) {
-        mUrl = "http://system.localhost"_ns;
-      }
-    } else {
-      nsCOMPtr<nsIIOService> ios(do_GetIOService());
-      nsCOMPtr<nsIURI> uri;
-      nsresult rv =
-          ios->NewURI(clientInfo->URL(), nullptr, nullptr, getter_AddRefs(uri));
-
-      if (NS_WARN_IF(NS_FAILED(rv)) || !uri) {
-        LOG("NewURI failed.");
-        return NS_ERROR_DOM_UNKNOWN_ERR;
-      }
-
-      uri->GetPrePath(mUrl);
-    }
-  } else {
-    LOG("Error: !clientInfo.isSome()");
-    return NS_ERROR_DOM_UNKNOWN_ERR;
-  }
-
-  LOG("mUrl:[%s]", mUrl.get());
-
-  // Alarms added by apps should be well-managed according to app urls.
-  // Empty urls may cause ambiguity.
-  if (mUrl.IsEmpty()) {
-    return NS_ERROR_DOM_UNKNOWN_ERR;
-  }
-
-  if (NS_IsMainThread()) {
-    mImpl = new AlarmManagerMain(mUrl, mGlobal);
-  } else {
-    mImpl = new AlarmManagerWorker(mUrl, mGlobal);
-  }
-
-  return NS_OK;
-}
-
-bool AlarmManager::CheckPermission() {
-  if (NS_WARN_IF(!mImpl)) {
-    LOG("!mImpl");
-    return false;
-  }
-
-  return mImpl->CheckPermission();
-}
-
-already_AddRefed<Promise> AlarmManager::GetAll() {
-  LOG("AlarmManager::GetAll mUrl:[%s] NS_IsMainThread:[%s]", mUrl.get(),
-      NS_IsMainThread() ? "true" : "false");
-  if (NS_WARN_IF(!mImpl)) {
-    LOG("!mImpl");
     return nullptr;
   }
 
-  return mImpl->GetAll();
+  ErrorResult rv;
+  RefPtr<Promise> promise = Promise::Create(mGlobal, rv);
+  if (NS_WARN_IF(rv.Failed())) {
+    LOG("Promise::Create failed. [%x]", rv.ErrorCodeAsInt());
+    return nullptr;
+  }
+
+  if (NS_WARN_IF(!mImpl)) {
+    LOG("!mImpl");
+    promise->MaybeReject(NS_ERROR_UNEXPECTED);
+  }
+
+  mImpl->GetAll(promise);
+
+  return promise.forget();
 }
 
 already_AddRefed<Promise> AlarmManager::Add(JSContext* aCx,
                                             const AlarmOptions& aOptions) {
-  LOG("AlarmManager::Add mUrl:[%s] NS_IsMainThread:[%s]", mUrl.get(),
+  LOG("AlarmManager::Add NS_IsMainThread:[%s]",
       NS_IsMainThread() ? "true" : "false");
-  if (NS_WARN_IF(!mImpl)) {
-    LOG("!mImpl");
+
+  if (NS_WARN_IF(!mGlobal)) {
+    LOG("!mGlobal");
     return nullptr;
   }
 
-  return mImpl->Add(aCx, aOptions);
+  ErrorResult rv;
+  RefPtr<Promise> promise = Promise::Create(mGlobal, rv);
+  if (NS_WARN_IF(rv.Failed())) {
+    LOG("Promise::Create failed. [%x]", rv.ErrorCodeAsInt());
+    return nullptr;
+  }
+
+  if (NS_WARN_IF(!mImpl)) {
+    LOG("!mImpl");
+    promise->MaybeReject(NS_ERROR_UNEXPECTED);
+  }
+
+  mImpl->Add(promise, aCx, aOptions);
+
+  return promise.forget();
 }
 
 void AlarmManager::Remove(long aId) {
-  LOG("AlarmManager::Remove mUrl:[%s] aId:[%d] NS_IsMainThread:[%s]",
-      mUrl.get(), aId, NS_IsMainThread() ? "true" : "false");
+  LOG("AlarmManager::Remove aId:[%d] NS_IsMainThread:[%s]", aId,
+      NS_IsMainThread() ? "true" : "false");
   if (NS_WARN_IF(!mImpl)) {
     LOG("!mImpl");
     return;
@@ -336,13 +303,9 @@ JSObject* AlarmManager::WrapObject(JSContext* aCx,
   return AlarmManager_Binding::Wrap(aCx, this, aGivenProto);
 }
 
-bool AlarmManagerMain::CheckPermission() {
-  return alarm::DoCheckPermission(mUrl);
-}
-
 already_AddRefed<nsIAlarmProxy> alarm::CreateAlarmProxy() {
   if (NS_WARN_IF(!NS_IsMainThread())) {
-    LOG("CreateAlarmProxy should not be called from non main threads.");
+    LOG("CreateAlarmProxy can only be called on main threads.");
     return nullptr;
   }
 
@@ -350,43 +313,72 @@ already_AddRefed<nsIAlarmProxy> alarm::CreateAlarmProxy() {
   nsCOMPtr<nsIAlarmProxy> alarmProxy =
       do_CreateInstance("@mozilla.org/dom/alarm/proxy;1", &rv);
   if (NS_WARN_IF(NS_FAILED(rv)) || NS_WARN_IF(!alarmProxy)) {
-    LOG("do_CreateInstance of nsIAlarmProxy failed. rv:[%u]", uint(rv));
+    LOG("do_CreateInstance of nsIAlarmProxy failed. rv:[%x]", uint(rv));
     return nullptr;
   }
 
   return alarmProxy.forget();
 }
 
-bool alarm::DoCheckPermission(nsCString aUrl) {
+nsresult alarm::Initialize(const nsCOMPtr<nsIPrincipal>& aPrincipal,
+                           nsCString& aUrl) {
   if (NS_WARN_IF(!NS_IsMainThread())) {
-    LOG("DoCheckPermission should not be called from non main threads.");
-    return false;
+    LOG("Initialize can only be called on main threads.");
+    return NS_ERROR_DOM_ABORT_ERR;
+  }
+
+  if (NS_WARN_IF(!aPrincipal)) {
+    LOG("!aPrincipal");
+    return NS_ERROR_DOM_ABORT_ERR;
+  }
+
+  if (aPrincipal->IsSystemPrincipal()) {
+    // System app might call AlarmManager from the system startup chrome url.
+    // To ensure proper system message receiver, replace the url with system
+    // app's origin.
+    // Other modules or services in Gecko should send messages to AlarmService
+    // directly, not through AlarmManager or AlarmProxy.
+
+#if !defined(API_DAEMON_PORT) || API_DAEMON_PORT == 80
+    aUrl = "http://system.localhost"_ns;
+#else
+    aUrl = nsLiteralCString(
+        "http://system.localhost:" MOZ_STRINGIFY(API_DAEMON_PORT));
+#endif
+    LOG("system principal");
+    return NS_OK;
   }
 
   nsCOMPtr<nsIPermissionManager> permissionManager =
       services::GetPermissionManager();
   if (NS_WARN_IF(!permissionManager)) {
     LOG("!permissionManager");
-    return false;
+    return NS_ERROR_DOM_ABORT_ERR;
   }
 
-  nsCOMPtr<nsIPrincipal> principal =
-      BasePrincipal::CreateContentPrincipal(aUrl);
-  if (NS_WARN_IF(!principal)) {
-    LOG("!principal aUrl:[%s]", aUrl.get());
-    return false;
-  }
-
+  nsresult rv;
   uint32_t permission = nsIPermissionManager::DENY_ACTION;
-  nsresult rv = permissionManager->TestPermissionFromPrincipal(
-      principal, "alarms"_ns, &permission);
+  rv = permissionManager->TestPermissionFromPrincipal(aPrincipal, "alarms"_ns,
+                                                      &permission);
   if (NS_WARN_IF(NS_FAILED(rv))) {
-    LOG("TestPermissionFromPrincipal failed. rv[%u] mUrl:[%s]", uint(rv),
-        aUrl.get());
-    return false;
+    LOG("TestPermissionFromPrincipal failed. rv[%x]", uint(rv));
+    return rv;
   }
 
-  return permission == nsIPermissionManager::ALLOW_ACTION;
+  if (permission != nsIPermissionManager::ALLOW_ACTION) {
+    return NS_ERROR_DOM_SECURITY_ERR;
+  }
+
+  rv = aPrincipal->GetAsciiOrigin(aUrl);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    LOG("GetAsciiOrigin failed. [%x]", uint(rv));
+    return rv;
+  }
+
+  LOG("aUrl:[%s]", aUrl.get());
+
+  return NS_OK;
 }
+
 }  // namespace dom
 }  // namespace mozilla

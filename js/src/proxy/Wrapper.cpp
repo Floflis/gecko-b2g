@@ -8,6 +8,7 @@
 
 #include "jsexn.h"
 
+#include "js/CallAndConstruct.h"      // JS::Construct, JS::IsConstructor
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/friend/WindowProxy.h"    // js::IsWindowProxy
 #include "js/Object.h"                // JS::GetBuiltinClass
@@ -47,7 +48,7 @@ bool Wrapper::finalizeInBackground(const Value& priv) const {
 
 bool ForwardingProxyHandler::getOwnPropertyDescriptor(
     JSContext* cx, HandleObject proxy, HandleId id,
-    MutableHandle<PropertyDescriptor> desc) const {
+    MutableHandle<mozilla::Maybe<PropertyDescriptor>> desc) const {
   assertEnteredPolicy(cx, proxy, id, GET | SET | GET_PROPERTY_DESCRIPTOR);
   RootedObject target(cx, proxy->as<ProxyObject>().target());
   return GetOwnPropertyDescriptor(cx, target, id, desc);
@@ -285,19 +286,6 @@ JSObject* Wrapper::New(JSContext* cx, JSObject* obj, const Wrapper* handler,
   return NewProxyObject(cx, handler, priv, options.proto(), options);
 }
 
-JSObject* Wrapper::NewSingleton(JSContext* cx, JSObject* obj,
-                                const Wrapper* handler,
-                                const WrapperOptions& options) {
-  // If this is a cross-compartment wrapper allocate it in the compartment's
-  // first global. See Compartment::globalForNewCCW.
-  mozilla::Maybe<AutoRealm> ar;
-  if (handler->isCrossCompartmentWrapper()) {
-    ar.emplace(cx, &cx->compartment()->globalForNewCCW());
-  }
-  RootedValue priv(cx, ObjectValue(*obj));
-  return NewProxyObject(cx, handler, priv, options.proto(), options);
-}
-
 JSObject* Wrapper::Renew(JSObject* existing, JSObject* obj,
                          const Wrapper* handler) {
   existing->as<ProxyObject>().renew(handler, ObjectValue(*obj));
@@ -332,7 +320,7 @@ JSObject* Wrapper::wrappedObject(JSObject* wrapper) {
   return target;
 }
 
-JS_FRIEND_API JSObject* js::UncheckedUnwrapWithoutExpose(JSObject* wrapped) {
+JS_PUBLIC_API JSObject* js::UncheckedUnwrapWithoutExpose(JSObject* wrapped) {
   while (true) {
     if (!wrapped->is<WrapperObject>() || MOZ_UNLIKELY(IsWindowProxy(wrapped))) {
       break;
@@ -348,7 +336,7 @@ JS_FRIEND_API JSObject* js::UncheckedUnwrapWithoutExpose(JSObject* wrapped) {
   return wrapped;
 }
 
-JS_FRIEND_API JSObject* js::UncheckedUnwrap(JSObject* wrapped,
+JS_PUBLIC_API JSObject* js::UncheckedUnwrap(JSObject* wrapped,
                                             bool stopAtWindowProxy,
                                             unsigned* flagsp) {
   MOZ_ASSERT(!JS::RuntimeHeapIsCollecting());
@@ -369,7 +357,7 @@ JS_FRIEND_API JSObject* js::UncheckedUnwrap(JSObject* wrapped,
   return wrapped;
 }
 
-JS_FRIEND_API JSObject* js::CheckedUnwrapStatic(JSObject* obj) {
+JS_PUBLIC_API JSObject* js::CheckedUnwrapStatic(JSObject* obj) {
   while (true) {
     JSObject* wrapper = obj;
     obj = UnwrapOneCheckedStatic(obj);
@@ -379,7 +367,7 @@ JS_FRIEND_API JSObject* js::CheckedUnwrapStatic(JSObject* obj) {
   }
 }
 
-JS_FRIEND_API JSObject* js::UnwrapOneCheckedStatic(JSObject* obj) {
+JS_PUBLIC_API JSObject* js::UnwrapOneCheckedStatic(JSObject* obj) {
   MOZ_ASSERT(!JS::RuntimeHeapIsCollecting());
   MOZ_ASSERT(CurrentThreadCanAccessRuntime(obj->runtimeFromAnyThread()));
 
@@ -395,7 +383,7 @@ JS_FRIEND_API JSObject* js::UnwrapOneCheckedStatic(JSObject* obj) {
   return handler->hasSecurityPolicy() ? nullptr : Wrapper::wrappedObject(obj);
 }
 
-JS_FRIEND_API JSObject* js::CheckedUnwrapDynamic(JSObject* obj, JSContext* cx,
+JS_PUBLIC_API JSObject* js::CheckedUnwrapDynamic(JSObject* obj, JSContext* cx,
                                                  bool stopAtWindowProxy) {
   RootedObject wrapper(cx, obj);
   while (true) {
@@ -408,7 +396,7 @@ JS_FRIEND_API JSObject* js::CheckedUnwrapDynamic(JSObject* obj, JSContext* cx,
   }
 }
 
-JS_FRIEND_API JSObject* js::UnwrapOneCheckedDynamic(HandleObject obj,
+JS_PUBLIC_API JSObject* js::UnwrapOneCheckedDynamic(HandleObject obj,
                                                     JSContext* cx,
                                                     bool stopAtWindowProxy) {
   MOZ_ASSERT(!JS::RuntimeHeapIsCollecting());

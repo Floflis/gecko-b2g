@@ -5,6 +5,7 @@
   <title>Various mouse tests that spawn in new windows</title>
   <script src="/tests/SimpleTest/SimpleTest.js"></script>
   <script type="application/javascript" src="apz_test_utils.js"></script>
+  <script type="application/javascript" src="apz_test_native_event_utils.js"></script>
   <link rel="stylesheet" type="text/css" href="/tests/SimpleTest/test.css"/>
   <script type="application/javascript">
 
@@ -44,7 +45,17 @@ var subtests = [
   {"file": "helper_visualscroll_nonrcd_rsf.html"},
   // Scrollbar-dragging on scrollframes inside nested transforms with scale
   {"file": "helper_bug1662800.html"},
+  // Scrollbar-dragging on subframe with enclosing translation transform
+  {"file": "helper_drag_bug1719913.html"},
 ];
+
+// Android, mac, and linux (at least in our automation) do not have scrollbar buttons.
+if (getPlatform() == "windows") {
+  subtests.push(
+    // Basic test that click and hold on a scrollbar button works as expected
+    { file: "helper_scrollbarbutton_repeat.html", "prefs": [["general.smoothScroll", false]] }
+  );
+}
 
 if (isApzEnabled()) {
   SimpleTest.waitForExplicitFinish();

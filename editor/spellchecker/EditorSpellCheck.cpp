@@ -10,11 +10,13 @@
 #include "mozilla/EditorBase.h"   // for EditorBase
 #include "mozilla/HTMLEditor.h"   // for HTMLEditor
 #include "mozilla/dom/Element.h"  // for Element
+#include "mozilla/dom/Promise.h"
 #include "mozilla/dom/Selection.h"
 #include "mozilla/dom/StaticRange.h"
 #include "mozilla/intl/LocaleService.h"    // for retrieving app locale
 #include "mozilla/intl/MozLocale.h"        // for mozilla::intl::Locale
 #include "mozilla/intl/OSPreferences.h"    // for mozilla::intl::OSPreferences
+#include "mozilla/Logging.h"               // for mozilla::LazyLogModule
 #include "mozilla/mozalloc.h"              // for operator delete, etc
 #include "mozilla/mozSpellChecker.h"       // for mozSpellChecker
 #include "mozilla/Preferences.h"           // for Preferences
@@ -49,6 +51,8 @@ namespace mozilla {
 using namespace dom;
 using intl::LocaleService;
 using intl::OSPreferences;
+
+static mozilla::LazyLogModule sEditorSpellChecker("EditorSpellChecker");
 
 class UpdateDictionaryHolder {
  private:
@@ -410,6 +414,8 @@ EditorSpellCheck::InitSpellChecker(nsIEditor* aEditor,
 
 NS_IMETHODIMP
 EditorSpellCheck::GetNextMisspelledWord(nsAString& aNextMisspelledWord) {
+  MOZ_LOG(sEditorSpellChecker, LogLevel::Debug, ("%s", __FUNCTION__));
+
   NS_ENSURE_TRUE(mSpellChecker, NS_ERROR_NOT_INITIALIZED);
 
   DeleteSuggestedWordList();
@@ -441,6 +447,36 @@ EditorSpellCheck::CheckCurrentWord(const nsAString& aSuggestedWord,
   DeleteSuggestedWordList();
   return mSpellChecker->CheckWord(aSuggestedWord, aIsMisspelled,
                                   &mSuggestedWordList);
+}
+
+NS_IMETHODIMP
+EditorSpellCheck::Suggest(const nsAString& aSuggestedWord, uint32_t aCount,
+                          JSContext* aCx, Promise** aPromise) {
+  NS_ENSURE_TRUE(mSpellChecker, NS_ERROR_NOT_INITIALIZED);
+
+  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
+  if (NS_WARN_IF(!globalObject)) {
+    return NS_ERROR_UNEXPECTED;
+  }
+
+  ErrorResult result;
+  RefPtr<Promise> promise = Promise::Create(globalObject, result);
+  if (NS_WARN_IF(result.Failed())) {
+    return result.StealNSResult();
+  }
+
+  mSpellChecker->Suggest(aSuggestedWord, aCount)
+      ->Then(
+          GetMainThreadSerialEventTarget(), __func__,
+          [promise](const CopyableTArray<nsString>& aSuggestions) {
+            promise->MaybeResolve(aSuggestions);
+          },
+          [promise](nsresult aError) {
+            promise->MaybeReject(NS_ERROR_FAILURE);
+          });
+
+  promise.forget(aPromise);
+  return NS_OK;
 }
 
 RefPtr<CheckWordPromise> EditorSpellCheck::CheckCurrentWordsNoSuggest(
@@ -623,8 +659,7 @@ EditorSpellCheck::UpdateCurrentDictionary(
 
   // Get language with html5 algorithm
   nsCOMPtr<nsIContent> rootContent;
-  HTMLEditor* htmlEditor = mEditor->AsHTMLEditor();
-  if (htmlEditor) {
+  if (HTMLEditor* htmlEditor = mEditor->GetAsHTMLEditor()) {
     if (flags & nsIEditor::eEditorMailMask) {
       // Always determine the root content for a mail editor,
       // even if not focused, to enable further processing below.

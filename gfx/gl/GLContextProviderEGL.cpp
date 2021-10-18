@@ -7,7 +7,7 @@
 #  define GET_NATIVE_WINDOW_FROM_REAL_WIDGET(aWidget) \
     ((EGLNativeWindowType)aWidget->GetNativeData(NS_NATIVE_EGL_WINDOW))
 #  define GET_NATIVE_WINDOW_FROM_COMPOSITOR_WIDGET(aWidget) \
-    (aWidget->AsX11()->GetEGLNativeWindow())
+    (aWidget->AsGTK()->GetEGLNativeWindow())
 #elif defined(MOZ_WIDGET_ANDROID)
 #  define GET_NATIVE_WINDOW_FROM_REAL_WIDGET(aWidget) \
     ((EGLNativeWindowType)aWidget->GetNativeData(NS_JAVA_SURFACE))
@@ -60,7 +60,6 @@
 #  error "Platform not recognized"
 #endif
 
-#include "gfxASurface.h"
 #include "gfxCrashReporterUtils.h"
 #include "gfxFailure.h"
 #include "gfxPlatform.h"
@@ -83,35 +82,16 @@
 #include "nsIWidget.h"
 #include "nsThreadUtils.h"
 #include "ScopedGLHelpers.h"
-#include "TextureImageEGL.h"
 
 #if defined(MOZ_WIDGET_GTK)
 #  include "mozilla/widget/GtkCompositorWidget.h"
+#  include "mozilla/WidgetUtilsGtk.h"
 #  if defined(MOZ_WAYLAND)
-#    include <dlfcn.h>
 #    include <gdk/gdkwayland.h>
 #    include <wayland-egl.h>
 #    define MOZ_GTK_WAYLAND 1
 #  endif
 #endif
-
-inline bool IsWaylandDisplay() {
-#ifdef MOZ_GTK_WAYLAND
-  return gdk_display_get_default() &&
-         GDK_IS_WAYLAND_DISPLAY(gdk_display_get_default());
-#else
-  return false;
-#endif
-}
-
-inline bool IsX11Display() {
-#ifdef MOZ_WIDGET_GTK
-  return gdk_display_get_default() &&
-         GDK_IS_X11_DISPLAY(gdk_display_get_default());
-#else
-  return false;
-#endif
-}
 
 struct wl_egl_window;
 
@@ -134,24 +114,26 @@ class WaylandGLSurface {
   struct wl_egl_window* mEGLWindow;
 };
 
-static nsDataHashtable<nsPtrHashKey<void>, WaylandGLSurface*> sWaylandGLSurface;
+static nsTHashMap<nsPtrHashKey<void>, WaylandGLSurface*> sWaylandGLSurface;
 
 void DeleteWaylandGLSurface(EGLSurface surface) {
+#  ifdef MOZ_GTK_WAYLAND
   // We're running on Wayland which means our EGLSurface may
   // have attached Wayland backend data which must be released.
-  if (IsWaylandDisplay()) {
+  if (GdkIsWaylandDisplay()) {
     auto entry = sWaylandGLSurface.Lookup(surface);
     if (entry) {
       delete entry.Data();
       entry.Remove();
     }
   }
+#  endif
 }
 #endif
 
 static bool CreateConfigScreen(EglDisplay&, EGLConfig* const aConfig,
                                const bool aEnableDepthBuffer,
-                               const bool aUseGles, int aVisual = 0);
+                               const bool aUseGles);
 
 // append three zeros at the end of attribs list to work around
 // EGL implementation bugs that iterate until they find 0, instead of
@@ -251,10 +233,10 @@ static EGLSurface CreateSurfaceFromNativeWindow(
 class GLContextEGLFactory {
  public:
   static already_AddRefed<GLContext> Create(EGLNativeWindowType aWindow,
-                                            bool aWebRender, int32_t aDepth);
+                                            bool aHardwareWebRender);
   static already_AddRefed<GLContext> CreateImpl(EGLNativeWindowType aWindow,
-                                                bool aWebRender, bool aUseGles,
-                                                int32_t aDepth);
+                                                bool aHardwareWebRender,
+                                                bool aUseGles);
 
  private:
   GLContextEGLFactory() = default;
@@ -262,8 +244,7 @@ class GLContextEGLFactory {
 };
 
 already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
-    EGLNativeWindowType aWindow, bool aWebRender, bool aUseGles,
-    int32_t aDepth) {
+    EGLNativeWindowType aWindow, bool aHardwareWebRender, bool aUseGles) {
   nsCString failureId;
   const auto lib = gl::DefaultEglLibrary(&failureId);
   if (!lib) {
@@ -277,49 +258,28 @@ already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
     return nullptr;
   }
 
-  int visualID = 0;
-  if (IsX11Display()) {
-#ifdef MOZ_X11
-    GdkDisplay* gdkDisplay = gdk_display_get_default();
-    auto display = gdkDisplay ? GDK_DISPLAY_XDISPLAY(gdkDisplay) : nullptr;
-    if (display) {
-      XWindowAttributes windowAttrs;
-      if (!XGetWindowAttributes(display, (Window)aWindow, &windowAttrs)) {
-        NS_WARNING("[EGL] XGetWindowAttributes() failed");
-        return nullptr;
-      }
-      visualID = XVisualIDFromVisual(windowAttrs.visual);
-    }
-#endif
-  }
-
   bool doubleBuffered = true;
 
   EGLConfig config;
-  if (aWebRender && egl->mLib->IsANGLE()) {
+  if (aHardwareWebRender && egl->mLib->IsANGLE()) {
     // Force enable alpha channel to make sure ANGLE use correct framebuffer
     // formart
     const int bpp = 32;
-    const bool withDepth = true;
-    if (!CreateConfig(*egl, &config, bpp, withDepth, aUseGles)) {
+    if (!CreateConfig(*egl, &config, bpp, false, aUseGles)) {
       gfxCriticalNote << "Failed to create EGLConfig for WebRender ANGLE!";
       return nullptr;
     }
+  } else if (kIsWayland || kIsX11) {
+    const int bpp = 32;
+    if (!CreateConfig(*egl, &config, bpp, false, aUseGles)) {
+      gfxCriticalNote << "Failed to create EGLConfig for WebRender!";
+      return nullptr;
+    }
   } else {
-    if (aDepth) {
-      if (!CreateConfig(*egl, &config, aDepth, aWebRender, aUseGles,
-                        visualID)) {
-        gfxCriticalNote
-            << "Failed to create EGLConfig for WebRender with depth!";
-        return nullptr;
-      }
-    } else {
-      if (!CreateConfigScreen(*egl, &config,
-                              /* aEnableDepthBuffer */ aWebRender, aUseGles,
-                              visualID)) {
-        gfxCriticalNote << "Failed to create EGLConfig!";
-        return nullptr;
-      }
+    if (!CreateConfigScreen(*egl, &config,
+                            /* aEnableDepthBuffer */ false, aUseGles)) {
+      gfxCriticalNote << "Failed to create EGLConfig!";
+      return nullptr;
     }
   }
 
@@ -332,13 +292,14 @@ already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
   }
 
   CreateContextFlags flags = CreateContextFlags::NONE;
-  if (aWebRender && StaticPrefs::gfx_webrender_prefer_robustness_AtStartup()) {
+  if (aHardwareWebRender &&
+      StaticPrefs::gfx_webrender_prefer_robustness_AtStartup()) {
     flags |= CreateContextFlags::PREFER_ROBUSTNESS;
   }
-  if (aWebRender && aUseGles) {
+  if (aHardwareWebRender && aUseGles) {
     flags |= CreateContextFlags::PREFER_ES3;
   }
-  if (!aWebRender) {
+  if (!aHardwareWebRender) {
     flags |= CreateContextFlags::REQUIRE_COMPAT_PROFILE;
   }
 
@@ -355,11 +316,13 @@ already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
   gl->MakeCurrent();
   gl->SetIsDoubleBuffered(doubleBuffered);
 
-  if (surface && IsWaylandDisplay()) {
+#ifdef MOZ_GTK_WAYLAND
+  if (surface && GdkIsWaylandDisplay()) {
     // Make eglSwapBuffers() non-blocking on wayland
     egl->fSwapInterval(0);
   }
-  if (aWebRender && egl->mLib->IsANGLE()) {
+#endif
+  if (aHardwareWebRender && egl->mLib->IsANGLE()) {
     MOZ_ASSERT(doubleBuffered);
     egl->fSwapInterval(0);
   }
@@ -367,14 +330,14 @@ already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
 }
 
 already_AddRefed<GLContext> GLContextEGLFactory::Create(
-    EGLNativeWindowType aWindow, bool aWebRender, int32_t aDepth) {
+    EGLNativeWindowType aWindow, bool aHardwareWebRender) {
   RefPtr<GLContext> glContext;
 #if !defined(MOZ_WIDGET_ANDROID)
-  glContext = CreateImpl(aWindow, aWebRender, /* aUseGles */ false, aDepth);
+  glContext = CreateImpl(aWindow, aHardwareWebRender, /* aUseGles */ false);
 #endif  // !defined(MOZ_WIDGET_ANDROID)
 
   if (!glContext) {
-    glContext = CreateImpl(aWindow, aWebRender, /* aUseGles */ true, aDepth);
+    glContext = CreateImpl(aWindow, aHardwareWebRender, /* aUseGles */ true);
   }
   return glContext.forget();
 }
@@ -538,10 +501,12 @@ bool GLContextEGL::RenewSurface(CompositorWidget* aWidget) {
   }
   const bool ok = MakeCurrent(true);
   MOZ_ASSERT(ok);
-  if (mSurface && IsWaylandDisplay()) {
+#ifdef MOZ_GTK_WAYLAND
+  if (mSurface && GdkIsWaylandDisplay()) {
     // Make eglSwapBuffers() non-blocking on wayland
     mEgl->fSwapInterval(0);
   }
+#endif
   return ok;
 }
 
@@ -608,10 +573,6 @@ void GLContextEGL::GetWSIInfo(nsCString* const out) const {
       (const char*)mEgl->mLib->fQueryString(nullptr, LOCAL_EGL_EXTENSIONS));
 #endif
 }
-
-// hold a reference to the given surface
-// for the lifetime of this context.
-void GLContextEGL::HoldSurface(gfxASurface* aSurf) { mThebesSurface = aSurf; }
 
 bool GLContextEGL::HasExtBufferAge() const {
   return mEgl->IsExtensionSupported(EGLExtension::EXT_buffer_age);
@@ -876,9 +837,9 @@ EGLSurface GLContextEGL::CreateWaylandBufferSurface(
       config, reinterpret_cast<EGLNativeWindowType>(eglwindow), 0);
   if (surface) {
 #ifdef MOZ_GTK_WAYLAND
-    WaylandGLSurface* waylandData = new WaylandGLSurface(wlsurface, eglwindow);
-    auto entry = sWaylandGLSurface.LookupForAdd(surface);
-    entry.OrInsert([&waylandData]() { return waylandData; });
+    MOZ_ASSERT(!sWaylandGLSurface.Contains(surface));
+    sWaylandGLSurface.LookupOrInsert(
+        surface, new WaylandGLSurface(wlsurface, eglwindow));
 #endif
   }
 
@@ -906,13 +867,13 @@ static const EGLint kEGLConfigAttribsRGBA32[] = {
     LOCAL_EGL_BLUE_SIZE,    8,
     LOCAL_EGL_ALPHA_SIZE,   8};
 
-bool CreateConfig(EglDisplay& egl, EGLConfig* aConfig, int32_t depth,
-                  bool aEnableDepthBuffer, bool aUseGles, int aVisual) {
+bool CreateConfig(EglDisplay& aEgl, EGLConfig* aConfig, int32_t aDepth,
+                  bool aEnableDepthBuffer, bool aUseGles, bool aAllowFallback) {
   EGLConfig configs[64];
   std::vector<EGLint> attribs;
   EGLint ncfg = ArrayLength(configs);
 
-  switch (depth) {
+  switch (aDepth) {
     case 16:
       for (const auto& cur : kEGLConfigAttribsRGB16) {
         attribs.push_back(cur);
@@ -941,7 +902,7 @@ bool CreateConfig(EglDisplay& egl, EGLConfig* aConfig, int32_t depth,
     attribs.push_back(cur);
   }
 
-  if (!egl.fChooseConfig(attribs.data(), configs, ncfg, &ncfg) || ncfg < 1) {
+  if (!aEgl.fChooseConfig(attribs.data(), configs, ncfg, &ncfg) || ncfg < 1) {
     return false;
   }
 
@@ -950,38 +911,49 @@ bool CreateConfig(EglDisplay& egl, EGLConfig* aConfig, int32_t depth,
   for (int j = 0; j < ncfg; ++j) {
     EGLConfig config = configs[j];
     EGLint r, g, b, a;
-    if (egl.fGetConfigAttrib(config, LOCAL_EGL_RED_SIZE, &r) &&
-        egl.fGetConfigAttrib(config, LOCAL_EGL_GREEN_SIZE, &g) &&
-        egl.fGetConfigAttrib(config, LOCAL_EGL_BLUE_SIZE, &b) &&
-        egl.fGetConfigAttrib(config, LOCAL_EGL_ALPHA_SIZE, &a) &&
-        ((depth == 16 && r == 5 && g == 6 && b == 5) ||
-         (depth == 24 && r == 8 && g == 8 && b == 8) ||
-         (depth == 32 && r == 8 && g == 8 && b == 8 && a == 8))) {
+    if (aEgl.fGetConfigAttrib(config, LOCAL_EGL_RED_SIZE, &r) &&
+        aEgl.fGetConfigAttrib(config, LOCAL_EGL_GREEN_SIZE, &g) &&
+        aEgl.fGetConfigAttrib(config, LOCAL_EGL_BLUE_SIZE, &b) &&
+        aEgl.fGetConfigAttrib(config, LOCAL_EGL_ALPHA_SIZE, &a) &&
+        ((aDepth == 16 && r == 5 && g == 6 && b == 5) ||
+         (aDepth == 24 && r == 8 && g == 8 && b == 8) ||
+         (aDepth == 32 && r == 8 && g == 8 && b == 8 && a == 8))) {
       EGLint z;
       if (aEnableDepthBuffer) {
-        if (!egl.fGetConfigAttrib(config, LOCAL_EGL_DEPTH_SIZE, &z) ||
+        if (!aEgl.fGetConfigAttrib(config, LOCAL_EGL_DEPTH_SIZE, &z) ||
             z != 24) {
           continue;
         }
       }
-      if (kIsX11 && aVisual) {
-        int vis;
-        if (!egl.fGetConfigAttrib(config, LOCAL_EGL_NATIVE_VISUAL_ID, &vis) ||
-            aVisual != vis) {
-          if (!fallbackConfig) {
+#ifdef MOZ_X11
+      if (GdkIsX11Display()) {
+        int configVisualID;
+        if (!aEgl.fGetConfigAttrib(config, LOCAL_EGL_NATIVE_VISUAL_ID,
+                                   &configVisualID)) {
+          continue;
+        }
+
+        XVisualInfo visual_info_template, *visual_info;
+        int num_visuals;
+
+        visual_info_template.visualid = configVisualID;
+        visual_info =
+            XGetVisualInfo(GDK_DISPLAY_XDISPLAY(gdk_display_get_default()),
+                           VisualIDMask, &visual_info_template, &num_visuals);
+
+        if (!visual_info || visual_info->depth != aDepth) {
+          if (aAllowFallback && !fallbackConfig) {
             fallbackConfig = Some(config);
           }
           continue;
         }
       }
+#endif
       *aConfig = config;
       return true;
     }
   }
 
-  // We don't have a frame buffer X11 visual which matches the EGL visual
-  // from GLContextEGL::FindVisual(). Let's try to use the fallback one and hope
-  // we're not on NVIDIA (Bug 1478454) as it causes X11 BadMatch error there.
   if (kIsX11 && fallbackConfig) {
     *aConfig = fallbackConfig.value();
     return true;
@@ -995,13 +967,11 @@ bool CreateConfig(EglDisplay& egl, EGLConfig* aConfig, int32_t depth,
 //
 // NB: It's entirely legal for the returned EGLConfig to be valid yet
 // have the value null.
-// aVisual is used in Linux only.
 static bool CreateConfigScreen(EglDisplay& egl, EGLConfig* const aConfig,
                                const bool aEnableDepthBuffer,
-                               const bool aUseGles, int aVisual) {
+                               const bool aUseGles) {
   int32_t depth = gfxVars::ScreenDepth();
-  if (CreateConfig(egl, aConfig, depth, aEnableDepthBuffer, aUseGles,
-                   aVisual)) {
+  if (CreateConfig(egl, aConfig, depth, aEnableDepthBuffer, aUseGles)) {
     return true;
   }
 #ifdef MOZ_WIDGET_ANDROID
@@ -1020,17 +990,13 @@ static bool CreateConfigScreen(EglDisplay& egl, EGLConfig* const aConfig,
 }
 
 already_AddRefed<GLContext> GLContextProviderEGL::CreateForCompositorWidget(
-    CompositorWidget* aCompositorWidget, bool aWebRender,
+    CompositorWidget* aCompositorWidget, bool aHardwareWebRender,
     bool /*aForceAccelerated*/) {
   EGLNativeWindowType window = nullptr;
-  int32_t depth = 0;
   if (aCompositorWidget) {
     window = GET_NATIVE_WINDOW_FROM_COMPOSITOR_WIDGET(aCompositorWidget);
-#if defined(MOZ_WIDGET_GTK)
-    depth = aCompositorWidget->AsX11()->GetDepth();
-#endif
   }
-  return GLContextEGLFactory::Create(window, aWebRender, depth);
+  return GLContextEGLFactory::Create(window, aHardwareWebRender);
 }
 
 EGLSurface GLContextEGL::CreateCompatibleSurface(void* aWindow) const {
@@ -1064,11 +1030,14 @@ EGLSurface GLContextEGL::CreateCompatibleSurface(void* aWindow) const {
 
 static void FillContextAttribs(bool es3, bool useGles, nsTArray<EGLint>* out) {
   out->AppendElement(LOCAL_EGL_SURFACE_TYPE);
-  if (IsWaylandDisplay()) {
+#ifdef MOZ_GTK_WAYLAND
+  if (GdkIsWaylandDisplay()) {
     // Wayland on desktop does not support PBuffer or FBO.
     // We create a dummy wl_egl_window instead.
     out->AppendElement(LOCAL_EGL_WINDOW_BIT);
-  } else {
+  } else
+#endif
+  {
     out->AppendElement(LOCAL_EGL_PBUFFER_BIT);
   }
 
@@ -1142,8 +1111,7 @@ static EGLConfig ChooseConfig(EglDisplay& egl, const GLContextCreateDesc& desc,
 
 #ifdef MOZ_X11
 /* static */
-bool GLContextEGL::FindVisual(bool aUseWebRender, bool useAlpha,
-                              int* const out_visualId) {
+bool GLContextEGL::FindVisual(int* const out_visualId) {
   nsCString discardFailureId;
   const auto egl = DefaultEglDisplay(&discardFailureId);
   if (!egl) {
@@ -1153,10 +1121,11 @@ bool GLContextEGL::FindVisual(bool aUseWebRender, bool useAlpha,
   }
 
   EGLConfig config;
-  const int bpp = useAlpha ? 32 : 24;
-  if (!CreateConfig(*egl, &config, bpp, aUseWebRender, /* aUseGles */ false)) {
-    gfxCriticalNote
-        << "GLContextEGL::FindVisual(): Failed to create EGLConfig!";
+  const int bpp = 32;
+  if (!CreateConfig(*egl, &config, bpp, /* aEnableDepthBuffer */ false,
+                    /* aUseGles */ false, /* aAllowFallback */ false)) {
+    // We are on a buggy driver. Do not return a visual so a fallback path can
+    // be used. See https://gitlab.freedesktop.org/mesa/mesa/-/issues/149
     return false;
   }
   if (egl->fGetConfigAttrib(config, LOCAL_EGL_NATIVE_VISUAL_ID, out_visualId)) {
@@ -1184,9 +1153,12 @@ RefPtr<GLContextEGL> GLContextEGL::CreateEGLPBufferOffscreenContextImpl(
 
   mozilla::gfx::IntSize pbSize(size);
   EGLSurface surface = nullptr;
-  if (IsWaylandDisplay()) {
+#ifdef MOZ_GTK_WAYLAND
+  if (GdkIsWaylandDisplay()) {
     surface = GLContextEGL::CreateWaylandBufferSurface(*egl, config, pbSize);
-  } else {
+  } else
+#endif
+  {
     surface = GLContextEGL::CreatePBufferSurfaceTryingPowerOfTwo(
         *egl, config, LOCAL_EGL_NONE, pbSize);
   }

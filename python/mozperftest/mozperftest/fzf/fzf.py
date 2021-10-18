@@ -9,7 +9,6 @@ import json
 
 from mozterm import Terminal
 from mozboot.util import get_state_dir
-from mozbuild.util import ensure_subprocess_env
 from distutils.spawn import find_executable
 
 
@@ -45,7 +44,7 @@ def run_fzf(cmd, tasks):
         cmd,
         stdout=subprocess.PIPE,
         stdin=subprocess.PIPE,
-        env=ensure_subprocess_env(env),
+        env=env,
         universal_newlines=True,
     )
     out = proc.communicate("\n".join(tasks))[0].splitlines()
@@ -93,7 +92,13 @@ def select(test_objects):
         return f"[{flavor}] {path.name} in {location}"
 
     candidate_tasks = [_display(t) for t in test_objects]
-    fzf_bin = find_executable("fzf", str(Path(get_state_dir(), "fzf", "bin")))
+
+    fzf_bin = find_executable(
+        "fzf", str(Path(get_state_dir(), "fzf", "bin"))
+    ) or find_executable("fzf")
+    if not fzf_bin:
+        raise AssertionError("Unable to find fzf")
+
     key_shortcuts = [k + ":" + v for k, v in fzf_shortcuts.items()]
 
     base_cmd = [

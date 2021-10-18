@@ -32,35 +32,18 @@ namespace jit {
 
 class Requirement {
  public:
-  enum Kind { NONE, REGISTER, FIXED, MUST_REUSE_INPUT };
+  enum Kind { NONE, REGISTER, FIXED };
 
   Requirement() : kind_(NONE) {}
 
   explicit Requirement(Kind kind) : kind_(kind) {
-    // These have dedicated constructors.
-    MOZ_ASSERT(kind != FIXED && kind != MUST_REUSE_INPUT);
-  }
-
-  Requirement(Kind kind, CodePosition at) : kind_(kind), position_(at) {
-    // These have dedicated constructors.
-    MOZ_ASSERT(kind != FIXED && kind != MUST_REUSE_INPUT);
+    // FIXED has a dedicated constructor.
+    MOZ_ASSERT(kind != FIXED);
   }
 
   explicit Requirement(LAllocation fixed) : kind_(FIXED), allocation_(fixed) {
     MOZ_ASSERT(!fixed.isBogus() && !fixed.isUse());
   }
-
-  // Only useful as a hint, encodes where the fixed requirement is used to
-  // avoid allocating a fixed register too early.
-  Requirement(LAllocation fixed, CodePosition at)
-      : kind_(FIXED), allocation_(fixed), position_(at) {
-    MOZ_ASSERT(!fixed.isBogus() && !fixed.isUse());
-  }
-
-  Requirement(uint32_t vreg, CodePosition at)
-      : kind_(MUST_REUSE_INPUT),
-        allocation_(LUse(vreg, LUse::ANY)),
-        position_(at) {}
 
   Kind kind() const { return kind_; }
 
@@ -69,18 +52,9 @@ class Requirement {
     return allocation_;
   }
 
-  uint32_t virtualRegister() const {
-    MOZ_ASSERT(allocation_.isUse());
-    MOZ_ASSERT(kind() == MUST_REUSE_INPUT);
-    return allocation_.toUse()->virtualRegister();
-  }
-
-  CodePosition pos() const { return position_; }
-
   [[nodiscard]] bool merge(const Requirement& newRequirement) {
     // Merge newRequirement with any existing requirement, returning false
     // if the new and old requirements conflict.
-    MOZ_ASSERT(newRequirement.kind() != Requirement::MUST_REUSE_INPUT);
 
     if (newRequirement.kind() == Requirement::FIXED) {
       if (kind() == Requirement::FIXED) {
@@ -102,7 +76,6 @@ class Requirement {
  private:
   Kind kind_;
   LAllocation allocation_;
-  CodePosition position_;
 };
 
 struct UsePosition : public TempObject,
@@ -201,6 +174,7 @@ using UsePositionIterator = InlineForwardListIterator<UsePosition>;
 // These smaller bundles are then allocated independently.
 
 class LiveBundle;
+class VirtualRegister;
 
 class LiveRange : public TempObject {
  public:
@@ -246,9 +220,9 @@ class LiveRange : public TempObject {
   };
 
  private:
-  // The virtual register this range is for, or zero if this does not have a
+  // The virtual register this range is for, or nullptr if this does not have a
   // virtual register (for example, it is in the callRanges bundle).
-  uint32_t vreg_;
+  VirtualRegister* vreg_;
 
   // The bundle containing this range, null if liveness information is being
   // constructed and we haven't started allocating bundles yet.
@@ -273,7 +247,7 @@ class LiveRange : public TempObject {
   // Whether this range contains the virtual register's definition.
   bool hasDefinition_;
 
-  LiveRange(uint32_t vreg, Range range)
+  LiveRange(VirtualRegister* vreg, Range range)
       : vreg_(vreg),
         bundle_(nullptr),
         range_(range),
@@ -289,16 +263,16 @@ class LiveRange : public TempObject {
   void noteRemovedUse(UsePosition* use);
 
  public:
-  static LiveRange* FallibleNew(TempAllocator& alloc, uint32_t vreg,
+  static LiveRange* FallibleNew(TempAllocator& alloc, VirtualRegister* vreg,
                                 CodePosition from, CodePosition to) {
     return new (alloc.fallible()) LiveRange(vreg, Range(from, to));
   }
 
-  uint32_t vreg() const {
+  VirtualRegister& vreg() const {
     MOZ_ASSERT(hasVreg());
-    return vreg_;
+    return *vreg_;
   }
-  bool hasVreg() const { return vreg_ != 0; }
+  bool hasVreg() const { return vreg_ != nullptr; }
 
   LiveBundle* bundle() const { return bundle_; }
 
@@ -430,7 +404,7 @@ class LiveBundle : public TempObject {
     ranges_.removeAndIncrement(iter);
   }
   void addRange(LiveRange* range);
-  [[nodiscard]] bool addRange(TempAllocator& alloc, uint32_t vreg,
+  [[nodiscard]] bool addRange(TempAllocator& alloc, VirtualRegister* vreg,
                               CodePosition from, CodePosition to);
   [[nodiscard]] bool addRangeAndDistributeUses(TempAllocator& alloc,
                                                LiveRange* oldRange,
@@ -683,6 +657,9 @@ class BacktrackingAllocator : protected RegisterAllocator {
                                          LiveBundle* bundle, bool* success,
                                          bool* pfixed,
                                          LiveBundleVector& conflicting);
+  [[nodiscard]] bool tryAllocateAnyRegister(LiveBundle* bundle, bool* success,
+                                            bool* pfixed,
+                                            LiveBundleVector& conflicting);
   [[nodiscard]] bool evictBundle(LiveBundle* bundle);
   [[nodiscard]] bool splitAndRequeueBundles(LiveBundle* bundle,
                                             const LiveBundleVector& newBundles);

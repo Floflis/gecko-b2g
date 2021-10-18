@@ -478,15 +478,10 @@ add_task(async function pickingTipDoesNotDisableOtherKinds() {
 add_task(async function notification() {
   await BrowserTestUtils.withNewTab("about:blank", async () => {
     let box = gBrowser.getNotificationBox();
-    let note = box.appendNotification(
-      "Test",
-      "urlbar-test",
-      null,
-      box.PRIORITY_INFO_HIGH,
-      null,
-      null,
-      null
-    );
+    let note = box.appendNotification("urlbar-test", {
+      label: "Test",
+      priority: box.PRIORITY_INFO_HIGH,
+    });
     // Give it a big persistence so it doesn't go away on page load.
     note.persistence = 100;
     await withDNSRedirect("www.google.com", "/", async url => {
@@ -542,19 +537,18 @@ add_task(async function pasteAndGo_url() {
 
 add_task(async function pasteAndGo_nonURL() {
   // Add a mock engine so we don't hit the network loading the SERP.
-  let engine = await Services.search.addEngineWithDetails("Test", {
-    template: "http://example.com/?search={searchTerms}",
-  });
+  await SearchTestUtils.installSearchExtension();
+
+  let engine = Services.search.getEngineByName("Example");
   let oldDefaultEngine = await Services.search.getDefault();
   Services.search.setDefault(engine);
 
   await doPasteAndGoTest(
     "pasteAndGo_nonURL",
-    "http://example.com/?search=pasteAndGo_nonURL"
+    "https://example.com/?q=pasteAndGo_nonURL"
   );
 
   Services.search.setDefault(oldDefaultEngine);
-  await Services.search.removeEngine(engine);
 });
 
 async function doPasteAndGoTest(searchString, expectedURL) {
@@ -585,7 +579,7 @@ async function doPasteAndGoTest(searchString, expectedURL) {
     false,
     expectedURL
   );
-  EventUtils.synthesizeMouseAtCenter(menuitem, {});
+  cxmenu.activateItem(menuitem);
   await browserLoadedPromise;
   BrowserTestUtils.removeTab(tab);
   resetSearchTipsProvider();

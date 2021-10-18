@@ -162,7 +162,16 @@ nsresult WebrtcTCPSocket::Open(
 
   mOpened = true;
   nsCString schemePrefix = aUseTls ? "https://"_ns : "http://"_ns;
-  nsCString spec = schemePrefix + aHost;
+  nsCString spec = schemePrefix;
+
+  bool ipv6Literal = aHost.Find(":") != kNotFound;
+  if (ipv6Literal) {
+    spec += "[";
+    spec += aHost;
+    spec += "]";
+  } else {
+    spec += aHost;
+  }
 
   nsresult rv = NS_MutateURI(NS_STANDARDURLMUTATOR_CONTRACTID)
                     .SetSpec(spec)
@@ -270,6 +279,8 @@ void WebrtcTCPSocket::OpenWithoutHttpProxy(nsIProxyInfo* aSocksProxyInfo) {
     return;
   }
 
+  LOG(("WebrtcTCPSocket::OpenWithoutHttpProxy %p\n", this));
+
   if (mClosed) {
     return;
   }
@@ -302,7 +313,7 @@ void WebrtcTCPSocket::OpenWithoutHttpProxy(nsIProxyInfo* aSocksProxyInfo) {
 
   nsCOMPtr<nsISocketTransportService> sts =
       do_GetService("@mozilla.org/network/socket-transport-service;1");
-  rv = sts->CreateTransport(socketTypes, host, port, aSocksProxyInfo,
+  rv = sts->CreateTransport(socketTypes, host, port, aSocksProxyInfo, nullptr,
                             getter_AddRefs(mTransport));
   if (NS_WARN_IF(NS_FAILED(rv))) {
     CloseWithReason(rv);
@@ -374,6 +385,7 @@ void WebrtcTCPSocket::OpenWithoutHttpProxy(nsIProxyInfo* aSocksProxyInfo) {
 
 nsresult WebrtcTCPSocket::OpenWithHttpProxy() {
   MOZ_ASSERT(NS_IsMainThread(), "not on main thread");
+  LOG(("WebrtcTCPSocket::OpenWithHttpProxy %p\n", this));
   nsresult rv;
   nsCOMPtr<nsIIOService> ioService;
   ioService = do_GetService(NS_IOSERVICE_CONTRACTID, &rv);
@@ -405,7 +417,8 @@ nsresult WebrtcTCPSocket::OpenWithHttpProxy() {
           // We need this flag to allow loads from any origin since this channel
           // is being used to CONNECT to an HTTP proxy.
           nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
-      nsIContentPolicy::TYPE_OTHER, getter_AddRefs(localChannel));
+      nsIContentPolicy::TYPE_PROXIED_WEBRTC_MEDIA,
+      getter_AddRefs(localChannel));
   if (NS_FAILED(rv)) {
     LOG(("WebrtcTCPSocket %p: bad open channel\n", this));
     return rv;

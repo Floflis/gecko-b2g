@@ -19,6 +19,7 @@
 #include "wasm/WasmTable.h"
 
 #include "mozilla/CheckedInt.h"
+#include "mozilla/PodOperations.h"
 
 #include "vm/JSContext.h"
 #include "vm/Realm.h"
@@ -28,6 +29,7 @@
 using namespace js;
 using namespace js::wasm;
 using mozilla::CheckedInt;
+using mozilla::PodZero;
 
 Table::Table(JSContext* cx, const TableDesc& desc,
              HandleWasmTableObject maybeObject, UniqueFuncRefArray functions)
@@ -72,13 +74,14 @@ SharedTable Table::create(JSContext* cx, const TableDesc& desc,
     case TableRepr::Ref: {
       TableAnyRefVector objects;
       if (!objects.resize(desc.initialLength)) {
+        ReportOutOfMemory(cx);
         return nullptr;
       }
       return SharedTable(
           cx->new_<Table>(cx, desc, maybeObject, std::move(objects)));
     }
   }
-  MOZ_MAKE_COMPILER_ASSUME_IS_UNREACHABLE("switch is exhaustive");
+  MOZ_CRASH("switch is exhaustive");
 }
 
 void Table::tracePrivate(JSTracer* trc) {
@@ -333,7 +336,7 @@ uint32_t Table::grow(uint32_t delta) {
       if (!newFunctions) {
         return -1;
       }
-      Unused << functions_.release();
+      (void)functions_.release();
       functions_.reset(newFunctions);
 
       // Realloc does not zero the delta for us.
@@ -348,13 +351,13 @@ uint32_t Table::grow(uint32_t delta) {
     }
   }
 
-  if (auto object = maybeObject_.unbarrieredGet()) {
+  if (auto* object = maybeObject_.unbarrieredGet()) {
     RemoveCellMemory(object, gcMallocBytes(), MemoryUse::WasmTableTable);
   }
 
   length_ = newLength.value();
 
-  if (auto object = maybeObject_.unbarrieredGet()) {
+  if (auto* object = maybeObject_.unbarrieredGet()) {
     AddCellMemory(object, gcMallocBytes(), MemoryUse::WasmTableTable);
   }
 

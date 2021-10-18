@@ -11,6 +11,7 @@
 #include "builtin/Promise.h"  // js::AsyncFromSyncIteratorMethod, js::AsyncGeneratorEnqueue
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/PropertySpec.h"
+#include "vm/CompletionKind.h"
 #include "vm/FunctionFlags.h"  // js::FunctionFlags
 #include "vm/GeneratorObject.h"
 #include "vm/GlobalObject.h"
@@ -19,6 +20,7 @@
 #include "vm/PromiseObject.h"  // js::PromiseObject
 #include "vm/Realm.h"
 #include "vm/SelfHosting.h"
+#include "vm/WellKnownAtom.h"  // js_*_str
 
 #include "vm/JSContext-inl.h"
 #include "vm/JSObject-inl.h"
@@ -28,7 +30,7 @@ using namespace js;
 
 // ES2019 draft rev 49b781ec80117b60f73327ef3054703a3111e40c
 // 6.2.3.1.1 Await Fulfilled Functions
-MOZ_MUST_USE bool js::AsyncGeneratorAwaitedFulfilled(
+[[nodiscard]] bool js::AsyncGeneratorAwaitedFulfilled(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     HandleValue value) {
   return AsyncGeneratorResume(cx, asyncGenObj, CompletionKind::Normal, value);
@@ -36,7 +38,7 @@ MOZ_MUST_USE bool js::AsyncGeneratorAwaitedFulfilled(
 
 // ES2019 draft rev 49b781ec80117b60f73327ef3054703a3111e40c
 // 6.2.3.1.2 Await Rejected Functions
-MOZ_MUST_USE bool js::AsyncGeneratorAwaitedRejected(
+[[nodiscard]] bool js::AsyncGeneratorAwaitedRejected(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     HandleValue reason) {
   return AsyncGeneratorResume(cx, asyncGenObj, CompletionKind::Throw, reason);
@@ -44,7 +46,7 @@ MOZ_MUST_USE bool js::AsyncGeneratorAwaitedRejected(
 
 // ES2019 draft rev 49b781ec80117b60f73327ef3054703a3111e40c
 // 25.5.3.7 AsyncGeneratorYield, step 8.e.
-MOZ_MUST_USE bool js::AsyncGeneratorYieldReturnAwaitedFulfilled(
+[[nodiscard]] bool js::AsyncGeneratorYieldReturnAwaitedFulfilled(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     HandleValue value) {
   return AsyncGeneratorResume(cx, asyncGenObj, CompletionKind::Return, value);
@@ -52,7 +54,7 @@ MOZ_MUST_USE bool js::AsyncGeneratorYieldReturnAwaitedFulfilled(
 
 // ES2019 draft rev 49b781ec80117b60f73327ef3054703a3111e40c
 // 25.5.3.7 AsyncGeneratorYield, step 8.c.
-MOZ_MUST_USE bool js::AsyncGeneratorYieldReturnAwaitedRejected(
+[[nodiscard]] bool js::AsyncGeneratorYieldReturnAwaitedRejected(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     HandleValue reason) {
   return AsyncGeneratorResume(cx, asyncGenObj, CompletionKind::Throw, reason);
@@ -237,7 +239,7 @@ AsyncGeneratorRequest* AsyncGeneratorObject::createRequest(
   return request;
 }
 
-/* static */ MOZ_MUST_USE bool AsyncGeneratorObject::enqueueRequest(
+/* static */ [[nodiscard]] bool AsyncGeneratorObject::enqueueRequest(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     Handle<AsyncGeneratorRequest*> request) {
   if (asyncGenObj->isSingleQueue()) {
@@ -314,7 +316,7 @@ AsyncGeneratorRequest* AsyncGeneratorRequest::create(
 
 // ES2019 draft rev c012f9c70847559a1d9dc0d35d35b27fec42911e
 // 25.5.3.2 AsyncGeneratorStart
-static MOZ_MUST_USE bool AsyncGeneratorReturned(
+[[nodiscard]] static bool AsyncGeneratorReturned(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     HandleValue value) {
   // Step 5.d.
@@ -329,7 +331,7 @@ static MOZ_MUST_USE bool AsyncGeneratorReturned(
 
 // ES2019 draft rev c012f9c70847559a1d9dc0d35d35b27fec42911e
 // 25.5.3.2 AsyncGeneratorStart
-static MOZ_MUST_USE bool AsyncGeneratorThrown(
+[[nodiscard]] static bool AsyncGeneratorThrown(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj) {
   // Step 5.d.
   asyncGenObj->setCompleted();
@@ -352,7 +354,7 @@ static MOZ_MUST_USE bool AsyncGeneratorThrown(
 // ES2019 draft rev c012f9c70847559a1d9dc0d35d35b27fec42911e
 // 25.5.3.7 AsyncGeneratorYield (partially)
 // Most steps are done in generator.
-static MOZ_MUST_USE bool AsyncGeneratorYield(
+[[nodiscard]] static bool AsyncGeneratorYield(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     HandleValue value) {
   // Step 5 is done in bytecode.
@@ -372,7 +374,7 @@ static MOZ_MUST_USE bool AsyncGeneratorYield(
 // 25.5.3.7 AsyncGeneratorYield, steps 5-6, 9.
 //
 // Note: Execution context switching is handled in generator.
-MOZ_MUST_USE bool js::AsyncGeneratorResume(
+[[nodiscard]] bool js::AsyncGeneratorResume(
     JSContext* cx, Handle<AsyncGeneratorObject*> asyncGenObj,
     CompletionKind completionKind, HandleValue argument) {
   MOZ_ASSERT(!asyncGenObj->isClosed(),
@@ -445,7 +447,7 @@ static const JSFunctionSpec async_generator_methods[] = {
 
 bool GlobalObject::initAsyncIteratorProto(JSContext* cx,
                                           Handle<GlobalObject*> global) {
-  if (global->getReservedSlot(ASYNC_ITERATOR_PROTO).isObject()) {
+  if (global->hasBuiltinProto(ProtoKind::AsyncIteratorProto)) {
     return true;
   }
 
@@ -460,13 +462,13 @@ bool GlobalObject::initAsyncIteratorProto(JSContext* cx,
     return false;
   }
 
-  global->setReservedSlot(ASYNC_ITERATOR_PROTO, ObjectValue(*asyncIterProto));
+  global->initBuiltinProto(ProtoKind::AsyncIteratorProto, asyncIterProto);
   return true;
 }
 
 bool GlobalObject::initAsyncFromSyncIteratorProto(
     JSContext* cx, Handle<GlobalObject*> global) {
-  if (global->getReservedSlot(ASYNC_FROM_SYNC_ITERATOR_PROTO).isObject()) {
+  if (global->hasBuiltinProto(ProtoKind::AsyncFromSyncIteratorProto)) {
     return true;
   }
 
@@ -490,8 +492,8 @@ bool GlobalObject::initAsyncFromSyncIteratorProto(
     return false;
   }
 
-  global->setReservedSlot(ASYNC_FROM_SYNC_ITERATOR_PROTO,
-                          ObjectValue(*asyncFromSyncIterProto));
+  global->initBuiltinProto(ProtoKind::AsyncFromSyncIteratorProto,
+                           asyncFromSyncIterProto);
   return true;
 }
 
@@ -522,10 +524,8 @@ static bool AsyncGeneratorFunctionClassFinish(JSContext* cx,
   // Change the "constructor" property to non-writable before adding any other
   // properties, so it's still the last property and can be modified without a
   // dictionary-mode transition.
-  MOZ_ASSERT(StringEqualsAscii(
-      JSID_TO_LINEAR_STRING(
-          asyncGenerator->as<NativeObject>().lastProperty()->propid()),
-      "constructor"));
+  MOZ_ASSERT(asyncGenerator->as<NativeObject>().getLastProperty().key() ==
+             NameToId(cx->names().constructor));
   MOZ_ASSERT(!asyncGenerator->as<NativeObject>().inDictionaryMode());
 
   RootedValue asyncGenFunctionVal(cx, ObjectValue(*asyncGenFunction));
@@ -657,14 +657,15 @@ const JSClass AsyncIteratorHelperObject::class_ = {
 /* static */
 NativeObject* GlobalObject::getOrCreateAsyncIteratorHelperPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
-  return MaybeNativeObject(getOrCreateObject(
-      cx, global, ASYNC_ITERATOR_HELPER_PROTO, initAsyncIteratorHelperProto));
+  return MaybeNativeObject(
+      getOrCreateBuiltinProto(cx, global, ProtoKind::AsyncIteratorHelperProto,
+                              initAsyncIteratorHelperProto));
 }
 
 /* static */
 bool GlobalObject::initAsyncIteratorHelperProto(JSContext* cx,
                                                 Handle<GlobalObject*> global) {
-  if (global->getReservedSlot(ASYNC_ITERATOR_HELPER_PROTO).isObject()) {
+  if (global->hasBuiltinProto(ProtoKind::AsyncIteratorHelperProto)) {
     return true;
   }
 
@@ -685,8 +686,8 @@ bool GlobalObject::initAsyncIteratorHelperProto(JSContext* cx,
     return false;
   }
 
-  global->setReservedSlot(ASYNC_ITERATOR_HELPER_PROTO,
-                          ObjectValue(*asyncIteratorHelperProto));
+  global->initBuiltinProto(ProtoKind::AsyncIteratorHelperProto,
+                           asyncIteratorHelperProto);
   return true;
 }
 

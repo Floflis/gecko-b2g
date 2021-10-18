@@ -367,7 +367,6 @@ function openLinkIn(url, where, params) {
     : new ReferrerInfo(Ci.nsIReferrerInfo.EMPTY, true, null);
   var aRelatedToCurrent = params.relatedToCurrent;
   var aAllowInheritPrincipal = !!params.allowInheritPrincipal;
-  var aAllowMixedContent = params.allowMixedContent;
   var aForceAllowDataURI = params.forceAllowDataURI;
   var aInBackground = params.inBackground;
   var aInitiatingDoc = params.initiatingDoc;
@@ -663,7 +662,6 @@ function openLinkIn(url, where, params) {
         allowThirdPartyFixup: aAllowThirdPartyFixup,
         relatedToCurrent: aRelatedToCurrent,
         skipAnimation: aSkipTabAnimation,
-        allowMixedContent: aAllowMixedContent,
         userContextId: aUserContextId,
         originPrincipal: aPrincipal,
         originStoragePrincipal: aStoragePrincipal,
@@ -711,6 +709,7 @@ function openLinkIn(url, where, params) {
 
 // Used as an onclick handler for UI elements with link-like behavior.
 // e.g. onclick="checkForMiddleClick(this, event);"
+// Not needed for menuitems because those fire command events even on middle clicks.
 function checkForMiddleClick(node, event) {
   // We should be using the disabled property here instead of the attribute,
   // but some elements that this function is used with don't support it (e.g.
@@ -718,6 +717,11 @@ function checkForMiddleClick(node, event) {
   if (node.getAttribute("disabled") == "true") {
     return;
   } // Do nothing
+
+  if (event.target.tagName == "menuitem") {
+    // Menu items fire command on middle-click by themselves.
+    return;
+  }
 
   if (event.button == 1) {
     /* Execute the node's oncommand or command.
@@ -734,6 +738,7 @@ function checkForMiddleClick(node, event) {
       event.altKey,
       event.shiftKey,
       event.metaKey,
+      0,
       event,
       event.mozInputSource
     );
@@ -743,6 +748,7 @@ function checkForMiddleClick(node, event) {
     // handled more than once.
     // E.g. see https://bugzilla.mozilla.org/show_bug.cgi?id=1657992#c4
     event.stopPropagation();
+    event.preventDefault();
 
     // If the middle-click was on part of a menu, close the menu.
     // (Menus close automatically with left-click but not with middle-click.)
@@ -783,9 +789,9 @@ function createUserContextMenu(
       bundle.GetStringFromName("userContextNone.accesskey")
     );
 
-    // We don't set an oncommand/command attribute because if we have
-    // to exclude a userContextId we are generating the contextMenu and
-    // isContextMenu will be true.
+    if (!isContextMenu) {
+      menuitem.setAttribute("command", "Browser:NewUserContextTab");
+    }
 
     docfrag.appendChild(menuitem);
 
@@ -989,7 +995,7 @@ function openAboutDialog() {
   window.openDialog("chrome://browser/content/aboutDialog.xhtml", "", features);
 }
 
-function openPreferences(paneID, extraArgs) {
+async function openPreferences(paneID, extraArgs) {
   // This function is duplicated from preferences.js.
   function internalPrefCategoryNameToFriendlyName(aName) {
     return (aName || "").replace(/^pane./, function(toReplace) {
@@ -1044,17 +1050,15 @@ function openPreferences(paneID, extraArgs) {
     browser = win.gBrowser.selectedBrowser;
   }
 
-  if (newLoad) {
-    Services.obs.addObserver(function panesLoadedObs(prefWin, topic, data) {
-      if (!browser) {
-        browser = win.gBrowser.selectedBrowser;
-      }
-      if (prefWin != browser.contentWindow) {
-        return;
-      }
-      Services.obs.removeObserver(panesLoadedObs, "sync-pane-loaded");
-    }, "sync-pane-loaded");
-  } else if (paneID) {
+  if (!newLoad && paneID) {
+    if (browser.contentDocument?.readyState != "complete") {
+      await new Promise(resolve => {
+        browser.addEventListener("load", resolve, {
+          capture: true,
+          once: true,
+        });
+      });
+    }
     browser.contentWindow.gotoPref(paneID);
   }
 }
@@ -1075,20 +1079,10 @@ function openFeedbackPage() {
   openTrustedLinkIn(url, "tab");
 }
 
-function openTourPage() {
-  let scope = {};
-  ChromeUtils.import("resource:///modules/UITour.jsm", scope);
-  openTrustedLinkIn(scope.UITour.url, "tab");
-}
-
 function buildHelpMenu() {
   document.getElementById(
     "feedbackPage"
   ).disabled = !Services.policies.isAllowed("feedbackCommands");
-  let checkForUpdates = document.getElementById("checkForUpdates");
-  if (checkForUpdates) {
-    checkForUpdates.disabled = !Services.policies.isAllowed("appUpdate");
-  }
 
   document.getElementById(
     "helpSafeMode"
@@ -1110,7 +1104,29 @@ function buildHelpMenu() {
     gSafeBrowsing.setReportPhishingMenu();
   }
 
-  updateImportCommandEnabledState();
+  // We're testing to see if the WebCompat team's "Report Site Issue"
+  // access point makes sense in the Help menu. Normally checking this
+  // pref wouldn't be enough, since there's also the case that the
+  // add-on has somehow been disabled by the user or third-party software
+  // without flipping the pref. Since this add-on is only used on pre-release
+  // channels, and since the jury is still out on whether or not the Help menu
+  // is the right place for this item, we're going to do a least-effort
+  // approach here and assume that the pref is enough to determine whether the
+  // menuitem should appear.
+  //
+  // See bug 1690573 for further details.
+  let reportSiteIssueEnabled = Services.prefs.getBoolPref(
+    "extensions.webcompat-reporter.enabled",
+    false
+  );
+  let reportSiteIssue = document.getElementById("help_reportSiteIssue");
+  reportSiteIssue.hidden = !reportSiteIssueEnabled;
+  if (reportSiteIssueEnabled) {
+    let uri = gBrowser.currentURI;
+    let isReportablePage =
+      uri && (uri.schemeIs("http") || uri.schemeIs("https"));
+    reportSiteIssue.disabled = !isReportablePage;
+  }
 }
 
 function isElementVisible(aElement) {
@@ -1148,19 +1164,4 @@ function openHelpLink(aHelpTopic, aCalledFromModal, aWhere) {
 function openPrefsHelp(aEvent) {
   let helpTopic = aEvent.target.getAttribute("helpTopic");
   openHelpLink(helpTopic);
-}
-
-/**
- * Updates the enabled state of the "Import From Another Browser" command
- * depending on the DisableProfileImport policy.
- */
-function updateImportCommandEnabledState() {
-  if (!Services.policies.isAllowed("profileImport")) {
-    document
-      .getElementById("cmd_file_importFromAnotherBrowser")
-      .setAttribute("disabled", "true");
-    document
-      .getElementById("cmd_help_importFromAnotherBrowser")
-      .setAttribute("disabled", "true");
-  }
 }

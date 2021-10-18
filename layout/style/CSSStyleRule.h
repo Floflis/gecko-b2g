@@ -26,7 +26,8 @@ class CSSStyleRuleDeclaration final : public nsDOMCSSDeclaration {
   NS_DECL_ISUPPORTS_INHERITED
 
   css::Rule* GetParentRule() final;
-  nsINode* GetParentObject() final;
+  nsINode* GetAssociatedNode() const final;
+  nsISupports* GetParentObject() const final;
 
  protected:
   mozilla::DeclarationBlock* GetOrCreateCSSDeclaration(
@@ -47,6 +48,8 @@ class CSSStyleRuleDeclaration final : public nsDOMCSSDeclaration {
 
   inline CSSStyleRule* Rule();
   inline const CSSStyleRule* Rule() const;
+
+  void SetRawAfterClone(RefPtr<RawServoDeclarationBlock>);
 
   RefPtr<DeclarationBlock> mDecls;
 };
@@ -73,13 +76,14 @@ class CSSStyleRule final : public BindingStyleRule, public SupportsWeakPtr {
   NotNull<DeclarationBlock*> GetDeclarationBlock() const override;
 
   // WebIDL interface
-  uint16_t Type() const final { return dom::CSSRule_Binding::STYLE_RULE; }
+  StyleCssRuleType Type() const final;
   void GetCssText(nsACString& aCssText) const final;
   void GetSelectorText(nsACString& aSelectorText) final;
   void SetSelectorText(const nsACString& aSelectorText) final;
   nsICSSDeclaration* Style() final;
 
   RawServoStyleRule* Raw() const { return mRawRule; }
+  void SetRawAfterClone(RefPtr<RawServoStyleRule>);
 
   // Methods of mozilla::css::Rule
   size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const final;

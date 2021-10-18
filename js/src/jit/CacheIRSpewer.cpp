@@ -11,18 +11,13 @@
 #  include "mozilla/Sprintf.h"
 
 #  include <algorithm>
-
-#  ifdef XP_WIN
-#    include <process.h>
-#    define getpid _getpid
-#  else
-#    include <unistd.h>
-#  endif
 #  include <stdarg.h>
 
+#  include "jsapi.h"
 #  include "jsmath.h"
 
 #  include "js/ScalarType.h"  // js::Scalar::Type
+#  include "util/GetPidProvider.h"
 #  include "util/Text.h"
 #  include "vm/JSFunction.h"
 #  include "vm/JSObject.h"
@@ -112,6 +107,9 @@ class MOZ_RAII CacheIROpsJitSpewer {
   }
   void spewWasmValTypeImm(const char* name, wasm::ValType::Kind kind) {
     out_.printf("%s WasmValTypeKind(%u)", name, unsigned(kind));
+  }
+  void spewAllocKindImm(const char* name, gc::AllocKind kind) {
+    out_.printf("%s AllocKind(%u)", name, unsigned(kind));
   }
 
  public:
@@ -248,6 +246,9 @@ class MOZ_RAII CacheIROpsJSONSpewer {
   void spewWasmValTypeImm(const char* name, wasm::ValType::Kind kind) {
     spewArgImpl(name, "Imm", unsigned(kind));
   }
+  void spewAllocKindImm(const char* name, gc::AllocKind kind) {
+    spewArgImpl(name, "Imm", unsigned(kind));
+  }
 
  public:
   explicit CacheIROpsJSONSpewer(JSONPrinter& j) : j_(j) {}
@@ -340,36 +341,6 @@ void CacheIRSpewer::beginCache(const IRGenerator& gen) {
   }
 }
 
-template <typename CharT>
-static void QuoteString(GenericPrinter& out, const CharT* s, size_t length) {
-  const CharT* end = s + length;
-  for (const CharT* t = s; t < end; s = ++t) {
-    // This quote implementation is probably correct,
-    // but uses \u even when not strictly necessary.
-    char16_t c = *t;
-    if (c == '"' || c == '\\') {
-      out.printf("\\");
-      out.printf("%c", char(c));
-    } else if (!IsAsciiPrintable(c)) {
-      out.printf("\\u%04x", c);
-    } else {
-      out.printf("%c", char(c));
-    }
-  }
-}
-
-static void QuoteString(GenericPrinter& out, JSLinearString* str) {
-  JS::AutoCheckCannotGC nogc;
-
-  // Limit the string length to reduce the JSON file size.
-  size_t length = std::min(str->length(), size_t(128));
-  if (str->hasLatin1Chars()) {
-    QuoteString(out, str->latin1Chars(nogc), length);
-  } else {
-    QuoteString(out, str->twoByteChars(nogc), length);
-  }
-}
-
 void CacheIRSpewer::valueProperty(const char* name, const Value& v) {
   MOZ_ASSERT(enabled());
   JSONPrinter& j = json_.ref();
@@ -389,9 +360,7 @@ void CacheIRSpewer::valueProperty(const char* name, const Value& v) {
   } else if (v.isString() || v.isSymbol()) {
     JSString* str = v.isString() ? v.toString() : v.toSymbol()->description();
     if (str && str->isLinear()) {
-      j.beginStringProperty("value");
-      QuoteString(output_, &str->asLinear());
-      j.endStringProperty();
+      j.property("value", &str->asLinear());
     }
   } else if (v.isObject()) {
     JSObject& object = v.toObject();
@@ -399,14 +368,12 @@ void CacheIRSpewer::valueProperty(const char* name, const Value& v) {
 
     if (object.is<JSFunction>()) {
       if (JSAtom* name = object.as<JSFunction>().displayAtom()) {
-        j.beginStringProperty("funName");
-        QuoteString(output_, name);
-        j.endStringProperty();
+        j.property("funName", name);
       }
     }
 
     if (NativeObject* nobj =
-            object.isNative() ? &object.as<NativeObject>() : nullptr) {
+            object.is<NativeObject>() ? &object.as<NativeObject>() : nullptr) {
       j.beginListProperty("flags");
       {
         if (nobj->isIndexed()) {

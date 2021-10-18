@@ -7,9 +7,11 @@
 /* Class that wraps JS objects to appear as XPCOM objects. */
 
 #include "xpcprivate.h"
+#include "XPCMaps.h"
 #include "mozilla/DeferredFinalize.h"
 #include "mozilla/Sprintf.h"
 #include "js/Object.h"  // JS::GetCompartment
+#include "js/RealmIterators.h"
 #include "nsCCUncollectableMarker.h"
 #include "nsContentUtils.h"
 #include "nsThreadUtils.h"
@@ -281,7 +283,7 @@ MozExternalRefCountType nsXPCWrappedJS::Release(void) {
     }
 
     // If we are not a root wrapper being used from a weak reference,
-    // then the extra ref is not needed and we can let outselves be
+    // then the extra ref is not needed and we can let ourselves be
     // deleted.
     if (!HasWeakReferences()) {
       return Release();

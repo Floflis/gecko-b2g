@@ -35,7 +35,9 @@ function debugEvents(global, els) {
   }
 }
 
-var WebViewChild = {
+function WebViewChild() {}
+
+WebViewChild.prototype = {
   // Prints arguments separated by a space and appends a new line.
   log(...args) {
     dump("WebViewChild: ");
@@ -157,6 +159,7 @@ var WebViewChild = {
     // this value in the loadend event handler of the <web-view> element.
     let seenLoadStart = false;
     let seenLoadEnd = false;
+    let logfn = this.log;
     let progressListener = {
       QueryInterface: ChromeUtils.generateQI([
         Ci.nsIWebProgressListener,
@@ -175,7 +178,7 @@ var WebViewChild = {
               .getComputedStyle(global.content.document.body)
               .getPropertyValue("background-color");
           } catch (e) {
-            WebViewChild.log(`Failed to get background-color property: ${e}`);
+            logfn(`Failed to get background-color property: ${e}`);
           }
           if (seenLoadStart && !seenLoadEnd) {
             global.sendAsyncMessage("WebView::backgroundcolor", {
@@ -453,7 +456,6 @@ var WebViewChild = {
     if (target.type !== "application/opensearchdescription+xml") {
       return;
     }
-
     this.global.sendAsyncMessage("WebView::opensearch", {
       title: target.title,
       href: target.href,
@@ -640,7 +642,7 @@ var WebViewChild = {
     var copyableElements = {
       image: false,
       link: false,
-      hasElements: () => {
+      hasElements() {
         return this.image || this.link;
       },
     };

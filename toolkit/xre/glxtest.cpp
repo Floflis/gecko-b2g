@@ -26,7 +26,7 @@
 #include <unistd.h>
 
 #include "mozilla/Unused.h"
-#include "nsAppRunner.h"  // for IsWaylandDisabled on IsX11EGLEnabled
+#include "nsAppRunner.h"  // for IsWaylandEnabled on IsX11EGLEnabled
 #include "stdint.h"
 
 #ifdef __SUNPRO_CC
@@ -36,6 +36,7 @@
 #ifdef MOZ_X11
 #  include "X11/Xlib.h"
 #  include "X11/Xutil.h"
+#  include <X11/extensions/Xrandr.h>
 #endif
 
 #ifdef MOZ_WAYLAND
@@ -58,6 +59,7 @@ typedef XID GLXPbuffer;
 #  define GLX_RED_SIZE 8
 #  define GLX_GREEN_SIZE 9
 #  define GLX_BLUE_SIZE 10
+#  define GLX_DOUBLEBUFFER 5
 #endif
 
 // stuff from gl.h
@@ -96,6 +98,7 @@ typedef void* EGLSurface;
 typedef void* (*PFNEGLGETPROCADDRESS)(const char*);
 
 #define EGL_NO_CONTEXT nullptr
+#define EGL_NO_SURFACE nullptr
 #define EGL_FALSE 0
 #define EGL_TRUE 1
 #define EGL_BLUE_SIZE 0x3022
@@ -104,12 +107,21 @@ typedef void* (*PFNEGLGETPROCADDRESS)(const char*);
 #define EGL_NONE 0x3038
 #define EGL_VENDOR 0x3053
 #define EGL_CONTEXT_CLIENT_VERSION 0x3098
+#define EGL_OPENGL_API 0x30A2
 #define EGL_DEVICE_EXT 0x322C
 #define EGL_DRM_DEVICE_FILE_EXT 0x3233
 
 // stuff from xf86drm.h
 #define DRM_NODE_RENDER 2
 #define DRM_NODE_MAX 3
+
+typedef struct _drmPciDeviceInfo {
+  uint16_t vendor_id;
+  uint16_t device_id;
+  uint16_t subvendor_id;
+  uint16_t subdevice_id;
+  uint8_t revision_id;
+} drmPciDeviceInfo, *drmPciDeviceInfoPtr;
 
 typedef struct _drmDevice {
   char** nodes;
@@ -122,7 +134,7 @@ typedef struct _drmDevice {
     void* host1x;
   } businfo;
   union {
-    void* pci;
+    drmPciDeviceInfoPtr pci;
     void* usb;
     void* platform;
     void* host1x;
@@ -337,11 +349,11 @@ static bool device_has_name(const drmDevice* device, const char* name) {
   return false;
 }
 
-static char* get_render_name(const char* name) {
+static void get_render_name(const char* name) {
   void* libdrm = dlopen(LIBDRM_FILENAME, RTLD_LAZY);
   if (!libdrm) {
     record_warning("Failed to open libdrm");
-    return nullptr;
+    return;
   }
 
   typedef int (*DRMGETDEVICES2)(uint32_t, drmDevicePtr*, int);
@@ -356,7 +368,7 @@ static char* get_render_name(const char* name) {
     record_warning(
         "libdrm missing methods for drmGetDevices2 or drmFreeDevice");
     dlclose(libdrm);
-    return nullptr;
+    return;
   }
 
   uint32_t flags = 0;
@@ -364,20 +376,20 @@ static char* get_render_name(const char* name) {
   if (devices_len < 0) {
     record_warning("drmGetDevices2 failed");
     dlclose(libdrm);
-    return nullptr;
+    return;
   }
   drmDevice** devices = (drmDevice**)calloc(devices_len, sizeof(drmDevice*));
   if (!devices) {
     record_warning("Allocation error");
     dlclose(libdrm);
-    return nullptr;
+    return;
   }
   devices_len = drmGetDevices2(flags, devices, devices_len);
   if (devices_len < 0) {
     free(devices);
     record_warning("drmGetDevices2 failed");
     dlclose(libdrm);
-    return nullptr;
+    return;
   }
 
   const drmDevice* match = nullptr;
@@ -388,13 +400,16 @@ static char* get_render_name(const char* name) {
     }
   }
 
-  char* render_name = nullptr;
   if (!match) {
     record_warning("Cannot find DRM device");
   } else if (!(match->available_nodes & (1 << DRM_NODE_RENDER))) {
     record_warning("DRM device has no render node");
   } else {
-    render_name = strdup(match->nodes[DRM_NODE_RENDER]);
+    record_value("DRM_RENDERDEVICE\n%s\n", match->nodes[DRM_NODE_RENDER]);
+    record_value(
+        "MESA_VENDOR_ID\n0x%04x\n"
+        "MESA_DEVICE_ID\n0x%04x\n",
+        match->deviceinfo.pci->vendor_id, match->deviceinfo.pci->device_id);
   }
 
   for (int i = 0; i < devices_len; i++) {
@@ -403,7 +418,6 @@ static char* get_render_name(const char* name) {
   free(devices);
 
   dlclose(libdrm);
-  return render_name;
 }
 #endif
 
@@ -415,17 +429,15 @@ static bool get_gles_status(EGLDisplay dpy,
   PFNEGLCHOOSECONFIGPROC eglChooseConfig =
       cast<PFNEGLCHOOSECONFIGPROC>(eglGetProcAddress("eglChooseConfig"));
 
+  typedef EGLBoolean (*PFNEGLBINDAPIPROC)(EGLint api);
+  PFNEGLBINDAPIPROC eglBindAPI =
+      cast<PFNEGLBINDAPIPROC>(eglGetProcAddress("eglBindAPI"));
+
   typedef EGLContext (*PFNEGLCREATECONTEXTPROC)(
       EGLDisplay dpy, EGLConfig config, EGLContext share_context,
       EGLint const* attrib_list);
   PFNEGLCREATECONTEXTPROC eglCreateContext =
       cast<PFNEGLCREATECONTEXTPROC>(eglGetProcAddress("eglCreateContext"));
-
-  typedef EGLSurface (*PFNEGLCREATEPBUFFERSURFACEPROC)(
-      EGLDisplay dpy, EGLConfig config, EGLint const* attrib_list);
-  PFNEGLCREATEPBUFFERSURFACEPROC eglCreatePbufferSurface =
-      cast<PFNEGLCREATEPBUFFERSURFACEPROC>(
-          eglGetProcAddress("eglCreatePbufferSurface"));
 
   typedef EGLBoolean (*PFNEGLMAKECURRENTPROC)(
       EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext context);
@@ -444,15 +456,42 @@ static bool get_gles_status(EGLDisplay dpy,
       cast<PFNEGLQUERYDISPLAYATTRIBEXTPROC>(
           eglGetProcAddress("eglQueryDisplayAttribEXT"));
 
-  if (!eglChooseConfig || !eglCreateContext || !eglCreatePbufferSurface ||
-      !eglMakeCurrent) {
-    record_error("libEGL missing methods for GLES test");
+  if (!eglChooseConfig || !eglCreateContext || !eglMakeCurrent) {
+    record_warning("libEGL missing methods for GL test");
     return false;
   }
 
   typedef GLubyte* (*PFNGLGETSTRING)(GLenum);
   PFNGLGETSTRING glGetString =
       cast<PFNGLGETSTRING>(eglGetProcAddress("glGetString"));
+
+  EGLint config_attrs[] = {EGL_RED_SIZE,  8, EGL_GREEN_SIZE, 8,
+                           EGL_BLUE_SIZE, 8, EGL_NONE};
+
+  EGLConfig config;
+  EGLint num_config;
+  if (eglChooseConfig(dpy, config_attrs, &config, 1, &num_config) ==
+      EGL_FALSE) {
+    record_warning("eglChooseConfig returned an error");
+    return false;
+  }
+
+  if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE) {
+    record_warning("eglBindAPI returned an error");
+    return false;
+  }
+
+  EGLint ctx_attrs[] = {EGL_NONE};
+  EGLContext ectx = eglCreateContext(dpy, config, EGL_NO_CONTEXT, ctx_attrs);
+  if (!ectx) {
+    record_warning("eglCreateContext returned an error");
+    return false;
+  }
+
+  if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ectx) == EGL_FALSE) {
+    record_warning("eglMakeCurrent returned an error");
+    return false;
+  }
 
   // Implementations disagree about whether eglGetProcAddress or dlsym
   // should be used for getting functions from the actual API, see
@@ -471,20 +510,10 @@ static bool get_gles_status(EGLDisplay dpy,
     glGetString = cast<PFNGLGETSTRING>(dlsym(libgl, "glGetString"));
     if (!glGetString) {
       dlclose(libgl);
-      record_error("libGL or libGLESv2 glGetString missing");
+      record_warning("libEGL, libGL and libGLESv2 are missing glGetString");
       return false;
     }
   }
-
-  EGLint config_attrs[] = {EGL_RED_SIZE,  8, EGL_GREEN_SIZE, 8,
-                           EGL_BLUE_SIZE, 8, EGL_NONE};
-  EGLConfig config;
-  EGLint num_config;
-  eglChooseConfig(dpy, config_attrs, &config, 1, &num_config);
-  EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-  EGLContext ectx = eglCreateContext(dpy, config, EGL_NO_CONTEXT, ctx_attrs);
-  EGLSurface pbuf = eglCreatePbufferSurface(dpy, config, nullptr);
-  eglMakeCurrent(dpy, pbuf, pbuf, ectx);
 
   const GLubyte* versionString = glGetString(GL_VERSION);
   const GLubyte* vendorString = glGetString(GL_VENDOR);
@@ -494,7 +523,11 @@ static bool get_gles_status(EGLDisplay dpy,
     record_value("VENDOR\n%s\nRENDERER\n%s\nVERSION\n%s\nTFP\nTRUE\n",
                  vendorString, rendererString, versionString);
   } else {
-    record_error("libGLESv2 glGetString returned null");
+    record_warning("EGL glGetString returned null");
+    if (libgl) {
+      dlclose(libgl);
+    }
+    return false;
   }
 
   if (eglQueryDeviceStringEXT) {
@@ -508,13 +541,10 @@ static bool get_gles_status(EGLDisplay dpy,
         record_value("MESA_ACCELERATED\nTRUE\n");
 
 #ifdef MOZ_WAYLAND
-        char* renderDeviceName = get_render_name(deviceString);
-        if (renderDeviceName) {
-          record_value("DRM_RENDERDEVICE\n%s\n", renderDeviceName);
-        } else {
-          record_warning("Can't find render node name for DRM device");
-        }
+        get_render_name(deviceString);
 #endif
+      } else {
+        record_value("MESA_ACCELERATED\nFALSE\n");
       }
     }
   }
@@ -538,7 +568,7 @@ static bool get_egl_status(EGLNativeDisplayType native_dpy, bool gles_test,
 
   if (!eglGetProcAddress) {
     dlclose(libegl);
-    record_error("no eglGetProcAddress");
+    record_warning("no eglGetProcAddress");
     return false;
   }
 
@@ -557,7 +587,7 @@ static bool get_egl_status(EGLNativeDisplayType native_dpy, bool gles_test,
 
   if (!eglGetDisplay || !eglInitialize || !eglTerminate) {
     dlclose(libegl);
-    record_error("libEGL missing methods");
+    record_warning("libEGL missing methods");
     return false;
   }
 
@@ -607,19 +637,41 @@ static bool get_egl_status(EGLNativeDisplayType native_dpy, bool gles_test,
 }
 
 #ifdef MOZ_X11
-static void get_x11_screen_info(Display* dpy) {
-  int screenCount = ScreenCount(dpy);
-  int defaultScreen = DefaultScreen(dpy);
-  if (screenCount != 0) {
-    record_value("SCREEN_INFO\n");
-    for (int idx = 0; idx < screenCount; idx++) {
-      Screen* scrn = ScreenOfDisplay(dpy, idx);
-      int current_height = scrn->height;
-      int current_width = scrn->width;
+static void get_xrandr_info(Display* dpy) {
+  Window root = RootWindow(dpy, DefaultScreen(dpy));
+  XRRProviderResources* pr = XRRGetProviderResources(dpy, root);
+  XRRScreenResources* res = XRRGetScreenResourcesCurrent(dpy, root);
+  RROutput primary = XRRGetOutputPrimary(dpy, root);
 
-      record_value("%dx%d:%d%s", current_width, current_height,
-                   idx == defaultScreen ? 1 : 0,
-                   idx == screenCount - 1 ? ";\n" : ";");
+  if (res->noutput != 0) {
+    bool foundCRTC = false;
+
+    for (int i = 0; i < res->noutput; i++) {
+      XRROutputInfo* outputInfo = XRRGetOutputInfo(dpy, res, res->outputs[i]);
+      if (!outputInfo->crtc) {
+        continue;
+      }
+
+      if (!foundCRTC) {
+        record_value("SCREEN_INFO\n");
+        foundCRTC = true;
+      }
+
+      XRRCrtcInfo* crtcInfo = XRRGetCrtcInfo(dpy, res, outputInfo->crtc);
+      record_value("%dx%d:%d;", crtcInfo->width, crtcInfo->height,
+                   res->outputs[i] == primary ? 1 : 0);
+    }
+
+    if (foundCRTC) {
+      record_value("\n");
+    }
+  }
+
+  if (pr->nproviders != 0) {
+    record_value("DDX_DRIVER\n");
+    for (int i = 0; i < pr->nproviders; i++) {
+      XRRProviderInfo* info = XRRGetProviderInfo(dpy, res, pr->providers[i]);
+      record_value("%s%s", info->name, i == pr->nproviders - 1 ? ";\n" : ";");
     }
   }
 }
@@ -696,8 +748,14 @@ static void get_glx_status(int* gotGlxInfo, int* gotDriDriver) {
                    1,        GLX_BLUE_SIZE, 1, None};
   XVisualInfo* vInfo = glXChooseVisual(dpy, DefaultScreen(dpy), attribs);
   if (!vInfo) {
-    record_error("No visuals found");
-    return;
+    int attribs2[] = {GLX_RGBA, GLX_RED_SIZE,  1, GLX_GREEN_SIZE,
+                      1,        GLX_BLUE_SIZE, 1, GLX_DOUBLEBUFFER,
+                      None};
+    vInfo = glXChooseVisual(dpy, DefaultScreen(dpy), attribs2);
+    if (!vInfo) {
+      record_error("No visuals found");
+      return;
+    }
   }
 
   // using a X11 Window instead of a GLXPixmap does not crash
@@ -775,8 +833,8 @@ static void get_glx_status(int* gotGlxInfo, int* gotDriDriver) {
     }
   }
 
-  // Get monitor information
-  get_x11_screen_info(dpy);
+  // Get monitor and DDX driver information
+  get_xrandr_info(dpy);
 
   ///// Clean up. Indeed, the parent process might fail to kill us (e.g. if it
   ///// doesn't need to check GL info) so we might be staying alive for longer
@@ -804,19 +862,34 @@ static void get_glx_status(int* gotGlxInfo, int* gotDriDriver) {
 }
 
 static bool x11_egltest(int pci_count) {
-  if (!get_egl_status(nullptr, true, pci_count != 1)) {
-    return false;
-  }
-
   Display* dpy = XOpenDisplay(nullptr);
   if (!dpy) {
     return false;
   }
   XSetErrorHandler(x_error_handler);
 
-  get_x11_screen_info(dpy);
+  // Bug 1667621: 30bit "Deep Color" is broken on EGL on Mesa (as of 2021/10).
+  // Disable all non-standard depths for the initial EGL roleout.
+  int screenCount = ScreenCount(dpy);
+  for (int idx = 0; idx < screenCount; idx++) {
+    if (DefaultDepth(dpy, idx) != 24) {
+      return false;
+    }
+  }
 
-  XCloseDisplay(dpy);
+  // On at least amdgpu open source driver, eglInitialize fails unless
+  // a valid XDisplay pointer is passed as the native display.
+  if (!get_egl_status(dpy, true, pci_count != 1)) {
+    return false;
+  }
+
+  // Get monitor and DDX driver information
+  get_xrandr_info(dpy);
+
+  // Bug 1715245: Closing the display connection here crashes on NV prop.
+  // drivers. Just leave it open, the process will exit shortly after anyway.
+  // XCloseDisplay(dpy);
+
   record_value("TEST_TYPE\nEGL\n");
   return true;
 }
@@ -873,8 +946,6 @@ struct xdg_output_v1_info {
   struct {
     int32_t width, height;
   } logical;
-
-  char *name, *description;
 };
 
 struct xdg_output_manager_v1_info {
@@ -911,8 +982,6 @@ static void print_output_info(void* data) {}
 static void destroy_xdg_output_v1_info(struct xdg_output_v1_info* info) {
   wl_list_remove(&info->link);
   zxdg_output_v1_destroy(info->xdg_output);
-  free(info->name);
-  free(info->description);
   free(info);
 }
 
@@ -928,8 +997,8 @@ static void print_xdg_output_manager_v1_info(void* data) {
 
   int screen_count = wl_list_length(&info->outputs);
   if (screen_count > 0) {
-    struct xdg_output_v1_info* infos = (struct xdg_output_v1_info*)malloc(
-        screen_count * sizeof(xdg_output_v1_info));
+    struct xdg_output_v1_info* infos = (struct xdg_output_v1_info*)calloc(
+        1, screen_count * sizeof(xdg_output_v1_info));
 
     int pos = 0;
     wl_list_for_each(output, &info->outputs, link) {
@@ -959,8 +1028,9 @@ static void destroy_xdg_output_manager_v1_info(void* data) {
 
   zxdg_output_manager_v1_destroy(info->manager);
 
-  wl_list_for_each_safe(output, tmp, &info->outputs, link)
-      destroy_xdg_output_v1_info(output);
+  wl_list_for_each_safe(output, tmp, &info->outputs, link) {
+    destroy_xdg_output_v1_info(output);
+  }
 }
 
 static void handle_xdg_output_v1_logical_position(void* data,
@@ -979,17 +1049,11 @@ static void handle_xdg_output_v1_done(void* data,
                                       struct zxdg_output_v1* output) {}
 
 static void handle_xdg_output_v1_name(void* data, struct zxdg_output_v1* output,
-                                      const char* name) {
-  struct xdg_output_v1_info* xdg_output = (struct xdg_output_v1_info*)data;
-  xdg_output->name = strdup(name);
-}
+                                      const char* name) {}
 
 static void handle_xdg_output_v1_description(void* data,
                                              struct zxdg_output_v1* output,
-                                             const char* description) {
-  struct xdg_output_v1_info* xdg_output = (struct xdg_output_v1_info*)data;
-  xdg_output->description = strdup(description);
-}
+                                             const char* description) {}
 
 static const struct zxdg_output_v1_listener xdg_output_v1_listener = {
     .logical_position = handle_xdg_output_v1_logical_position,
@@ -1003,7 +1067,7 @@ static void add_xdg_output_v1_info(
     struct xdg_output_manager_v1_info* manager_info,
     struct output_info* output) {
   struct xdg_output_v1_info* xdg_output =
-      (struct xdg_output_v1_info*)malloc(sizeof *xdg_output);
+      (struct xdg_output_v1_info*)calloc(1, sizeof *xdg_output);
 
   wl_list_insert(&manager_info->outputs, &xdg_output->link);
   xdg_output->xdg_output = zxdg_output_manager_v1_get_xdg_output(
@@ -1020,7 +1084,7 @@ static void add_xdg_output_manager_v1_info(struct weston_info* info,
                                            uint32_t id, uint32_t version) {
   struct output_info* output;
   struct xdg_output_manager_v1_info* manager =
-      (struct xdg_output_manager_v1_info*)malloc(sizeof *manager);
+      (struct xdg_output_manager_v1_info*)calloc(1, sizeof *manager);
 
   wl_list_init(&manager->outputs);
   manager->info = info;
@@ -1034,8 +1098,9 @@ static void add_xdg_output_manager_v1_info(struct weston_info* info,
       info->registry, id, &zxdg_output_manager_v1_interface,
       version > 2 ? 2 : version);
 
-  wl_list_for_each(output, &info->outputs, global_link)
-      add_xdg_output_v1_info(manager, output);
+  wl_list_for_each(output, &info->outputs, global_link) {
+    add_xdg_output_v1_info(manager, output);
+  }
 
   info->xdg_output_manager_v1_info = manager;
 }
@@ -1074,7 +1139,7 @@ static void destroy_output_info(void* data) {
 
 static void add_output_info(struct weston_info* info, uint32_t id,
                             uint32_t version) {
-  struct output_info* output = (struct output_info*)malloc(sizeof *output);
+  struct output_info* output = (struct output_info*)calloc(1, sizeof *output);
 
   init_global_info(info, &output->global, id, "wl_output", version);
   output->global.print = print_output_info;
@@ -1155,20 +1220,22 @@ static void get_wayland_screen_info(struct wl_display* dpy) {
   wl_registry_destroy(info.registry);
 }
 
-static bool wayland_egltest() {
+static void wayland_egltest() {
   // NOTE: returns false to fall back to X11 when the Wayland socket doesn't
   // exist but fails with record_error if something actually went wrong
   struct wl_display* dpy = wl_display_connect(nullptr);
   if (!dpy) {
-    return false;
+    record_error("Could not connect to wayland socket");
+    return;
   }
 
-  get_egl_status((EGLNativeDisplayType)dpy, true, false);
+  if (!get_egl_status((EGLNativeDisplayType)dpy, true, false)) {
+    record_error("EGL test failed");
+  }
   get_wayland_screen_info(dpy);
 
   wl_display_disconnect(dpy);
   record_value("TEST_TYPE\nEGL\n");
-  return true;
 }
 #endif
 
@@ -1184,21 +1251,19 @@ int childgltest() {
   // Get a list of all GPUs from the PCI bus.
   int pci_count = get_pci_status();
 
-  bool result = false;
 #ifdef MOZ_WAYLAND
-  if (!IsWaylandDisabled()) {
-    result = wayland_egltest();
-  }
+  if (IsWaylandEnabled()) {
+    wayland_egltest();
+  } else
 #endif
+  {
 #ifdef MOZ_X11
-  // TODO: --display command line argument is not properly handled
-  if (!result) {
-    result = x11_egltest(pci_count);
-  }
-  if (!result) {
-    glxtest();
-  }
+    // TODO: --display command line argument is not properly handled
+    if (!x11_egltest(pci_count)) {
+      glxtest();
+    }
 #endif
+  }
 
   // Finally write buffered data to the pipe.
   record_flush();

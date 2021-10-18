@@ -261,9 +261,10 @@ OCSPRequest::Run() {
     priorityChannel->AdjustPriority(nsISupportsPriority::PRIORITY_HIGHEST);
   }
 
-  channel->SetLoadFlags(nsIRequest::LOAD_ANONYMOUS |
-                        nsIChannel::LOAD_BYPASS_SERVICE_WORKER |
-                        nsIChannel::LOAD_BYPASS_URL_CLASSIFIER);
+  channel->SetLoadFlags(
+      nsIRequest::LOAD_ANONYMOUS | nsIRequest::LOAD_BYPASS_CACHE |
+      nsIRequest::INHIBIT_CACHING | nsIChannel::LOAD_BYPASS_SERVICE_WORKER |
+      nsIChannel::LOAD_BYPASS_URL_CLASSIFIER);
 
   nsCOMPtr<nsILoadInfo> loadInfo = channel->LoadInfo();
 
@@ -320,6 +321,10 @@ OCSPRequest::Run() {
     return NotifyDone(rv, lock);
   }
   rv = internalChannel->SetAllowHttp3(false);
+  if (NS_FAILED(rv)) {
+    return NotifyDone(rv, lock);
+  }
+  rv = internalChannel->SetIsOCSP(true);
   if (NS_FAILED(rv)) {
     return NotifyDone(rv, lock);
   }
@@ -586,13 +591,9 @@ void PK11PasswordPromptRunnable::RunOnTargetThread() {
   }
 
   nsString password;
-  // |checkState| is unused because |checkMsg| (the argument just before it) is
-  // null, but XPConnect requires it to point to a valid bool nonetheless.
-  bool checkState = false;
   bool userClickedOK = false;
   rv = prompt->PromptPassword(nullptr, promptString.get(),
-                              getter_Copies(password), nullptr, &checkState,
-                              &userClickedOK);
+                              getter_Copies(password), &userClickedOK);
   if (NS_FAILED(rv) || !userClickedOK) {
     return;
   }
@@ -1091,23 +1092,21 @@ static void RebuildVerifiedCertificateInformation(PRFileDesc* fd,
     flags |= CertVerifier::FLAG_TLS_IGNORE_STATUS_REQUEST;
   }
 
-  SECOidTag evOidPolicy;
+  EVStatus evStatus;
   CertificateTransparencyInfo certificateTransparencyInfo;
-  UniqueCERTCertList builtChain;
-  const bool saveIntermediates = false;
+  nsTArray<nsTArray<uint8_t>> builtChainCertBytes;
+  nsTArray<uint8_t> certBytes(cert->derCert.data, cert->derCert.len);
   bool isBuiltCertChainRootBuiltInRoot = false;
   mozilla::pkix::Result rv = certVerifier->VerifySSLServerCert(
-      cert, mozilla::pkix::Now(), infoObject, infoObject->GetHostName(),
-      builtChain, flags, maybePeerCertsBytes, stapledOCSPResponse,
+      certBytes, mozilla::pkix::Now(), infoObject, infoObject->GetHostName(),
+      builtChainCertBytes, flags, maybePeerCertsBytes, stapledOCSPResponse,
       sctsFromTLSExtension, Nothing(), infoObject->GetOriginAttributes(),
-      saveIntermediates, &evOidPolicy,
+      &evStatus,
       nullptr,  // OCSP stapling telemetry
       nullptr,  // key size telemetry
       nullptr,  // SHA-1 telemetry
       nullptr,  // pinning telemetry
-      &certificateTransparencyInfo,
-      nullptr,  // CRLite telemetry,
-      &isBuiltCertChainRootBuiltInRoot);
+      &certificateTransparencyInfo, &isBuiltCertChainRootBuiltInRoot);
 
   if (rv != Success) {
     MOZ_LOG(gPIPNSSLog, LogLevel::Debug,
@@ -1115,7 +1114,7 @@ static void RebuildVerifiedCertificateInformation(PRFileDesc* fd,
   }
 
   RefPtr<nsNSSCertificate> nssc(nsNSSCertificate::Create(cert.get()));
-  if (rv == Success && evOidPolicy != SEC_OID_UNKNOWN) {
+  if (rv == Success && evStatus == EVStatus::EV) {
     MOZ_LOG(gPIPNSSLog, LogLevel::Debug,
             ("HandshakeCallback using NEW cert %p (is EV)", nssc.get()));
     infoObject->SetServerCert(nssc, EVStatus::EV);
@@ -1130,9 +1129,7 @@ static void RebuildVerifiedCertificateInformation(PRFileDesc* fd,
         TransportSecurityInfo::ConvertCertificateTransparencyInfoToStatus(
             certificateTransparencyInfo);
     infoObject->SetCertificateTransparencyStatus(status);
-    nsTArray<nsTArray<uint8_t>> certBytesArray =
-        TransportSecurityInfo::CreateCertBytesArray(builtChain);
-    infoObject->SetSucceededCertChain(std::move(certBytesArray));
+    infoObject->SetSucceededCertChain(std::move(builtChainCertBytes));
     infoObject->SetIsBuiltCertChainRootBuiltInRoot(
         isBuiltCertChainRootBuiltInRoot);
   }

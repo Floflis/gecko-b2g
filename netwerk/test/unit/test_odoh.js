@@ -2,64 +2,41 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+/*
+ * Most of tests in this file are reused from test_trr.js, except tests listed
+ * below. Since ODoH doesn't support push and customerized DNS resolver, some
+ * related tests are skipped.
+ *
+ * test_trr_flags
+ * test_push
+ * test_clearCacheOnURIChange // TODO: Clear DNS cache when ODoH prefs changed.
+ * test_dnsSuffix
+ * test_async_resolve_with_trr_server
+ * test_content_encoding_gzip
+ * test_redirect
+ * test_confirmation
+ * test_detected_uri
+ * test_pref_changes
+ * test_dohrollout_mode
+ * test_purge_trr_cache_on_mode_change
+ * test_old_bootstrap_pref
+ */
+
 "use strict";
+
+/* import-globals-from trr_common.js */
 
 ChromeUtils.import("resource://gre/modules/NetUtil.jsm");
 
-let prefs;
-let h2Port;
-let listen;
-
-const dns = Cc["@mozilla.org/network/dns-service;1"].getService(
-  Ci.nsIDNSService
-);
 const certOverrideService = Cc[
   "@mozilla.org/security/certoverride;1"
 ].getService(Ci.nsICertOverrideService);
-const threadManager = Cc["@mozilla.org/thread-manager;1"].getService(
-  Ci.nsIThreadManager
-);
-const mainThread = threadManager.currentThread;
-
-const defaultOriginAttributes = {};
 
 function setup() {
-  let env = Cc["@mozilla.org/process/environment;1"].getService(
-    Ci.nsIEnvironment
-  );
-  h2Port = env.get("MOZHTTP2_PORT");
-  Assert.notEqual(h2Port, null);
-  Assert.notEqual(h2Port, "");
+  h2Port = trr_test_setup();
+  runningODoHTests = true;
 
-  // Set to allow the cert presented by our H2 server
-  do_get_profile();
-  prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefBranch);
-
-  prefs.setBoolPref("network.http.spdy.enabled", true);
-  prefs.setBoolPref("network.http.spdy.enabled.http2", true);
-  // the TRR server is on 127.0.0.1
-  prefs.setCharPref("network.trr.bootstrapAddress", "127.0.0.1");
-
-  // make all native resolve calls "secretly" resolve localhost instead
-  prefs.setBoolPref("network.dns.native-is-localhost", true);
-
-  // 0 - off, 1 - race, 2 TRR first, 3 TRR only, 4 shadow
-  prefs.setIntPref("network.trr.mode", 3); // TRR first
-  prefs.setBoolPref("network.trr.wait-for-portal", false);
-  // don't confirm that TRR is working, just go!
-  prefs.setCharPref("network.trr.confirmationNS", "skip");
-
-  // So we can change the pref without clearing the cache to check a pushed
-  // record with a TRR path that fails.
-  Services.prefs.setBoolPref("network.trr.clear-cache-on-pref-change", false);
-
-  // The moz-http2 cert is for foo.example.com and is signed by http2-ca.pem
-  // so add that cert to the trust list as a signing cert.  // the foo.example.com domain name.
-  const certdb = Cc["@mozilla.org/security/x509certdb;1"].getService(
-    Ci.nsIX509CertDB
-  );
-  addCertFromFile(certdb, "http2-ca.pem", "CTu,u,u");
-
+  Services.prefs.setIntPref("network.trr.mode", Ci.nsIDNSService.MODE_TRRONLY);
   // This is for skiping the security check for the odoh host.
   certOverrideService.setDisableAllSecurityChecksAndLetAttackersInterceptMyData(
     true
@@ -68,67 +45,25 @@ function setup() {
 
 setup();
 registerCleanupFunction(() => {
-  prefs.clearUserPref("network.http.spdy.enabled");
-  prefs.clearUserPref("network.http.spdy.enabled.http2");
-  prefs.clearUserPref("network.dns.localDomains");
-  prefs.clearUserPref("network.dns.native-is-localhost");
-  prefs.clearUserPref("network.trr.mode");
-  prefs.clearUserPref("network.trr.uri");
-  prefs.clearUserPref("network.trr.credentials");
-  prefs.clearUserPref("network.trr.wait-for-portal");
-  prefs.clearUserPref("network.trr.allow-rfc1918");
-  prefs.clearUserPref("network.trr.useGET");
-  prefs.clearUserPref("network.trr.confirmationNS");
-  prefs.clearUserPref("network.trr.bootstrapAddress");
-  prefs.clearUserPref("network.trr.request-timeout");
-  prefs.clearUserPref("network.trr.clear-cache-on-pref-change");
-  prefs.clearUserPref("network.trr.odoh.enabled");
-  prefs.clearUserPref("network.trr.odoh.target_path");
+  trr_clear_prefs();
+  Services.prefs.clearUserPref("network.trr.odoh.enabled");
+  Services.prefs.clearUserPref("network.trr.odoh.target_path");
+  Services.prefs.clearUserPref("network.trr.odoh.configs_uri");
   certOverrideService.setDisableAllSecurityChecksAndLetAttackersInterceptMyData(
     false
   );
 });
 
-class DNSListener {
-  constructor() {
-    this.promise = new Promise(resolve => {
-      this.resolve = resolve;
-    });
-  }
-  onLookupComplete(inRequest, inRecord, inStatus) {
-    this.resolve([inRequest, inRecord, inStatus]);
-  }
-  // So we can await this as a promise.
-  then() {
-    return this.promise.then.apply(this.promise, arguments);
-  }
-}
-
-DNSListener.prototype.QueryInterface = ChromeUtils.generateQI([
-  "nsIDNSListener",
-]);
-
 add_task(async function testODoHConfig() {
   // use the h2 server as DOH provider
-  prefs.setCharPref(
+  Services.prefs.setCharPref(
     "network.trr.uri",
     "https://foo.example.com:" + h2Port + "/odohconfig"
   );
 
-  let dnsListener = new DNSListener();
-  let request = dns.asyncResolve(
-    "odoh_host.example.com",
-    dns.RESOLVE_TYPE_HTTPSSVC,
-    0,
-    null, // resolverInfo
-    dnsListener,
-    mainThread,
-    defaultOriginAttributes
-  );
-
-  let [inRequest, inRecord, inStatus] = await dnsListener;
-  Assert.equal(inRequest, request, "correct request was used");
-  Assert.equal(inStatus, Cr.NS_OK, "status OK");
+  let [, inRecord] = await new TRRDNSListener("odoh_host.example.com", {
+    type: Ci.nsIDNSService.RESOLVE_TYPE_HTTPSSVC,
+  });
   let answer = inRecord.QueryInterface(Ci.nsIDNSHTTPSSVCRecord).records;
   Assert.equal(answer[0].priority, 1);
   Assert.equal(answer[0].name, "odoh_host.example.com");
@@ -138,65 +73,189 @@ add_task(async function testODoHConfig() {
   Assert.equal(odohconfig.length, 46);
 });
 
-add_task(async function testODoHQueryA() {
-  dns.clearCache(true);
+let testIndex = 0;
 
-  prefs.setBoolPref("network.trr.odoh.enabled", true);
-  prefs.setCharPref(
+async function ODoHConfigTest(query, ODoHHost, expectedResult = false) {
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    "https://foo.example.com:" + h2Port + "/odohconfig?" + query
+  );
+
+  // Setting the pref "network.trr.odoh.target_host" will trigger the reload of
+  // the ODoHConfigs.
+  if (ODoHHost != undefined) {
+    Services.prefs.setCharPref("network.trr.odoh.target_host", ODoHHost);
+  } else {
+    Services.prefs.setCharPref(
+      "network.trr.odoh.target_host",
+      `https://odoh_host_${testIndex++}.com`
+    );
+  }
+
+  await topicObserved("odoh-service-activated");
+  Assert.equal(dns.ODoHActivated, expectedResult);
+}
+
+add_task(async function testODoHConfig1() {
+  await ODoHConfigTest("invalid=empty");
+});
+
+add_task(async function testODoHConfig2() {
+  await ODoHConfigTest("invalid=version");
+});
+
+add_task(async function testODoHConfig3() {
+  await ODoHConfigTest("invalid=configLength");
+});
+
+add_task(async function testODoHConfig4() {
+  await ODoHConfigTest("invalid=totalLength");
+});
+
+add_task(async function testODoHConfig5() {
+  await ODoHConfigTest("invalid=kemId");
+});
+
+add_task(async function testODoHConfig6() {
+  // Use a very short TTL.
+  Services.prefs.setIntPref("network.trr.odoh.min_ttl", 1);
+  await ODoHConfigTest("invalid=kemId&ttl=1");
+
+  // This is triggered by the expiration of the TTL.
+  await topicObserved("odoh-service-activated");
+  Assert.ok(!dns.ODoHActivated);
+  Services.prefs.clearUserPref("network.trr.odoh.min_ttl");
+});
+
+add_task(async function testODoHConfig7() {
+  dns.clearCache(true);
+  Services.prefs.setIntPref("network.trr.mode", 2); // TRR-first
+  Services.prefs.setBoolPref("network.trr.odoh.enabled", true);
+  // At this point, we've queried the ODoHConfig, but there is no usable config
+  // (kemId is not supported). So, we should see the DNS result is from the
+  // native resolver.
+  await new TRRDNSListener("bar.example.com", "127.0.0.1");
+});
+
+async function ODoHConfigTestHTTP(configUri, expectedResult) {
+  // Setting the pref "network.trr.odoh.configs_uri" will trigger the reload of
+  // the ODoHConfigs.
+  Services.prefs.setCharPref("network.trr.odoh.configs_uri", configUri);
+
+  await topicObserved("odoh-service-activated");
+  Assert.equal(dns.ODoHActivated, expectedResult);
+}
+
+add_task(async function testODoHConfig8() {
+  dns.clearCache(true);
+  Services.prefs.setCharPref("network.trr.uri", "");
+
+  await ODoHConfigTestHTTP(
+    `https://foo.example.com:${h2Port}/odohconfig?downloadFrom=http`,
+    true
+  );
+});
+
+add_task(async function testODoHConfig9() {
+  // Reset the prefs back to the correct values, so we will get valid
+  // ODoHConfigs when "network.trr.odoh.configs_uri" is cleared below.
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://foo.example.com:${h2Port}/odohconfig`
+  );
+  Services.prefs.setCharPref(
     "network.trr.odoh.target_host",
     `https://odoh_host.example.com:${h2Port}`
   );
-  const expectedIP = "8.8.8.8";
-  prefs.setCharPref(
-    "network.trr.odoh.target_path",
-    `odoh?responseIP=${expectedIP}`
+
+  // Use a very short TTL.
+  Services.prefs.setIntPref("network.trr.odoh.min_ttl", 1);
+  // This will trigger to download ODoHConfigs from HTTPS RR.
+  Services.prefs.clearUserPref("network.trr.odoh.configs_uri");
+
+  await topicObserved("odoh-service-activated");
+  Assert.ok(dns.ODoHActivated);
+
+  await ODoHConfigTestHTTP(
+    `https://foo.example.com:${h2Port}/odohconfig?downloadFrom=http`,
+    true
   );
 
-  prefs.setCharPref("network.dns.localDomains", "odoh_host.example.com");
-
-  let dnsListener = new DNSListener();
-  let request = dns.asyncResolve(
-    "bar.example.com",
-    dns.RESOLVE_TYPE_DEFAULT,
-    0,
-    null, // resolverInfo
-    dnsListener,
-    mainThread,
-    defaultOriginAttributes
-  );
-
-  let [inRequest, inRecord, inStatus] = await dnsListener;
-  Assert.equal(inRequest, request, "correct request was used");
-  Assert.equal(inStatus, Cr.NS_OK, "status OK");
-  inRecord.QueryInterface(Ci.nsIDNSAddrRecord);
-  let answer = inRecord.getNextAddrAsString();
-  Assert.equal(answer, expectedIP);
+  // This is triggered by the expiration of the TTL.
+  await topicObserved("odoh-service-activated");
+  Assert.ok(dns.ODoHActivated);
+  Services.prefs.clearUserPref("network.trr.odoh.min_ttl");
 });
 
-add_task(async function testODoHQueryAAAA() {
-  dns.clearCache(true);
-
-  const expectedIP = "2020:2020::2020";
-  prefs.setCharPref(
-    "network.trr.odoh.target_path",
-    `odoh?responseIP=${expectedIP}`
-  );
-
-  let dnsListener = new DNSListener();
-  let request = dns.asyncResolve(
-    "aaaa.example.com",
-    dns.RESOLVE_TYPE_DEFAULT,
-    0,
-    null, // resolverInfo
-    dnsListener,
-    mainThread,
-    defaultOriginAttributes
-  );
-
-  let [inRequest, inRecord, inStatus] = await dnsListener;
-  Assert.equal(inRequest, request, "correct request was used");
-  Assert.equal(inStatus, Cr.NS_OK, "status OK");
-  inRecord.QueryInterface(Ci.nsIDNSAddrRecord);
-  let answer = inRecord.getNextAddrAsString();
-  Assert.equal(answer, expectedIP);
+add_task(async function testODoHConfig10() {
+  // We can still get ODoHConfigs from HTTPS RR.
+  await ODoHConfigTestHTTP("http://invalid_odoh_config.com", true);
 });
+
+add_task(async function ensureODoHConfig() {
+  Services.prefs.setBoolPref("network.trr.odoh.enabled", true);
+  // Make sure we can connect to ODOH target successfully.
+  Services.prefs.setCharPref(
+    "network.dns.localDomains",
+    "odoh_host.example.com"
+  );
+
+  // Make sure we have an usable ODoHConfig to use.
+  await ODoHConfigTestHTTP(
+    `https://foo.example.com:${h2Port}/odohconfig?downloadFrom=http`,
+    true
+  );
+});
+
+add_task(test_A_record);
+
+add_task(test_AAAA_records);
+
+add_task(test_RFC1918);
+
+add_task(test_GET_ECS);
+
+add_task(test_timeout_mode3);
+
+add_task(test_strict_native_fallback);
+
+add_task(test_no_answers_fallback);
+
+add_task(test_404_fallback);
+
+add_task(test_mode_1_and_4);
+
+add_task(test_CNAME);
+
+add_task(test_name_mismatch);
+
+add_task(test_mode_2);
+
+add_task(test_excluded_domains);
+
+add_task(test_captiveportal_canonicalURL);
+
+add_task(test_parentalcontrols);
+
+// TRR-first check that DNS result is used if domain is part of the builtin-excluded-domains pref
+add_task(test_builtin_excluded_domains);
+
+add_task(test_excluded_domains_mode3);
+
+add_task(test25e);
+
+add_task(test_parentalcontrols_mode3);
+
+add_task(test_builtin_excluded_domains_mode3);
+
+add_task(count_cookies);
+
+add_task(test_connection_closed);
+
+add_task(test_fetch_time);
+
+add_task(test_fqdn);
+
+add_task(test_ipv6_trr_fallback);
+
+add_task(test_no_retry_without_doh);

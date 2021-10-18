@@ -11,6 +11,10 @@ const { XPCOMUtils } = ChromeUtils.import(
 const { AppConstants } = ChromeUtils.import(
   "resource://gre/modules/AppConstants.jsm"
 );
+const { MarionetteController } = ChromeUtils.import(
+  "resource://gre/modules/MarionetteController.jsm"
+);
+
 ChromeUtils.import("resource://gre/modules/ActivitiesService.jsm");
 ChromeUtils.import("resource://gre/modules/AlarmService.jsm");
 ChromeUtils.import("resource://gre/modules/DownloadService.jsm");
@@ -31,9 +35,17 @@ XPCOMUtils.defineLazyServiceGetter(
   "nsIVirtualCursorService"
 );
 
+XPCOMUtils.defineLazyModuleGetters(this, {
+  GeckoBridge: "resource://gre/modules/GeckoBridge.jsm",
+  SafeBrowsing: "resource://gre/modules/SafeBrowsing.jsm",
+  SettingsPrefsSync: "resource://gre/modules/SettingsPrefsSync.jsm",
+});
+
 const isGonk = AppConstants.platform === "gonk";
 
 if (isGonk) {
+  ChromeUtils.import("resource://gre/modules/CustomHeaderInjector.jsm");
+
   XPCOMUtils.defineLazyGetter(this, "libcutils", () => {
     const { libcutils } = ChromeUtils.import(
       "resource://gre/modules/systemlibs.js"
@@ -93,12 +105,60 @@ var shell = {
     this.contentBrowser = systemAppFrame;
   },
 
+  _progressListener: {
+    stopUrl: null,
+
+    onLocationChange: (webProgress, request, location, flags) => {
+      debug(`LocationChange: ${location.spec}`);
+    },
+
+    onProgressChange: () => {
+      debug(`ProgressChange`);
+    },
+
+    onSecurityChange: () => {
+      debug(`SecurityChange`);
+    },
+
+    onStateChange: (webProgress, request, stateFlags, status) => {
+      debug(`StateChange ${stateFlags} ${request.name}`);
+      if (stateFlags & Ci.nsIWebProgressListener.STATE_START) {
+        if (!this.stopUrl) {
+          this.stopUrl = request.name;
+        }
+      }
+
+      if (stateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
+        if (this.stopUrl && request.name == this.stopUrl) {
+          debug(`About to notify system app is loaded.`);
+          shell.contentBrowser.removeProgressListener(shell._progressListener);
+          shell.notifyContentWindowLoaded();
+        }
+      }
+    },
+
+    onStatusChange: () => {
+      debug(`StatusChange`);
+    },
+
+    QueryInterface: ChromeUtils.generateQI([
+      Ci.nsIWebProgressListener2,
+      Ci.nsIWebProgressListener,
+      Ci.nsISupportsWeakReference,
+    ]),
+  },
+
   start() {
     if (this._started) {
       return;
     }
 
     this._started = true;
+
+    let gaiaChrome = Cc["@mozilla.org/b2g/gaia-chrome;1"].getService();
+    if (!gaiaChrome) {
+      debug("No gaia chrome!");
+    }
 
     // This forces the initialization of the cookie service before we hit the
     // network.
@@ -110,58 +170,16 @@ var shell = {
 
     let startURL = this.startURL;
 
-    window.addEventListener("MozAfterPaint", this);
     window.addEventListener("sizemodechange", this);
     window.addEventListener("unload", this);
 
     Services.virtualcursor.init(window);
 
-    let stopUrl = null;
+    this.contentBrowser.addProgressListener(
+      this._progressListener,
+      Ci.nsIWebProgress.NOTIFY_STATE_REQUEST
+    );
 
-    // Listen for loading events on the system app xul:browser
-    let listener = {
-      onLocationChange: (webProgress, request, location, flags) => {
-        // debug(`LocationChange: ${location.spec}`);
-      },
-
-      onProgressChange: () => {
-        // debug(`ProgressChange`);
-      },
-
-      onSecurityChange: () => {
-        // debug(`SecurityChange`);
-      },
-
-      onStateChange: (webProgress, request, stateFlags, status) => {
-        // debug(`StateChange ${stateFlags}`);
-        if (stateFlags & Ci.nsIWebProgressListener.STATE_START) {
-          if (!stopUrl) {
-            stopUrl = request.name;
-          }
-        }
-
-        if (stateFlags & Ci.nsIWebProgressListener.STATE_STOP) {
-          // debug(`Done loading ${request.name}`);
-          if (stopUrl && request.name == stopUrl) {
-            this.contentBrowser.removeProgressListener(listener);
-            this.notifyContentWindowLoaded();
-          }
-        }
-      },
-
-      onStatusChange: () => {
-        // debug(`StatusChange`);
-      },
-
-      QueryInterface: ChromeUtils.generateQI([
-        Ci.nsIWebProgressListener2,
-        Ci.nsIWebProgressListener,
-        Ci.nsISupportsWeakReference,
-      ]),
-    };
-    this.contentBrowser.addProgressListener(listener);
-
-    Services.ppmm.addMessageListener("content-handler", this);
     Services.ppmm.addMessageListener("dial-handler", this);
     Services.ppmm.addMessageListener("sms-handler", this);
     Services.ppmm.addMessageListener("mail-handler", this);
@@ -175,7 +193,6 @@ var shell = {
   stop() {
     window.removeEventListener("unload", this);
     window.removeEventListener("sizemodechange", this);
-    Services.ppmm.removeMessageListener("content-handler", this);
     Services.ppmm.removeMessageListener("dial-handler", this);
     Services.ppmm.removeMessageListener("sms-handler", this);
     Services.ppmm.removeMessageListener("mail-handler", this);
@@ -197,9 +214,6 @@ var shell = {
           this.contentBrowser.docShellIsActive = true;
         }
         break;
-      case "MozAfterPaint":
-        window.removeEventListener("MozAfterPaint", this);
-        break;
       case "unload":
         this.stop();
         break;
@@ -208,7 +222,6 @@ var shell = {
 
   receiveMessage(message) {
     const activities = {
-      "content-handler": { name: "view" },
       "dial-handler": { name: "dial" },
       "mail-handler": { name: "new" },
       "sms-handler": { name: "new" },
@@ -222,10 +235,7 @@ var shell = {
     let data = message.data;
     let activity = activities[message.name];
 
-    let a = new window.WebActivity({
-      name: activity.name,
-      data,
-    });
+    let a = new window.WebActivity(activity.name, data);
 
     let promise = a.start();
     if (activity.response) {
@@ -287,34 +297,56 @@ document.addEventListener(
       // Notify the the shell is ready at the next event loop tick to
       // let the embedder user a chance to add event listeners.
       window.setTimeout(() => {
+        // Provide a sync accessor to the shell readiness.
+        shell.isReady = true;
         Services.obs.notifyObservers(window, "shell-ready");
       }, 0);
     }, "web-embedder-created");
 
-    // Initialize Marionette server
-    Services.tm.idleDispatchToMainThread(() => {
-      Services.obs.notifyObservers(null, "marionette-startup-requested");
+    // Always initialize Marionette server in userdebug and desktop builds
+    if (!isGonk || libcutils.property_get("ro.build.type") == "userdebug") {
+      Services.tm.idleDispatchToMainThread(() => {
+        Services.obs.notifyObservers(null, "marionette-startup-requested");
+      });
+    }
+
+    // Use another way to initialize Marionette server in user builds
+    if (isGonk && libcutils.property_get("ro.build.type") == "user") {
+      if (MarionetteController) {
+        MarionetteController.enableRunner();
+      } else {
+        console.warn("MarionetteController not exist");
+      }
+    }
+
+    // Wait for the the on-boot-done event to start the shell.
+    // If the on-boot-done is not reported,
+    // the shell will be started by the following timeout handler.
+    let onBootDone = new Promise(resolve => {
+      Services.obs.addObserver(() => {
+        resolve();
+      }, "on-boot-done");
     });
 
     // Start the SIDL <-> Gecko bridge.
-    const { GeckoBridge } = ChromeUtils.import(
-      "resource://gre/modules/GeckoBridge.jsm"
-    );
     GeckoBridge.start();
+    // Init SafeBrowsing prefs.
+    SafeBrowsing.init();
 
     shell.createSystemAppFrame();
 
     // Start the Settings <-> Preferences synchronizer.
-    const { SettingsPrefsSync } = ChromeUtils.import(
-      "resource://gre/modules/SettingsPrefsSync.jsm"
-    );
-    SettingsPrefsSync.start(window).then(() => {
+    let languageReady = SettingsPrefsSync.start(window).then(() => {
       // TODO: check if there is a better time to run delayedInit()
       // for the overall OS startup, like when the homescreen is ready.
       window.setTimeout(() => {
         SettingsPrefsSync.delayedInit();
       }, 10000);
+    });
 
+    // As soon as apps boot is done and the locale is configured,
+    // start loading the system app.
+    Promise.allSettled([onBootDone, languageReady]).then(() => {
       shell.start();
     });
 

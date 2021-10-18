@@ -8,7 +8,6 @@
 
 #include "nsINavHistoryService.h"
 
-#include "nsICollation.h"
 #include "nsIStringBundle.h"
 #include "nsITimer.h"
 #include "nsMaybeWeakPtr.h"
@@ -23,6 +22,8 @@
 #include "Database.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/Attributes.h"
+#include "mozilla/intl/Collator.h"
+#include "mozilla/UniquePtr.h"
 #include "mozIStorageVacuumParticipant.h"
 
 #ifdef XP_WIN
@@ -167,7 +168,7 @@ class nsNavHistory final : public nsSupportsWeakReference,
    * objects for places components.
    */
   nsIStringBundle* GetBundle();
-  nsICollation* GetCollation();
+  const mozilla::intl::Collator* GetCollator();
   void GetStringFromName(const char* aName, nsACString& aResult);
   void GetAgeInDaysString(int32_t aInt, const char* aName, nsACString& aResult);
   static void GetMonthName(const PRExplodedTime& aTime, nsACString& aResult);
@@ -236,14 +237,7 @@ class nsNavHistory final : public nsSupportsWeakReference,
   void DomainNameFromURI(nsIURI* aURI, nsACString& aDomainName);
   static PRTime NormalizeTime(uint32_t aRelative, PRTime aOffset);
 
-  typedef nsDataHashtable<nsCStringHashKey, nsCString> StringHash;
-
-  /**
-   * Indicates if it is OK to notify history observers or not.
-   *
-   * @return true if it is OK to notify, false otherwise.
-   */
-  bool canNotify() { return mCanNotify; }
+  typedef nsTHashMap<nsCStringHashKey, nsCString> StringHash;
 
   enum RecentEventFlags {
     RECENT_TYPED = 1 << 0,      // User typed in URL recently
@@ -433,19 +427,16 @@ class nsNavHistory final : public nsSupportsWeakReference,
                          nsNavHistoryQueryOptions* aOptions,
                          nsCOMArray<nsNavHistoryResultNode>* aResults);
 
-  // observers
-  nsMaybeWeakPtrArray<nsINavHistoryObserver> mObservers;
-
   // effective tld service
   nsCOMPtr<nsIEffectiveTLDService> mTLDService;
   nsCOMPtr<nsIIDNService> mIDNService;
 
   // localization
   nsCOMPtr<nsIStringBundle> mBundle;
-  nsCOMPtr<nsICollation> mCollation;
+  mozilla::UniquePtr<const mozilla::intl::Collator> mCollator;
 
   // recent events
-  typedef nsDataHashtable<nsCStringHashKey, int64_t> RecentEventHash;
+  typedef nsTHashMap<nsCStringHashKey, int64_t> RecentEventHash;
   RecentEventHash mRecentTyped;
   RecentEventHash mRecentLink;
   RecentEventHash mRecentBookmark;
@@ -499,9 +490,6 @@ class nsNavHistory final : public nsSupportsWeakReference,
 
   int64_t mLastCachedStartOfDay;
   int64_t mLastCachedEndOfDay;
-
-  // Used to enable and disable the observer notifications
-  bool mCanNotify;
 
   // Used to cache the call to CryptAcquireContext, which is expensive
   // when called thousands of times

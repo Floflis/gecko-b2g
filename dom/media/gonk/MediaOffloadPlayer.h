@@ -21,7 +21,8 @@ class MediaOffloadPlayer : public DecoderDoctorLifeLogger<MediaOffloadPlayer> {
  public:
   typedef MediaDecoderOwner::NextFrameStatus NextFrameStatus;
 
-  static RefPtr<MediaOffloadPlayer> Create(MediaFormatReaderInit& aInit,
+  static RefPtr<MediaOffloadPlayer> Create(MediaDecoder* aDecoder,
+                                           MediaFormatReaderInit& aInit,
                                            nsIURI* aURI);
 
   /*
@@ -95,7 +96,7 @@ class MediaOffloadPlayer : public DecoderDoctorLifeLogger<MediaOffloadPlayer> {
   /*
    * APIs from MediaFormatReader.
    */
-  void NotifyDataArrived() {}
+  virtual void NotifyDataArrived() {}
   RefPtr<SetCDMPromise> SetCDMProxy(CDMProxy* aProxy);
   void UpdateCompositor(already_AddRefed<layers::KnowsCompositor> aCompositor);
   void GetDebugInfo(dom::MediaFormatReaderDebugInfo& aInfo) {}
@@ -138,7 +139,7 @@ class MediaOffloadPlayer : public DecoderDoctorLifeLogger<MediaOffloadPlayer> {
   bool OnTaskQueue() const { return OwnerThread()->IsCurrentThreadIn(); }
   RefPtr<MediaDecoder::SeekPromise> HandleSeek(const SeekTarget& aTarget,
                                                bool aVisible);
-  void FirePendingSeekIfExists();
+  bool FirePendingSeekIfExists();
   bool Seeking() { return mCurrentSeek.Exists(); }
   void NotifySeeked(bool aSuccess);
   void UpdateCurrentPositionPeriodically();
@@ -155,6 +156,7 @@ class MediaOffloadPlayer : public DecoderDoctorLifeLogger<MediaOffloadPlayer> {
    * Methods implemented by derived classes.
    */
   virtual void InitInternal() = 0;
+  virtual void ShutdownInternal() = 0;
   virtual void ResetInternal() = 0;
   virtual void SeekInternal(const SeekTarget& aTarget, bool aVisible) = 0;
   // Return true to schedule next update.

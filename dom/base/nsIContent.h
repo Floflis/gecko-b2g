@@ -117,48 +117,28 @@ class nsIContent : public nsINode {
      *
      * @note the result children order is
      *   1. :before generated node
-     *   2. XBL flattened tree children of this node
+     *   2. Shadow DOM flattened tree children of this node
      *   3. native anonymous nodes
      *   4. :after generated node
      */
     eAllChildren = 0,
 
     /**
-     * All XBL explicit children of the node (see
-     * http://www.w3.org/TR/xbl/#explicit3 ), as well as :before and :after
-     * anonymous content and native anonymous children.
-     *
-     * @note the result children order is
-     *   1. :before generated node
-     *   2. XBL explicit children of the node
-     *   3. native anonymous nodes
-     *   4. :after generated node
+     * Skip native anonymous content created for placeholder of HTML input.
      */
-    eAllButXBL = 1,
-
-    /**
-     * Skip native anonymous content created for placeholder of HTML input,
-     * used in conjunction with eAllChildren or eAllButXBL.
-     */
-    eSkipPlaceholderContent = 2,
+    eSkipPlaceholderContent = 1 << 0,
 
     /**
      * Skip native anonymous content created by ancestor frames of the root
      * element's primary frame, such as scrollbar elements created by the root
      * scroll frame.
      */
-    eSkipDocumentLevelNativeAnonymousContent = 4,
+    eSkipDocumentLevelNativeAnonymousContent = 1 << 1,
   };
 
   /**
-   * Return either the XBL explicit children of the node or the XBL flattened
-   * tree children of the node, depending on the filter, as well as
-   * native anonymous children.
-   *
-   * @note calling this method with eAllButXBL will return children that are
-   *  also in the eAllButXBL and eAllChildren child lists of other descendants
-   *  of this node in the tree, but those other nodes cannot be reached from the
-   *  eAllButXBL child list.
+   * Return the flattened tree children of the node, depending on the filter, as
+   * well as native anonymous children.
    */
   virtual already_AddRefed<nsINodeList> GetChildren(uint32_t aFilter) = 0;
 
@@ -317,20 +297,6 @@ class nsIContent : public nsINode {
   bool IsFocusable(int32_t* aTabIndex = nullptr, bool aWithMouse = false);
   virtual bool IsFocusableInternal(int32_t* aTabIndex, bool aWithMouse);
 
-  /**
-   * The method focuses (or activates) element that accesskey is bound to. It is
-   * called when accesskey is activated.
-   *
-   * @param aKeyCausesActivation - if true then element should be activated
-   * @param aIsTrustedEvent - if true then event that is cause of accesskey
-   *                          execution is trusted.
-   * @return true if the focus was changed.
-   */
-  MOZ_CAN_RUN_SCRIPT virtual bool PerformAccesskey(bool aKeyCausesActivation,
-                                                   bool aIsTrustedEvent) {
-    return false;
-  }
-
   /*
    * Get desired IME state for the content.
    *
@@ -390,6 +356,16 @@ class nsIContent : public nsINode {
    * @return The assigned slot element or null.
    */
   mozilla::dom::HTMLSlotElement* GetAssignedSlotByMode() const;
+
+  mozilla::dom::HTMLSlotElement* GetManualSlotAssignment() const {
+    const nsExtendedContentSlots* slots = GetExistingExtendedContentSlots();
+    return slots ? slots->mManualSlotAssignment : nullptr;
+  }
+
+  void SetManualSlotAssignment(mozilla::dom::HTMLSlotElement* aSlot) {
+    MOZ_ASSERT(aSlot || GetExistingExtendedContentSlots());
+    ExtendedContentSlots()->mManualSlotAssignment = aSlot;
+  }
 
   /**
    * Same as GetFlattenedTreeParentNode, but returns null if the parent is
@@ -689,6 +665,8 @@ class nsIContent : public nsINode {
      * @see nsIContent::GetAssignedSlot
      */
     RefPtr<mozilla::dom::HTMLSlotElement> mAssignedSlot;
+
+    mozilla::dom::HTMLSlotElement* mManualSlotAssignment = nullptr;
   };
 
   class nsContentSlots : public nsINode::nsSlots {
@@ -785,7 +763,18 @@ class nsIContent : public nsINode {
   ~nsIContent() = default;
 
  public:
-#ifdef DEBUG_FRAME_DUMP
+#if defined(DEBUG) || defined(MOZ_DUMP_PAINTING)
+#  define MOZ_DOM_LIST
+#endif
+
+#if defined(MOZ_DOM_LIST) || defined(DEBUG_FRAME_DUMP)
+  /**
+   * An alias for List() with default arguments. Since some debuggers can't
+   * figure the default arguments easily, having an out-of-line, non-static
+   * function helps quite a lot.
+   */
+  void Dump();
+
   /**
    * List the content (and anything it contains) out to the given
    * file stream. Use aIndent as the base indent during formatting.

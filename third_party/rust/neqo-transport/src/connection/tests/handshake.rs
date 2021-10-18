@@ -4,25 +4,37 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use super::super::{Connection, Output, State, LOCAL_IDLE_TIMEOUT};
+use super::super::{Connection, Output, State};
 use super::{
-    assert_error, connect_force_idle, connect_with_rtt, default_client, default_server, get_tokens,
-    handshake, maybe_authenticate, send_something, CountingConnectionIdGenerator, AT_LEAST_PTO,
-    DEFAULT_RTT, DEFAULT_STREAM_DATA,
+    assert_error, connect, connect_force_idle, connect_with_rtt, default_client, default_server,
+    get_tokens, handshake, maybe_authenticate, send_something, CountingConnectionIdGenerator,
+    AT_LEAST_PTO, DEFAULT_RTT, DEFAULT_STREAM_DATA,
 };
 use crate::connection::AddressValidation;
 use crate::events::ConnectionEvent;
 use crate::path::PATH_MTU_V6;
 use crate::server::ValidateAddress;
-use crate::tparams::TransportParameter;
-use crate::{ConnectionError, ConnectionParameters, EmptyConnectionIdGenerator, Error, StreamType};
+use crate::tparams::{TransportParameter, MIN_ACK_DELAY};
+use crate::tracking::DEFAULT_ACK_DELAY;
+use crate::{
+    ConnectionError, ConnectionParameters, EmptyConnectionIdGenerator, Error, QuicVersion,
+    StreamType,
+};
 
 use neqo_common::{event::Provider, qdebug, Datagram};
-use neqo_crypto::{constants::TLS_CHACHA20_POLY1305_SHA256, AuthenticationStatus};
+use neqo_crypto::{
+    constants::TLS_CHACHA20_POLY1305_SHA256, generate_ech_keys, AuthenticationStatus,
+};
 use std::cell::RefCell;
+use std::convert::TryFrom;
+use std::mem;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::rc::Rc;
 use std::time::Duration;
 use test_fixture::{self, addr, assertions, fixture_init, now, split_datagram};
+
+const ECH_CONFIG_ID: u8 = 7;
+const ECH_PUBLIC_NAME: &str = "public.example";
 
 #[test]
 fn full_handshake() {
@@ -108,6 +120,7 @@ fn no_alpn() {
         addr(),
         addr(),
         ConnectionParameters::default(),
+        now(),
     )
     .unwrap();
     let mut server = default_server();
@@ -218,8 +231,8 @@ fn crypto_frame_split() {
     // after the first or second server packet.
     assert!(client3.as_dgram_ref().is_some() ^ client4.as_dgram_ref().is_some());
 
-    let _ = server.process(client3.dgram(), now());
-    let _ = server.process(client4.dgram(), now());
+    mem::drop(server.process(client3.dgram(), now()));
+    mem::drop(server.process(client4.dgram(), now()));
 
     assert_eq!(*client.state(), State::Connected);
     assert_eq!(*server.state(), State::Confirmed);
@@ -236,6 +249,7 @@ fn chacha20poly1305() {
         addr(),
         addr(),
         ConnectionParameters::default(),
+        now(),
     )
     .expect("create a default client");
     client.set_ciphers(&[TLS_CHACHA20_POLY1305_SHA256]).unwrap();
@@ -354,7 +368,7 @@ fn reorder_05rtt_with_0rtt() {
 
     // Handle the first packet and send 0.5-RTT in response.  Drop the response.
     now += RTT / 2;
-    let _ = server.process(Some(c1), now).dgram().unwrap();
+    mem::drop(server.process(Some(c1), now).dgram().unwrap());
     // The gap in 0-RTT will result in this 0.5 RTT containing an ACK.
     server.process_input(c2, now);
     let s2 = send_something(&mut server, now);
@@ -379,12 +393,12 @@ fn reorder_05rtt_with_0rtt() {
     maybe_authenticate(&mut client);
     let c4 = client.process(None, now).dgram();
     assert_eq!(*client.state(), State::Connected);
-    assert_eq!(client.loss_recovery.rtt(), RTT);
+    assert_eq!(client.paths.rtt(), RTT);
 
     now += RTT / 2;
     server.process_input(c4.unwrap(), now);
     assert_eq!(*server.state(), State::Confirmed);
-    assert_eq!(server.loss_recovery.rtt(), RTT);
+    assert_eq!(server.paths.rtt(), RTT);
 }
 
 /// Test that a server that coalesces 0.5 RTT with handshake packets
@@ -425,7 +439,7 @@ fn coalesce_05rtt() {
     // packet until authentication completes though.  So it saves it.
     now += RTT / 2;
     assert_eq!(client.stats().dropped_rx, 0);
-    let _ = client.process(s2, now).dgram();
+    mem::drop(client.process(s2, now).dgram());
     // This packet will contain an ACK, but we can ignore it.
     assert_eq!(client.stats().dropped_rx, 0);
     assert_eq!(client.stats().packets_rx, 3);
@@ -446,7 +460,7 @@ fn coalesce_05rtt() {
     assert!(s3.is_some());
     assert_eq!(*server.state(), State::Confirmed);
     now += RTT / 2;
-    let _ = client.process(s3, now).dgram();
+    mem::drop(client.process(s3, now).dgram());
     assert_eq!(*client.state(), State::Confirmed);
 
     assert_eq!(client.stats().dropped_rx, 0); // No dropped packets.
@@ -474,7 +488,7 @@ fn reorder_handshake() {
     // It can only send another Initial packet.
     now += RTT / 2;
     let dgram = client.process(s_hs, now).dgram();
-    assertions::assert_initial(&dgram.as_ref().unwrap(), false);
+    assertions::assert_initial(dgram.as_ref().unwrap(), false);
     assert_eq!(client.stats().saved_datagrams, 1);
     assert_eq!(client.stats().packets_rx, 1);
 
@@ -508,18 +522,18 @@ fn reorder_handshake() {
     now += RTT / 2;
     let s3 = server.process(c3, now).dgram();
     assert_eq!(*server.state(), State::Confirmed);
-    assert_eq!(server.loss_recovery.rtt(), RTT);
+    assert_eq!(server.paths.rtt(), RTT);
 
     now += RTT / 2;
     client.process_input(s3.unwrap(), now);
     assert_eq!(*client.state(), State::Confirmed);
-    assert_eq!(client.loss_recovery.rtt(), RTT);
+    assert_eq!(client.paths.rtt(), RTT);
 }
 
 #[test]
 fn reorder_1rtt() {
     const RTT: Duration = Duration::from_millis(100);
-    const PACKETS: usize = 6; // Many, but not enough to overflow cwnd.
+    const PACKETS: usize = 4; // Many, but not enough to overflow cwnd.
     let mut client = default_client();
     let mut server = default_server();
     let mut now = now();
@@ -558,11 +572,11 @@ fn reorder_1rtt() {
     assert_eq!(server.stats().saved_datagrams, PACKETS);
     assert_eq!(server.stats().dropped_rx, 1);
     assert_eq!(*server.state(), State::Confirmed);
-    assert_eq!(server.loss_recovery.rtt(), RTT);
+    assert_eq!(server.paths.rtt(), RTT);
 
     now += RTT / 2;
     client.process_input(s2.unwrap(), now);
-    assert_eq!(client.loss_recovery.rtt(), RTT);
+    assert_eq!(client.paths.rtt(), RTT);
 
     // All the stream data that was sent should now be available.
     let streams = server
@@ -584,6 +598,7 @@ fn reorder_1rtt() {
     }
 }
 
+#[cfg(not(feature = "fuzzing"))]
 #[test]
 fn corrupted_initial() {
     let mut client = default_client();
@@ -617,7 +632,8 @@ fn verify_pkt_honors_mtu() {
     let now = now();
 
     let res = client.process(None, now);
-    assert_eq!(res, Output::Callback(LOCAL_IDLE_TIMEOUT));
+    let idle_timeout = ConnectionParameters::default().get_idle_timeout();
+    assert_eq!(res, Output::Callback(idle_timeout));
 
     // Try to send a large stream and verify first packet is correctly sized
     let stream_id = client.stream_create(StreamType::UniDi).unwrap();
@@ -649,7 +665,7 @@ fn extra_initial_hs() {
     // another Initial packet.
     for _ in 0..=super::super::EXTRA_INITIALS {
         let c_init = client.process(undecryptable.clone(), now).dgram();
-        assertions::assert_initial(&c_init.as_ref().unwrap(), false);
+        assertions::assert_initial(c_init.as_ref().unwrap(), false);
         now += DEFAULT_RTT / 10;
     }
 
@@ -698,6 +714,53 @@ fn extra_initial_invalid_cid() {
     assert!(nothing.is_none());
 }
 
+fn connect_version(version: QuicVersion) {
+    fixture_init();
+    let mut client = Connection::new_client(
+        test_fixture::DEFAULT_SERVER_NAME,
+        test_fixture::DEFAULT_ALPN,
+        Rc::new(RefCell::new(CountingConnectionIdGenerator::default())),
+        addr(),
+        addr(),
+        ConnectionParameters::default().quic_version(version),
+        now(),
+    )
+    .unwrap();
+    let mut server = Connection::new_server(
+        test_fixture::DEFAULT_KEYS,
+        test_fixture::DEFAULT_ALPN,
+        Rc::new(RefCell::new(CountingConnectionIdGenerator::default())),
+        ConnectionParameters::default().quic_version(version),
+    )
+    .unwrap();
+    connect_force_idle(&mut client, &mut server);
+}
+
+#[test]
+fn connect_v1() {
+    connect_version(QuicVersion::Version1);
+}
+
+#[test]
+fn connect_29() {
+    connect_version(QuicVersion::Draft29);
+}
+
+#[test]
+fn connect_30() {
+    connect_version(QuicVersion::Draft30);
+}
+
+#[test]
+fn connect_31() {
+    connect_version(QuicVersion::Draft31);
+}
+
+#[test]
+fn connect_32() {
+    connect_version(QuicVersion::Draft32);
+}
+
 #[test]
 fn anti_amplification() {
     let mut client = default_client();
@@ -715,6 +778,12 @@ fn anti_amplification() {
     assert_eq!(s_init1.len(), PATH_MTU_V6);
     let s_init2 = server.process_output(now).dgram().unwrap();
     assert_eq!(s_init2.len(), PATH_MTU_V6);
+
+    // Skip the gap for pacing here.
+    let s_pacing = server.process_output(now).callback();
+    assert_ne!(s_pacing, Duration::new(0, 0));
+    now += s_pacing;
+
     let s_init3 = server.process_output(now).dgram().unwrap();
     assert_eq!(s_init3.len(), PATH_MTU_V6);
     let cb = server.process_output(now).callback();
@@ -745,4 +814,217 @@ fn anti_amplification() {
     now += DEFAULT_RTT / 2;
     server.process_input(fin.unwrap(), now);
     assert_eq!(*server.state(), State::Confirmed);
+}
+
+#[cfg(not(feature = "fuzzing"))]
+#[test]
+fn garbage_initial() {
+    let mut client = default_client();
+    let mut server = default_server();
+
+    let dgram = client.process_output(now()).dgram().unwrap();
+    let (initial, rest) = split_datagram(&dgram);
+    let mut corrupted = Vec::from(&initial[..initial.len() - 1]);
+    corrupted.push(initial[initial.len() - 1] ^ 0xb7);
+    corrupted.extend_from_slice(rest.as_ref().map_or(&[], |r| &r[..]));
+    let garbage = Datagram::new(addr(), addr(), corrupted);
+    assert_eq!(Output::None, server.process(Some(garbage), now()));
+}
+
+#[test]
+fn drop_initial_packet_from_wrong_address() {
+    let mut client = default_client();
+    let out = client.process(None, now());
+    assert!(out.as_dgram_ref().is_some());
+
+    let mut server = default_server();
+    let out = server.process(out.dgram(), now());
+    assert!(out.as_dgram_ref().is_some());
+
+    let p = out.dgram().unwrap();
+    let dgram = Datagram::new(
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)), 443),
+        p.destination(),
+        &p[..],
+    );
+
+    let out = client.process(Some(dgram), now());
+    assert!(out.as_dgram_ref().is_none());
+}
+
+#[test]
+fn drop_handshake_packet_from_wrong_address() {
+    let mut client = default_client();
+    let out = client.process(None, now());
+    assert!(out.as_dgram_ref().is_some());
+
+    let mut server = default_server();
+    let out = server.process(out.dgram(), now());
+    assert!(out.as_dgram_ref().is_some());
+
+    let (s_in, s_hs) = split_datagram(&out.dgram().unwrap());
+
+    // Pass the initial packet.
+    mem::drop(client.process(Some(s_in), now()).dgram());
+
+    let p = s_hs.unwrap();
+    let dgram = Datagram::new(
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)), 443),
+        p.destination(),
+        &p[..],
+    );
+
+    let out = client.process(Some(dgram), now());
+    assert!(out.as_dgram_ref().is_none());
+}
+
+#[test]
+fn ech() {
+    let mut server = default_server();
+    let (sk, pk) = generate_ech_keys().unwrap();
+    server
+        .server_enable_ech(ECH_CONFIG_ID, ECH_PUBLIC_NAME, &sk, &pk)
+        .unwrap();
+
+    let mut client = default_client();
+    client.client_enable_ech(server.ech_config()).unwrap();
+
+    connect(&mut client, &mut server);
+
+    assert!(client.tls_info().unwrap().ech_accepted());
+    assert!(server.tls_info().unwrap().ech_accepted());
+    assert!(client.tls_preinfo().unwrap().ech_accepted().unwrap());
+    assert!(server.tls_preinfo().unwrap().ech_accepted().unwrap());
+}
+
+fn damaged_ech_config(config: &[u8]) -> Vec<u8> {
+    let mut cfg = Vec::from(config);
+    // Ensure that the version and config_id is correct.
+    assert_eq!(cfg[2], 0xfe);
+    assert_eq!(cfg[3], 0x0a);
+    assert_eq!(cfg[6], ECH_CONFIG_ID);
+    // Change the config_id so that the server doesn't recognize it.
+    cfg[6] ^= 0x94;
+    cfg
+}
+
+#[test]
+fn ech_retry() {
+    fixture_init();
+    let mut server = default_server();
+    let (sk, pk) = generate_ech_keys().unwrap();
+    server
+        .server_enable_ech(ECH_CONFIG_ID, ECH_PUBLIC_NAME, &sk, &pk)
+        .unwrap();
+
+    let mut client = default_client();
+    client
+        .client_enable_ech(&damaged_ech_config(server.ech_config()))
+        .unwrap();
+
+    let dgram = client.process_output(now()).dgram();
+    let dgram = server.process(dgram, now()).dgram();
+    client.process_input(dgram.unwrap(), now());
+    let auth_event = ConnectionEvent::EchFallbackAuthenticationNeeded {
+        public_name: String::from(ECH_PUBLIC_NAME),
+    };
+    assert!(client.events().any(|e| e == auth_event));
+    client.authenticated(AuthenticationStatus::Ok, now());
+    assert!(client.state().error().is_some());
+
+    // Tell the server about the error.
+    let dgram = client.process_output(now()).dgram();
+    server.process_input(dgram.unwrap(), now());
+    assert_eq!(
+        server.state().error(),
+        Some(&ConnectionError::Transport(Error::PeerError(0x100 + 121)))
+    );
+
+    let updated_config =
+        if let Some(ConnectionError::Transport(Error::EchRetry(c))) = client.state().error() {
+            c
+        } else {
+            panic!(
+                "Client state should be failed with EchRetry, is {:?}",
+                client.state()
+            );
+        };
+
+    let mut server = default_server();
+    server
+        .server_enable_ech(ECH_CONFIG_ID, ECH_PUBLIC_NAME, &sk, &pk)
+        .unwrap();
+    let mut client = default_client();
+    client.client_enable_ech(updated_config).unwrap();
+
+    connect(&mut client, &mut server);
+
+    assert!(client.tls_info().unwrap().ech_accepted());
+    assert!(server.tls_info().unwrap().ech_accepted());
+    assert!(client.tls_preinfo().unwrap().ech_accepted().unwrap());
+    assert!(server.tls_preinfo().unwrap().ech_accepted().unwrap());
+}
+
+#[test]
+fn ech_retry_fallback_rejected() {
+    fixture_init();
+    let mut server = default_server();
+    let (sk, pk) = generate_ech_keys().unwrap();
+    server
+        .server_enable_ech(ECH_CONFIG_ID, ECH_PUBLIC_NAME, &sk, &pk)
+        .unwrap();
+
+    let mut client = default_client();
+    client
+        .client_enable_ech(&damaged_ech_config(server.ech_config()))
+        .unwrap();
+
+    let dgram = client.process_output(now()).dgram();
+    let dgram = server.process(dgram, now()).dgram();
+    client.process_input(dgram.unwrap(), now());
+    let auth_event = ConnectionEvent::EchFallbackAuthenticationNeeded {
+        public_name: String::from(ECH_PUBLIC_NAME),
+    };
+    assert!(client.events().any(|e| e == auth_event));
+    client.authenticated(AuthenticationStatus::PolicyRejection, now());
+    assert!(client.state().error().is_some());
+
+    if let Some(ConnectionError::Transport(Error::EchRetry(_))) = client.state().error() {
+        panic!("Client should not get EchRetry error");
+    }
+
+    // Pass the error on.
+    let dgram = client.process_output(now()).dgram();
+    server.process_input(dgram.unwrap(), now());
+    assert_eq!(
+        server.state().error(),
+        Some(&ConnectionError::Transport(Error::PeerError(298)))
+    ); // A bad_certificate alert.
+}
+
+#[test]
+fn bad_min_ack_delay() {
+    const EXPECTED_ERROR: ConnectionError =
+        ConnectionError::Transport(Error::TransportParameterError);
+    let mut server = default_server();
+    let max_ad = u64::try_from(DEFAULT_ACK_DELAY.as_micros()).unwrap();
+    server
+        .set_local_tparam(MIN_ACK_DELAY, TransportParameter::Integer(max_ad + 1))
+        .unwrap();
+    let mut client = default_client();
+
+    let dgram = client.process_output(now()).dgram();
+    let dgram = server.process(dgram, now()).dgram();
+    client.process_input(dgram.unwrap(), now());
+    client.authenticated(AuthenticationStatus::Ok, now());
+    assert_eq!(client.state().error(), Some(&EXPECTED_ERROR));
+    let dgram = client.process_output(now()).dgram();
+
+    server.process_input(dgram.unwrap(), now());
+    assert_eq!(
+        server.state().error(),
+        Some(&ConnectionError::Transport(Error::PeerError(
+            Error::TransportParameterError.code()
+        )))
+    );
 }

@@ -59,7 +59,6 @@ dictionary NetworkCommandOptions
   long mtu;                           // for "setMtu".
 
   DOMString type;                     // for "updateUpStream".
-  boolean privacyExtensions;          // for "setIpv6PrivacyExtensions".
   DOMString tcpBufferSizes;           // for "setTcpBufferSizes"
   long networkType;                   // for "createNetwork", "destroyNetwork".
   sequence<DOMString> IPv6Routes;     // for "addIPv6RouteToLocalNetwork".
@@ -120,4 +119,15 @@ dictionary NetworkResultOptions
   DOMString macAddr = "";             // for "getInterfaceConfig".
   DOMString ipAddr = "";              // for "getInterfaceConfig".
   DOMString clatdAddress = "";        // for "startClatd".
+  sequence<TetherStats> tetherStats;  // for "getTetherStats".
+};
+
+[GenerateConversionToJS]
+dictionary TetherStats
+{
+  DOMString ifname = "";              // for "getTetherStats".
+  long long rxBytes = 0;              // for "getTetherStats".
+  long long rxPackets = 0;            // for "getTetherStats".
+  long long txBytes = 0;              // for "getTetherStats".
+  long long txPackets = 0;            // for "getTetherStats".
 };

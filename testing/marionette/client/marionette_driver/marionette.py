@@ -447,7 +447,6 @@ class Marionette(object):
         :param app: Type of ``instance_class`` to use for managing app
             instance. See ``marionette_driver.geckoinstance``.
         :param instance_args: Arguments to pass to ``instance_class``.
-
         """
         self.host = "127.0.0.1"  # host
         if int(port) == 0:
@@ -466,6 +465,7 @@ class Marionette(object):
         self._test_name = None
         self.crashed = 0
         self.is_shutting_down = False
+        self.cleanup_ran = False
 
         if socket_timeout is None:
             self.socket_timeout = self.DEFAULT_SOCKET_TIMEOUT
@@ -531,9 +531,11 @@ class Marionette(object):
                 raise errors.UnresponsiveInstanceException(
                     "Application clean-up has failed >2 consecutive times."
                 )
+        self.cleanup_ran = True
 
     def __del__(self):
-        self.cleanup()
+        if not self.cleanup_ran:
+            self.cleanup()
 
     @staticmethod
     def check_port_available(port, host=""):
@@ -619,7 +621,6 @@ class Marionette(object):
 
         try:
             msg = self.client.request(name, params)
-
         except IOError:
             self.delete_session(send_request=False)
             raise
@@ -927,7 +928,10 @@ class Marionette(object):
         :throws InvalidArgumentException: If there are multiple
             `shutdown_flags` ending with `"Quit"`.
 
-        :returns: The cause of shutdown.
+        :returns: A dictionary containing details of the application shutdown.
+                  The `cause` property reflects the reason, and `forced` indicates
+                  that something prevented the shutdown and the application had
+                  to be forced to shutdown.
         """
 
         # The vast majority of this function was implemented inside
@@ -941,29 +945,11 @@ class Marionette(object):
         if not any(flag.endswith("Quit") for flag in flags):
             flags = flags | set(("eForceQuit",))
 
-        # Trigger a quit-application-requested observer notification
-        # so that components can safely shutdown before quitting the
-        # application.
-        with self.using_context("chrome"):
-            canceled = self.execute_script(
-                """
-                Components.utils.import("resource://gre/modules/Services.jsm");
-                let cancelQuit = Components.classes["@mozilla.org/supports-PRBool;1"]
-                    .createInstance(Components.interfaces.nsISupportsPRBool);
-                Services.obs.notifyObservers(cancelQuit, "quit-application-requested", null);
-                return cancelQuit.data;
-                """
-            )
-            if canceled:
-                raise errors.MarionetteException(
-                    "Something cancelled the quit application request"
-                )
-
         body = None
         if len(flags) > 0:
             body = {"flags": list(flags)}
 
-        return self._send_message("Marionette:Quit", body, key="cause")
+        return self._send_message("Marionette:Quit", body)
 
     @do_process_check
     def quit(self, clean=False, in_app=False, callback=None):
@@ -981,13 +967,18 @@ class Marionette(object):
                        by killing the process.
         :param callback: If provided and `in_app` is True, the callback will
                          be used to trigger the shutdown.
+
+        :returns: A dictionary containing details of the application shutdown.
+                  The `cause` property reflects the reason, and `forced` indicates
+                  that something prevented the shutdown and the application had
+                  to be forced to shutdown.
         """
         if not self.instance:
             raise errors.MarionetteException(
                 "quit() can only be called " "on Gecko instances launched by Marionette"
             )
 
-        cause = None
+        quit_details = {"cause": "shutdown", "forced": False}
         if in_app:
             if callback is not None and not callable(callback):
                 raise ValueError(
@@ -1002,7 +993,7 @@ class Marionette(object):
                 if callback is not None:
                     callback()
                 else:
-                    cause = self._request_in_app_shutdown()
+                    quit_details = self._request_in_app_shutdown()
 
             except IOError:
                 # A possible IOError should be ignored at this point, given that
@@ -1025,11 +1016,15 @@ class Marionette(object):
             self.delete_session(send_request=False)
             self.instance.close(clean=clean)
 
-        if cause not in (None, "shutdown"):
+            quit_details["forced"] = True
+
+        if quit_details.get("cause") not in (None, "shutdown"):
             raise errors.MarionetteException(
                 "Unexpected shutdown reason '{}' for "
-                "quitting the process.".format(cause)
+                "quitting the process.".format(quit_details["cause"])
             )
+
+        return quit_details
 
     @do_process_check
     def restart(self, clean=False, in_app=False, callback=None):
@@ -1045,6 +1040,11 @@ class Marionette(object):
                        by killing the process.
         :param callback: If provided and `in_app` is True, the callback will be
                          used to trigger the restart.
+
+        :returns: A dictionary containing details of the application restart.
+                  The `cause` property reflects the reason, and `forced` indicates
+                  that something prevented the shutdown and the application had
+                  to be forced to shutdown.
         """
         if not self.instance:
             raise errors.MarionetteException(
@@ -1053,7 +1053,7 @@ class Marionette(object):
             )
         context = self._send_message("Marionette:GetContext", key="value")
 
-        cause = None
+        restart_details = {"cause": "restart", "forced": False}
         if in_app:
             if clean:
                 raise ValueError(
@@ -1073,7 +1073,7 @@ class Marionette(object):
                 if callback is not None:
                     callback()
                 else:
-                    cause = self._request_in_app_shutdown("eRestart")
+                    restart_details = self._request_in_app_shutdown("eRestart")
 
             except IOError:
                 # A possible IOError should be ignored at this point, given that
@@ -1118,10 +1118,12 @@ class Marionette(object):
             self.instance.restart(clean=clean)
             self.raise_for_port(timeout=self.DEFAULT_STARTUP_TIMEOUT)
 
-        if cause not in (None, "restart"):
+            restart_details["forced"] = True
+
+        if restart_details.get("cause") not in (None, "restart"):
             raise errors.MarionetteException(
                 "Unexpected shutdown reason '{}' for "
-                "restarting the process".format(cause)
+                "restarting the process".format(restart_details["cause"])
             )
 
         self.start_session()
@@ -1133,6 +1135,8 @@ class Marionette(object):
             # As long as mozprocess cannot track that behavior (bug 1284864) we assist by
             # informing about the new process id.
             self.instance.runner.process_handler.check_for_detached(self.process_id)
+
+        return restart_details
 
     def absolute_url(self, relative_url):
         """
@@ -1191,6 +1195,7 @@ class Marionette(object):
 
         self.session_id = resp["sessionId"]
         self.session = resp["capabilities"]
+        self.cleanup_ran = False
         # fallback to processId can be removed in Firefox 55
         self.process_id = self.session.get(
             "moz:processID", self.session.get("processId")
@@ -1254,7 +1259,9 @@ class Marionette(object):
         :returns: unique window handle
         :rtype: string
         """
-        self.window = self._send_message("WebDriver:GetWindowHandle", key="value")
+        with self.using_context("content"):
+            self.window = self._send_message("WebDriver:GetWindowHandle", key="value")
+
         return self.window
 
     @property
@@ -1270,9 +1277,10 @@ class Marionette(object):
         :returns: unique window handle
         :rtype: string
         """
-        self.chrome_window = self._send_message(
-            "WebDriver:GetChromeWindowHandle", key="value"
-        )
+        with self.using_context("chrome"):
+            self.chrome_window = self._send_message(
+                "WebDriver:GetWindowHandle", key="value"
+            )
 
         return self.chrome_window
 
@@ -1312,16 +1320,15 @@ class Marionette(object):
         """Get list of windows in the current context.
 
         If called in the content context it will return a list of
-        references to all available browser windows.  Called in the
-        chrome context, it will list all available windows, not just
-        browser windows (e.g. not just navigator.browser).
+        references to all available browser windows.
 
         Each window handle is assigned by the server, and the list of
         strings returned does not have a guaranteed ordering.
 
         :returns: Unordered list of unique window handles as strings
         """
-        return self._send_message("WebDriver:GetWindowHandles")
+        with self.using_context("content"):
+            return self._send_message("WebDriver:GetWindowHandles")
 
     @property
     def chrome_window_handles(self):
@@ -1332,7 +1339,8 @@ class Marionette(object):
 
         :returns: Unordered list of unique chrome window handles as strings
         """
-        return self._send_message("WebDriver:GetChromeWindowHandles")
+        with self.using_context("chrome"):
+            return self._send_message("WebDriver:GetWindowHandles")
 
     @property
     def page_source(self):

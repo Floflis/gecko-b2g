@@ -54,10 +54,18 @@ function SubDialog({
   this._overlay.classList.add(`dialogOverlay-${id}`);
   this._frame.setAttribute("name", `dialogFrame-${id}`);
   this._frameCreated = new Promise(resolve => {
-    this._frame.addEventListener("load", resolve, {
-      once: true,
-      capture: true,
-    });
+    this._frame.addEventListener(
+      "load",
+      () => {
+        // We intentionally avoid handling or passing the event to the
+        // resolve method to avoid shutdown window leaks. See bug 1686743.
+        resolve();
+      },
+      {
+        once: true,
+        capture: true,
+      }
+    );
   });
 
   parentElement.appendChild(this._overlay);
@@ -79,6 +87,10 @@ SubDialog.prototype = {
   _id: null,
   _titleElement: null,
   _closeButton: null,
+
+  get frameContentWindow() {
+    return this._frame?.contentWindow;
+  },
 
   get _window() {
     return this._overlay?.ownerGlobal;
@@ -108,8 +120,8 @@ SubDialog.prototype = {
     { features, closingCallback, closedCallback, sizeTo } = {},
     ...aParams
   ) {
-    if (sizeTo == "available") {
-      this._box.setAttribute("sizeto", "available");
+    if (["available", "limitheight"].includes(sizeTo)) {
+      this._box.setAttribute("sizeto", sizeTo);
     }
 
     // Create a promise so consumers can tell when we're done setting up.
@@ -117,6 +129,21 @@ SubDialog.prototype = {
       this._resolveDialogReady = resolve;
     });
     this._frame._dialogReady = this._dialogReady;
+
+    // Assign close callbacks sync to ensure we can always callback even if the
+    // SubDialog is closed directly after opening.
+    let dialog = null;
+
+    if (closingCallback) {
+      this._closingCallback = (...args) => {
+        closingCallback.apply(dialog, args);
+      };
+    }
+    if (closedCallback) {
+      this._closedCallback = (...args) => {
+        closedCallback.apply(dialog, args);
+      };
+    }
 
     // Wait until frame is ready to prevent browser crash in tests
     await this._frameCreated;
@@ -152,18 +179,12 @@ SubDialog.prototype = {
       dialogFeatures = `${features},${dialogFeatures}`;
     }
 
-    let dialog = this._window.openDialog(
+    dialog = this._window.openDialog(
       aURL,
       `dialogFrame-${this._id}`,
       dialogFeatures,
       ...aParams
     );
-    if (closingCallback) {
-      this._closingCallback = closingCallback.bind(dialog);
-    }
-    if (closedCallback) {
-      this._closedCallback = closedCallback.bind(dialog);
-    }
 
     this._closingEvent = null;
     this._isClosing = false;
@@ -188,6 +209,12 @@ SubDialog.prototype = {
       detail: { dialog: this, abort: true },
     });
     this._frame.contentWindow.close();
+    // It's possible that we're aborting this dialog before we've had a
+    // chance to set up the contentWindow.close function override in
+    // _onContentLoaded. If so, call this.close() directly to clean things
+    // up. That'll be a no-op if the contentWindow.close override had been
+    // set up, since this.close is idempotent.
+    this.close(this._closingEvent);
   },
 
   close(aEvent = null) {
@@ -218,10 +245,10 @@ SubDialog.prototype = {
     this._box.removeAttribute("height");
     this._box.style.removeProperty("min-height");
     this._box.style.removeProperty("min-width");
+    this._overlay.parentNode.style.removeProperty("--inner-height");
 
     let onClosed = () => {
       this._openedURL = null;
-      this._isClosing = false;
 
       this._resolveClosePromise();
 
@@ -252,9 +279,9 @@ SubDialog.prototype = {
     );
 
     // Defer removing the overlay so the frame content window can unload.
-    this._window.setTimeout(() => {
+    Services.tm.dispatchToMainThread(() => {
       this._overlay.remove();
-    }, 0);
+    });
   },
 
   handleEvent(aEvent) {
@@ -322,24 +349,38 @@ SubDialog.prototype = {
       this.injectXMLStylesheet(styleSheetURL);
     }
 
+    let { contentDocument } = this._frame;
     // Provide the ability for the dialog to know that it is being loaded "in-content".
-    for (let dialog of this._frame.contentDocument.querySelectorAll("dialog")) {
+    for (let dialog of contentDocument.querySelectorAll("dialog")) {
       dialog.setAttribute("subdialog", "true");
     }
+    // Used by CSS to give the appropriate background colour in dark mode.
+    contentDocument.documentElement.setAttribute("dialogroot", "true");
 
     this._frame.contentWindow.addEventListener("dialogclosing", this);
 
     let oldResizeBy = this._frame.contentWindow.resizeBy;
     this._frame.contentWindow.resizeBy = (resizeByWidth, resizeByHeight) => {
       // Only handle resizeByHeight currently.
-      let frameHeight = this._frame.clientHeight;
+      let frameHeight = this._overlay.parentNode.style.getPropertyValue(
+        "--inner-height"
+      );
+      if (frameHeight) {
+        frameHeight = parseFloat(frameHeight, 10);
+      } else {
+        frameHeight = this._frame.clientHeight;
+      }
       let boxMinHeight = parseFloat(
         this._window.getComputedStyle(this._box).minHeight,
         10
       );
 
-      this._frame.style.height = frameHeight + resizeByHeight + "px";
       this._box.style.minHeight = boxMinHeight + resizeByHeight + "px";
+
+      this._overlay.parentNode.style.setProperty(
+        "--inner-height",
+        frameHeight + resizeByHeight + "px"
+      );
 
       oldResizeBy.call(
         this._frame.contentWindow,
@@ -382,10 +423,10 @@ SubDialog.prototype = {
     this._overlay.style.opacity = "0.01";
 
     // Ensure the document gets an a11y role of dialog.
-    const a11yDoc =
-      this._frame.contentDocument.body ||
-      this._frame.contentDocument.documentElement;
+    const a11yDoc = contentDocument.body || contentDocument.documentElement;
     a11yDoc.setAttribute("role", "dialog");
+
+    Services.obs.notifyObservers(this._frame.contentWindow, "subdialog-loaded");
   },
 
   async _onLoad(aEvent) {
@@ -470,6 +511,10 @@ SubDialog.prototype = {
 
   resizeVertically() {
     let docEl = this._frame.contentDocument.documentElement;
+    function getDocHeight() {
+      let { scrollHeight } = docEl.ownerDocument.body || docEl;
+      return docEl.style.height || scrollHeight + "px";
+    }
 
     // If the title bar is disabled (not in the template),
     // set its height to 0 for the calculation.
@@ -493,25 +538,35 @@ SubDialog.prototype = {
     let frameSizeDifference =
       frameRect.top - boxRect.top + (boxRect.bottom - frameRect.bottom);
 
-    if (this._box.getAttribute("sizeto") == "available") {
-      // Inform the CSS of the toolbar height so the bottom padding can be
-      // correctly calculated.
-      this._box.style.setProperty("--box-top-px", `${boxRect.top}px`);
+    let contentPane =
+      this._frame.contentDocument.querySelector(".contentPane") ||
+      this._frame.contentDocument.querySelector("dialog");
+
+    let sizeTo = this._box.getAttribute("sizeto");
+    if (["available", "limitheight"].includes(sizeTo)) {
+      if (sizeTo == "limitheight") {
+        this._overlay.style.setProperty("--doc-height-px", getDocHeight());
+        contentPane?.classList.add("sizeDetermined");
+      } else {
+        // Inform the CSS of the toolbar height so the bottom padding can be
+        // correctly calculated.
+        this._box.style.setProperty("--box-top-px", `${boxRect.top}px`);
+      }
       return;
     }
 
     // Now do the same but for the height. We need to do this afterwards because otherwise
     // XUL assumes we'll optimize for height and gives us "wrong" values which then are no
     // longer correct after we set the width:
-    let { scrollHeight } = docEl.ownerDocument.body || docEl;
-    let frameMinHeight = docEl.style.height || scrollHeight + "px";
+    let frameMinHeight = getDocHeight();
     let frameHeight = docEl.getAttribute("height")
       ? docEl.getAttribute("height") + "px"
       : frameMinHeight;
 
     // Now check if the frame height we calculated is possible at this window size,
     // accounting for titlebar, padding/border and some spacing.
-    let maxHeight = this._window.innerHeight - frameSizeDifference - 30;
+    let frameOverhead = frameSizeDifference + titleBarHeight;
+    let maxHeight = this._window.innerHeight - frameOverhead;
     // Do this with a frame height in pixels...
     let comparisonFrameHeight;
     if (frameHeight.endsWith("em")) {
@@ -540,11 +595,8 @@ SubDialog.prototype = {
       // contents scroll. The class is set on the "dialog" element, unless a
       // content pane exists, which is usually the case when the "window"
       // element is used to implement the subdialog instead.
-      frameHeight = maxHeight + "px";
       frameMinHeight = maxHeight + "px";
-      let contentPane =
-        this._frame.contentDocument.querySelector(".contentPane") ||
-        this._frame.contentDocument.querySelector("dialog");
+
       if (contentPane) {
         // There are also instances where the subdialog is neither implemented
         // using a content pane, nor a <dialog> (such as manageAddresses.xhtml)
@@ -554,13 +606,15 @@ SubDialog.prototype = {
       }
     }
 
-    this._frame.style.height = frameHeight;
-    this._box.style.minHeight =
-      "calc(" +
-      (boxVerticalBorder + titleBarHeight + frameVerticalMargin) +
-      "px + " +
-      frameMinHeight +
-      ")";
+    this._overlay.parentNode.style.setProperty("--inner-height", frameHeight);
+    this._frame.style.height = `min(
+      calc(100vh - ${frameOverhead}px),
+      var(--inner-height, ${frameHeight})
+    )`;
+    this._box.style.minHeight = `calc(
+      ${boxVerticalBorder + titleBarHeight + frameVerticalMargin}px +
+      ${frameMinHeight}
+    )`;
   },
 
   _onResize(mutations) {
@@ -772,11 +826,15 @@ SubDialog.prototype = {
     // Handle focus ourselves. Try to move the focus to the first element in
     // the content window.
     let fm = Services.focus;
+
+    // We're intentionally hiding the focus ring here for now per bug 1704882,
+    // but we aim to have a better fix that retains the focus ring for users
+    // that had brought up the dialog by keyboard in bug 1708261.
     let focusedElement = fm.moveFocus(
       this._frame.contentWindow,
       null,
       fm.MOVEFOCUS_FIRST,
-      0
+      fm.FLAG_NOSHOWRING
     );
     if (!focusedElement) {
       // Ensure the focus is pulled out of the content document even if there's
@@ -964,6 +1022,10 @@ class SubDialogManager {
       return false;
     }
     return this._dialogs.some(dialog => !dialog._isClosing);
+  }
+
+  get dialogs() {
+    return [...this._dialogs];
   }
 
   focusTopDialog() {

@@ -91,28 +91,29 @@ def extract_opcodes(paths):
 
 
 def extract_opcode_flags(paths):
-    pat = re.compile(r'(JOF_[A-Z0-9_]+)\s=\s([^,]+),\s*/\*\s+(.*)\s+\*/')
+    pat = re.compile(r'(JOF_[A-Z0-9_]+)\s=\s([^,]+),\s*/\*\s*(.*?)\s*\*/',
+                     re.DOTALL)
 
     flags = []
 
     with open(paths['BytecodeFormatFlags.h'], 'r') as f:
-        for line in f:
-            m = pat.search(line)
-            if not m:
-                continue
+        content = f.read()
 
-            name = m.group(1)
-            value = m.group(2)
-            comment = m.group(3)
+    for m in pat.finditer(content):
+        name = m.group(1)
+        value = m.group(2)
+        comment = m.group(3)
 
-            if name == 'JOF_MODEMASK':
-                continue
+        comment = re.sub('\s*\n\s*', ' ', comment)
 
-            flags.append({
-                'name': name,
-                'value': value,
-                'comment': comment,
-            })
+        if name == 'JOF_MODEMASK':
+            continue
+
+        flags.append({
+            'name': name,
+            'value': value,
+            'comment': comment,
+        })
 
     return flags
 
@@ -461,6 +462,10 @@ def parse_operands(opcode):
             assert ty == 'u32'
             ty = 'GCThingIndex'
 
+        if 'JOF_STRING' in opcode.format_:
+            assert ty == 'u32'
+            ty = 'GCThingIndex'
+
         if 'JOF_ICINDEX' in opcode.format_ or 'JOF_LOOPHEAD' in opcode.format_:
             if ty == 'u32' and name == 'ic_index':
                 ty = 'IcIndex'
@@ -548,7 +553,7 @@ def generate_emit_methods(out_f, opcodes, types):
             assert len(params) == 1
             assert params[0][0] == 'u32'
             params[0] = ('GCThingIndex', params[0][1])
-        elif 'JOF_OBJECT' in opcode.format_ or 'JOF_SCOPE' in opcode.format_:
+        elif 'JOF_OBJECT' in opcode.format_ or 'JOF_SCOPE' in opcode.format_ or 'JOF_SHAPE' in opcode.format_:
             assert len(params) == 1
             assert params[0][0] == 'u32'
             params[0] = ('GCThingIndex', params[0][1])

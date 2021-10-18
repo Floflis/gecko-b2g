@@ -9,13 +9,17 @@ const SUGGEST_ALL_PREF = "browser.search.suggest.enabled";
 const SUGGEST_URLBAR_PREF = "browser.urlbar.suggest.searches";
 const TEST_ENGINE_BASENAME = "searchSuggestionEngine.xml";
 
-async function getResultText(element) {
+async function getResultText(element, expectedValue, description = "") {
   await initAccessibilityService();
-  await BrowserTestUtils.waitForCondition(() =>
-    accService.getAccessibleFor(element)
+
+  await BrowserTestUtils.waitForCondition(
+    () => {
+      let accessible = accService.getAccessibleFor(element);
+      return accessible !== null && accessible.name === expectedValue;
+    },
+    description,
+    200
   );
-  let accessible = accService.getAccessibleFor(element);
-  return accessible.name;
 }
 
 let accService;
@@ -70,10 +74,12 @@ add_task(async function switchToTab() {
     window,
     index
   );
-  is(
-    await getResultText(element),
-    "about: robots— Switch to Tab",
-    "Result a11y label should be: <title>— Switch to Tab"
+  // The a11y text will include the "Firefox Suggest" pseudo-element label shown
+  // before the result.
+  await getResultText(
+    element,
+    "Firefox Suggest about: robots— Switch to Tab",
+    "Result a11y text is correct"
   );
 
   await UrlbarTestUtils.promisePopupClose(window);
@@ -132,15 +138,15 @@ add_task(async function searchSuggestions() {
         element.toggleAttribute("selected", true);
       }
       if (result.searchParams.inPrivateWindow) {
-        Assert.equal(
-          await getResultText(element),
+        await getResultText(
+          element,
           searchTerm + "— Search in a Private Window",
           "Check result label"
         );
       } else {
         let suggestion = expectedSearches.shift();
-        Assert.equal(
-          await getResultText(element),
+        await getResultText(
+          element,
           suggestion +
             "— Search with browser_searchSuggestionEngine searchSuggestionEngine.xml",
           "Check result label"

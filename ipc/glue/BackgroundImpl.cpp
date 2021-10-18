@@ -379,9 +379,13 @@ class ChildImpl final : public BackgroundChildImpl {
         nsIEventTarget* aMainEventTarget) {
       MOZ_ASSERT_IF(NS_IsMainThread(), !aMainEventTarget);
 
-      MOZ_ASSERT(mThreadLocalIndex != kBadThreadLocalIndex,
-                 "BackgroundChild::Startup() was never called!");
-
+      // Processes can be told to do final CC's during shutdown even though
+      // they never finished starting (and thus call this), because they
+      // hadn't gotten far enough to call Startup() before shutdown began.
+      if (mThreadLocalIndex == kBadThreadLocalIndex) {
+        NS_ERROR("BackgroundChild::Startup() was never called");
+        return nullptr;
+      }
       if (NS_IsMainThread() && ChildImpl::sShutdownHasStarted) {
         return nullptr;
       }
@@ -1293,7 +1297,8 @@ void ParentImpl::ShutdownBackgroundThread() {
           &ShutdownTimerCallback, &closure, kShutdownTimerDelayMS,
           nsITimer::TYPE_ONE_SHOT, "ParentImpl::ShutdownTimerCallback"));
 
-      SpinEventLoopUntil([&]() { return !sLiveActorCount; });
+      SpinEventLoopUntil("ParentImpl::ShutdownBackgroundThread"_ns,
+                         [&]() { return !sLiveActorCount; });
 
       MOZ_ASSERT(liveActors->IsEmpty());
 

@@ -24,9 +24,7 @@
 #  include "mozilla/WinDllServices.h"
 #endif
 
-#ifdef MOZ_GECKO_PROFILER
-#  include "ProfilerParent.h"
-#endif
+#include "ProfilerParent.h"
 #include "RDDProcessHost.h"
 
 namespace mozilla {
@@ -62,9 +60,7 @@ bool RDDChild::Init() {
 
   SendInit(updates, brokerFd, Telemetry::CanRecordReleaseData());
 
-#ifdef MOZ_GECKO_PROFILER
   Unused << SendInitProfiler(ProfilerParent::CreateForProcess(OtherPid()));
-#endif
 
   gfxVars::AddReceiver(this);
   auto* gpm = gfx::GPUProcessManager::Get();
@@ -121,10 +117,10 @@ mozilla::ipc::IPCResult RDDChild::RecvAddMemoryReport(
   return IPC_OK();
 }
 
+#if defined(XP_WIN)
 mozilla::ipc::IPCResult RDDChild::RecvGetModulesTrust(
     ModulePaths&& aModPaths, bool aRunAtNormalPriority,
     GetModulesTrustResolver&& aResolver) {
-#if defined(XP_WIN)
   RefPtr<DllServices> dllSvc(DllServices::Get());
   dllSvc->GetModulesTrust(std::move(aModPaths), aRunAtNormalPriority)
       ->Then(
@@ -134,10 +130,8 @@ mozilla::ipc::IPCResult RDDChild::RecvGetModulesTrust(
           },
           [aResolver](nsresult aRv) { aResolver(Nothing()); });
   return IPC_OK();
-#else
-  return IPC_FAIL(this, "Unsupported on this platform");
-#endif  // defined(XP_WIN)
 }
+#endif  // defined(XP_WIN)
 
 mozilla::ipc::IPCResult RDDChild::RecvUpdateMediaCodecsSupported(
     const PDMFactory::MediaCodecsSupported& aSupported) {

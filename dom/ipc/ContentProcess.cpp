@@ -15,6 +15,10 @@
 #  include "mozilla/Sandbox.h"
 #endif
 
+#if defined(XP_WIN) && defined(MOZ_SANDBOX)
+#  include "mozilla/WindowsProcessMitigations.h"
+#endif
+
 #if (defined(XP_WIN) || defined(XP_MACOSX)) && defined(MOZ_SANDBOX)
 #  include "mozilla/SandboxSettings.h"
 #  include "nsAppDirectoryServiceDefs.h"
@@ -23,7 +27,8 @@
 #endif
 
 #include "nsAppRunner.h"
-#include "ProcessUtils.h"
+#include "mozilla/ipc/BackgroundChild.h"
+#include "mozilla/ipc/ProcessUtils.h"
 
 using mozilla::ipc::IOThreadChild;
 
@@ -53,8 +58,9 @@ static void SetUpSandboxEnvironment() {
       "SetUpSandboxEnvironment relies on nsDirectoryService being initialized");
 
   // On Windows, a sandbox-writable temp directory is used whenever the sandbox
-  // is enabled.
-  if (!IsContentSandboxEnabled()) {
+  // is enabled, except when win32k is locked down when we no longer require a
+  // temp directory.
+  if (!IsContentSandboxEnabled() || IsWin32kLockedDown()) {
     return;
   }
 
@@ -86,6 +92,8 @@ bool ContentProcess::Init(int aArgc, char* aArgv[]) {
   char* prefMapHandle = nullptr;
   char* prefsLen = nullptr;
   char* prefMapSize = nullptr;
+  char* jsInitHandle = nullptr;
+  char* jsInitLen = nullptr;
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
   nsCOMPtr<nsIFile> profileDir;
 #endif
@@ -141,6 +149,19 @@ bool ContentProcess::Init(int aArgc, char* aArgv[]) {
         return false;
       }
       prefMapSize = aArgv[i];
+
+    } else if (strcmp(aArgv[i], "-jsInit") == 0) {
+      // command line: -jsInit [handle] length
+#ifdef XP_WIN
+      if (++i == aArgc) {
+        return false;
+      }
+      jsInitHandle = aArgv[i];
+#endif
+      if (++i == aArgc) {
+        return false;
+      }
+      jsInitLen = aArgv[i];
     } else if (strcmp(aArgv[i], "-safeMode") == 0) {
       gSafeMode = true;
 
@@ -177,8 +198,12 @@ bool ContentProcess::Init(int aArgc, char* aArgv[]) {
     return false;
   }
 
-  mContent.Init(IOThreadChild::message_loop(), ParentPid(), *parentBuildID,
-                IOThreadChild::TakeChannel(), *childID, *isForBrowser);
+  if (!::mozilla::ipc::ImportSharedJSInit(jsInitHandle, jsInitLen)) {
+    return false;
+  }
+
+  mContent.Init(ParentPid(), *parentBuildID, IOThreadChild::TakeInitialPort(),
+                *childID, *isForBrowser);
 
   mXREEmbed.Start();
 #if (defined(XP_MACOSX)) && defined(MOZ_SANDBOX)
@@ -193,6 +218,10 @@ bool ContentProcess::Init(int aArgc, char* aArgv[]) {
 #if defined(XP_WIN) && defined(MOZ_SANDBOX)
   SetUpSandboxEnvironment();
 #endif
+
+  // Do this as early as possible to get the parent process to initialize the
+  // background thread since we'll likely need database information very soon.
+  mozilla::ipc::BackgroundChild::Startup();
 
   return true;
 }

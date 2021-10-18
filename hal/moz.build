@@ -96,6 +96,7 @@ elif CONFIG["OS_TARGET"] == "Linux":
         "fallback/FallbackAlarm.cpp",
         "fallback/FallbackFlashlightManager.cpp",
         "fallback/FallbackFlipManager.cpp",
+        "fallback/FallbackFMRadio.cpp",
         "fallback/FallbackNetwork.cpp",
         "fallback/FallbackPowerSupply.cpp",
         "fallback/FallbackProcessPriority.cpp",
@@ -114,6 +115,7 @@ elif CONFIG["OS_TARGET"] == "Linux":
             "fallback/FallbackBattery.cpp",
         ]
 elif CONFIG["OS_TARGET"] == "WINNT":
+    REQUIRES_UNIFIED_BUILD = True
     UNIFIED_SOURCES += [
         "fallback/FallbackAlarm.cpp",
         "fallback/FallbackFlashlightManager.cpp",

@@ -7,11 +7,7 @@
 #ifndef vm_SymbolType_h
 #define vm_SymbolType_h
 
-#include "mozilla/Attributes.h"
-
 #include <stdio.h>
-
-#include "jsapi.h"
 
 #include "gc/Barrier.h"
 #include "gc/Tracer.h"
@@ -106,6 +102,8 @@ class Symbol
   void dump();  // Debugger-friendly stderr dump.
   void dump(js::GenericPrinter& out);
 #endif
+
+  static constexpr size_t offsetOfHash() { return offsetof(Symbol, hash_); }
 };
 
 } /* namespace JS */

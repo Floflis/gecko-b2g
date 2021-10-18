@@ -55,7 +55,6 @@ EXPORTS += [
     "nsDOMCSSDeclaration.h",
     "nsICSSDeclaration.h",
     "nsICSSLoaderObserver.h",
-    "nsMediaFeatures.h",
     "nsStyleAutoArray.h",
     "nsStyleConsts.h",
     "nsStyleStruct.h",
@@ -109,6 +108,7 @@ EXPORTS.mozilla += [
     "ServoUtils.h",
     "ShadowParts.h",
     "SharedStyleSheetCache.h",
+    "SharedSubResourceCache.h",
     "StyleAnimationValue.h",
     "StyleColorInlines.h",
     "StyleSheet.h",
@@ -127,11 +127,13 @@ EXPORTS.mozilla.dom += [
     "CSSImportRule.h",
     "CSSKeyframeRule.h",
     "CSSKeyframesRule.h",
+    "CSSLayerRule.h",
     "CSSMediaRule.h",
     "CSSMozDocumentRule.h",
     "CSSNamespaceRule.h",
     "CSSPageRule.h",
     "CSSRuleList.h",
+    "CSSScrollTimelineRule.h",
     "CSSStyleRule.h",
     "CSSSupportsRule.h",
     "CSSValue.h",
@@ -153,6 +155,7 @@ EXPORTS.mozilla.css += [
     "SheetLoadData.h",
     "SheetParsingMode.h",
     "StreamLoader.h",
+    "StylePreloadKind.h",
 ]
 
 UNIFIED_SOURCES += [
@@ -168,11 +171,13 @@ UNIFIED_SOURCES += [
     "CSSImportRule.cpp",
     "CSSKeyframeRule.cpp",
     "CSSKeyframesRule.cpp",
+    "CSSLayerRule.cpp",
     "CSSMediaRule.cpp",
     "CSSMozDocumentRule.cpp",
     "CSSNamespaceRule.cpp",
     "CSSPageRule.cpp",
     "CSSRuleList.cpp",
+    "CSSScrollTimelineRule.cpp",
     "CSSStyleRule.cpp",
     "CSSSupportsRule.cpp",
     "DeclarationBlock.cpp",
@@ -320,5 +325,7 @@ if CONFIG["COMPILE_ENVIRONMENT"]:
     )
 
     CONFIGURE_SUBST_FILES += [
-        "bindgen.toml",
+        "extra-bindgen-flags",
     ]
+
+REQUIRES_UNIFIED_BUILD = True

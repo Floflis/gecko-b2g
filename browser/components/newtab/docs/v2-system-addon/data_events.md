@@ -674,6 +674,25 @@ This reports the user's interaction with those Pocket tiles.
 }
 ```
 
+### Load more button ping
+
+```js
+{
+  "event": "CLICK",
+  "source": "DS_LOAD_MORE_BUTTON",
+
+  // Basic metadata
+  "action": "activity_stream_event",
+  "page": ["about:newtab" | "about:home" | "about:welcome" | "unknown"],
+  "client_id": "26288a14-5cc4-d14f-ae0a-bb01ef45be9c",
+  "session_id": "005deed0-e3e4-4c02-a041-17405fd703f6",
+  "browser_session_id": "e7e52665-7db3-f348-9918-e93160eb2ef3",
+  "addon_version": "20180710100040",
+  "locale": "en-US",
+  "user_prefs": 7
+}
+```
+
 ## Save to Pocket button pings
 
 Right now the save to Pocket button, while technically outside of newtab, has some similarities with the newtab telemetry.
@@ -688,7 +707,11 @@ These pings record user interaction with the save to Pocket button.
   "version": "83.0a1",
   "release_channel": "default",
   "model": "",
-  "events": [{"action":"click|impression|unpin","position":0,"source":"save_button|on_save_recs|learn_more|sign_up_1|sign_up_2|log_in"}],
+  "events": [{
+    "action":"click|impression|unpin",
+    "position":0,
+    "source":"recs_learn_more|view_list|home_view_list|home_topic|home_discover|save_button|home_button|on_save_recs|learn_more|sign_up_1|sign_up_2|log_in"
+  }],
   "pocket_logged_in_state": true|false,
   "impression_id": "{005deed0-e3e4-4c02-a041-17405fd703f6}",
   "profile_creation_date": 18550
@@ -966,6 +989,54 @@ as other CFR messages.
 }
 ```
 
+## InfoBar pings
+
+This reports when the user interacts with the browser infobar (messaging area
+located at the top of the content area). Similar policy applied as for the
+What's New panel client_id is reported in all the channels.
+
+```
+{
+  "experiments" : {
+    "exp1" : {
+      "branch" : "treatment-a"
+    }
+  },
+  "addon_version" : "20210115035053",
+  "release_channel" : "release",
+  "locale" : "en-US",
+  "event" : ["IMPRESSION", "CLICK_PRIMARY_BUTTON", "CLICK_SECONDARY_BUTTON", "DISMISSED"],
+  "client_id" : "c4beb4bf-4feb-9c4e-9587-9323b28c2e50",
+  "version" : "86",
+  "message_id" : "INFOBAR_ACTION_86",
+  "browser_session_id" : "93714e76-9919-ca49-b697-5e7c09a1394f"
+}
+```
+
+## Spotlight pings
+
+This reports when the user interacts with the Messaging System Spotlight component
+Similar policy applied as for the Infobar messages: client_id is reported in all
+ the channels. Currently this is only used in experiments.
+
+```
+{
+  "experiments" : {
+    "exp1" : {
+      "branch" : "treatment-a"
+    }
+  },
+  "addon_version" : "20210115035053",
+  "release_channel" : "release",
+  "locale" : "en-US",
+  "event" : ["IMPRESSION", "CLICK", "DISMISS"],
+  "client_id" : "c4beb4bf-4feb-9c4e-9587-9323b28c2e50",
+  "version" : "93",
+  "message_id" : "SPOTLIGHT_MESSAGE_93",
+  "browser_session_id" : "93714e76-9919-ca49-b697-5e7c09a1394f"
+}
+```
+
 ## Messaging-experiments pings
 
 As the new experiment platform, the Messaging experiment manager is now managing & operating all the experiments of Firefox Messaging System, including the first-run experience (about:welcome), CFR, Whats-new-panel, Moments Page, and Snippets.
@@ -997,21 +1068,28 @@ Unlike other Activity Stream pings, this is a Firefox Events telemetry event, an
 ### Experiment attribute errors
 
 This records whether issues were encountered with any of the targeting attributes used in the experiment enrollment or message targeting.
-Two different types of events are sent: `attribute_error` and `attribute_timeout` along with the attribute that caused it.
+Two different types of events are sent: `attribute_error` and `attribute_timeout` along with the attribute that caused it. An attribute
+is a variable inside the JEXL targeting expression that is evaluated client side by the browser.
 
 ```js
-[
+{
   "messaging_experiments",
   "targeting",
   "attribute_error", // event
-  "foo" // attribute
-],
-[
+  "foo", // attribute,
+  "extra_keys": {
+    "source": "message id or experiment slug",
+  },
+},
+{
   "messaging_experiments",
   "targeting",
   "attribute_timeout", // event
-  "bar" // attribute
-]
+  "bar", // attribute,
+  "extra_keys": {
+    "source": "message id or experiment slug",
+  },
+}
 ```
 
 ## Firefox Onboarding (about:welcome) pings
@@ -1106,7 +1184,7 @@ These record the telemetry metrics during the Firefox onboarding experience.
   "event": "SESSION_END",
   "browser_session_id": "e7e52665-7db3-f348-9918-e93160eb2ef3",
   "event_context": { "page": "about:welcome", "reason":
-    ["welcome-window-closed" | "welcome-tab-closed" | "app-shut-down" | "address-bar-navigated" | "unknown"]},
+    ["welcome-window-closed" | "welcome-tab-closed" | "app-shut-down" | "address-bar-navigated"]},
   "attribution": {
     "source": "mozilla.org",
     "medium": "referral",
@@ -1115,6 +1193,56 @@ These record the telemetry metrics during the Firefox onboarding experience.
     "experiment": "ua-onboarding",
     "variation": "chrome",
     "ua": "firefox"
+  }
+}
+```
+
+## Sponsored TopSites pings
+
+These record the impression and click pings for the Sponsored TopSites.
+
+### Impression ping for the sponsored TopSites
+```js
+{
+  "context_id": "{94642acb-4996-034b-916c-147da723cc41}",
+  "advertiser": "test-advertiser",
+  "tile_id": 42,
+  "source": "newtab",
+  "position": 1,
+  "reporting_url": "https://test.reporting.net/static?id=7RHzfOIWHG7kJnEYgGeuJm7vJ%3DEkiFXwxYIZjF8XgClWfC 8%2B7R4dHQ8zjmENj%3DNwxwz%2FJmdw7R4dHQfz4Z2ZfplnHG3Z5FwqgCfX4ZLafC2mfBINI9HuiF2 z4Z2ZfplnHmcux%3DcvImauiF2zfQlWfpDX7R3%2Bx%3DDuiF2zfLyy",
+  "version": "76.0a1",
+  "locale": "en-US",
+  "release_channel": "default",
+  "experiments": {
+    "exp_id_foo": {
+      "branch": "control"
+    },
+    "exp_id_bar": {
+      "branch": "treatment"
+    }
+  }
+}
+```
+
+### Click ping for the sponsored TopSites
+```js
+{
+  "context_id": "{94642acb-4996-034b-916c-147da723cc41}",
+  "tile_id": 42,
+  "source": "newtab",
+  "position": 1,
+  "advertiser": "test-advertiser",
+  "reporting_url": "https://test.reporting.net/ctp?version=16.0.0&key=1598991514900100001.1&ci=15 98991514792.12747&ctag=1598291839300100006&aespFlag=altinst",
+  "version": "76.0a1",
+  "locale": "en-US",
+  "release_channel": "default",
+  "experiments": {
+    "exp_id_foo": {
+      "branch": "control"
+    },
+    "exp_id_bar": {
+      "branch": "treatment"
+    }
   }
 }
 ```

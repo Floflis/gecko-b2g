@@ -68,6 +68,9 @@
  * WeakHeapPtr   Provides read and post-write barriers, for use with weak
  *               pointers.
  *
+ * UnsafeBarePtr Provides no barriers. Don't add new uses of this, or only if
+ *               you really know what you are doing.
+ *
  * The following classes are implemented in js/RootingAPI.h (in the JS
  * namespace):
  *
@@ -93,12 +96,17 @@
  *             Can your object be destroyed outside of a GC?
  *               Yes => Use HeapPtr<T>
  *               No => Use GCPtr<T> (optimization)
- *           No, I'll do this myself => Use PreBarriered<T>
+ *           No, I'll do this myself =>
+ *             Do you want pre-barriers so incremental marking works?
+ *               Yes, of course => Use PreBarriered<T>
+ *               No, and I'll fix all the bugs myself => Use UnsafeBarePtr<T>
  *       Weak => Use WeakHeapPtr<T>
  *   No, it's external =>
  *     Can your pointer refer to nursery objects?
  *       Yes => Use JS::Heap<T>
  *       Never => Use JS::TenuredHeap<T> (optimization)
+ *
+ * If in doubt, use HeapPtr<T>.
  *
  * Write barriers
  * ==============
@@ -514,12 +522,12 @@ class PreBarriered : public WriteBarriered<T> {
 
   DECLARE_POINTER_ASSIGN_AND_MOVE_OPS(PreBarriered, T);
 
- private:
   void set(const T& v) {
     AssertTargetIsNotGray(v);
     setUnchecked(v);
   }
 
+ private:
   void setUnchecked(const T& v) {
     this->pre();
     this->value = v;
@@ -594,12 +602,12 @@ class GCPtr : public WriteBarriered<T> {
 
   DECLARE_POINTER_ASSIGN_OPS(GCPtr, T);
 
- private:
   void set(const T& v) {
     AssertTargetIsNotGray(v);
     setUnchecked(v);
   }
 
+ private:
   void setUnchecked(const T& v) {
     this->pre();
     T tmp = this->value;
@@ -688,17 +696,17 @@ class HeapPtr : public WriteBarriered<T> {
 
   DECLARE_POINTER_ASSIGN_AND_MOVE_OPS(HeapPtr, T);
 
+  void set(const T& v) {
+    AssertTargetIsNotGray(v);
+    setUnchecked(v);
+  }
+
   /* Make this friend so it can access pre() and post(). */
   template <class T1, class T2>
   friend inline void BarrieredSetPair(Zone* zone, HeapPtr<T1*>& v1, T1* val1,
                                       HeapPtr<T2*>& v2, T2* val2);
 
  protected:
-  void set(const T& v) {
-    AssertTargetIsNotGray(v);
-    setUnchecked(v);
-  }
-
   void setUnchecked(const T& v) {
     this->pre();
     postBarrieredSet(v);
@@ -829,6 +837,20 @@ class WeakHeapPtr : public ReadBarriered<T>,
   }
 };
 
+// A wrapper for a bare pointer, with no barriers.
+//
+// This should only be necessary in a limited number of cases. Please don't add
+// more uses of this if at all possible.
+template <typename T>
+class UnsafeBarePtr : public BarrieredBase<T> {
+ public:
+  UnsafeBarePtr() : BarrieredBase<T>(JS::SafelyInitialized<T>()) {}
+  MOZ_IMPLICIT UnsafeBarePtr(T v) : BarrieredBase<T>(v) {}
+  const T& get() const { return this->value; }
+  void set(T newValue) { this->value = newValue; }
+  DECLARE_POINTER_CONSTREF_OPS(T);
+};
+
 }  // namespace js
 
 namespace JS {
@@ -859,6 +881,8 @@ class HeapSlot : public WriteBarriered<Value> {
     value = v;
     post(owner, kind, slot, v);
   }
+
+  void initAsUndefined() { value.setUndefined(); }
 
   void destroy() { pre(); }
 
@@ -1083,6 +1107,16 @@ struct WeakHeapPtrHasher {
   }
 };
 
+template <class T>
+struct UnsafeBarePtrHasher {
+  using Key = UnsafeBarePtr<T>;
+  using Lookup = T;
+
+  static HashNumber hash(const Lookup& l) { return DefaultHasher<T>::hash(l); }
+  static bool match(const Key& k, Lookup l) { return k.get() == l; }
+  static void rekey(Key& k, const Key& newKey) { k.set(newKey.get()); }
+};
+
 }  // namespace js
 
 namespace mozilla {
@@ -1102,6 +1136,9 @@ struct DefaultHasher<js::PreBarriered<T>> : js::PreBarrieredHasher<T> {};
 template <class T>
 struct DefaultHasher<js::WeakHeapPtr<T>> : js::WeakHeapPtrHasher<T> {};
 
+template <class T>
+struct DefaultHasher<js::UnsafeBarePtr<T>> : js::UnsafeBarePtrHasher<T> {};
+
 }  // namespace mozilla
 
 namespace js {
@@ -1109,13 +1146,13 @@ namespace js {
 class ArrayObject;
 class DebugEnvironmentProxy;
 class GlobalObject;
-class ObjectGroup;
 class PropertyName;
 class Scope;
 class ScriptSourceObject;
 class Shape;
 class BaseShape;
-class UnownedBaseShape;
+class GetterSetter;
+class PropMap;
 class WasmInstanceObject;
 class WasmTableObject;
 
@@ -1137,8 +1174,8 @@ using GCPtrObject = GCPtr<JSObject*>;
 using GCPtrScript = GCPtr<JSScript*>;
 using GCPtrString = GCPtr<JSString*>;
 using GCPtrShape = GCPtr<Shape*>;
-using GCPtrUnownedBaseShape = GCPtr<UnownedBaseShape*>;
-using GCPtrObjectGroup = GCPtr<ObjectGroup*>;
+using GCPtrGetterSetter = GCPtr<GetterSetter*>;
+using GCPtrPropMap = GCPtr<PropMap*>;
 using GCPtrValue = GCPtr<Value>;
 using GCPtrId = GCPtr<jsid>;
 
@@ -1152,7 +1189,6 @@ using WeakHeapPtrScript = WeakHeapPtr<JSScript*>;
 using WeakHeapPtrScriptSourceObject = WeakHeapPtr<ScriptSourceObject*>;
 using WeakHeapPtrShape = WeakHeapPtr<Shape*>;
 using WeakHeapPtrJitCode = WeakHeapPtr<jit::JitCode*>;
-using WeakHeapPtrObjectGroup = WeakHeapPtr<ObjectGroup*>;
 using WeakHeapPtrSymbol = WeakHeapPtr<JS::Symbol*>;
 using WeakHeapPtrWasmInstanceObject = WeakHeapPtr<WasmInstanceObject*>;
 using WeakHeapPtrWasmTableObject = WeakHeapPtr<WasmTableObject*>;

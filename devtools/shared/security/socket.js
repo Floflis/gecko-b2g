@@ -10,7 +10,6 @@ var { Ci, Cc, CC, Cr } = require("chrome");
 Cc["@mozilla.org/psm;1"].getService(Ci.nsISupports);
 
 var Services = require("Services");
-var promise = require("promise");
 var DevToolsUtils = require("devtools/shared/DevToolsUtils");
 var { dumpn, dumpv } = DevToolsUtils;
 loader.lazyRequireGetter(
@@ -47,6 +46,13 @@ loader.lazyRequireGetter(
   "devtools/shared/security/auth",
   true
 );
+loader.lazyRequireGetter(
+  this,
+  "DevToolsSocketStatus",
+  "resource://devtools/shared/security/DevToolsSocketStatus.jsm",
+  true
+);
+
 loader.lazyRequireGetter(this, "EventEmitter", "devtools/shared/event-emitter");
 
 DevToolsUtils.defineLazyGetter(this, "nsFile", () => {
@@ -270,9 +276,9 @@ var _attemptTransport = async function(settings) {
 var _attemptConnect = async function({ host, port, encryption }) {
   let s;
   if (encryption) {
-    s = socketTransportService.createTransport(["ssl"], host, port, null);
+    s = socketTransportService.createTransport(["ssl"], host, port, null, null);
   } else {
-    s = socketTransportService.createTransport([], host, port, null);
+    s = socketTransportService.createTransport([], host, port, null, null);
   }
 
   // Force disabling IPV6 if we aren't explicitely connecting to an IPv6 address
@@ -395,6 +401,7 @@ function _storeCertOverride(s, host, port) {
   certOverrideService.rememberValidityOverride(
     host,
     port,
+    {},
     cert,
     overrideBits,
     true /* temporary */
@@ -423,6 +430,11 @@ function _storeCertOverride(s, host, port) {
  *          encryption:
  *            Controls whether this listener's transport uses encryption.
  *            Defaults is false.
+ *          fromBrowserToolbox:
+ *            Should only be passed when opening a socket for a Browser Toolbox
+ *            session. This will skip notifying DevToolsSocketStatus
+ *            about the opened socket, to avoid triggering the visual cue in the
+ *            URL bar.
  *          portOrPath:
  *            The port or path to listen on.
  *            If given an integer, the port to listen on.  Use -1 to choose any available
@@ -441,6 +453,7 @@ function SocketListener(devToolsServer, socketOptions) {
       socketOptions.authenticator || new (Authenticators.get().Server)(),
     discoverable: !!socketOptions.discoverable,
     encryption: !!socketOptions.encryption,
+    fromBrowserToolbox: !!socketOptions.fromBrowserToolbox,
     portOrPath: socketOptions.portOrPath || null,
     webSocket: !!socketOptions.webSocket,
   };
@@ -459,6 +472,10 @@ SocketListener.prototype = {
 
   get encryption() {
     return this._socketOptions.encryption;
+  },
+
+  get fromBrowserToolbox() {
+    return this._socketOptions.fromBrowserToolbox;
   },
 
   get portOrPath() {
@@ -520,6 +537,9 @@ SocketListener.prototype = {
       dumpn("Socket listening on: " + (self.port || self.portOrPath));
     })()
       .then(() => {
+        if (!self.fromBrowserToolbox) {
+          DevToolsSocketStatus.notifySocketOpened();
+        }
         this._advertise();
       })
       .catch(e => {
@@ -580,6 +600,10 @@ SocketListener.prototype = {
     if (this._socket) {
       this._socket.close();
       this._socket = null;
+
+      if (!this.fromBrowserToolbox) {
+        DevToolsSocketStatus.notifySocketClosed();
+      }
     }
     this._devToolsServer.removeSocketListener(this);
   },
@@ -748,7 +772,7 @@ ServerSocketConnection.prototype = {
     // Start up the transport to observe the streams in case they are closed
     // early.  This allows us to clean up our state as well.
     this._transport.hooks = {
-      onClosed: reason => {
+      onTransportClosed: reason => {
         this.deny(reason);
       },
     };
@@ -827,19 +851,23 @@ ServerSocketConnection.prototype = {
       server: this.server,
       transport: this._transport,
     });
-    switch (result) {
-      case AuthenticationResult.DISABLE_ALL:
-        this._listener._devToolsServer.closeAllSocketListeners();
-        Services.prefs.setBoolPref("devtools.debugger.remote-enabled", false);
-        return promise.reject(Cr.NS_ERROR_CONNECTION_REFUSED);
-      case AuthenticationResult.DENY:
-        return promise.reject(Cr.NS_ERROR_CONNECTION_REFUSED);
-      case AuthenticationResult.ALLOW:
-      case AuthenticationResult.ALLOW_PERSIST:
-        return promise.resolve();
-      default:
-        return promise.reject(Cr.NS_ERROR_CONNECTION_REFUSED);
+
+    // If result is fine, we can stop here
+    if (
+      result === AuthenticationResult.ALLOW ||
+      result === AuthenticationResult.ALLOW_PERSIST
+    ) {
+      return;
     }
+
+    if (result === AuthenticationResult.DISABLE_ALL) {
+      this._listener._devToolsServer.closeAllSocketListeners();
+      Services.prefs.setBoolPref("devtools.debugger.remote-enabled", false);
+    }
+
+    // If we got an error (DISABLE_ALL, DENY, …), let's throw a NS_ERROR_CONNECTION_REFUSED
+    // exception
+    throw Components.Exception("", Cr.NS_ERROR_CONNECTION_REFUSED);
   },
 
   deny(result) {

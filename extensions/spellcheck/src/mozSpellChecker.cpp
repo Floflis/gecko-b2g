@@ -10,18 +10,23 @@
 #include "nsISimpleEnumerator.h"
 #include "mozEnglishWordUtils.h"
 #include "mozilla/dom/ContentChild.h"
+#include "mozilla/Logging.h"
 #include "mozilla/PRemoteSpellcheckEngineChild.h"
 #include "mozilla/TextServicesDocument.h"
 #include "nsXULAppAPI.h"
 #include "RemoteSpellCheckEngineChild.h"
 
+using mozilla::AssertedCast;
 using mozilla::GenericPromise;
+using mozilla::LogLevel;
 using mozilla::PRemoteSpellcheckEngineChild;
 using mozilla::RemoteSpellcheckEngineChild;
 using mozilla::TextServicesDocument;
 using mozilla::dom::ContentChild;
 
 #define DEFAULT_SPELL_CHECKER "@mozilla.org/spellchecker/engine;1"
+
+static mozilla::LazyLogModule sSpellChecker("SpellChecker");
 
 NS_IMPL_CYCLE_COLLECTION(mozSpellChecker, mTextServicesDocument,
                          mPersonalDictionary)
@@ -68,6 +73,8 @@ TextServicesDocument* mozSpellChecker::GetTextServicesDocument() {
 
 nsresult mozSpellChecker::SetDocument(
     TextServicesDocument* aTextServicesDocument, bool aFromStartofDoc) {
+  MOZ_LOG(sSpellChecker, LogLevel::Debug, ("%s", __FUNCTION__));
+
   mTextServicesDocument = aTextServicesDocument;
   mFromStart = aFromStartofDoc;
   return NS_OK;
@@ -98,7 +105,9 @@ nsresult mozSpellChecker::NextMisspelledWord(nsAString& aWord,
       }
       if (isMisspelled) {
         aWord = currWord;
-        MOZ_KnownLive(mTextServicesDocument)->SetSelection(begin, end - begin);
+        MOZ_KnownLive(mTextServicesDocument)
+            ->SetSelection(AssertedCast<uint32_t>(begin),
+                           AssertedCast<uint32_t>(end - begin));
         // After ScrollSelectionIntoView(), the pending notifications might
         // be flushed and PresShell/PresContext/Frames may be dead.
         // See bug 418470.
@@ -135,17 +144,13 @@ RefPtr<mozilla::CheckWordPromise> mozSpellChecker::CheckWords(
 
 nsresult mozSpellChecker::CheckWord(const nsAString& aWord, bool* aIsMisspelled,
                                     nsTArray<nsString>* aSuggestions) {
+  if (XRE_IsContentProcess()) {
+    // Use async version (CheckWords or Suggest) on content process
+    return NS_ERROR_FAILURE;
+  }
+
   nsresult result;
   bool correct;
-
-  if (XRE_IsContentProcess()) {
-    MOZ_ASSERT(aSuggestions, "Use CheckWords if content process");
-    if (!mEngine->SendCheckAndSuggest(nsString(aWord), aIsMisspelled,
-                                      aSuggestions)) {
-      return NS_ERROR_NOT_AVAILABLE;
-    }
-    return NS_OK;
-  }
 
   if (!mSpellCheckingEngine) {
     return NS_ERROR_NULL_POINTER;
@@ -161,6 +166,46 @@ nsresult mozSpellChecker::CheckWord(const nsAString& aWord, bool* aIsMisspelled,
     *aIsMisspelled = true;
   }
   return NS_OK;
+}
+
+RefPtr<mozilla::SuggestionsPromise> mozSpellChecker::Suggest(
+    const nsAString& aWord, uint32_t aMaxCount) {
+  if (XRE_IsContentProcess()) {
+    return mEngine->SendSuggest(nsString(aWord), aMaxCount)
+        ->Then(
+            mozilla::GetCurrentSerialEventTarget(), __func__,
+            [](nsTArray<nsString>&& aSuggestions) {
+              return mozilla::SuggestionsPromise::CreateAndResolve(
+                  std::move(aSuggestions), __func__);
+            },
+            [](mozilla::ipc::ResponseRejectReason&& aReason) {
+              return mozilla::SuggestionsPromise::CreateAndReject(
+                  NS_ERROR_NOT_AVAILABLE, __func__);
+            });
+  }
+
+  if (!mSpellCheckingEngine) {
+    return mozilla::SuggestionsPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE,
+                                                        __func__);
+  }
+
+  bool correct;
+  nsresult rv = mSpellCheckingEngine->Check(aWord, &correct);
+  if (NS_FAILED(rv)) {
+    return mozilla::SuggestionsPromise::CreateAndReject(rv, __func__);
+  }
+  nsTArray<nsString> suggestions;
+  if (!correct) {
+    rv = mSpellCheckingEngine->Suggest(aWord, suggestions);
+    if (NS_FAILED(rv)) {
+      return mozilla::SuggestionsPromise::CreateAndReject(rv, __func__);
+    }
+    if (suggestions.Length() > aMaxCount) {
+      suggestions.TruncateLength(aMaxCount);
+    }
+  }
+  return mozilla::SuggestionsPromise::CreateAndResolve(std::move(suggestions),
+                                                       __func__);
 }
 
 nsresult mozSpellChecker::Replace(const nsAString& aOldWord,
@@ -198,6 +243,9 @@ nsresult mozSpellChecker::Replace(const nsAString& aOldWord,
   }
   int32_t currOffset = 0;
   int32_t currentBlock = 0;
+  int32_t wordLengthDifference =
+      AssertedCast<int32_t>(static_cast<int64_t>(aNewWord.Length()) -
+                            static_cast<int64_t>(aOldWord.Length()));
   while (NS_SUCCEEDED(mTextServicesDocument->IsDone(&done)) && !done) {
     nsAutoString str;
     mTextServicesDocument->GetCurrentTextBlock(str);
@@ -206,16 +254,25 @@ nsresult mozSpellChecker::Replace(const nsAString& aOldWord,
         // if we are before the current selection point but in the same
         // block move the selection point forwards
         if (currentBlock == startBlock && begin < selOffset) {
-          selOffset += int32_t(aNewWord.Length()) - int32_t(aOldWord.Length());
+          selOffset += wordLengthDifference;
           if (selOffset < begin) {
             selOffset = begin;
           }
         }
-        MOZ_KnownLive(mTextServicesDocument)->SetSelection(begin, end - begin);
-        MOZ_KnownLive(mTextServicesDocument)->InsertText(aNewWord);
+        // Don't keep running if selecting or inserting text fails because
+        // it may cause infinite loop.
+        if (NS_WARN_IF(NS_FAILED(
+                MOZ_KnownLive(mTextServicesDocument)
+                    ->SetSelection(AssertedCast<uint32_t>(begin),
+                                   AssertedCast<uint32_t>(end - begin))))) {
+          return NS_ERROR_FAILURE;
+        }
+        if (NS_WARN_IF(NS_FAILED(
+                MOZ_KnownLive(mTextServicesDocument)->InsertText(aNewWord)))) {
+          return NS_ERROR_FAILURE;
+        }
         mTextServicesDocument->GetCurrentTextBlock(str);
-        end += (aNewWord.Length() -
-                aOldWord.Length());  // recursion was cute in GEB, not here.
+        end += wordLengthDifference;  // recursion was cute in GEB, not here.
       }
       currOffset = end;
     }
@@ -249,13 +306,15 @@ nsresult mozSpellChecker::Replace(const nsAString& aOldWord,
     nsAutoString str;
     mTextServicesDocument->GetCurrentTextBlock(str);
     if (mConverter->FindNextWord(str, selOffset, &begin, &end)) {
-      MOZ_KnownLive(mTextServicesDocument)->SetSelection(begin, 0);
+      MOZ_KnownLive(mTextServicesDocument)
+          ->SetSelection(AssertedCast<uint32_t>(begin), 0);
       return NS_OK;
     }
     mTextServicesDocument->NextBlock();
     mTextServicesDocument->GetCurrentTextBlock(str);
     if (mConverter->FindNextWord(str, 0, &begin, &end)) {
-      MOZ_KnownLive(mTextServicesDocument)->SetSelection(begin, 0);
+      MOZ_KnownLive(mTextServicesDocument)
+          ->SetSelection(AssertedCast<uint32_t>(begin), 0);
     }
   }
   return NS_OK;
@@ -314,7 +373,7 @@ nsresult mozSpellChecker::GetDictionaryList(
   nsresult rv;
 
   // For catching duplicates
-  nsTHashtable<nsCStringHashKey> dictionaries;
+  nsTHashSet<nsCString> dictionaries;
 
   nsCOMArray<mozISpellCheckingEngine> spellCheckingEngines;
   rv = GetEngineList(&spellCheckingEngines);
@@ -328,9 +387,8 @@ nsresult mozSpellChecker::GetDictionaryList(
     for (auto& dictName : dictNames) {
       // Skip duplicate dictionaries. Only take the first one
       // for each name.
-      if (dictionaries.Contains(dictName)) continue;
+      if (!dictionaries.EnsureInserted(dictName)) continue;
 
-      dictionaries.PutEntry(dictName);
       aDictionaryList->AppendElement(dictName);
     }
   }
@@ -429,11 +487,10 @@ nsresult mozSpellChecker::SetupDoc(int32_t* outBlockOffset) {
   nsresult rv;
 
   TextServicesDocument::BlockSelectionStatus blockStatus;
-  int32_t selOffset;
-  int32_t selLength;
   *outBlockOffset = 0;
 
   if (!mFromStart) {
+    uint32_t selOffset, selLength;
     rv = MOZ_KnownLive(mTextServicesDocument)
              ->LastSelectedBlock(&blockStatus, &selOffset, &selLength);
     if (NS_SUCCEEDED(rv) &&
@@ -445,7 +502,13 @@ nsresult mozSpellChecker::SetupDoc(int32_t* outBlockOffset) {
         // S begins or ends in TB but extends outside of TB.
         case TextServicesDocument::BlockSelectionStatus::eBlockPartial:
           // the TS doc points to the block we want.
-          *outBlockOffset = selOffset + selLength;
+          if (NS_WARN_IF(selOffset == UINT32_MAX) ||
+              NS_WARN_IF(selLength == UINT32_MAX)) {
+            rv = mTextServicesDocument->FirstBlock();
+            *outBlockOffset = 0;
+            break;
+          }
+          *outBlockOffset = AssertedCast<int32_t>(selOffset + selLength);
           break;
 
         // S extends beyond the start and end of TB.
@@ -457,7 +520,13 @@ nsresult mozSpellChecker::SetupDoc(int32_t* outBlockOffset) {
 
         // TB contains entire S.
         case TextServicesDocument::BlockSelectionStatus::eBlockContains:
-          *outBlockOffset = selOffset + selLength;
+          if (NS_WARN_IF(selOffset == UINT32_MAX) ||
+              NS_WARN_IF(selLength == UINT32_MAX)) {
+            rv = mTextServicesDocument->FirstBlock();
+            *outBlockOffset = 0;
+            break;
+          }
+          *outBlockOffset = AssertedCast<int32_t>(selOffset + selLength);
           break;
 
         // There is no text block (TB) in or before the selection (S).

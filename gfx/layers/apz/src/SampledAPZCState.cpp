@@ -54,18 +54,20 @@ void SampledAPZCState::UpdateZoomProperties(const FrameMetrics& aMetrics) {
 }
 
 void SampledAPZCState::ClampVisualScrollOffset(const FrameMetrics& aMetrics) {
-  mVisualScrollOffset =
-      aMetrics.CalculateScrollRange().ClampPoint(mVisualScrollOffset);
+  // Make sure that we use the local mZoom to do these calculations, because the
+  // one on aMetrics might be newer.
+  CSSRect scrollRange = FrameMetrics::CalculateScrollRange(
+      aMetrics.GetScrollableRect(), aMetrics.GetCompositionBounds(), mZoom);
+  mVisualScrollOffset = scrollRange.ClampPoint(mVisualScrollOffset);
+
   FrameMetrics::KeepLayoutViewportEnclosingVisualViewport(
       CSSRect(mVisualScrollOffset,
-              aMetrics.CalculateCompositedSizeInCssPixels()),
+              FrameMetrics::CalculateCompositedSizeInCssPixels(
+                  aMetrics.GetCompositionBounds(), mZoom)),
       aMetrics.GetScrollableRect(), mLayoutViewport);
 }
 
-void SampledAPZCState::ZoomBy(const gfxSize& aScale) {
-  mZoom.xScale *= aScale.width;
-  mZoom.yScale *= aScale.height;
-}
+void SampledAPZCState::ZoomBy(float aScale) { mZoom.scale *= aScale; }
 
 void SampledAPZCState::RemoveFractionalAsyncDelta() {
   // This function is a performance hack. With non-WebRender, having small

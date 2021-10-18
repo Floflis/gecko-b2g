@@ -30,12 +30,13 @@ XPCOMUtils.defineLazyServiceGetter(
  * DownloadManager.jsm in the parent process.
  */
 
+const DEBUG = Services.prefs.getBoolPref("dom.downloads.debug", false);
 function debug(aStr) {
   dump("-*- DownloadManager.js : " + aStr + "\n");
 }
 
 function DownloadManager() {
-  debug("DownloadManager constructor");
+  DEBUG && debug("DownloadManager constructor");
 }
 
 DownloadManager.prototype = {
@@ -43,7 +44,19 @@ DownloadManager.prototype = {
 
   // nsIDOMGlobalPropertyInitializer implementation
   init(aWindow) {
-    debug("DownloadsManager init");
+    DEBUG && debug("init " + aWindow?.document?.nodePrincipal?.origin);
+
+    this.grantedForAll =
+      Services.perms.testExactPermissionFromPrincipal(
+        aWindow?.document?.nodePrincipal,
+        "downloads"
+      ) == Ci.nsIPermissionManager.ALLOW_ACTION;
+
+    DownloadsIPC.init(
+      aWindow?.document?.nodePrincipal?.origin,
+      this.grantedForAll
+    );
+
     this.initDOMRequestHelper(aWindow, [
       "Downloads:Added",
       "Downloads:Removed",
@@ -51,7 +64,7 @@ DownloadManager.prototype = {
   },
 
   uninit() {
-    debug("uninit");
+    DEBUG && debug("uninit");
     downloadsCache.evict(this._window);
   },
 
@@ -64,9 +77,9 @@ DownloadManager.prototype = {
   },
 
   getDownloads() {
-    debug("getDownloads()");
+    DEBUG && debug("getDownloads");
 
-    return this.createPromise(
+    return new Promise(
       function(aResolve, aReject) {
         DownloadsIPC.getDownloads().then(
           function(aDownloads) {
@@ -74,8 +87,8 @@ DownloadManager.prototype = {
             // send them.
             let array = new this._window.Array();
             for (let id in aDownloads) {
-              let dom = createDownloadObject(this._window, aDownloads[id]);
-              array.push(this._prepareForContent(dom));
+              let dom = getOrCreateDownloadObject(this._window, aDownloads[id]);
+              array.push(dom);
             }
             aResolve(array);
           }.bind(this),
@@ -88,27 +101,45 @@ DownloadManager.prototype = {
   },
 
   clearAllDone() {
-    debug("clearAllDone()");
+    DEBUG && debug("clearAllDone");
     // This is a void function; we just kick it off.  No promises, etc.
     DownloadsIPC.clearAllDone();
   },
 
   remove(aDownload) {
-    debug("remove " + aDownload.url + " " + aDownload.id);
-    return this.createPromise(
+    DEBUG && debug("remove " + aDownload.url + " " + aDownload.id);
+    return new Promise(
       function(aResolve, aReject) {
         if (!downloadsCache.has(this._window, aDownload.id)) {
-          debug("no download " + aDownload.id);
+          DEBUG && debug("no download " + aDownload.id);
           aReject("InvalidDownload");
           return;
         }
 
         DownloadsIPC.remove(aDownload.id).then(
           function(aResult) {
-            let dom = createDownloadObject(this._window, aResult);
-            // Change the state right away to not race against the update message.
-            dom.wrappedJSObject.state = "finalized";
-            aResolve(this._prepareForContent(dom));
+            let dom = getOrCreateDownloadObject(this._window, aResult);
+            if (dom.state === "finalized") {
+              aResolve(dom);
+            } else {
+              debug(
+                `Resolve remove() with a new download object with "finalized" state. ${aResult.id} ${dom.state}`
+              );
+              // The state might be updated to "finalized" AFTER this remove
+              // function being resolved. If the race condition happens, update
+              // the state manually, since once a download becomes "finalized",
+              // it will not change anymore.
+              let impl = Cc["@mozilla.org/download/object;1"].createInstance(
+                Ci.nsISupports
+              );
+              impl.wrappedJSObject._init(this._window, dom);
+              impl.wrappedJSObject.state = "finalized";
+              let contentDownloadObject = this._window.DownloadObject._create(
+                this._window,
+                impl.wrappedJSObject
+              );
+              aResolve(contentDownloadObject);
+            }
           }.bind(this),
           function() {
             aReject("RemoveError");
@@ -122,8 +153,8 @@ DownloadManager.prototype = {
     // Our AdoptDownloadDict only includes simple types, which WebIDL enforces.
     // We have no object/any types so we do not need to worry about invoking
     // JSON.stringify (and it inheriting our security privileges).
-    debug("adoptDownload");
-    return this.createPromise(
+    DEBUG && debug("adoptDownload");
+    return new Promise(
       function(aResolve, aReject) {
         if (!aAdoptDownloadDict) {
           debug("DownloadObject dictionary is required!");
@@ -166,50 +197,32 @@ DownloadManager.prototype = {
           url: aAdoptDownloadDict.url,
           path: computedPath,
           contentType: aAdoptDownloadDict.contentType,
-          startTime: aAdoptDownloadDict.startTime.valueOf() || Date.now(),
-          sourceAppManifestURL: "",
+          startTime: aAdoptDownloadDict.startTime?.valueOf() || Date.now(),
+          referrer: Cu.getWebIDLCallerPrincipal().origin,
         };
 
         DownloadsIPC.adoptDownload(jsonDownload).then(
           function(aResult) {
-            let domDownload = createDownloadObject(this._window, aResult);
-            aResolve(this._prepareForContent(domDownload));
+            let domDownload = getOrCreateDownloadObject(this._window, aResult);
+            aResolve(domDownload);
           }.bind(this),
           function(aResult) {
             // This will be one of: AdoptError (generic catch-all),
             // AdoptNoSuchFile, AdoptFileIsDirectory
-            aReject(aResult.error);
+            aReject(aResult);
           }
         );
       }.bind(this)
     );
   },
 
-  /**
-   * Turns a chrome download object into a content accessible one.
-   * When we have __DOM_IMPL__ available we just use that, otherwise
-   * we run _create() with the wrapped js object.
-   */
-  _prepareForContent(aChromeObject) {
-    if (aChromeObject.__DOM_IMPL__) {
-      return aChromeObject.__DOM_IMPL__;
-    }
-    let res = this._window.DownloadObject._create(
-      this._window,
-      aChromeObject.wrappedJSObject
-    );
-    return res;
-  },
-
   receiveMessage(aMessage) {
     let data = aMessage.data;
     switch (aMessage.name) {
       case "Downloads:Added":
-        debug("Adding " + uneval(data));
+        DEBUG && debug("Adding " + uneval(data));
         let event = new this._window.DownloadEvent("downloadstart", {
-          download: this._prepareForContent(
-            createDownloadObject(this._window, data)
-          ),
+          download: getOrCreateDownloadObject(this._window, data),
         });
         this.__DOM_IMPL__.dispatchEvent(event);
         break;
@@ -242,7 +255,7 @@ var downloadsCache = {
   get(aWindow, aDownload) {
     let downloads = this.cache.get(aWindow);
     if (!(downloads && downloads[aDownload.id])) {
-      debug("Adding download " + aDownload.id + " to cache.");
+      DEBUG && debug("Adding download " + aDownload.id + " to cache.");
       if (!downloads) {
         this.cache.set(aWindow, {});
         downloads = this.cache.get(aWindow);
@@ -252,7 +265,10 @@ var downloadsCache = {
         Ci.nsISupports
       );
       impl.wrappedJSObject._init(aWindow, aDownload);
-      downloads[aDownload.id] = impl;
+      downloads[aDownload.id] = aWindow.DownloadObject._create(
+        aWindow,
+        impl.wrappedJSObject
+      );
     }
     return downloads[aDownload.id];
   },
@@ -268,12 +284,12 @@ downloadsCache.init();
  * The DOM facade of a download object.
  */
 
-function createDownloadObject(aWindow, aDownload) {
+function getOrCreateDownloadObject(aWindow, aDownload) {
   return downloadsCache.get(aWindow, aDownload);
 }
 
 function DownloadObject() {
-  debug("DownloadObject constructor ");
+  DEBUG && debug("DownloadObject constructor ");
 
   this.wrappedJSObject = this;
   this.totalBytes = 0;
@@ -294,25 +310,27 @@ function DownloadObject() {
 }
 
 DownloadObject.prototype = {
-  createPromise(aPromiseInit) {
-    return new this._window.Promise(aPromiseInit);
-  },
-
   pause() {
-    debug("DownloadObject pause");
+    DEBUG && debug("DownloadObject pause " + this.id);
     let id = this.id;
-    // We need to wrap the Promise.jsm promise in a "real" DOM promise...
-    return this.createPromise(function(aResolve, aReject) {
-      DownloadsIPC.pause(id).then(aResolve, aReject);
+    let self = this;
+    return new Promise(function(aResolve, aReject) {
+      DownloadsIPC.pause(id).then(function(aResult) {
+        let domDownload = getOrCreateDownloadObject(self._window, aResult);
+        aResolve(domDownload);
+      }, aReject);
     });
   },
 
   resume() {
-    debug("DownloadObject resume");
+    DEBUG && debug("DownloadObject resume " + this.id);
     let id = this.id;
-    // We need to wrap the Promise.jsm promise in a "real" DOM promise...
-    return this.createPromise(function(aResolve, aReject) {
-      DownloadsIPC.resume(id).then(aResolve, aReject);
+    let self = this;
+    return new Promise(function(aResolve, aReject) {
+      DownloadsIPC.resume(id).then(function(aResult) {
+        let domDownload = getOrCreateDownloadObject(self._window, aResult);
+        aResolve(domDownload);
+      }, aReject);
     });
   },
 
@@ -374,14 +392,14 @@ DownloadObject.prototype = {
       "downloads-state-change-" + this.id,
       /* ownsWeak */ true
     );
-    debug("observer set for " + this.id);
+    DEBUG && debug("observer set for " + this.id);
   },
 
   /**
    * Updates the state of the object and fires the statechange event.
    */
   _update(aDownload) {
-    debug("update " + uneval(aDownload));
+    DEBUG && debug("update " + uneval(aDownload));
     if (this.id != aDownload.id) {
       return;
     }
@@ -396,7 +414,7 @@ DownloadObject.prototype = {
       "state",
       "contentType",
       "startTime",
-      "sourceAppManifestURL",
+      "referrer",
     ];
     let changed = false;
     let changedProps = {};
@@ -411,27 +429,38 @@ DownloadObject.prototype = {
     // When the path changes, we should update the storage name and
     // storage path used for our downloaded file in case our download
     // was re-targetted to a different storage and/or filename.
-    if (changedProps.path) {
+    if (changedProps.path && typeof this.path === "string") {
       let storages = this._window.navigator.b2g.getDeviceStorages("sdcard");
-      let preferredStorageName;
-      // Use the first one or the default storage. Just like jsdownloads picks
-      // the default / preferred download directory.
+      let storageName;
       storages.forEach(aStorage => {
-        if (aStorage.default || !preferredStorageName) {
-          preferredStorageName = aStorage.storageName;
+        if (
+          this.path.startsWith(aStorage.storagePath) ||
+          (aStorage.default && !storageName)
+        ) {
+          storageName = aStorage.storageName;
         }
       });
       // Now get the path for this storage area.
-      if (preferredStorageName) {
-        let volume = volumeService.getVolumeByName(preferredStorageName);
+      if (storageName) {
+        let volume = volumeService.getVolumeByName(storageName);
         if (volume) {
           // Finally, create the relative path of the file that can be used
           // later on to retrieve the file via DeviceStorage. Our path
           // needs to omit the starting '/'.
-          this.storageName = preferredStorageName;
-          this.storagePath = this.path.substring(
-            this.path.indexOf(volume.mountPoint) + volume.mountPoint.length + 1
-          );
+          this.storageName = storageName;
+          if (this.path.startsWith(volume.mountPoint)) {
+            this.storagePath = this.path.substring(
+              this.path.indexOf(volume.mountPoint) +
+                volume.mountPoint.length +
+                1
+            );
+          } else {
+            // The file might be in a removed or dettached volume, and does not
+            // exist. Remove the leading '/' for legitimate storagePath.
+            this.storagePath = this.path.startsWith("/")
+              ? this.path.substring(1)
+              : this.path;
+          }
         }
       }
     }
@@ -454,11 +483,12 @@ DownloadObject.prototype = {
         // We will delay sending the notification until we've inferred which
         // error is really happening.
         changed = false;
-        debug("Attempting to infer error via device storage sanity checks.");
+        DEBUG &&
+          debug("Attempting to infer error via device storage sanity checks.");
         // Get device storage and request availability status.
         let available = storage.available();
         available.onsuccess = function() {
-          debug("Storage Status = '" + available.result + "'");
+          DEBUG && debug("Storage Status = '" + available.result + "'");
           let inferredError = result;
           switch (available.result) {
             case "unavailable":
@@ -504,13 +534,13 @@ DownloadObject.prototype = {
       let event = new this._window.DownloadEvent("statechange", {
         download: this.__DOM_IMPL__,
       });
-      debug("Dispatching statechange event. state=" + this.state);
+      DEBUG && debug("Dispatching statechange event. state=" + this.state);
       this.__DOM_IMPL__.dispatchEvent(event);
     }
   },
 
   observe(aSubject, aTopic, aData) {
-    debug("DownloadObject observe " + aTopic);
+    DEBUG && debug(`DownloadObject ${this.id} observe ${aTopic}`);
     if (aTopic !== "downloads-state-change-" + this.id) {
       return;
     }

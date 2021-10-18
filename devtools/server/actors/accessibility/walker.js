@@ -32,7 +32,7 @@ loader.lazyRequireGetter(
 loader.lazyRequireGetter(this, "events", "devtools/shared/event-emitter");
 loader.lazyRequireGetter(
   this,
-  ["getCurrentZoom", "isWindowIncluded", "isRemoteFrame"],
+  ["getCurrentZoom", "isWindowIncluded", "isFrameWithChildTarget"],
   "devtools/shared/layout/utils",
   true
 );
@@ -880,7 +880,10 @@ const AccessibleWalkerActor = ActorClassWithSpec(accessibleWalkerSpec, {
       // remote frame target should emit RDP events (hovered/picked/...). And
       // all other WalkerActor for intermediate iframe and top level document
       // targets should stay silent.
-      isRemoteFrame(event.originalTarget || event.target)
+      isFrameWithChildTarget(
+        this.targetActor,
+        event.originalTarget || event.target
+      )
     );
   },
 
@@ -1072,19 +1075,7 @@ const AccessibleWalkerActor = ActorClassWithSpec(accessibleWalkerSpec, {
    * highlighter features correctly.
    */
   get pixelRatio() {
-    const { contentViewer } = this.targetActor.docShell;
-    const { windowUtils } = this.rootWin;
-    const overrideDPPX = contentViewer.overrideDPPX;
-    let ratio;
-    if (overrideDPPX) {
-      contentViewer.overrideDPPX = 0;
-      ratio = windowUtils.screenPixelsPerCSSPixel;
-      contentViewer.overrideDPPX = overrideDPPX;
-    } else {
-      ratio = windowUtils.screenPixelsPerCSSPixel;
-    }
-
-    return ratio;
+    return this.rootWin.windowUtils.screenPixelsPerCSSPixelNoOverride;
   },
 
   /**

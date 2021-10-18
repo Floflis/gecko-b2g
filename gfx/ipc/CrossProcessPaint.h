@@ -15,10 +15,10 @@
 #include "mozilla/MozPromise.h"
 #include "mozilla/ipc/ByteBuf.h"
 #include "nsColor.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsHashKeys.h"
 #include "nsRefPtrHashtable.h"
-#include "nsTHashtable.h"
+#include "nsTHashSet.h"
 
 class nsIDocShell;
 
@@ -30,6 +30,7 @@ struct ParamTraits;
 namespace mozilla {
 
 namespace dom {
+class CanonicalBrowsingContext;
 class DOMRect;
 class Promise;
 class WindowGlobalParent;
@@ -42,6 +43,7 @@ class CrossProcessPaint;
 enum class CrossProcessPaintFlags {
   None = 0,
   DrawView = 1 << 1,
+  ResetScrollPosition = 1 << 2,
 };
 
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(CrossProcessPaintFlags)
@@ -86,11 +88,11 @@ class PaintFragment final {
 
   typedef mozilla::ipc::ByteBuf ByteBuf;
 
-  PaintFragment(IntSize, ByteBuf&&, nsTHashtable<nsUint64HashKey>&&);
+  PaintFragment(IntSize, ByteBuf&&, nsTHashSet<uint64_t>&&);
 
   IntSize mSize;
   ByteBuf mRecording;
-  nsTHashtable<nsUint64HashKey> mDependencies;
+  nsTHashSet<uint64_t> mDependencies;
 };
 
 /**
@@ -126,25 +128,26 @@ class CrossProcessPaint final {
                     float aScale, nscolor aBackgroundColor,
                     CrossProcessPaintFlags aFlags, dom::Promise* aPromise);
 
-  static RefPtr<ResolvePromise> Start(
-      nsTHashtable<nsUint64HashKey>&& aDependencies);
+  static RefPtr<ResolvePromise> Start(nsTHashSet<uint64_t>&& aDependencies);
 
   void ReceiveFragment(dom::WindowGlobalParent* aWGP,
                        PaintFragment&& aFragment);
   void LostFragment(dom::WindowGlobalParent* aWGP);
 
  private:
-  typedef nsDataHashtable<nsUint64HashKey, PaintFragment> ReceivedFragmentMap;
+  typedef nsTHashMap<nsUint64HashKey, PaintFragment> ReceivedFragmentMap;
 
   CrossProcessPaint(float aScale, dom::TabId aRoot);
   ~CrossProcessPaint();
 
-  void QueueDependencies(const nsTHashtable<nsUint64HashKey>& aDependencies);
+  void QueueDependencies(const nsTHashSet<uint64_t>& aDependencies);
 
   void QueuePaint(
       dom::WindowGlobalParent* aWGP, const Maybe<IntRect>& aRect,
       nscolor aBackgroundColor = NS_RGBA(0, 0, 0, 0),
       CrossProcessPaintFlags aFlags = CrossProcessPaintFlags::DrawView);
+
+  void QueuePaint(dom::CanonicalBrowsingContext* aBc);
 
   /// Clear the state of this paint so that it cannot be resolved or receive
   /// any paint fragments.

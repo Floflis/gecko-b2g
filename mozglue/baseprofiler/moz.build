@@ -13,9 +13,7 @@ if CONFIG["MOZ_GECKO_PROFILER"]:
     DEFINES["IMPL_MFBT"] = True
     EXPORTS += [
         "public/BaseProfilerSharedLibraries.h",
-        "public/BaseProfilingCategory.h",
         "public/BaseProfilingStack.h",
-        "public/ProfilingCategoryList.h",
     ]
     UNIFIED_SOURCES += [
         "core/PageInformation.cpp",
@@ -68,24 +66,30 @@ if CONFIG["MOZ_GECKO_PROFILER"]:
         DEFINES["ANDROID_NDK_MAJOR_VERSION"] = CONFIG["ANDROID_NDK_MAJOR_VERSION"]
         DEFINES["ANDROID_NDK_MINOR_VERSION"] = CONFIG["ANDROID_NDK_MINOR_VERSION"]
 
-    FINAL_LIBRARY = "mozglue"
+GeneratedFile(
+    "public/ProfilingCategoryList.h",
+    script="build/generate_profiling_categories.py",
+    entry_point="generate_macro_header",
+    inputs=["build/profiling_categories.yaml"],
+)
 
-# Many of the headers in this directory are usable in non-MOZ_GECKO_PROFILER
-# builds.
-# BaseProfiler.h and BaseProfilerCounts.h only contain no-op macros in that
-# case.
 EXPORTS += [
+    "!public/ProfilingCategoryList.h",
     "public/BaseProfiler.h",
+    "public/BaseProfilingCategory.h",
 ]
 
 EXPORTS.mozilla += [
     "public/BaseProfileJSONWriter.h",
     "public/BaseProfilerCounts.h",
     "public/BaseProfilerDetail.h",
+    "public/BaseProfilerLabels.h",
     "public/BaseProfilerMarkers.h",
     "public/BaseProfilerMarkersDetail.h",
     "public/BaseProfilerMarkersPrerequisites.h",
     "public/BaseProfilerMarkerTypes.h",
+    "public/BaseProfilerState.h",
+    "public/BaseProfilerUtils.h",
     "public/BlocksRingBuffer.h",
     "public/leb128iterator.h",
     "public/ModuloBuffer.h",
@@ -101,12 +105,17 @@ EXPORTS.mozilla += [
     "public/ProfileChunkedBuffer.h",
 ]
 
+UNIFIED_SOURCES += [
+    "core/ProfilerUtils.cpp",
+]
+
 if CONFIG["MOZ_VTUNE"]:
     DEFINES["MOZ_VTUNE_INSTRUMENTATION"] = True
     UNIFIED_SOURCES += [
         "core/VTuneProfiler.cpp",
     ]
 
+FINAL_LIBRARY = "mozglue"
 
 if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     CXXFLAGS += [

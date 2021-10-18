@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Http3ClientEvent {
     /// Response headers are received.
     HeaderReady {
@@ -58,12 +58,16 @@ pub enum Http3ClientEvent {
     /// A push has been canceled.
     PushCanceled { push_id: u64 },
     /// A push stream was been reset due to a HttpGeneralProtocol error.
-    /// Most common dase are malformed response headers.
+    /// Most common case are malformed response headers.
     PushReset { push_id: u64, error: AppError },
     /// New stream can be created
     RequestsCreatable,
     /// Cert authentication needed
     AuthenticationNeeded,
+    /// Encrypted client hello fallback occurred.  The certificate for the
+    /// name `public_name` needs to be authenticated in order to get
+    /// an updated ECH configuration.
+    EchFallbackAuthenticationNeeded { public_name: String },
     /// A new resumption token.
     ResumptionToken(ResumptionToken),
     /// Zero Rtt has been rejected.
@@ -165,6 +169,11 @@ impl Http3ClientEvents {
         self.insert(Http3ClientEvent::AuthenticationNeeded);
     }
 
+    /// Add a new `AuthenticationNeeded` event
+    pub(crate) fn ech_fallback_authentication_needed(&self, public_name: String) {
+        self.insert(Http3ClientEvent::EchFallbackAuthenticationNeeded { public_name });
+    }
+
     /// Add a new resumption token event.
     pub(crate) fn resumption_token(&self, token: ResumptionToken) {
         self.insert(Http3ClientEvent::ResumptionToken(token));
@@ -189,7 +198,7 @@ impl Http3ClientEvents {
     where
         F: Fn(&Http3ClientEvent) -> bool,
     {
-        self.events.borrow_mut().retain(|evt| !f(evt))
+        self.events.borrow_mut().retain(|evt| !f(evt));
     }
 
     /// Add a new `StateChange` event.

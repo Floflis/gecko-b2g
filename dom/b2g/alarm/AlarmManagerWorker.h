@@ -14,14 +14,13 @@ namespace dom {
 class AlarmManagerWorker final : public AlarmManagerImpl {
  public:
   NS_INLINE_DECL_REFCOUNTING(AlarmManagerWorker, override)
-  explicit AlarmManagerWorker(nsCString aUrl, nsIGlobalObject* aOuterGlobal);
+  AlarmManagerWorker() = default;
+  virtual nsresult Init(nsIGlobalObject* aGlobal) override;
 
-  virtual already_AddRefed<Promise> GetAll() override;
-  virtual already_AddRefed<Promise> Add(JSContext* aCx,
-                                        const AlarmOptions& aOptions) override;
+  virtual void GetAll(Promise* aPromise) override;
+  virtual void Add(Promise* aPromise, JSContext* aCx,
+                   const AlarmOptions& aOptions) override;
   virtual void Remove(long aId) override;
-
-  virtual bool CheckPermission() override;
 
  private:
   ~AlarmManagerWorker() = default;

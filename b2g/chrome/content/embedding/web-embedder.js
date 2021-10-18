@@ -282,9 +282,11 @@ XPCOMUtils.defineLazyServiceGetter(
           // nsISidlConnectionObserver
           disconnected() {
             self.dispatchEvent(new CustomEvent("daemon-disconnected"));
+            Services.obs.notifyObservers(null, "api-daemon-disconnected");
           },
           reconnected() {
             self.dispatchEvent(new CustomEvent("daemon-reconnected"));
+            Services.obs.notifyObservers(null, "api-daemon-reconnected");
           },
         });
       } else {
@@ -341,6 +343,33 @@ XPCOMUtils.defineLazyServiceGetter(
       }, "activity-choice");
 
       Services.obs.addObserver((subject, topic, data) => {
+        _webembed_log("receive activity-aborted");
+        this.dispatchEvent(
+          new CustomEvent(topic, {
+            detail: subject.wrappedJSObject,
+          })
+        );
+      }, "activity-aborted");
+
+      Services.obs.addObserver((subject, topic, data) => {
+        _webembed_log("receive activity-opened");
+        this.dispatchEvent(
+          new CustomEvent(topic, {
+            detail: subject.wrappedJSObject,
+          })
+        );
+      }, "activity-opened");
+
+      Services.obs.addObserver((subject, topic, data) => {
+        _webembed_log("receive activity-closed");
+        this.dispatchEvent(
+          new CustomEvent(topic, {
+            detail: subject.wrappedJSObject,
+          })
+        );
+      }, "activity-closed");
+
+      Services.obs.addObserver((subject, topic, data) => {
         _webembed_log(`receive inputmethod-contextchange: ${data}`);
         if (data == null) {
           return;
@@ -365,6 +394,8 @@ XPCOMUtils.defineLazyServiceGetter(
             name: subject.name,
             choices: subject.choices,
             maxLength: subject.maxLength,
+            imeGroup: subject.imeGroup,
+            lastImeGroup: subject.lastImeGroup,
             activeEditable: new EditableSupport(subject.editableSupport),
           };
         }
@@ -573,6 +604,14 @@ XPCOMUtils.defineLazyServiceGetter(
         listener,
         useCapture
       );
+    }
+
+    launchRemoteWindows() {
+      Services.obs.notifyObservers(null, "open-remote-shell-windows");
+    }
+
+    getContentProcesses() {
+      return Services.appinfo.getContentProcesses();
     }
   }
 

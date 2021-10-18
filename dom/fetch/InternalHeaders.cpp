@@ -19,20 +19,25 @@
 namespace mozilla::dom {
 
 InternalHeaders::InternalHeaders(nsTArray<Entry>&& aHeaders,
-                                 HeadersGuardEnum aGuard)
-    : mGuard(aGuard), mList(std::move(aHeaders)), mListDirty(true) {}
+                                 HeadersGuardEnum aGuard, bool aSystemXHRPerm)
+    : mGuard(aGuard),
+      mList(std::move(aHeaders)),
+      mListDirty(true),
+      mHasSystemXHRPerm(aSystemXHRPerm) {}
 
 InternalHeaders::InternalHeaders(
-    const nsTArray<HeadersEntry>& aHeadersEntryList, HeadersGuardEnum aGuard)
-    : mGuard(aGuard), mListDirty(true) {
+    const nsTArray<HeadersEntry>& aHeadersEntryList, HeadersGuardEnum aGuard,
+    bool aSystemXHRPerm)
+    : mGuard(aGuard), mListDirty(true), mHasSystemXHRPerm(aSystemXHRPerm) {
   for (const HeadersEntry& headersEntry : aHeadersEntryList) {
     mList.AppendElement(Entry(headersEntry.name(), headersEntry.value()));
   }
 }
 
 void InternalHeaders::ToIPC(nsTArray<HeadersEntry>& aIPCHeaders,
-                            HeadersGuardEnum& aGuard) {
+                            HeadersGuardEnum& aGuard, bool& aHasSystemXHRPerm) {
   aGuard = mGuard;
+  aHasSystemXHRPerm = mHasSystemXHRPerm;
 
   aIPCHeaders.Clear();
   for (Entry& entry : mList) {
@@ -73,7 +78,8 @@ bool InternalHeaders::IsValidHeaderValue(const nsCString& aLowerName,
       tempValue.Append(aNormalizedValue);
     }
 
-    if (!nsContentUtils::IsCORSSafelistedRequestHeader(aLowerName, tempValue)) {
+    if (!mHasSystemXHRPerm &&
+        !nsContentUtils::IsCORSSafelistedRequestHeader(aLowerName, tempValue)) {
       return false;
     }
   }
@@ -308,6 +314,10 @@ void InternalHeaders::SetGuard(HeadersGuardEnum aGuard, ErrorResult& aRv) {
   mGuard = aGuard;
 }
 
+void InternalHeaders::SetHasSystemXHRPerm(bool aHasSystemXHRPerm) {
+  mHasSystemXHRPerm = aHasSystemXHRPerm;
+}
+
 InternalHeaders::~InternalHeaders() = default;
 
 // static
@@ -475,6 +485,11 @@ void InternalHeaders::FillResponseHeaders(nsIRequest* aRequest) {
 }
 
 bool InternalHeaders::HasOnlySimpleHeaders() const {
+  // Allow any header when the systemXHR permission is set.
+  if (mHasSystemXHRPerm) {
+    return true;
+  }
+
   for (uint32_t i = 0; i < mList.Length(); ++i) {
     if (!IsSimpleHeader(mList[i].mName, mList[i].mValue)) {
       return false;
@@ -552,6 +567,7 @@ already_AddRefed<InternalHeaders> InternalHeaders::CORSHeaders(
     } else if (entry.mName.EqualsIgnoreCase("cache-control") ||
                entry.mName.EqualsIgnoreCase("content-language") ||
                entry.mName.EqualsIgnoreCase("content-type") ||
+               entry.mName.EqualsIgnoreCase("content-length") ||
                entry.mName.EqualsIgnoreCase("expires") ||
                entry.mName.EqualsIgnoreCase("last-modified") ||
                entry.mName.EqualsIgnoreCase("pragma") ||

@@ -4,7 +4,7 @@
 
 "use strict";
 
-/* exported getNativeInterface, waitForMacEventWithInfo, waitForMacEvent,
+/* exported getNativeInterface, waitForMacEventWithInfo, waitForMacEvent, waitForStateChange,
    NSRange, NSDictionary, stringForRange, AXTextStateChangeTypeEdit,
    AXTextEditTypeDelete, AXTextEditTypeTyping, AXTextStateChangeTypeSelectionMove,
    AXTextStateChangeTypeSelectionExtend, AXTextSelectionDirectionUnknown,
@@ -107,8 +107,35 @@ function stringForRange(macDoc, range) {
     return "";
   }
 
-  return macDoc.getParameterizedAttributeValue(
+  let str = macDoc.getParameterizedAttributeValue(
     "AXStringForTextMarkerRange",
     range
   );
+
+  let attrStr = macDoc.getParameterizedAttributeValue(
+    "AXAttributedStringForTextMarkerRange",
+    range
+  );
+
+  // This is a fly-by test to make sure our attributed strings
+  // always match our flat strings.
+  is(
+    attrStr.map(({ string }) => string).join(""),
+    str,
+    "attributed text matches non-attributed text"
+  );
+
+  return str;
+}
+
+function waitForStateChange(id, state, isEnabled, isExtra = false) {
+  return waitForEvent(EVENT_STATE_CHANGE, e => {
+    e.QueryInterface(nsIAccessibleStateChangeEvent);
+    return (
+      e.state == state &&
+      e.isExtraState == isExtra &&
+      isEnabled == e.isEnabled &&
+      id == getAccessibleDOMNodeID(e.accessible)
+    );
+  });
 }

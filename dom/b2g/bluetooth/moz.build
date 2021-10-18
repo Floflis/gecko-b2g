@@ -13,16 +13,11 @@ if CONFIG["MOZ_B2G_RIL"]:
 
 UNIFIED_SOURCES += [
     "common/BluetoothCommon.cpp",
-]
-
-UNIFIED_SOURCES += [
     "common/BluetoothGattReplyRunnable.cpp",
     "common/BluetoothInterface.cpp",
-    "common/BluetoothProfileController.cpp",
     "common/BluetoothReplyRunnable.cpp",
     "common/BluetoothService.cpp",
     "common/BluetoothUtils.cpp",
-    "common/BluetoothUuidHelper.cpp",
     "common/ObexBase.cpp",
     "common/webapi/BluetoothAdapter.cpp",
     "common/webapi/BluetoothClassOfDevice.cpp",
@@ -49,6 +44,13 @@ UNIFIED_SOURCES += [
     "ipc/BluetoothRequestParent.cpp",
     "ipc/BluetoothServiceChildProcess.cpp",
 ]
+
+if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gonk":
+    UNIFIED_SOURCES += [
+        "common/BluetoothProfileController.cpp",
+        "common/BluetoothUuidHelper.cpp",
+    ]
+
 LOCAL_INCLUDES += ["common", "common/webapi", "ipc"]
 
 #
@@ -102,6 +104,11 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gonk":
             ]
 
         DEFINES["MOZ_B2G_BT_DAEMON"] = True
+else:
+    if CONFIG["ENABLE_TESTS"]:
+        UNIFIED_SOURCES += [
+            "bluedroid/BluetoothDaemonHelpers.cpp",
+        ]
 
 #
 # Exported interfaces
@@ -141,6 +148,11 @@ EXPORTS.mozilla.dom.bluetooth += [
 
 EXPORTS.mozilla.dom += ["common/webapi/BluetoothUUID.h"]
 
+# Bluetooth module often uses array designators for the mapping between enum and
+# array, therefore, silences c99-designator warnings of clang.
+if CONFIG["CC_TYPE"] == "clang":
+    CXXFLAGS += ["-Wno-c99-designator"]
+
 IPDL_SOURCES += [
     "ipc/BluetoothTypes.ipdlh",
     "ipc/PBluetooth.ipdl",
@@ -150,3 +162,6 @@ IPDL_SOURCES += [
 include("/ipc/chromium/chromium-config.mozbuild")
 
 FINAL_LIBRARY = "xul"
+
+if CONFIG["ENABLE_TESTS"]:
+    TEST_DIRS += ["gtest"]

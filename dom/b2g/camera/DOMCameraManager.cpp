@@ -216,7 +216,8 @@ CameraPermissionRequest::GetTopLevelPrincipal(
 }
 
 NS_IMETHODIMP
-CameraPermissionRequest::GetIsHandlingUserInput(bool* aHandlingUserInput) {
+CameraPermissionRequest::GetHasValidTransientUserGestureActivation(
+    bool* aHasValidTransientUserGestureActivation) {
   return NS_OK;
 }
 
@@ -228,8 +229,8 @@ CameraPermissionRequest::GetDelegatePrincipal(
 }
 
 NS_IMETHODIMP
-CameraPermissionRequest::GetMaybeUnsafePermissionDelegate(
-    bool* aMaybeUnsafePermissionDelegate) {
+CameraPermissionRequest::GetIsRequestDelegatedToUnsafeThirdParty(
+    bool* aIsRequestDelegatedToUnsafeThirdParty) {
   return NS_OK;
 }
 
@@ -315,8 +316,9 @@ void nsDOMCameraManager::Register(nsDOMCameraControl* aDOMCameraControl) {
 
   CameraControls* controls = sActiveWindows->Get(mWindowId);
   if (!controls) {
-    controls = new CameraControls();
-    sActiveWindows->Put(mWindowId, controls);
+    controls =
+        sActiveWindows->InsertOrUpdate(mWindowId, MakeUnique<CameraControls>())
+            .get();
   }
 
   // Remove any stale CameraControl objects to limit our memory usage

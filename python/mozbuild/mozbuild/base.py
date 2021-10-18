@@ -43,6 +43,11 @@ from .util import (
     memoized_property,
 )
 
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 
 def ancestors(path):
     """Emit the parent directories of a path."""
@@ -131,7 +136,7 @@ class MozbuildObject(ProcessExecutionMixin):
         self._topobjdir = mozpath.normsep(topobjdir) if topobjdir else topobjdir
         self._mozconfig = mozconfig
         self._config_environment = None
-        self._virtualenv_name = virtualenv_name or ("init_py3" if six.PY3 else "init")
+        self._virtualenv_name = virtualenv_name or "common"
         self._virtualenv_manager = None
 
     @classmethod
@@ -289,9 +294,8 @@ class MozbuildObject(ProcessExecutionMixin):
         if self._virtualenv_manager is None:
             self._virtualenv_manager = VirtualenvManager(
                 self.topsrcdir,
-                os.path.join(self.topobjdir, "_virtualenvs", self._virtualenv_name),
-                sys.stdout,
-                os.path.join(self.topsrcdir, "build", "build_virtualenv_packages.txt"),
+                os.path.join(self.topobjdir, "_virtualenvs"),
+                self._virtualenv_name,
             )
 
         return self._virtualenv_manager
@@ -328,8 +332,18 @@ class MozbuildObject(ProcessExecutionMixin):
                     *args, **kwargs
                 )
 
+        # This may be called recursively from configure itself for $reasons,
+        # so avoid logging to the same logger (configure uses "moz.configure")
+        logger = logging.getLogger("moz.configure.reduced")
+        handler = logging.StreamHandler(out)
+        logger.addHandler(handler)
+        # If this were true, logging would still propagate to "moz.configure".
+        logger.propagate = False
         sandbox = ReducedConfigureSandbox(
-            {}, environ=env, argv=["mach", "--help"], stdout=out, stderr=out
+            {},
+            environ=env,
+            argv=["mach", "--help"],
+            logger=logger,
         )
         base_dir = os.path.join(topsrcdir, "build", "moz.configure")
         try:
@@ -712,7 +726,6 @@ class MozbuildObject(ProcessExecutionMixin):
         target=None,
         log=True,
         srcdir=False,
-        allow_parallel=True,
         line_handler=None,
         append_env=None,
         explicit_env=None,
@@ -722,6 +735,7 @@ class MozbuildObject(ProcessExecutionMixin):
         print_directory=True,
         pass_thru=False,
         num_jobs=0,
+        job_size=0,
         keep_going=False,
     ):
         """Invoke make.
@@ -738,7 +752,7 @@ class MozbuildObject(ProcessExecutionMixin):
         """
         self._ensure_objdir_exists()
 
-        args = [self._make_path()]
+        args = [self.substs["GMAKE"]]
 
         if directory:
             args.extend(["-C", directory.replace(os.sep, "/")])
@@ -766,20 +780,24 @@ class MozbuildObject(ProcessExecutionMixin):
                 else:
                     args.append(flag)
 
-        if allow_parallel:
-            if num_jobs > 0:
-                args.append("-j%d" % num_jobs)
-            else:
-                args.append("-j%d" % multiprocessing.cpu_count())
-        elif num_jobs > 0:
-            args.append("MOZ_PARALLEL_BUILD=%d" % num_jobs)
-        elif os.environ.get("MOZ_LOW_PARALLELISM_BUILD"):
+        if num_jobs == 0:
+            if job_size == 0:
+                job_size = 2.0 if self.substs.get("CC_TYPE") == "gcc" else 1.0  # GiB
+
             cpus = multiprocessing.cpu_count()
-            jobs = max(1, int(0.75 * cpus))
-            print(
-                "  Low parallelism requested: using %d jobs for %d cores" % (jobs, cpus)
-            )
-            args.append("MOZ_PARALLEL_BUILD=%d" % jobs)
+            if not psutil or not job_size:
+                num_jobs = cpus
+            else:
+                mem_gb = psutil.virtual_memory().total / 1024 ** 3
+                from_mem = round(mem_gb / job_size)
+                num_jobs = max(1, min(cpus, from_mem))
+                print(
+                    "  Parallelism determined by memory: using %d jobs for %d cores "
+                    "based on %.1f GiB RAM and estimated job size of %.1f GiB"
+                    % (num_jobs, cpus, mem_gb, job_size)
+                )
+
+        args.append("-j%d" % num_jobs)
 
         if ignore_errors:
             args.append("-k")
@@ -827,58 +845,6 @@ class MozbuildObject(ProcessExecutionMixin):
             params["log_name"] = "make"
 
         return fn(**params)
-
-    def _make_path(self):
-        baseconfig = os.path.join(self.topsrcdir, "config", "baseconfig.mk")
-
-        def is_xcode_lisense_error(output):
-            return self._is_osx() and b"Agreeing to the Xcode" in output
-
-        def validate_make(make):
-            if os.path.exists(baseconfig) and os.path.exists(make):
-                cmd = [make, "-f", baseconfig]
-                if self._is_windows():
-                    cmd.append("HOST_OS_ARCH=WINNT")
-                try:
-                    subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-                except subprocess.CalledProcessError as e:
-                    return False, is_xcode_lisense_error(e.output)
-                return True, False
-            return False, False
-
-        xcode_lisense_error = False
-        possible_makes = ["gmake", "make", "mozmake", "gnumake", "mingw32-make"]
-
-        if "MAKE" in os.environ:
-            make = os.environ["MAKE"]
-            possible_makes.insert(0, make)
-
-        for test in possible_makes:
-            if os.path.isabs(test):
-                make = test
-            else:
-                make = which(test)
-                if not make:
-                    continue
-            result, xcode_lisense_error_tmp = validate_make(make)
-            if result:
-                return make
-            if xcode_lisense_error_tmp:
-                xcode_lisense_error = True
-
-        if xcode_lisense_error:
-            raise Exception(
-                "Xcode requires accepting to the license agreement.\n"
-                "Please run Xcode and accept the license agreement."
-            )
-
-        if self._is_windows():
-            raise Exception(
-                "Could not find a suitable make implementation.\n"
-                "Please use MozillaBuild 1.9 or newer"
-            )
-        else:
-            raise Exception("Could not find a suitable make implementation.")
 
     def _run_command_in_srcdir(self, **args):
         return self.run_process(cwd=self.topsrcdir, **args)

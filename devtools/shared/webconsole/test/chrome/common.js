@@ -6,12 +6,15 @@
 
 /* exported attachConsole, attachConsoleToTab, attachConsoleToWorker,
    closeDebugger, checkConsoleAPICalls, checkRawHeaders, runTests, nextTest, Ci, Cc,
-   withActiveServiceWorker, Services, consoleAPICall, createResourceWatcherForTab */
+   withActiveServiceWorker, Services, consoleAPICall, createCommandsForTab */
 
 const { require } = ChromeUtils.import("resource://devtools/shared/Loader.jsm");
 const { DevToolsServer } = require("devtools/server/devtools-server");
 // eslint-disable-next-line mozilla/reject-some-requires
 const { DevToolsClient } = require("devtools/client/devtools-client");
+const {
+  CommandsFactory,
+} = require("devtools/shared/commands/commands-factory");
 
 const Services = require("Services");
 
@@ -112,22 +115,10 @@ var _attachConsole = async function(listeners, attachToTab, attachToWorker) {
   return null;
 };
 
-async function createResourceWatcherForTab() {
-  const client = await connectToDebugger();
-  const targetDescriptor = await client.mainRoot.getMainProcess();
-  const target = await targetDescriptor.getTarget();
-
-  // Avoid mocha to try to load these module and fail while doing it when running node tests
-  const {
-    ResourceWatcher,
-  } = require("devtools/shared/resources/resource-watcher");
-  const { TargetList } = require("devtools/shared/resources/target-list");
-
-  const targetList = new TargetList(client.mainRoot, target);
-  await targetList.startListening();
-  const resourceWatcher = new ResourceWatcher(targetList);
-
-  return { resourceWatcher, target };
+async function createCommandsForTab() {
+  const commands = await CommandsFactory.forMainProcess();
+  await commands.targetCommand.startListening();
+  return commands;
 }
 
 function closeDebugger(state, callback) {

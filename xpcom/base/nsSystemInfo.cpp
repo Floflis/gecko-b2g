@@ -13,8 +13,10 @@
 #include "mozilla/SSE.h"
 #include "mozilla/arm.h"
 #include "mozilla/LazyIdleThread.h"
+#include "mozilla/LookAndFeel.h"
 #include "mozilla/Sprintf.h"
 #include "jsapi.h"
+#include "js/PropertyAndElement.h"  // JS_SetProperty
 #include "mozilla/dom/Promise.h"
 
 #ifdef XP_WIN
@@ -34,6 +36,8 @@
 #  include "nsDirectoryServiceDefs.h"
 #  include "nsDirectoryServiceUtils.h"
 #  include "nsWindowsHelpers.h"
+#  include "WinUtils.h"
+#  include "mozilla/NotNull.h"
 
 #endif
 
@@ -408,8 +412,8 @@ nsresult CollectCountryCode(nsAString& aCountryCode) {
 
 #  ifndef __MINGW32__
 
-static HRESULT EnumWSCProductList(nsAString& aOutput,
-                                  NotNull<IWSCProductList*> aProdList) {
+static HRESULT EnumWSCProductList(
+    nsAString& aOutput, mozilla::NotNull<IWSCProductList*> aProdList) {
   MOZ_ASSERT(aOutput.IsEmpty());
 
   LONG count;
@@ -478,10 +482,12 @@ static nsresult GetWindowsSecurityCenterInfo(nsAString& aAVInfo,
   // Each output must match the corresponding entry in providerTypes.
   nsAString* outputs[] = {&aAVInfo, &aAntiSpyInfo, &aFirewallInfo};
 
-  static_assert(ArrayLength(providerTypes) == ArrayLength(outputs),
-                "Length of providerTypes and outputs arrays must match");
+  static_assert(
+      mozilla::ArrayLength(providerTypes) == mozilla::ArrayLength(outputs),
+      "Length of providerTypes and outputs arrays must match");
 
-  for (uint32_t index = 0; index < ArrayLength(providerTypes); ++index) {
+  for (uint32_t index = 0; index < mozilla::ArrayLength(providerTypes);
+       ++index) {
     RefPtr<IWSCProductList> prodList;
     HRESULT hr = ::CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, iid,
                                     getter_AddRefs(prodList));
@@ -494,7 +500,8 @@ static nsresult GetWindowsSecurityCenterInfo(nsAString& aAVInfo,
       return NS_ERROR_UNEXPECTED;
     }
 
-    hr = EnumWSCProductList(*outputs[index], WrapNotNull(prodList.get()));
+    hr = EnumWSCProductList(*outputs[index],
+                            mozilla::WrapNotNull(prodList.get()));
     if (FAILED(hr)) {
       return NS_ERROR_UNEXPECTED;
     }
@@ -737,7 +744,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(keyValuePairs["cpu family"_ns]);
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        cpuFamily = static_cast<int>(t.AsInteger());
+        cpuFamily = static_cast<int32_t>(t.AsInteger());
       }
     }
 
@@ -747,7 +754,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(keyValuePairs["model"_ns]);
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        cpuModel = static_cast<int>(t.AsInteger());
+        cpuModel = static_cast<int32_t>(t.AsInteger());
       }
     }
 
@@ -757,7 +764,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(keyValuePairs["stepping"_ns]);
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        cpuStepping = static_cast<int>(t.AsInteger());
+        cpuStepping = static_cast<int32_t>(t.AsInteger());
       }
     }
 
@@ -767,7 +774,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(keyValuePairs["cpu cores"_ns]);
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        physicalCPUs = static_cast<int>(t.AsInteger());
+        physicalCPUs = static_cast<int32_t>(t.AsInteger());
       }
     }
   }
@@ -782,7 +789,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(line.c_str());
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        cpuSpeed = static_cast<int>(t.AsInteger() / 1000);
+        cpuSpeed = static_cast<int32_t>(t.AsInteger() / 1000);
       }
     }
   }
@@ -796,7 +803,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(line.c_str(), nullptr, "K");
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        cacheSizeL2 = static_cast<int>(t.AsInteger());
+        cacheSizeL2 = static_cast<int32_t>(t.AsInteger());
       }
     }
   }
@@ -810,7 +817,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
       Tokenizer p(line.c_str(), nullptr, "K");
       if (p.Next(t) && t.Type() == Tokenizer::TOKEN_INTEGER &&
           t.AsInteger() <= INT32_MAX) {
-        cacheSizeL3 = static_cast<int>(t.AsInteger());
+        cacheSizeL3 = static_cast<int32_t>(t.AsInteger());
       }
     }
   }
@@ -932,6 +939,12 @@ nsresult nsSystemInfo::Init() {
     return rv;
   }
 
+  rv = SetPropertyAsBool(u"hasWinPackageId"_ns,
+                         widget::WinUtils::HasPackageIdentity());
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    return rv;
+  }
+
 #  ifndef __MINGW32__
   nsAutoString avInfo, antiSpyInfo, firewallInfo;
   if (NS_SUCCEEDED(
@@ -959,8 +972,8 @@ nsresult nsSystemInfo::Init() {
   }
 #  endif  // __MINGW32__
 
-  mozilla::DynamicallyLinkedFunctionPtr<decltype(
-      &IsUserCetAvailableInEnvironment)>
+  mozilla::DynamicallyLinkedFunctionPtr<
+      decltype(&IsUserCetAvailableInEnvironment)>
       isUserCetAvailable(L"api-ms-win-core-sysinfo-l1-2-6.dll",
                          "IsUserCetAvailableInEnvironment");
   bool hasUserCET = isUserCetAvailable &&
@@ -984,6 +997,12 @@ nsresult nsSystemInfo::Init() {
     NS_ENSURE_SUCCESS(rv, rv);
   }
 #endif
+
+  {
+    nsAutoCString themeInfo;
+    LookAndFeel::GetThemeInfo(themeInfo);
+    MOZ_TRY(SetPropertyAsACString(u"osThemeInfo"_ns, themeInfo));
+  }
 
 #if defined(MOZ_WIDGET_GTK)
   // This must be done here because NSPR can only separate OS's when compiled,

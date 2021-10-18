@@ -105,48 +105,40 @@ export class TogglePrefCheckbox extends React.PureComponent {
 export class Personalization extends React.PureComponent {
   constructor(props) {
     super(props);
-    this.togglePersonalizationVersion = this.togglePersonalizationVersion.bind(
-      this
-    );
+    this.togglePersonalization = this.togglePersonalization.bind(this);
   }
 
-  togglePersonalizationVersion() {
+  togglePersonalization() {
     this.props.dispatch(
       ac.OnlyToMain({
-        type: at.DISCOVERY_STREAM_PERSONALIZATION_VERSION_TOGGLE,
+        type: at.DISCOVERY_STREAM_PERSONALIZATION_TOGGLE,
       })
     );
   }
 
   render() {
-    const {
-      lastUpdated,
-      version,
-      initialized,
-    } = this.props.state.Personalization;
+    const { lastUpdated, initialized } = this.props.state.Personalization;
     return (
       <React.Fragment>
-        <button className="button" onClick={this.togglePersonalizationVersion}>
-          {version === 1
-            ? "Enable V2 Personalization"
-            : "Enable V1 Personalization"}
-        </button>
         <table>
           <tbody>
             <Row>
-              <td className="min">Personalization version</td>
-              <td>{version}</td>
+              <td colSpan="2">
+                <TogglePrefCheckbox
+                  checked={this.props.personalized}
+                  pref="personalized"
+                  onChange={this.togglePersonalization}
+                />
+              </td>
             </Row>
             <Row>
               <td className="min">Personalization Last Updated</td>
               <td>{relativeTime(lastUpdated) || "(no data)"}</td>
             </Row>
-            {version === 2 ? (
-              <Row>
-                <td className="min">Personalization V2 Initialized</td>
-                <td>{initialized ? "true" : "false"}</td>
-              </Row>
-            ) : null}
+            <Row>
+              <td className="min">Personalization Initialized</td>
+              <td>{initialized ? "true" : "false"}</td>
+            </Row>
           </tbody>
         </table>
       </React.Fragment>
@@ -372,10 +364,13 @@ export class DiscoveryStreamAdmin extends React.PureComponent {
   }
 
   render() {
-    const prefToggles = "enabled hardcoded_layout show_spocs personalized collapsible".split(
+    const prefToggles = "enabled hardcoded_layout show_spocs collapsible".split(
       " "
     );
     const { config, lastUpdated, layout } = this.props.state.DiscoveryStream;
+    const personalized = this.props.otherPrefs[
+      "discoverystream.personalization.enabled"
+    ];
     return (
       <div>
         <button className="button" onClick={this.restorePrefDefaults}>
@@ -461,6 +456,7 @@ export class DiscoveryStreamAdmin extends React.PureComponent {
         ))}
         <h3>Personalization</h3>
         <Personalization
+          personalized={personalized}
           dispatch={this.props.dispatch}
           state={{
             Personalization: this.props.state.Personalization,
@@ -523,7 +519,7 @@ export class ASRouterAdminInner extends React.PureComponent {
         source: "addons.mozilla.org",
         medium: "referral",
         campaign: "non-fx-button",
-        content: "iridium@particlecore.github.io",
+        content: `rta:${btoa("uBlock0@raymondhill.net")}`,
         experiment: "ua-onboarding",
         variation: "chrome",
         ua: "Google Chrome 123",
@@ -1453,10 +1449,12 @@ export class ASRouterAdminInner extends React.PureComponent {
           This forces the browser to set some attribution parameters, useful for
           testing the Return To AMO feature. Clicking on 'Force Attribution',
           with the default values in each field, will demo the Return To AMO
-          flow with the addon called 'Iridium for Youtube'. If you wish to try
+          flow with the addon called 'uBlock Origin'. If you wish to try
           different attribution parameters, enter them in the text boxes. If you
           wish to try a different addon with the Return To AMO flow, make sure
-          the 'content' text box has the addon GUID, then click 'Force
+          the 'content' text box has a string that is 'rta:base64(addonID)', the
+          base64 string of the addonID prefixed with 'rta:'. The addon must
+          currently be a recommended addon on AMO. Then click 'Force
           Attribution'. Clicking on 'Force Attribution' with blank text boxes
           reset attribution data.
         </p>
@@ -1515,7 +1513,7 @@ export class ASRouterAdminInner extends React.PureComponent {
               <input
                 type="text"
                 name="content"
-                placeholder="iridium@particlecore.github.io"
+                placeholder={`rta:${btoa("uBlock0@raymondhill.net")}`}
                 value={this.state.attributionParameters.content}
                 onChange={this.onChangeAttributionParameters}
               />{" "}

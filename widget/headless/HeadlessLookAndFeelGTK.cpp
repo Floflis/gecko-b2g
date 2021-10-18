@@ -8,20 +8,21 @@
 #include "mozilla/FontPropertyTypes.h"
 #include "nsIContent.h"
 
-using mozilla::LookAndFeel;
-
-namespace mozilla {
-namespace widget {
+namespace mozilla::widget {
 
 static const char16_t UNICODE_BULLET = 0x2022;
 
-HeadlessLookAndFeel::HeadlessLookAndFeel(const LookAndFeelCache* aCache) {}
+HeadlessLookAndFeel::HeadlessLookAndFeel() {}
 
 HeadlessLookAndFeel::~HeadlessLookAndFeel() = default;
 
-nsresult HeadlessLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
+nsresult HeadlessLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aScheme,
+                                             nscolor& aColor) {
   // For headless mode, we use GetStandinForNativeColor for everything we can,
   // and hardcoded values for everything else.
+  //
+  // TODO(emilio): We should probably just move these to
+  // GetStandinForNativeColor.
 
   nsresult res = NS_OK;
 
@@ -56,10 +57,7 @@ nsresult HeadlessLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
     case ColorID::MozEventreerow:
       aColor = NS_RGB(0xff, 0xff, 0xff);
       break;
-    case ColorID::MozGtkInfoBarText:
-      aColor = NS_RGB(0x00, 0x00, 0x00);
-      break;
-    case ColorID::MozMacButtonactivetext:
+    case ColorID::MozButtonactivetext:
     case ColorID::MozMacDefaultbuttontext:
       aColor = NS_RGB(0xff, 0xff, 0xff);
       break;
@@ -78,21 +76,11 @@ nsresult HeadlessLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
     case ColorID::TextHighlightForeground:
       aColor = NS_RGB(0xff, 0xff, 0xff);
       break;
-    case ColorID::TextSelectBackground:
-      aColor = NS_RGB(0xaa, 0xaa, 0xaa);
-      break;
     case ColorID::TextSelectBackgroundAttention:
       aColor = NS_TRANSPARENT;
       break;
     case ColorID::TextSelectBackgroundDisabled:
       aColor = NS_RGB(0xaa, 0xaa, 0xaa);
-      break;
-    case ColorID::TextSelectForeground:
-      GetColor(ColorID::TextSelectBackground, aColor);
-      if (aColor == 0x000000)
-        aColor = NS_RGB(0xff, 0xff, 0xff);
-      else
-        aColor = NS_DONT_CHANGE_COLOR;
       break;
     case ColorID::Widget3DHighlight:
       aColor = NS_RGB(0xa0, 0xa0, 0xa0);
@@ -118,8 +106,18 @@ nsresult HeadlessLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
     case ColorID::WindowForeground:
       aColor = NS_RGB(0x00, 0x00, 0x00);
       break;
+    case ColorID::Highlight:
+    case ColorID::Selecteditem:
+    case ColorID::MozAccentColor:
+      aColor = NS_RGB(53, 132, 228);
+      break;
+    case ColorID::Highlighttext:
+    case ColorID::Selecteditemtext:
+    case ColorID::MozAccentColorForeground:
+      aColor = NS_RGB(0xff, 0xff, 0xff);
+      break;
     default:
-      aColor = GetStandinForNativeColor(aID);
+      aColor = GetStandinForNativeColor(aID, aScheme);
       break;
   }
 
@@ -152,9 +150,6 @@ nsresult HeadlessLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       aResult = 0;
       break;
     case IntID::AllowOverlayScrollbarsOverlap:
-      aResult = 0;
-      break;
-    case IntID::ShowHideScrollbars:
       aResult = 0;
       break;
     case IntID::SkipNavigatingDisabledMenuItem:
@@ -214,12 +209,6 @@ nsresult HeadlessLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       aResult = 0;
       res = NS_ERROR_FAILURE;
       break;
-    case IntID::TouchEnabled:
-    case IntID::MacGraphiteTheme:
-    case IntID::MacBigSurTheme:
-      aResult = 0;
-      res = NS_ERROR_NOT_IMPLEMENTED;
-      break;
     case IntID::AlertNotificationOrigin:
       aResult = NS_ALERT_TOP;
       break;
@@ -238,7 +227,6 @@ nsresult HeadlessLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
     case IntID::MenuBarDrag:
       aResult = 0;
       break;
-    case IntID::WindowsThemeIdentifier:
     case IntID::OperatingSystemVersionIdentifier:
       aResult = 0;
       res = NS_ERROR_NOT_IMPLEMENTED;
@@ -355,5 +343,4 @@ void HeadlessLookAndFeel::RefreshImpl() { nsXPLookAndFeel::RefreshImpl(); }
 
 bool HeadlessLookAndFeel::GetEchoPasswordImpl() { return false; }
 
-}  // namespace widget
-}  // namespace mozilla
+}  // namespace mozilla::widget

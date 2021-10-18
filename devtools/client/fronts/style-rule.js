@@ -9,7 +9,6 @@ const {
   registerFront,
 } = require("devtools/shared/protocol");
 const { styleRuleSpec } = require("devtools/shared/specs/style-rule");
-const promise = require("promise");
 
 loader.lazyRequireGetter(
   this,
@@ -110,10 +109,14 @@ class StyleRuleFront extends FrontClassWithSpec(styleRuleSpec) {
   }
 
   get parentStyleSheet() {
-    const resourceWatcher = this.parentFront.resourceWatcher;
-    if (resourceWatcher) {
-      return resourceWatcher.getResourceById(
-        resourceWatcher.TYPES.STYLESHEET,
+    const resourceCommand = this.targetFront.resourceCommand;
+    if (
+      resourceCommand?.hasResourceCommandSupport(
+        resourceCommand.TYPES.STYLESHEET
+      )
+    ) {
+      return resourceCommand.getResourceById(
+        resourceCommand.TYPES.STYLESHEET,
         this._form.parentStyleSheet
       );
     }
@@ -157,13 +160,13 @@ class StyleRuleFront extends FrontClassWithSpec(styleRuleSpec) {
 
   getOriginalLocation() {
     if (this._originalLocation) {
-      return promise.resolve(this._originalLocation);
+      return Promise.resolve(this._originalLocation);
     }
     const parentSheet = this.parentStyleSheet;
     if (!parentSheet) {
       // This rule doesn't belong to a stylesheet so it is an inline style.
       // Inline styles do not have any mediaText so we can return early.
-      return promise.resolve(this.location);
+      return Promise.resolve(this.location);
     }
     return parentSheet
       .getOriginalLocation(this.line, this.column)

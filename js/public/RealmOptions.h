@@ -48,9 +48,6 @@ enum class CompartmentSpecifier {
 
   // Create a new realm in an existing compartment.
   ExistingCompartment,
-
-  // Internal use only. Create the self-hosting compartment.
-  NewCompartmentInSelfHostingZone,
 };
 
 /**
@@ -98,7 +95,6 @@ class JS_PUBLIC_API RealmCreationOptions {
   RealmCreationOptions& setNewCompartmentAndZone();
   RealmCreationOptions& setExistingCompartment(JSObject* obj);
   RealmCreationOptions& setExistingCompartment(Compartment* compartment);
-  RealmCreationOptions& setNewCompartmentInSelfHostingZone();
 
   // Certain compartments are implementation details of the embedding, and
   // references to them should never leak out to script. This flag causes this
@@ -188,7 +184,11 @@ class JS_PUBLIC_API RealmCreationOptions {
 
   bool getStreamsEnabled() const { return streams_; }
   RealmCreationOptions& setStreamsEnabled(bool flag) {
+#ifndef MOZ_DOM_STREAMS
     streams_ = flag;
+#else
+    MOZ_ASSERT(!streams_);
+#endif
     return *this;
   }
 
@@ -300,12 +300,6 @@ class JS_PUBLIC_API RealmBehaviors {
     return *this;
   }
 
-  bool disableLazyParsing() const { return disableLazyParsing_; }
-  RealmBehaviors& setDisableLazyParsing(bool flag) {
-    disableLazyParsing_ = flag;
-    return *this;
-  }
-
   bool clampAndJitterTime() const { return clampAndJitterTime_; }
   RealmBehaviors& setClampAndJitterTime(bool flag) {
     clampAndJitterTime_ = flag;
@@ -346,7 +340,6 @@ class JS_PUBLIC_API RealmBehaviors {
 
  private:
   bool discardSource_ = false;
-  bool disableLazyParsing_ = false;
   bool clampAndJitterTime_ = true;
   bool isNonLive_ = false;
 };

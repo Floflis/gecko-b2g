@@ -12,6 +12,7 @@
 
 #include "nsCOMPtr.h"
 #include "nsTArray.h"
+#include "Units.h"
 #include "mozilla/dom/EventTarget.h"
 #include "mozilla/EventForwards.h"
 #include "mozilla/Maybe.h"
@@ -47,7 +48,7 @@ class nsPIDOMWindowInner;
 class nsPIDOMWindowOuter;
 class nsPIWindowRoot;
 
-typedef uint32_t SuspendTypes;
+using SuspendTypes = uint32_t;
 
 namespace mozilla {
 namespace dom {
@@ -61,6 +62,7 @@ class DocGroup;
 class Document;
 class Element;
 class Location;
+class MediaDevices;
 class MediaKeys;
 class Navigator;
 class Performance;
@@ -112,7 +114,7 @@ enum class FullscreenReason {
 
 class nsPIDOMWindowInner : public mozIDOMWindow {
  protected:
-  typedef mozilla::dom::Document Document;
+  using Document = mozilla::dom::Document;
   friend nsGlobalWindowInner;
   friend nsGlobalWindowOuter;
 
@@ -298,12 +300,12 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   // Calling suspend should prevent any asynchronous tasks from
   // executing javascript for this window.  This means setTimeout,
   // requestAnimationFrame, and events should not be fired. Suspending
-  // a window also suspends its children and workers.  Workers may
+  // a window maybe also suspends its children.  Workers may
   // continue to perform computations in the background.  A window
   // can have Suspend() called multiple times and will only resume after
   // a matching number of Resume() calls.
-  void Suspend();
-  void Resume();
+  void Suspend(bool aIncludeSubWindows = true);
+  void Resume(bool aIncludeSubWindows = true);
 
   // Whether or not this window was suspended by the BrowserContextGroup
   bool GetWasSuspendedByGroup() const { return mWasSuspendedByGroup; }
@@ -418,7 +420,7 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
 
   // Fire any DOM notification events related to things that happened while
   // the window was frozen.
-  virtual nsresult FireDelayedDOMEvents() = 0;
+  virtual nsresult FireDelayedDOMEvents(bool aIncludeSubWindows) = 0;
 
   /**
    * Get the docshell in this window.
@@ -482,10 +484,17 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
    * DO NOT CALL EITHER OF THESE METHODS DIRECTLY. USE THE FOCUS MANAGER
    * INSTEAD.
    */
-  inline mozilla::dom::Element* GetFocusedElement() const;
+  mozilla::dom::Element* GetFocusedElement() const {
+    return mFocusedElement.get();
+  }
+
   virtual void SetFocusedElement(mozilla::dom::Element* aElement,
                                  uint32_t aFocusMethod = 0,
                                  bool aNeedsFocus = false) = 0;
+
+  bool UnknownFocusMethodShouldShowOutline() const {
+    return mUnknownFocusMethodShouldShowOutline;
+  }
 
   /**
    * Retrieves the method that was used to focus the current node.
@@ -570,6 +579,7 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   uint32_t GetMarkedCCGeneration() { return mMarkedCCGeneration; }
 
   mozilla::dom::Navigator* Navigator();
+  mozilla::dom::MediaDevices* GetExtantMediaDevices() const;
   virtual mozilla::dom::Location* Location() = 0;
 
   virtual nsresult GetControllers(nsIControllers** aControllers) = 0;
@@ -631,7 +641,11 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   // These variables are only used on inner windows.
   uint32_t mMutationBits;
 
-  uint32_t mActivePeerConnections;
+  uint32_t mActivePeerConnections = 0;
+
+  // This is the count for active peer connections for all the windows in the
+  // subtree rooted at this window (only set on the top window).
+  uint32_t mTotalActivePeerConnections = 0;
 
   bool mIsDocumentLoaded;
   bool mIsHandlingResizeEvent;
@@ -669,6 +683,12 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
   // Set to true once we've sent the (chrome|content)-document-global-created
   // notification.
   bool mHasNotifiedGlobalCreated;
+
+  // Whether when focused via an "unknown" focus method, we should show outlines
+  // by default or not. The initial value of this is true (so as to show
+  // outlines for stuff like html autofocus, or initial programmatic focus
+  // without any other user interaction).
+  bool mUnknownFocusMethodShouldShowOutline = true;
 
   uint32_t mMarkedCCGeneration;
 
@@ -710,7 +730,7 @@ NS_DEFINE_STATIC_IID_ACCESSOR(nsPIDOMWindowInner, NS_PIDOMWINDOWINNER_IID)
 
 class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
  protected:
-  typedef mozilla::dom::Document Document;
+  using Document = mozilla::dom::Document;
 
   explicit nsPIDOMWindowOuter(uint64_t aWindowID);
 
@@ -767,19 +787,11 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
 
   bool GetAudioMuted() const;
 
-  float GetAudioVolume() const;
-  nsresult SetAudioVolume(float aVolume);
-
   void MaybeActiveMediaComponents();
 
   void RefreshMediaElementsVolume();
 
-  void SetServiceWorkersTestingEnabled(bool aEnabled);
-  bool GetServiceWorkersTestingEnabled();
-
   float GetDevicePixelRatio(mozilla::dom::CallerType aCallerType);
-
-  bool HadOriginalOpener() const;
 
   virtual nsPIDOMWindowOuter* GetPrivateRoot() = 0;
 
@@ -865,7 +877,7 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
 
   // Fire any DOM notification events related to things that happened while
   // the window was frozen.
-  virtual nsresult FireDelayedDOMEvents() = 0;
+  virtual nsresult FireDelayedDOMEvents(bool aIncludeSubWindows) = 0;
 
   /**
    * Get the docshell in this window.
@@ -902,10 +914,21 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
   virtual void EnsureSizeAndPositionUpToDate() = 0;
 
   /**
+   * Suppresses/unsuppresses user initiated event handling in window's document
+   * and all in-process descendant documents.
+   */
+  virtual void SuppressEventHandling() = 0;
+  virtual void UnsuppressEventHandling() = 0;
+
+  /**
    * Callback for notifying a window about a modal dialog being
    * opened/closed with the window as a parent.
+   *
+   * If any script can run between the enter and leave modal states, and the
+   * window isn't top, the LeaveModalState() should be called on the window
+   * returned by EnterModalState().
    */
-  virtual void EnterModalState() = 0;
+  virtual nsPIDOMWindowOuter* EnterModalState() = 0;
   virtual void LeaveModalState() = 0;
 
   virtual bool CanClose() = 0;
@@ -930,6 +953,9 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
 
   virtual void ForceFullScreenInWidget() = 0;
 
+  virtual void MacFullscreenMenubarOverlapChanged(
+      mozilla::DesktopCoord aOverlapAmount) = 0;
+
   // XXX: These focus methods all forward to the inner, could we change
   // consumers to call these on the inner directly?
 
@@ -942,9 +968,15 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
    * INSTEAD.
    */
   inline mozilla::dom::Element* GetFocusedElement() const;
+
   virtual void SetFocusedElement(mozilla::dom::Element* aElement,
                                  uint32_t aFocusMethod = 0,
                                  bool aNeedsFocus = false) = 0;
+  /**
+   * Get whether a focused element focused by unknown reasons (like script
+   * focus) should match the :focus-visible pseudo-class.
+   */
+  bool UnknownFocusMethodShouldShowOutline() const;
 
   /**
    * Retrieves the method that was used to focus the current node.
@@ -1102,6 +1134,8 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
 
   uint32_t mModalStateDepth;
 
+  uint32_t mSuppressEventHandlingDepth;
+
   // Tracks whether our docshell is active.  If it is, mIsBackground
   // is false.  Too bad we have so many different concepts of
   // "active".
@@ -1120,9 +1154,6 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
    */
   SuspendTypes mMediaSuspend;
 
-  bool mAudioMuted;
-  float mAudioVolume;
-
   // current desktop mode flag.
   bool mDesktopModeViewport;
 
@@ -1136,10 +1167,6 @@ class nsPIDOMWindowOuter : public mozIDOMWindowProxy {
   uint64_t mWindowID;
 
   uint32_t mMarkedCCGeneration;
-
-  // Let the service workers plumbing know that some feature are enabled while
-  // testing.
-  bool mServiceWorkersTestingEnabled;
 };
 
 NS_DEFINE_STATIC_IID_ACCESSOR(nsPIDOMWindowOuter, NS_PIDOMWINDOWOUTER_IID)

@@ -1,178 +1,232 @@
-use super::error::ErrorKind;
+use std::fmt;
+
+use super::{builtins::MacroCall, context::ExprPos, SourceMetadata};
 use crate::{
-    proc::{ResolveContext, Typifier},
-    Arena, BinaryOperator, Binding, Expression, FastHashMap, Function, GlobalVariable, Handle,
-    Interpolation, LocalVariable, Module, ShaderStage, Statement, StorageClass, Type,
+    BinaryOperator, Binding, Constant, Expression, Function, GlobalVariable, Handle, Interpolation,
+    Sampling, StorageAccess, StorageClass, Type, UnaryOperator,
 };
 
-#[derive(Debug)]
-pub struct Program {
-    pub version: u16,
-    pub profile: Profile,
-    pub shader_stage: ShaderStage,
-    pub entry: Option<String>,
-    pub lookup_function: FastHashMap<String, Handle<Function>>,
-    pub lookup_type: FastHashMap<String, Handle<Type>>,
-    pub lookup_global_variables: FastHashMap<String, Handle<GlobalVariable>>,
-    pub context: Context,
-    pub module: Module,
+#[derive(Debug, Clone, Copy)]
+pub enum GlobalLookupKind {
+    Variable(Handle<GlobalVariable>),
+    Constant(Handle<Constant>),
+    BlockSelect(Handle<GlobalVariable>, u32),
 }
 
-impl Program {
-    pub fn new(shader_stage: ShaderStage, entry: &str) -> Program {
-        Program {
-            version: 0,
-            profile: Profile::Core,
-            shader_stage,
-            entry: Some(entry.to_string()),
-            lookup_function: FastHashMap::default(),
-            lookup_type: FastHashMap::default(),
-            lookup_global_variables: FastHashMap::default(),
-            context: Context {
-                expressions: Arena::<Expression>::new(),
-                local_variables: Arena::<LocalVariable>::new(),
-                scopes: vec![FastHashMap::default()],
-                lookup_global_var_exps: FastHashMap::default(),
-                typifier: Typifier::new(),
-            },
-            module: Module::generate_empty(),
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalLookup {
+    pub kind: GlobalLookupKind,
+    pub entry_arg: Option<usize>,
+    pub mutable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParameterInfo {
+    pub qualifier: ParameterQualifier,
+    /// Wether the parameter should be treated as a depth image instead of a
+    /// sampled image
+    pub depth: bool,
+}
+
+/// How the function is implemented
+#[derive(Clone, Copy)]
+pub enum FunctionKind {
+    /// The function is user defined
+    Call(Handle<Function>),
+    /// The function is a buitin
+    Macro(MacroCall),
+}
+
+impl fmt::Debug for FunctionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Call(_) => write!(f, "Call"),
+            Self::Macro(_) => write!(f, "Macro"),
         }
     }
+}
 
-    pub fn binary_expr(
-        &mut self,
+#[derive(Debug)]
+pub struct Overload {
+    /// Normalized function parameters, modifiers are not applied
+    pub parameters: Vec<Handle<Type>>,
+    pub parameters_info: Vec<ParameterInfo>,
+    /// How the function is implemented
+    pub kind: FunctionKind,
+    /// Wheter this function was already defined or is just a prototype
+    pub defined: bool,
+    /// Wheter or not this function returns void (nothing)
+    pub void: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct FunctionDeclaration {
+    pub overloads: Vec<Overload>,
+    /// Wether or not this function has the name of a builtin
+    pub builtin: bool,
+    /// In case [`builtin`](Self::builtin) is true, this field indicates wether
+    /// this function already has double overloads added or not, otherwise is unused
+    pub double: bool,
+}
+
+#[derive(Debug)]
+pub struct EntryArg {
+    pub name: Option<String>,
+    pub binding: Binding,
+    pub handle: Handle<GlobalVariable>,
+    pub storage: StorageQualifier,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableReference {
+    pub expr: Handle<Expression>,
+    pub load: bool,
+    pub mutable: bool,
+    pub entry_arg: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirExpr {
+    pub kind: HirExprKind,
+    pub meta: SourceMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirExprKind {
+    Access {
+        base: Handle<HirExpr>,
+        index: Handle<HirExpr>,
+    },
+    Select {
+        base: Handle<HirExpr>,
+        field: String,
+    },
+    Constant(Handle<Constant>),
+    Binary {
+        left: Handle<HirExpr>,
         op: BinaryOperator,
-        left: &ExpressionRule,
-        right: &ExpressionRule,
-    ) -> ExpressionRule {
-        ExpressionRule::from_expression(self.context.expressions.append(Expression::Binary {
-            op,
-            left: left.expression,
-            right: right.expression,
-        }))
-    }
-
-    pub fn resolve_type(
-        &mut self,
-        handle: Handle<crate::Expression>,
-    ) -> Result<&crate::TypeInner, ErrorKind> {
-        let functions = Arena::new(); //TODO
-        let arguments = Vec::new(); //TODO
-        let resolve_ctx = ResolveContext {
-            constants: &self.module.constants,
-            global_vars: &self.module.global_variables,
-            local_vars: &self.context.local_variables,
-            functions: &functions,
-            arguments: &arguments,
-        };
-        match self.context.typifier.grow(
-            handle,
-            &self.context.expressions,
-            &mut self.module.types,
-            &resolve_ctx,
-        ) {
-            //TODO: better error report
-            Err(_) => Err(ErrorKind::SemanticError("Can't resolve type")),
-            Ok(()) => Ok(self.context.typifier.get(handle, &self.module.types)),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Profile {
-    Core,
-}
-
-#[derive(Debug)]
-pub struct Context {
-    pub expressions: Arena<Expression>,
-    pub local_variables: Arena<LocalVariable>,
-    //TODO: Find less allocation heavy representation
-    pub scopes: Vec<FastHashMap<String, Handle<Expression>>>,
-    pub lookup_global_var_exps: FastHashMap<String, Handle<Expression>>,
-    pub typifier: Typifier,
-}
-
-impl Context {
-    pub fn lookup_local_var(&self, name: &str) -> Option<Handle<Expression>> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(var) = scope.get(name) {
-                return Some(*var);
-            }
-        }
-        None
-    }
-
-    #[cfg(feature = "glsl-validate")]
-    pub fn lookup_local_var_current_scope(&self, name: &str) -> Option<Handle<Expression>> {
-        if let Some(current) = self.scopes.last() {
-            current.get(name).cloned()
-        } else {
-            None
-        }
-    }
-
-    pub fn clear_scopes(&mut self) {
-        self.scopes.clear();
-        self.scopes.push(FastHashMap::default());
-    }
-
-    /// Add variable to current scope
-    pub fn add_local_var(&mut self, name: String, handle: Handle<Expression>) {
-        if let Some(current) = self.scopes.last_mut() {
-            (*current).insert(name, handle);
-        }
-    }
-
-    /// Add new empty scope
-    pub fn push_scope(&mut self) {
-        self.scopes.push(FastHashMap::default());
-    }
-
-    pub fn remove_current_scope(&mut self) {
-        self.scopes.pop();
-    }
-}
-
-#[derive(Debug)]
-pub struct ExpressionRule {
-    pub expression: Handle<Expression>,
-    pub statements: Vec<Statement>,
-    pub sampler: Option<Handle<Expression>>,
-}
-
-impl ExpressionRule {
-    pub fn from_expression(expression: Handle<Expression>) -> ExpressionRule {
-        ExpressionRule {
-            expression,
-            statements: vec![],
-            sampler: None,
-        }
-    }
+        right: Handle<HirExpr>,
+    },
+    Unary {
+        op: UnaryOperator,
+        expr: Handle<HirExpr>,
+    },
+    Variable(VariableReference),
+    Call(FunctionCall),
+    Conditional {
+        condition: Handle<HirExpr>,
+        accept: Handle<HirExpr>,
+        reject: Handle<HirExpr>,
+    },
+    Assign {
+        tgt: Handle<HirExpr>,
+        value: Handle<HirExpr>,
+    },
+    IncDec {
+        increment: bool,
+        postfix: bool,
+        expr: Handle<HirExpr>,
+    },
 }
 
 #[derive(Debug)]
 pub enum TypeQualifier {
-    StorageClass(StorageClass),
-    Binding(Binding),
+    StorageQualifier(StorageQualifier),
     Interpolation(Interpolation),
+    Set(u32),
+    Binding(u32),
+    Location(u32),
+    WorkGroupSize(usize, u32),
+    Sampling(Sampling),
+    Layout(StructLayout),
+    Precision(Precision),
+    EarlyFragmentTests,
+    StorageAccess(StorageAccess),
 }
 
-#[derive(Debug)]
-pub struct VarDeclaration {
-    pub type_qualifiers: Vec<TypeQualifier>,
-    pub ids_initializers: Vec<(Option<String>, Option<ExpressionRule>)>,
-    pub ty: Handle<Type>,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FunctionCallKind {
     TypeConstructor(Handle<Type>),
     Function(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FunctionCall {
     pub kind: FunctionCallKind,
-    pub args: Vec<ExpressionRule>,
+    pub args: Vec<Handle<HirExpr>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StorageQualifier {
+    StorageClass(StorageClass),
+    Input,
+    Output,
+    Const,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructLayout {
+    Std140,
+    Std430,
+}
+
+// TODO: Encode precision hints in the IR
+/// A precision hint used in glsl declarations
+///
+/// Precision hints can be used to either speed up shader execution or control
+/// the precision of arithmetic operations.
+///
+/// To use a precision hint simply add it before the type in the declaration.
+/// ```glsl
+/// mediump float a;
+/// ```
+///
+/// The default when no precision is declared is `highp` which means that all
+/// operations operate with the type defined width.
+///
+/// For `mediump` and `lowp` operations follow the spir-v
+/// [`RelaxedPrecision`][RelaxedPrecision] decoration semantics.
+///
+/// [RelaxedPrecision]: https://www.khronos.org/registry/SPIR-V/specs/unified1/SPIRV.html#_a_id_relaxedprecisionsection_a_relaxed_precision
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum Precision {
+    /// `lowp` precision
+    Low,
+    /// `mediump` precision
+    Medium,
+    /// `highp` precision
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum ParameterQualifier {
+    In,
+    Out,
+    InOut,
+    Const,
+}
+
+impl ParameterQualifier {
+    /// Returns true if the argument should be passed as a lhs expression
+    pub fn is_lhs(&self) -> bool {
+        match *self {
+            ParameterQualifier::Out | ParameterQualifier::InOut => true,
+            _ => false,
+        }
+    }
+
+    /// Converts from a parameter qualifier into a [`ExprPos`](ExprPos)
+    pub fn as_pos(&self) -> ExprPos {
+        match *self {
+            ParameterQualifier::Out | ParameterQualifier::InOut => ExprPos::Lhs,
+            _ => ExprPos::Rhs,
+        }
+    }
+}
+
+/// The glsl profile used by a shader
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Profile {
+    /// The `core` profile, default when no profile is specified.
+    Core,
 }

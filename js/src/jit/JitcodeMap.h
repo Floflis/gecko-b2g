@@ -22,7 +22,6 @@
 class JSScript;
 class JSTracer;
 struct JSRuntime;
-class JSScript;
 
 namespace JS {
 class Zone;
@@ -80,8 +79,6 @@ class JitcodeSkiplistTower {
   }
 
   unsigned height() const { return height_; }
-
-  JitcodeGlobalEntry** ptrs(unsigned level) { return ptrs_; }
 
   JitcodeGlobalEntry* next(unsigned level) const {
     MOZ_ASSERT(!isFree_);
@@ -278,16 +275,6 @@ class JitcodeGlobalEntry {
 
     JitcodeIonTable* regionTable() const { return regionTable_; }
 
-    int scriptIndex(JSScript* script) const {
-      unsigned count = numScripts();
-      for (unsigned i = 0; i < count; i++) {
-        if (getScript(i) == script) {
-          return i;
-        }
-      }
-      return -1;
-    }
-
     void* canonicalNativeAddrFor(void* ptr) const;
 
     [[nodiscard]] bool callStackAtAddr(void* ptr,
@@ -300,19 +287,12 @@ class JitcodeGlobalEntry {
     uint64_t lookupRealmID(void* ptr) const;
 
     bool trace(JSTracer* trc);
-    void sweepChildren();
-    bool isMarkedFromAnyThread(JSRuntime* rt);
+    void traceWeak(JSTracer* trc);
   };
 
   struct BaselineEntry : public BaseEntry {
     JSScript* script_;
     const char* str_;
-
-    // Last location that caused Ion to abort compilation and the reason
-    // therein, if any. Only actionable aborts are tracked. Internal
-    // errors like OOMs are not.
-    jsbytecode* ionAbortPc_;
-    const char* ionAbortMessage_;
 
     void init(JitCode* code, void* nativeStartAddr, void* nativeEndAddr,
               JSScript* script, const char* str) {
@@ -325,13 +305,6 @@ class JitcodeGlobalEntry {
     JSScript* script() const { return script_; }
 
     const char* str() const { return str_; }
-
-    void trackIonAbort(jsbytecode* pc, const char* message);
-
-    bool hadIonAbort() const {
-      MOZ_ASSERT(!ionAbortPc_ || ionAbortMessage_);
-      return ionAbortPc_ != nullptr;
-    }
 
     void destroy();
 
@@ -347,8 +320,7 @@ class JitcodeGlobalEntry {
     uint64_t lookupRealmID() const;
 
     bool trace(JSTracer* trc);
-    void sweepChildren();
-    bool isMarkedFromAnyThread(JSRuntime* rt);
+    void traceWeak(JSTracer* trc);
   };
 
   struct BaselineInterpreterEntry : public BaseEntry {
@@ -681,13 +653,13 @@ class JitcodeGlobalEntry {
     return tracedAny;
   }
 
-  void sweepChildren(JSRuntime* rt) {
+  void traceWeak(JSTracer* trc) {
     switch (kind()) {
       case Ion:
-        ionEntry().sweepChildren();
+        ionEntry().traceWeak(trc);
         break;
       case Baseline:
-        baselineEntry().sweepChildren();
+        baselineEntry().traceWeak(trc);
         break;
       case BaselineInterpreter:
       case Dummy:
@@ -695,23 +667,6 @@ class JitcodeGlobalEntry {
       default:
         MOZ_CRASH("Invalid JitcodeGlobalEntry kind.");
     }
-  }
-
-  bool isMarkedFromAnyThread(JSRuntime* rt) {
-    if (!baseEntry().isJitcodeMarkedFromAnyThread(rt)) {
-      return false;
-    }
-    switch (kind()) {
-      case Ion:
-        return ionEntry().isMarkedFromAnyThread(rt);
-      case Baseline:
-        return baselineEntry().isMarkedFromAnyThread(rt);
-      case Dummy:
-        break;
-      default:
-        MOZ_CRASH("Invalid JitcodeGlobalEntry kind.");
-    }
-    return true;
   }
 
   //
@@ -1171,11 +1126,7 @@ class JitcodeIonTable {
   }
 
  public:
-  explicit JitcodeIonTable(uint32_t numRegions) : numRegions_(numRegions) {
-    for (uint32_t i = 0; i < numRegions; i++) {
-      regionOffsets_[i] = 0;
-    }
-  }
+  JitcodeIonTable() = delete;
 
   [[nodiscard]] bool makeIonEntry(JSContext* cx, JitCode* code,
                                   uint32_t numScripts, JSScript** scripts,
@@ -1195,21 +1146,6 @@ class JitcodeIonTable {
       regionEnd -= regionOffset(regionIndex + 1);
     }
     return JitcodeRegionEntry(regionStart, regionEnd);
-  }
-
-  bool regionContainsOffset(uint32_t regionIndex, uint32_t nativeOffset) {
-    MOZ_ASSERT(regionIndex < numRegions());
-
-    JitcodeRegionEntry ent = regionEntry(regionIndex);
-    if (nativeOffset < ent.nativeOffset()) {
-      return false;
-    }
-
-    if (regionIndex == numRegions_ - 1) {
-      return true;
-    }
-
-    return nativeOffset < regionEntry(regionIndex + 1).nativeOffset();
   }
 
   uint32_t findRegionEntry(uint32_t offset) const;

@@ -1833,14 +1833,6 @@ nsTableRowGroupFrame::FindFrameAt(int32_t aLineNumber, nsPoint aPos,
   return NS_OK;
 }
 
-NS_IMETHODIMP
-nsTableRowGroupFrame::GetNextSiblingOnLine(nsIFrame*& aFrame,
-                                           int32_t aLineNumber) const {
-  NS_ENSURE_ARG_POINTER(aFrame);
-  aFrame = aFrame->GetNextSibling();
-  return NS_OK;
-}
-
 // end nsLineIterator methods
 
 NS_DECLARE_FRAME_PROPERTY_DELETABLE(RowCursorProperty,
@@ -1872,7 +1864,6 @@ nsTableRowGroupFrame::FrameCursorData* nsTableRowGroupFrame::SetupRowCursor() {
   }
 
   FrameCursorData* data = new FrameCursorData();
-  if (!data) return nullptr;
   SetProperty(RowCursorProperty(), data);
   AddStateBits(NS_ROWGROUP_HAS_ROW_CURSOR);
   return data;

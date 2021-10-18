@@ -14,7 +14,6 @@
  */
 
 const { Cu, Cc, Ci } = require("chrome");
-const promise = require("resource://gre/modules/Promise.jsm").Promise;
 const jsmScope = require("resource://devtools/shared/Loader.jsm");
 const { Services } = require("resource://gre/modules/Services.jsm");
 
@@ -29,6 +28,7 @@ const {
   DOMQuad,
   DOMRect,
   HeapSnapshot,
+  L10nRegistry,
   NamedNodeMap,
   NodeFilter,
   StructuredCloneHolder,
@@ -37,17 +37,19 @@ const {
 
 // Create a single Sandbox to access global properties needed in this module.
 // Sandbox are memory expensive, so we should create as little as possible.
-const debuggerSandbox = Cu.Sandbox(systemPrincipal, {
+const debuggerSandbox = (exports.internalSandbox = Cu.Sandbox(systemPrincipal, {
   // This sandbox is also reused for ChromeDebugger implementation.
   // As we want to load the `Debugger` API for debugging chrome contexts,
   // we have to ensure loading it in a distinct compartment from its debuggee.
   freshCompartment: true,
 
   wantGlobalProperties: [
+    "AbortController",
     "atob",
     "btoa",
     "Blob",
     "ChromeUtils",
+    "crypto",
     "CSS",
     "CSSRule",
     "DOMParser",
@@ -61,15 +63,18 @@ const debuggerSandbox = Cu.Sandbox(systemPrincipal, {
     "TextDecoder",
     "TextEncoder",
     "URL",
+    "Window",
     "XMLHttpRequest",
   ],
-});
+}));
 
 const {
+  AbortController,
   atob,
   btoa,
   Blob,
   ChromeUtils,
+  crypto,
   CSS,
   CSSRule,
   DOMParser,
@@ -83,6 +88,7 @@ const {
   TextDecoder,
   TextEncoder,
   URL,
+  Window,
   XMLHttpRequest,
 } = debuggerSandbox;
 
@@ -205,7 +211,6 @@ exports.modules = {
   DebuggerNotificationObserver,
   HeapSnapshot,
   InspectorUtils,
-  promise,
   // Expose "chrome" Promise, which aren't related to any document
   // and so are never frozen, even if the browser loader module which
   // pull it is destroyed. See bug 1402779.
@@ -242,11 +247,13 @@ defineLazyGetter(exports.modules, "xpcInspector", () => {
 // List of all custom globals exposed to devtools modules.
 // Changes here should be mirrored to devtools/.eslintrc.
 exports.globals = {
+  AbortController,
   atob,
   Blob,
   btoa,
   BrowsingContext,
   console,
+  crypto,
   CSS,
   CSSRule,
   DOMParser,
@@ -260,6 +267,7 @@ exports.globals = {
   FileReader,
   FormData,
   isWorker: false,
+  L10nRegistry,
   loader: {
     lazyGetter: defineLazyGetter,
     lazyImporter: defineLazyModuleGetter,
@@ -274,6 +282,7 @@ exports.globals = {
   TextDecoder,
   TextEncoder,
   URL,
+  Window,
   XMLHttpRequest,
 };
 // DevTools loader copy globals property descriptors on each module global

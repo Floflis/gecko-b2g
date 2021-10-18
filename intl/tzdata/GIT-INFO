@@ -1,5 +1,5 @@
-commit 2bbcdff9a6c3b0e89183728ad7460746d455495d
-Author: Yoshito Umaoka <yumaoka@users.noreply.github.com>
-Date:   Wed Jan 6 13:38:58 2021 -0500
+commit 2d8fe2edd38b6287429a3a66225920aa4c210e56
+Author: yumaoka <y.umaoka@gmail.com>
+Date:   Tue Sep 28 11:51:02 2021 -0400
 
-    ICU-21448 Update ICU tzdata in icu-data repo to 2020f (#16)
+    ICU-21767 Adding tzdata2021a1 including 2021b changes (except pre-1970 changes) based on 2021a

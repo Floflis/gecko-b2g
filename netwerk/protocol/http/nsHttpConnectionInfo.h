@@ -15,6 +15,7 @@
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/AlreadyAddRefed.h"
 #include "ARefBase.h"
+#include "nsIRequest.h"
 
 //-----------------------------------------------------------------------------
 // nsHttpConnectionInfo - holds the properties of a connection
@@ -71,6 +72,24 @@ class nsHttpConnectionInfo final : public ARefBase {
   void BuildHashKey();
   void RebuildHashKey();
 
+  // See comments in nsHttpConnectionInfo::BuildHashKey for the meaning of each
+  // field.
+  enum class HashKeyIndex : uint32_t {
+    Proxy = 0,
+    EndToEndSSL,
+    Anonymous,
+    Private,
+    InsecureScheme,
+    NoSpdy,
+    BeConservative,
+    AnonymousAllowClientCert,
+    FallbackConnection,
+    End,
+  };
+  constexpr inline auto UnderlyingIndex(HashKeyIndex aIndex) const {
+    return std::underlying_type_t<HashKeyIndex>(aIndex);
+  }
+
  public:
   const nsCString& HashKey() const { return mHashKey; }
 
@@ -90,7 +109,7 @@ class nsHttpConnectionInfo final : public ARefBase {
   // mRoutedPort and mNPNToken will be replaced as well.
   already_AddRefed<nsHttpConnectionInfo> CloneAndAdoptHTTPSSVCRecord(
       nsISVCBRecord* aRecord) const;
-  void CloneAsDirectRoute(nsHttpConnectionInfo** outParam);
+  void CloneAsDirectRoute(nsHttpConnectionInfo** outCI);
   [[nodiscard]] nsresult CreateWildCard(nsHttpConnectionInfo** outParam);
 
   const char* ProxyHost() const {
@@ -130,22 +149,54 @@ class nsHttpConnectionInfo final : public ARefBase {
   int32_t DefaultPort() const {
     return mEndToEndSSL ? NS_HTTPS_DEFAULT_PORT : NS_HTTP_DEFAULT_PORT;
   }
-  void SetAnonymous(bool anon) { mHashKey.SetCharAt(anon ? 'A' : '.', 2); }
-  bool GetAnonymous() const { return mHashKey.CharAt(2) == 'A'; }
-  void SetPrivate(bool priv) { mHashKey.SetCharAt(priv ? 'P' : '.', 3); }
-  bool GetPrivate() const { return mHashKey.CharAt(3) == 'P'; }
-  void SetInsecureScheme(bool insecureScheme) {
-    mHashKey.SetCharAt(insecureScheme ? 'I' : '.', 4);
+  void SetAnonymous(bool anon) {
+    SetHashCharAt(anon ? 'A' : '.', HashKeyIndex::Anonymous);
   }
-  bool GetInsecureScheme() const { return mHashKey.CharAt(4) == 'I'; }
+  bool GetAnonymous() const {
+    return GetHashCharAt(HashKeyIndex::Anonymous) == 'A';
+  }
+  void SetPrivate(bool priv) {
+    SetHashCharAt(priv ? 'P' : '.', HashKeyIndex::Private);
+  }
+  bool GetPrivate() const {
+    return GetHashCharAt(HashKeyIndex::Private) == 'P';
+  }
+  void SetInsecureScheme(bool insecureScheme) {
+    SetHashCharAt(insecureScheme ? 'I' : '.', HashKeyIndex::InsecureScheme);
+  }
+  bool GetInsecureScheme() const {
+    return GetHashCharAt(HashKeyIndex::InsecureScheme) == 'I';
+  }
 
-  void SetNoSpdy(bool aNoSpdy) { mHashKey.SetCharAt(aNoSpdy ? 'X' : '.', 5); }
-  bool GetNoSpdy() const { return mHashKey.CharAt(5) == 'X'; }
+  void SetNoSpdy(bool aNoSpdy) {
+    SetHashCharAt(aNoSpdy ? 'X' : '.', HashKeyIndex::NoSpdy);
+    if (aNoSpdy && mNPNToken == "h2"_ns) {
+      mNPNToken.Truncate();
+      RebuildHashKey();
+    }
+  }
+  bool GetNoSpdy() const { return GetHashCharAt(HashKeyIndex::NoSpdy) == 'X'; }
 
   void SetBeConservative(bool aBeConservative) {
-    mHashKey.SetCharAt(aBeConservative ? 'C' : '.', 6);
+    SetHashCharAt(aBeConservative ? 'C' : '.', HashKeyIndex::BeConservative);
   }
-  bool GetBeConservative() const { return mHashKey.CharAt(6) == 'C'; }
+  bool GetBeConservative() const {
+    return GetHashCharAt(HashKeyIndex::BeConservative) == 'C';
+  }
+
+  void SetAnonymousAllowClientCert(bool anon) {
+    SetHashCharAt(anon ? 'B' : '.', HashKeyIndex::AnonymousAllowClientCert);
+  }
+  bool GetAnonymousAllowClientCert() const {
+    return GetHashCharAt(HashKeyIndex::AnonymousAllowClientCert) == 'B';
+  }
+
+  void SetFallbackConnection(bool aFallback) {
+    SetHashCharAt(aFallback ? 'F' : '.', HashKeyIndex::FallbackConnection);
+  }
+  bool GetFallbackConnection() const {
+    return GetHashCharAt(HashKeyIndex::FallbackConnection) == 'F';
+  }
 
   void SetTlsFlags(uint32_t aTlsFlags);
   uint32_t GetTlsFlags() const { return mTlsFlags; }
@@ -210,27 +261,34 @@ class nsHttpConnectionInfo final : public ARefBase {
  private:
   void Init(const nsACString& host, int32_t port, const nsACString& npnToken,
             const nsACString& username, nsProxyInfo* proxyInfo,
-            const OriginAttributes& originAttributes, bool EndToEndSSL,
+            const OriginAttributes& originAttributes, bool e2eSSL,
             bool aIsHttp3);
   void SetOriginServer(const nsACString& host, int32_t port);
+  nsCString::char_type GetHashCharAt(HashKeyIndex aIndex) const {
+    return mHashKey.CharAt(UnderlyingIndex(aIndex));
+  }
+  void SetHashCharAt(nsCString::char_type aValue, HashKeyIndex aIndex) {
+    mHashKey.SetCharAt(aValue, UnderlyingIndex(aIndex));
+  }
 
   nsCString mOrigin;
-  int32_t mOriginPort;
+  int32_t mOriginPort = 0;
   nsCString mRoutedHost;
   int32_t mRoutedPort;
 
   nsCString mHashKey;
   nsCString mUsername;
   nsCOMPtr<nsProxyInfo> mProxyInfo;
-  bool mUsingHttpProxy;
-  bool mUsingHttpsProxy;
-  bool mEndToEndSSL;
-  bool mUsingConnect;  // if will use CONNECT with http proxy
+  bool mUsingHttpProxy = false;
+  bool mUsingHttpsProxy = false;
+  bool mEndToEndSSL = false;
+  // if will use CONNECT with http proxy
+  bool mUsingConnect = false;
   nsCString mNPNToken;
   OriginAttributes mOriginAttributes;
   nsIRequest::TRRMode mTRRMode;
 
-  uint32_t mTlsFlags;
+  uint32_t mTlsFlags = 0;
   uint16_t mIsTrrServiceChannel : 1;
   uint16_t mIPv4Disabled : 1;
   uint16_t mIPv6Disabled : 1;
@@ -238,7 +296,7 @@ class nsHttpConnectionInfo final : public ARefBase {
   bool mLessThanTls13;  // This will be set to true if we negotiate less than
                         // tls1.3. If the tls version is till not know or it
                         // is 1.3 or greater the value will be false.
-  bool mIsHttp3;
+  bool mIsHttp3 = false;
 
   bool mHasIPHintAddress = false;
   nsCString mEchConfig;

@@ -24,6 +24,7 @@ if (!("mediaDevices" in navigator)) {
         ['media.peerconnection.nat_simulator.mapping_type', 'PORT_DEPENDENT'],
         ['media.peerconnection.nat_simulator.block_udp', true],
         ['media.peerconnection.nat_simulator.error_code_for_drop', 3 /*R_INTERNAL*/],
+        ['media.peerconnection.nat_simulator.block_tls', true],
         ['media.getusermedia.insecure.enabled', true]);
     options.expectedLocalCandidateType = "relay-tcp";
     options.expectedRemoteCandidateType = "relay-tcp";
@@ -31,7 +32,7 @@ if (!("mediaDevices" in navigator)) {
     // since relayed-tcp is the only thing that can work.
     const test = new PeerConnectionTest(options);
     test.setMediaConstraints([{audio: true}], [{audio: true}]);
-    test.run();
+    await test.run();
   }, { useIceServer: true });
 }
 </script>

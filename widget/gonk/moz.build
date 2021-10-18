@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+XPCOM_MANIFESTS += [
+    "components.conf",
+]
+
 EXPORTS += [
     "AccessibleCaretGonk.h",
     "GfxDebugger.h",
@@ -66,7 +70,8 @@ SOURCES += [
 ]
 
 UNIFIED_SOURCES += [
-    "GonkScreenshot.cpp",
+    "GonkScreenRecord.cpp",
+    "GonkScreenShot.cpp",
     "hwchal/android_10/ComposerHal.cpp",
     "hwchal/android_10/HWC2.cpp",
 ]
@@ -74,7 +79,7 @@ UNIFIED_SOURCES += [
 SOURCES += [
     "AccessibleCaretGonk.cpp",
     "GeckoTouchDispatcher.cpp",
-    "GfxDebugger.cpp",
+#    "GfxDebugger.cpp",
     "GfxInfo.cpp",
     "GLCursorImageManager.cpp",
     "GonkActivityManagerService.cpp",

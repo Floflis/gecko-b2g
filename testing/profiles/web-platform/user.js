@@ -57,10 +57,17 @@ user_pref("media.block-autoplay-until-in-foreground", false);
 // Disable dark scrollbars as it can be semi-transparent that many reftests
 // don't expect.
 user_pref("widget.disable-dark-scrollbar", true);
+// Don't enable paint suppression when the background is unknown. While paint
+// is suppressed, synthetic click events and co. go to the old page, which can
+// be confusing for tests that send click events before the first paint.
+user_pref("nglayout.initialpaint.unsuppress_with_no_background", true);
 user_pref("media.block-autoplay-until-in-foreground", false);
 // Enable AppCache globally for now whilst it's being removed in Bug 1584984
-user_pref("browser.cache.offline.storage.enable", true);
 user_pref("browser.cache.offline.enable", true);
 // Enable blocking access to storage from tracking resources by default.
 // We don't want to run WPT using BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN (5 - aka Dynamic First Party Isolation) yet.
 user_pref("network.cookie.cookieBehavior", 4);
+// Force a light color scheme unless explicitly overriden by pref.
+user_pref("layout.css.prefers-color-scheme.content-override", 1);
+// system app url for b2g wpt tests
+user_pref("b2g.system_startup_url", "chrome://b2g/content/system/marionette.html");

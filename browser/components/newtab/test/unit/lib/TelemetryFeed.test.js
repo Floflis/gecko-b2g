@@ -20,6 +20,7 @@ const FAKE_UUID = "{foo-123-foo}";
 const FAKE_ROUTER_MESSAGE_PROVIDER = [{ id: "cfr", enabled: true }];
 const FAKE_TELEMETRY_ID = "foo123";
 
+// eslint-disable-next-line max-statements
 describe("TelemetryFeed", () => {
   let globals;
   let sandbox;
@@ -328,14 +329,14 @@ describe("TelemetryFeed", () => {
       assert.equal(instance.sessions.get("foo"), session);
     });
     it("should set the session_id", () => {
-      sandbox.spy(global.gUUIDGenerator, "generateUUID");
+      sandbox.spy(Services.uuid, "generateUUID");
 
       const session = instance.addSession("foo");
 
-      assert.calledOnce(global.gUUIDGenerator.generateUUID);
+      assert.calledOnce(Services.uuid.generateUUID);
       assert.equal(
         session.session_id,
-        global.gUUIDGenerator.generateUUID.firstCall.returnValue
+        Services.uuid.generateUUID.firstCall.returnValue
       );
     });
     it("should set the page if a url parameter is given", () => {
@@ -766,6 +767,24 @@ describe("TelemetryFeed", () => {
       assert.equal(pingType, "whats-new-panel");
     });
   });
+  describe("#applyInfoBarPolicy", () => {
+    it("should set client_id and set pingType", async () => {
+      const { ping, pingType } = await instance.applyInfoBarPolicy({});
+
+      assert.propertyVal(ping, "client_id", FAKE_TELEMETRY_ID);
+      assert.equal(pingType, "infobar");
+    });
+  });
+  describe("#applySpotlightPolicy", () => {
+    it("should set client_id and set pingType", async () => {
+      let pingData = { action: "foo" };
+      const { ping, pingType } = await instance.applySpotlightPolicy(pingData);
+
+      assert.propertyVal(ping, "client_id", FAKE_TELEMETRY_ID);
+      assert.equal(pingType, "spotlight");
+      assert.notProperty(ping, "action");
+    });
+  });
   describe("#applyMomentsPolicy", () => {
     it("should use client_id and message_id in prerelease", async () => {
       globals.set("UpdateUtils", {
@@ -1036,6 +1055,18 @@ describe("TelemetryFeed", () => {
       await instance.createASRouterEvent(action);
 
       assert.calledOnce(instance.applyMomentsPolicy);
+    });
+    it("should call applySpotlightPolicy if action equals to spotlight_user_event", async () => {
+      const data = {
+        action: "spotlight_user_event",
+        event: "CLICK",
+        message_id: "SPOTLIGHT_MESSAGE_93",
+      };
+      sandbox.stub(instance, "applySpotlightPolicy");
+      const action = ac.ASRouterUserEvent(data);
+      await instance.createASRouterEvent(action);
+
+      assert.calledOnce(instance.applySpotlightPolicy);
     });
     it("should call applyUndesiredEventPolicy if action equals to asrouter_undesired_event", async () => {
       const data = {
@@ -1458,6 +1489,21 @@ describe("TelemetryFeed", () => {
         data
       );
     });
+    it("should call .handleTopSitesImpressionStats on a TOP_SITES_IMPRESSION_STATS action", () => {
+      const session = {};
+      sandbox.stub(instance.sessions, "get").returns(session);
+      const data = { type: "impression", tile_id: 42, position: 1 };
+      const action = { type: at.TOP_SITES_IMPRESSION_STATS, data };
+      sandbox.spy(instance, "handleTopSitesImpressionStats");
+
+      instance.onAction(ac.AlsoToMain(action));
+
+      assert.calledOnce(instance.handleTopSitesImpressionStats);
+      assert.deepEqual(
+        instance.handleTopSitesImpressionStats.firstCall.args[0].data,
+        data
+      );
+    });
   });
   describe("#handleNewTabInit", () => {
     it("should set the session as preloaded if the browser is preloaded", () => {
@@ -1740,7 +1786,7 @@ describe("TelemetryFeed", () => {
       FakePrefs.prototype.prefs[
         STRUCTURED_INGESTION_ENDPOINT_PREF
       ] = fakeEndpoint;
-      sandbox.stub(global.gUUIDGenerator, "generateUUID").returns(fakeUUID);
+      sandbox.stub(Services.uuid, "generateUUID").returns(fakeUUID);
       const feed = new TelemetryFeed();
       const url = feed._generateStructuredIngestionEndpoint(
         "testNameSpace",
@@ -1787,11 +1833,6 @@ describe("TelemetryFeed", () => {
     it("should return false if there is no CFR experiment registered", () => {
       assert.ok(!instance.isInCFRCohort);
     });
-    it("should return false if getExperimentMetaData throws", () => {
-      sandbox.stub(ExperimentAPI, "getExperimentMetaData").throws();
-
-      assert.ok(!instance.isInCFRCohort);
-    });
     it("should return true if there is a CFR experiment registered", () => {
       sandbox.stub(ExperimentAPI, "getExperimentMetaData").returns({
         slug: "SOME-CFR-EXP",
@@ -1803,6 +1844,100 @@ describe("TelemetryFeed", () => {
         "featureId",
         "cfr"
       );
+    });
+  });
+  describe("#handleTopSitesImpressionStats", () => {
+    it("should call sendStructuredIngestionEvent on an impression event", async () => {
+      const data = {
+        type: "impression",
+        tile_id: 42,
+        source: "newtab",
+        position: 1,
+        reporting_url: "https://test.reporting.net/",
+      };
+      instance = new TelemetryFeed();
+      sandbox.spy(instance, "sendStructuredIngestionEvent");
+      sandbox.spy(Services.telemetry, "keyedScalarAdd");
+
+      await instance.handleTopSitesImpressionStats({ data });
+
+      // Scalar should be added
+      assert.calledOnce(Services.telemetry.keyedScalarAdd);
+      assert.calledWith(
+        Services.telemetry.keyedScalarAdd,
+        "contextual.services.topsites.impression",
+        "newtab_1",
+        1
+      );
+
+      assert.calledOnce(instance.sendStructuredIngestionEvent);
+
+      const { args } = instance.sendStructuredIngestionEvent.firstCall;
+      // payload
+      assert.deepEqual(args[0], {
+        context_id: FAKE_UUID,
+        tile_id: 42,
+        source: "newtab",
+        position: 1,
+        reporting_url: "https://test.reporting.net/",
+      });
+      // namespace
+      assert.equal(args[1], "contextual-services");
+      // docType
+      assert.equal(args[2], "topsites-impression");
+      // version
+      assert.equal(args[3], "1");
+    });
+    it("should call sendStructuredIngestionEvent on a click event", async () => {
+      const data = {
+        type: "click",
+        tile_id: 42,
+        source: "newtab",
+        position: 1,
+        reporting_url: "https://test.reporting.net/",
+      };
+      instance = new TelemetryFeed();
+      sandbox.spy(instance, "sendStructuredIngestionEvent");
+      sandbox.spy(Services.telemetry, "keyedScalarAdd");
+
+      await instance.handleTopSitesImpressionStats({ data });
+
+      // Scalar should be added
+      assert.calledOnce(Services.telemetry.keyedScalarAdd);
+      assert.calledWith(
+        Services.telemetry.keyedScalarAdd,
+        "contextual.services.topsites.click",
+        "newtab_1",
+        1
+      );
+
+      assert.calledOnce(instance.sendStructuredIngestionEvent);
+
+      const { args } = instance.sendStructuredIngestionEvent.firstCall;
+      // payload
+      assert.deepEqual(args[0], {
+        context_id: FAKE_UUID,
+        tile_id: 42,
+        source: "newtab",
+        position: 1,
+        reporting_url: "https://test.reporting.net/",
+      });
+      // namespace
+      assert.equal(args[1], "contextual-services");
+      // docType
+      assert.equal(args[2], "topsites-click");
+      // version
+      assert.equal(args[3], "1");
+    });
+    it("should reportError on unknown pingTypes", async () => {
+      const data = { type: "unknown_type" };
+      instance = new TelemetryFeed();
+      sandbox.spy(instance, "sendStructuredIngestionEvent");
+
+      await instance.handleTopSitesImpressionStats({ data });
+
+      assert.calledOnce(global.Cu.reportError);
+      assert.notCalled(instance.sendStructuredIngestionEvent);
     });
   });
 });

@@ -26,17 +26,16 @@ class nsFontMetrics;
 class nsImageMap;
 class nsIURI;
 class nsILoadGroup;
-class nsDisplayImage;
 class nsPresContext;
 class nsImageFrame;
 class nsTransform2D;
 class nsImageLoadingContent;
 
 namespace mozilla {
+class nsDisplayImage;
 class PresShell;
 namespace layers {
 class ImageContainer;
-class ImageLayer;
 class LayerManager;
 }  // namespace layers
 }  // namespace mozilla
@@ -66,7 +65,6 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
 
   typedef mozilla::image::ImgDrawResult ImgDrawResult;
   typedef mozilla::layers::ImageContainer ImageContainer;
-  typedef mozilla::layers::ImageLayer ImageLayer;
   typedef mozilla::layers::LayerManager LayerManager;
 
   NS_DECL_FRAMEARENA_HELPERS(nsImageFrame)
@@ -102,6 +100,8 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
   void ResponsiveContentDensityChanged();
   void SetupForContentURLRequest();
   bool ShouldShowBrokenImageIcon() const;
+
+  const mozilla::StyleImage* GetImageFromStyle() const;
 
 #ifdef ACCESSIBILITY
   mozilla::a11y::AccType AccessibleType() override;
@@ -185,6 +185,8 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
     // For a child of a ::before / ::after pseudo-element that had an url() item
     // for the content property.
     ContentPropertyAtIndex,
+    // For a list-style-image ::marker.
+    ListStyleImage,
   };
 
   // Creates a suitable continuing frame for this frame.
@@ -197,6 +199,8 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
                                                       ComputedStyle*);
   friend nsIFrame* NS_NewImageFrameForGeneratedContentIndex(mozilla::PresShell*,
                                                             ComputedStyle*);
+  friend nsIFrame* NS_NewImageFrameForListStyleImage(mozilla::PresShell*,
+                                                     ComputedStyle*);
 
   nsImageFrame(ComputedStyle* aStyle, nsPresContext* aPresContext, Kind aKind)
       : nsImageFrame(aStyle, aPresContext, kClassID, aKind) {}
@@ -257,6 +261,11 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
    * painted.
    */
   void MaybeDecodeForPredictedSize();
+
+  /**
+   * Is this frame part of a ::marker pseudo?
+   */
+  bool IsForMarkerPseudo() const;
 
  protected:
   friend class nsImageListener;
@@ -351,7 +360,7 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
 
   RefPtr<nsImageListener> mListener;
 
-  // An image request created for content: url(..).
+  // An image request created for content: url(..) or list-style-image.
   RefPtr<imgRequestProxy> mContentURLRequest;
 
   nsCOMPtr<imgIContainer> mImage;
@@ -423,22 +432,24 @@ class nsImageFrame : public nsAtomicContainerFrame, public nsIReflowCallback {
   // singleton pattern: one LoadIcons instance is used
   static mozilla::StaticRefPtr<IconLoad> gIconLoad;
 
-  friend class nsDisplayImage;
+  friend class mozilla::nsDisplayImage;
+  friend class nsDisplayGradient;
 };
 
+namespace mozilla {
 /**
  * Note that nsDisplayImage does not receive events. However, an image element
  * is replaced content so its background will be z-adjacent to the
  * image itself, and hence receive events just as if the image itself
  * received events.
  */
-class nsDisplayImage final : public nsDisplayImageContainer {
+class nsDisplayImage final : public nsPaintedDisplayItem {
  public:
   typedef mozilla::layers::LayerManager LayerManager;
 
   nsDisplayImage(nsDisplayListBuilder* aBuilder, nsImageFrame* aFrame,
                  imgIContainer* aImage, imgIContainer* aPrevImage)
-      : nsDisplayImageContainer(aBuilder, aFrame),
+      : nsPaintedDisplayItem(aBuilder, aFrame),
         mImage(aImage),
         mPrevImage(aPrevImage) {
     MOZ_COUNT_CTOR(nsDisplayImage);
@@ -451,20 +462,12 @@ class nsDisplayImage final : public nsDisplayImageContainer {
                                  nsRegion* aInvalidRegion) const final;
   void Paint(nsDisplayListBuilder*, gfxContext* aCtx) final;
 
-  already_AddRefed<imgIContainer> GetImage() final;
-
   /**
    * @return The dest rect we'll use when drawing this image, in app units.
    *         Not necessarily contained in this item's bounds.
    */
-  nsRect GetDestRect() const final;
+  nsRect GetDestRect() const;
 
-  void UpdateDrawResult(mozilla::image::ImgDrawResult aResult) final {
-    nsDisplayItemGenericImageGeometry::UpdateDrawResult(this, aResult);
-  }
-
-  LayerState GetLayerState(nsDisplayListBuilder*, LayerManager*,
-                           const ContainerLayerParameters&) final;
   nsRect GetBounds(bool* aSnap) const {
     *aSnap = true;
 
@@ -478,8 +481,6 @@ class nsDisplayImage final : public nsDisplayImageContainer {
 
   nsRegion GetOpaqueRegion(nsDisplayListBuilder*, bool* aSnap) const final;
 
-  already_AddRefed<Layer> BuildLayer(nsDisplayListBuilder*, LayerManager*,
-                                     const ContainerLayerParameters&) final;
   bool CreateWebRenderCommands(mozilla::wr::DisplayListBuilder&,
                                mozilla::wr::IpcResourceUpdateQueue&,
                                const StackingContextHelper&,
@@ -491,5 +492,7 @@ class nsDisplayImage final : public nsDisplayImageContainer {
   nsCOMPtr<imgIContainer> mImage;
   nsCOMPtr<imgIContainer> mPrevImage;
 };
+
+}  // namespace mozilla
 
 #endif /* nsImageFrame_h___ */

@@ -16,7 +16,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   ActorManagerParent: "resource://gre/modules/ActorManagerParent.jsm",
   EventDispatcher: "resource://gre/modules/Messaging.jsm",
   Preferences: "resource://gre/modules/Preferences.jsm",
-  SafeBrowsing: "resource://gre/modules/SafeBrowsing.jsm",
   Services: "resource://gre/modules/Services.jsm",
 });
 
@@ -38,12 +37,6 @@ const JSWINDOWACTORS = {
       },
     },
     allFrames: true,
-  },
-  WebBrowserChrome: {
-    child: {
-      moduleURI: "resource:///actors/WebBrowserChromeChild.jsm",
-    },
-    includeChrome: true,
   },
 };
 
@@ -95,6 +88,11 @@ class GeckoViewStartup {
             "GeckoView:WebExtension:Uninstall",
             "GeckoView:WebExtension:Update",
           ],
+          observers: [
+            "devtools-installed-addon",
+            "testing-installed-addon",
+            "testing-uninstalled-addon",
+          ],
         });
 
         GeckoViewUtils.addLazyGetter(this, "GeckoViewStorageController", {
@@ -103,6 +101,11 @@ class GeckoViewStartup {
             "GeckoView:ClearData",
             "GeckoView:ClearSessionContextData",
             "GeckoView:ClearHostData",
+            "GeckoView:ClearBaseDomainData",
+            "GeckoView:GetAllPermissions",
+            "GeckoView:GetPermissionsByURI",
+            "GeckoView:SetPermission",
+            "GeckoView:SetPermissionByURI",
           ],
         });
 
@@ -159,11 +162,6 @@ class GeckoViewStartup {
         ) {
           ActorManagerParent.addJSWindowActors(JSWINDOWACTORS);
 
-          Services.mm.loadFrameScript(
-            "chrome://geckoview/content/GeckoViewPromptChild.js",
-            true
-          );
-
           GeckoViewUtils.addLazyGetter(this, "ContentCrashHandler", {
             module: "resource://gre/modules/ContentCrashHandler.jsm",
             observers: ["ipc:content-shutdown"],
@@ -200,11 +198,12 @@ class GeckoViewStartup {
           }
         );
 
-        ChromeUtils.import("resource://gre/modules/NotificationDB.jsm");
+        GeckoViewUtils.addLazyGetter(this, "DownloadTracker", {
+          module: "resource://gre/modules/GeckoViewWebExtension.jsm",
+          ged: ["GeckoView:WebExtension:DownloadChanged"],
+        });
 
-        // Initialize safe browsing module. This is required for content
-        // blocking features and manages blocklist downloads and updates.
-        SafeBrowsing.init();
+        ChromeUtils.import("resource://gre/modules/NotificationDB.jsm");
 
         // Listen for global EventDispatcher messages
         EventDispatcher.instance.registerListener(this, [
@@ -213,10 +212,14 @@ class GeckoViewStartup {
           "GeckoView:SetLocale",
         ]);
 
+        Services.obs.addObserver(this, "browser-idle-startup-tasks-finished");
+
         Services.obs.notifyObservers(null, "geckoview-startup-complete");
         break;
       }
       case "browser-idle-startup-tasks-finished": {
+        // TODO bug 1730026: when an alternative is introduced that runs once,
+        // replace this observer topic with that alternative.
         // This only needs to happen once during startup.
         Services.obs.removeObserver(this, aTopic);
         // Notify the start up crash tracker that the browser has successfully

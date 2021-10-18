@@ -28,6 +28,8 @@ const MOZ_COMPATIBILITY_NIGHTLY = ![
   "esr",
 ].includes(AppConstants.MOZ_UPDATE_CHANNEL);
 
+const INTL_LOCALES_CHANGED = "intl:app-locales-changed";
+
 const PREF_AMO_ABUSEREPORT = "extensions.abuseReport.amWebAPI.enabled";
 const PREF_BLOCKLIST_PINGCOUNTVERSION = "extensions.blocklist.pingCountVersion";
 const PREF_EM_UPDATE_ENABLED = "extensions.update.enabled";
@@ -41,7 +43,6 @@ const PREF_SYS_ADDON_UPDATE_ENABLED = "extensions.systemAddon.update.enabled";
 const PREF_MIN_WEBEXT_PLATFORM_VERSION =
   "extensions.webExtensionsMinPlatformVersion";
 const PREF_WEBAPI_TESTING = "extensions.webapi.testing";
-const PREF_WEBEXT_PERM_PROMPTS = "extensions.webextPermissionPrompts";
 const PREF_EM_POSTDOWNLOAD_THIRD_PARTY =
   "extensions.postDownloadThirdPartyPrompt";
 
@@ -88,13 +89,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   AbuseReporter: "resource://gre/modules/AbuseReporter.jsm",
   Extension: "resource://gre/modules/Extension.jsm",
 });
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
-  "WEBEXT_PERMISSION_PROMPTS",
-  PREF_WEBEXT_PERM_PROMPTS,
-  false
-);
 
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
@@ -489,18 +483,8 @@ AddonScreenshot.prototype = {
  * @param  aUIPriority
  *         The priority is used by the UI to list the types in order. Lower
  *         values push the type higher in the list.
- * @param  aFlags
- *         An option set of flags that customize the display of the add-on in
- *         the UI.
  */
-function AddonType(
-  aID,
-  aLocaleURI,
-  aLocaleKey,
-  aViewType,
-  aUIPriority,
-  aFlags
-) {
+function AddonType(aID, aLocaleURI, aLocaleKey, aViewType, aUIPriority) {
   if (!aID) {
     throw Components.Exception(
       "An AddonType must have an ID",
@@ -525,7 +509,6 @@ function AddonType(
   this.id = aID;
   this.uiPriority = aUIPriority;
   this.viewType = aViewType;
-  this.flags = aFlags;
 
   if (aLocaleURI) {
     XPCOMUtils.defineLazyGetter(this, "name", () => {
@@ -748,6 +731,9 @@ var AddonManagerInternal = {
         gWebExtensionsMinPlatformVersion
       );
       Services.prefs.addObserver(PREF_MIN_WEBEXT_PLATFORM_VERSION, this);
+
+      // Watch for language changes, refresh the addon cache when it changes.
+      Services.obs.addObserver(this, INTL_LOCALES_CHANGED);
 
       // Ensure all default providers have had a chance to register themselves
       for (let url of DEFAULT_PROVIDERS) {
@@ -1067,6 +1053,8 @@ var AddonManagerInternal = {
     Services.prefs.removeObserver(PREF_EM_UPDATE_ENABLED, this);
     Services.prefs.removeObserver(PREF_EM_AUTOUPDATE_DEFAULT, this);
 
+    Services.obs.removeObserver(this, INTL_LOCALES_CHANGED);
+
     let savedError = null;
     // Only shut down providers if they've been started.
     if (gStarted) {
@@ -1123,6 +1111,14 @@ var AddonManagerInternal = {
    * @see nsIObserver
    */
   observe(aSubject, aTopic, aData) {
+    switch (aTopic) {
+      case INTL_LOCALES_CHANGED: {
+        // Asynchronously fetch and update the addons cache.
+        AddonRepository.backgroundUpdateCheck();
+        return;
+      }
+    }
+
     switch (aData) {
       case PREF_EM_CHECK_COMPATIBILITY: {
         let oldValue = gCheckCompatibility;
@@ -1356,17 +1352,12 @@ var AddonManagerInternal = {
                     // Start installing updates when the add-on can be updated and
                     // background updates should be applied.
                     logger.debug("Found update for add-on ${id}", aAddon);
-                    if (
-                      aAddon.permissions & AddonManager.PERM_CAN_UPGRADE &&
-                      AddonManager.shouldAutoUpdate(aAddon)
-                    ) {
+                    if (AddonManager.shouldAutoUpdate(aAddon)) {
                       // XXX we really should resolve when this install is done,
                       // not when update-available check completes, no?
                       logger.debug(`Starting upgrade install of ${aAddon.id}`);
-                      if (WEBEXT_PERMISSION_PROMPTS) {
-                        aInstall.promptHandler = (...args) =>
-                          AddonManagerInternal._updatePromptHandler(...args);
-                      }
+                      aInstall.promptHandler = (...args) =>
+                        AddonManagerInternal._updatePromptHandler(...args);
                       aInstall.install();
                     }
                   },
@@ -2165,7 +2156,7 @@ var AddonManagerInternal = {
         let needsRestart =
           install.addon.pendingOperations != AddonManager.PENDING_NONE;
 
-        if (WEBEXT_PERMISSION_PROMPTS && !needsRestart) {
+        if (!needsRestart) {
           let subject = {
             wrappedJSObject: { target: browser, addon: install.addon },
           };
@@ -3164,7 +3155,7 @@ var AddonManagerInternal = {
             // the customConfirmationUI preference and responding to the
             // "addon-install-confirmation" notification.  If the application
             // does not implement its own prompt, use the built-in xul dialog.
-            if (info.addon.userPermissions && WEBEXT_PERMISSION_PROMPTS) {
+            if (info.addon.userPermissions) {
               let subject = {
                 wrappedJSObject: {
                   target: browser,
@@ -3434,14 +3425,12 @@ var AddonManagerInternal = {
         await addon.enable();
       }
 
-      if (Services.prefs.getBoolPref(PREF_WEBEXT_PERM_PROMPTS, false)) {
-        await new Promise(resolve => {
-          let subject = {
-            wrappedJSObject: { target, addon, callback: resolve },
-          };
-          Services.obs.notifyObservers(subject, "webextension-install-notify");
-        });
-      }
+      await new Promise(resolve => {
+        let subject = {
+          wrappedJSObject: { target, addon, callback: resolve },
+        };
+        Services.obs.notifyObservers(subject, "webextension-install-notify");
+      });
     },
 
     addonInstallCancel(target, id) {
@@ -3577,7 +3566,7 @@ var AddonManagerPrivate = {
   },
 
   notifyAddonChanged(aID, aType, aPendingRestart) {
-    AddonManagerInternal.notifyAddonChanged(aID, aType, aPendingRestart);
+    return AddonManagerInternal.notifyAddonChanged(aID, aType, aPendingRestart);
   },
 
   updateAddonAppDisabledStates() {
@@ -3885,9 +3874,6 @@ var AddonManager = {
   PERM_CAN_DISABLE: 4,
   // Indicates that the Addon can be upgraded.
   PERM_CAN_UPGRADE: 8,
-  // Indicates that the Addon can be set to be optionally enabled
-  // on a case-by-case basis.
-  PERM_CAN_ASK_TO_ACTIVATE: 16,
   // Indicates that the Addon can be set to be allowed/disallowed
   // in private browsing windows.
   PERM_CAN_CHANGE_PRIVATEBROWSING_ACCESS: 32,
@@ -3911,20 +3897,6 @@ var AddonManager = {
 
   // Add-on type is expected to be displayed in the UI in a list.
   VIEW_TYPE_LIST: "list",
-
-  // Constants describing how add-on types behave.
-
-  // If no add-ons of a type are installed, then the category for that add-on
-  // type should be hidden in the UI.
-  TYPE_UI_HIDE_EMPTY: 16,
-  // Indicates that this add-on type supports the ask-to-activate state.
-  // That is, add-ons of this type can be set to be optionally enabled
-  // on a case-by-case basis.
-  TYPE_SUPPORTS_ASK_TO_ACTIVATE: 32,
-  // The add-on type natively supports undo for restartless uninstalls.
-  // If this flag is not specified, the UI is expected to handle this via
-  // disabling the add-on, and performing the actual uninstall at a later time.
-  TYPE_SUPPORTS_UNDO_RESTARTLESS_UNINSTALL: 64,
 
   // Constants for Addon.applyBackgroundUpdates.
   // Indicates that the Addon should not update automatically.
@@ -3988,12 +3960,6 @@ var AddonManager = {
   SIGNEDSTATE_SYSTEM: 3,
   // Add-on is signed with a "Mozilla Extensions" certificate
   SIGNEDSTATE_PRIVILEGED: 4,
-
-  // Constants for the Addon.userDisabled property
-  // Indicates that the userDisabled state of this add-on is currently
-  // ask-to-activate. That is, it can be conditionally enabled on a
-  // case-by-case basis.
-  STATE_ASK_TO_ACTIVATE: "askToActivate",
 
   get __AddonManagerInternal__() {
     return AppConstants.DEBUG ? AddonManagerInternal : undefined;
@@ -4213,6 +4179,9 @@ var AddonManager = {
     }
 
     if (!("applyBackgroundUpdates" in aAddon)) {
+      return false;
+    }
+    if (!(aAddon.permissions & AddonManager.PERM_CAN_UPGRADE)) {
       return false;
     }
     if (aAddon.applyBackgroundUpdates == AddonManager.AUTOUPDATE_ENABLE) {
@@ -4625,6 +4594,16 @@ AMTelemetry = {
       };
     }
 
+    if (
+      telemetryInfo?.source === "disco" &&
+      typeof telemetryInfo?.taarRecommended === "boolean"
+    ) {
+      extra = {
+        ...extra,
+        taar_based: this.convertToString(telemetryInfo.taarRecommended),
+      };
+    }
+
     this.recordEvent({ method, object, value: install.hashedAddonId, extra });
   },
 
@@ -4818,6 +4797,9 @@ AMTelemetry = {
    */
   recordActionEvent({ object, action, value, addon, view, extra }) {
     extra = { ...extra, action, addon, view };
+    if (action === "installFromRecommendation") {
+      extra.taar_based = !!addon.taarRecommended;
+    }
     this.recordEvent({
       method: "action",
       object,
@@ -4840,13 +4822,20 @@ AMTelemetry = {
    * @param {string} opts.type
    *        An optional type for the view. If opts.addon is set it will
    *        overwrite this value with the type of the add-on.
+   * @param {boolean} opts.taarEnabled
+   *        Set to true if taar-based discovery was enabled when the user
+   *        did switch between about:addons views.
    */
-  recordViewEvent({ view, addon, type }) {
+  recordViewEvent({ view, addon, type, taarEnabled }) {
     this.recordEvent({
       method: "view",
       object: "aboutAddons",
       value: view,
-      extra: this.formatExtraVars({ type, addon }),
+      extra: this.formatExtraVars({
+        type,
+        addon,
+        taar_enabled: taarEnabled,
+      }),
     });
   },
 

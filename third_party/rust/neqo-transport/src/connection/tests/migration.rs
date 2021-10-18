@@ -6,19 +6,29 @@
 
 use super::super::{Connection, Output, State, StreamType};
 use super::{
-    connect_fail, connect_force_idle, default_client, default_server, maybe_authenticate,
-    new_client, new_server, send_something,
+    connect_fail, connect_force_idle, connect_rtt_idle, default_client, default_server,
+    maybe_authenticate, new_client, new_server, send_something, CountingConnectionIdGenerator,
 };
+use crate::cid::LOCAL_ACTIVE_CID_LIMIT;
+use crate::frame::FRAME_TYPE_NEW_CONNECTION_ID;
+use crate::packet::PacketBuilder;
 use crate::path::{PATH_MTU_V4, PATH_MTU_V6};
 use crate::tparams::{self, PreferredAddress, TransportParameter};
-use crate::{ConnectionError, ConnectionParameters, EmptyConnectionIdGenerator, Error};
+use crate::{
+    ConnectionError, ConnectionId, ConnectionIdDecoder, ConnectionIdGenerator, ConnectionIdRef,
+    ConnectionParameters, EmptyConnectionIdGenerator, Error,
+};
 
-use neqo_common::Datagram;
+use neqo_common::{Datagram, Decoder};
 use std::cell::RefCell;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::rc::Rc;
-use std::time::Duration;
-use test_fixture::{self, addr, fixture_init, now};
+use std::time::{Duration, Instant};
+use test_fixture::{
+    self, addr, addr_v4,
+    assertions::{assert_v4_path, assert_v6_path},
+    fixture_init, now,
+};
 
 /// This should be a valid-seeming transport parameter.
 /// And it should have different values to `addr` and `addr_v4`.
@@ -33,10 +43,6 @@ const SAMPLE_PREFERRED_ADDRESS: &[u8] = &[
 // Migrations move to a path with the same IPv4 address on both ends.
 // This simplifies validation as the same assertions can be used for client and server.
 // The risk is that there is a place where source/destination local/remote is inverted.
-fn addr_v4() -> SocketAddr {
-    let localhost_v4 = IpAddr::V4(Ipv4Addr::from(0xc000_0201));
-    SocketAddr::new(localhost_v4, addr().port())
-}
 
 fn loopback() -> SocketAddr {
     SocketAddr::new(IpAddr::V6(Ipv6Addr::from(1)), 443)
@@ -55,23 +61,12 @@ fn change_source_port(d: &Datagram) -> Datagram {
     Datagram::new(new_port(d.source()), d.destination(), &d[..])
 }
 
-fn assert_path(dgram: &Datagram, path_addr: SocketAddr) {
-    assert_eq!(dgram.source(), path_addr);
-    assert_eq!(dgram.destination(), path_addr);
-}
-
-fn assert_v4_path(dgram: &Datagram, padded: bool) {
-    assert_path(dgram, addr_v4());
-    if padded {
-        assert_eq!(dgram.len(), PATH_MTU_V4);
-    }
-}
-
-fn assert_v6_path(dgram: &Datagram, padded: bool) {
-    assert_path(dgram, addr());
-    if padded {
-        assert_eq!(dgram.len(), PATH_MTU_V6);
-    }
+/// As these tests use a new path, that path often has a non-zero RTT.
+/// Pacing can be a problem when testing that path.  This skips time forward.
+fn skip_pacing(c: &mut Connection, now: Instant) -> Instant {
+    let pacing = c.process_output(now).callback();
+    assert_ne!(pacing, Duration::new(0, 0));
+    now + pacing
 }
 
 #[test]
@@ -101,18 +96,19 @@ fn path_forwarding_attack() {
     let mut client = default_client();
     let mut server = default_server();
     connect_force_idle(&mut client, &mut server);
+    let mut now = now();
 
-    let dgram = send_something(&mut client, now());
+    let dgram = send_something(&mut client, now);
     let dgram = change_path(&dgram, addr_v4());
-    server.process_input(dgram, now());
+    server.process_input(dgram, now);
 
     // The server now probes the new (primary) path.
-    let new_probe = server.process_output(now()).dgram().unwrap();
+    let new_probe = server.process_output(now).dgram().unwrap();
     assert_eq!(server.stats().frame_tx.path_challenge, 1);
     assert_v4_path(&new_probe, false); // Can't be padded.
 
     // The server also probes the old path.
-    let old_probe = server.process_output(now()).dgram().unwrap();
+    let old_probe = server.process_output(now).dgram().unwrap();
     assert_eq!(server.stats().frame_tx.path_challenge, 2);
     assert_v6_path(&old_probe, true);
 
@@ -120,56 +116,57 @@ fn path_forwarding_attack() {
     // now constrained by the amplification limit.
     let stream_id = server.stream_create(StreamType::UniDi).unwrap();
     server.stream_close_send(stream_id).unwrap();
-    assert!(server.process_output(now()).dgram().is_none());
+    assert!(server.process_output(now).dgram().is_none());
 
     // The client should respond to the challenge on the new path.
     // The server couldn't pad, so the client is also amplification limited.
-    let new_resp = client.process(Some(new_probe), now()).dgram().unwrap();
+    let new_resp = client.process(Some(new_probe), now).dgram().unwrap();
     assert_eq!(client.stats().frame_rx.path_challenge, 1);
     assert_eq!(client.stats().frame_tx.path_challenge, 1);
     assert_eq!(client.stats().frame_tx.path_response, 1);
     assert_v4_path(&new_resp, false);
 
     // The client also responds to probes on the old path.
-    let old_resp = client.process(Some(old_probe), now()).dgram().unwrap();
+    let old_resp = client.process(Some(old_probe), now).dgram().unwrap();
     assert_eq!(client.stats().frame_rx.path_challenge, 2);
     assert_eq!(client.stats().frame_tx.path_challenge, 1);
     assert_eq!(client.stats().frame_tx.path_response, 2);
     assert_v6_path(&old_resp, true);
 
     // But the client still sends data on the old path.
-    let client_data1 = send_something(&mut client, now());
+    let client_data1 = send_something(&mut client, now);
     assert_v6_path(&client_data1, false); // Just data.
 
     // Receiving the PATH_RESPONSE from the client opens the amplification
     // limit enough for the server to respond.
     // This is padded because it includes PATH_CHALLENGE.
-    let server_data1 = server.process(Some(new_resp), now()).dgram().unwrap();
+    let server_data1 = server.process(Some(new_resp), now).dgram().unwrap();
     assert_v4_path(&server_data1, true);
     assert_eq!(server.stats().frame_tx.path_challenge, 3);
 
     // The client responds to this probe on the new path.
-    client.process_input(server_data1, now());
+    client.process_input(server_data1, now);
     let stream_before = client.stats().frame_tx.stream;
-    let padded_resp = send_something(&mut client, now());
+    let padded_resp = send_something(&mut client, now);
     assert_eq!(stream_before, client.stats().frame_tx.stream);
     assert_v4_path(&padded_resp, true); // This is padded!
 
     // But new data from the client stays on the old path.
-    let client_data2 = client.process_output(now()).dgram().unwrap();
+    let client_data2 = client.process_output(now).dgram().unwrap();
     assert_v6_path(&client_data2, false);
 
     // The server keeps sending on the new path.
-    let server_data2 = send_something(&mut server, now());
+    now = skip_pacing(&mut server, now);
+    let server_data2 = send_something(&mut server, now);
     assert_v4_path(&server_data2, false);
 
     // Until new data is received from the client on the old path.
-    server.process_input(client_data2, now());
+    server.process_input(client_data2, now);
     // The server sends a probe on the "old" path.
-    let server_data3 = send_something(&mut server, now());
+    let server_data3 = send_something(&mut server, now);
     assert_v4_path(&server_data3, true);
     // But switches data transmission to the "new" path.
-    let server_data4 = server.process_output(now()).dgram().unwrap();
+    let server_data4 = server.process_output(now).dgram().unwrap();
     assert_v6_path(&server_data4, false);
 }
 
@@ -178,36 +175,55 @@ fn migrate_immediate() {
     let mut client = default_client();
     let mut server = default_server();
     connect_force_idle(&mut client, &mut server);
+    let mut now = now();
 
     client
-        .migrate(Some(addr_v4()), Some(addr_v4()), true, now())
+        .migrate(Some(addr_v4()), Some(addr_v4()), true, now)
         .unwrap();
 
-    let client1 = send_something(&mut client, now());
+    let client1 = send_something(&mut client, now);
     assert_v4_path(&client1, true); // Contains PATH_CHALLENGE.
-    let client2 = send_something(&mut client, now());
+    let client2 = send_something(&mut client, now);
     assert_v4_path(&client2, false); // Doesn't.
 
-    let server_delayed = send_something(&mut server, now());
+    let server_delayed = send_something(&mut server, now);
 
     // The server accepts the first packet and migrates (but probes).
-    let server1 = server.process(Some(client1), now()).dgram().unwrap();
+    let server1 = server.process(Some(client1), now).dgram().unwrap();
     assert_v4_path(&server1, true);
-    let server2 = server.process_output(now()).dgram().unwrap();
+    let server2 = server.process_output(now).dgram().unwrap();
     assert_v6_path(&server2, true);
 
     // The second packet has no real effect, it just elicits an ACK.
     let all_before = server.stats().frame_tx.all;
     let ack_before = server.stats().frame_tx.ack;
-    let server3 = server.process(Some(client2), now()).dgram();
+    let server3 = server.process(Some(client2), now).dgram();
     assert!(server3.is_some());
     assert_eq!(server.stats().frame_tx.all, all_before + 1);
     assert_eq!(server.stats().frame_tx.ack, ack_before + 1);
 
     // Receiving a packet sent by the server before migration doesn't change path.
-    client.process_input(server_delayed, now());
-    let client3 = send_something(&mut client, now());
+    client.process_input(server_delayed, now);
+    now = skip_pacing(&mut client, now);
+    let client3 = send_something(&mut client, now);
     assert_v4_path(&client3, false);
+}
+
+/// RTT estimates for paths should be preserved across migrations.
+#[test]
+fn migrate_rtt() {
+    const RTT: Duration = Duration::from_millis(20);
+    let mut client = default_client();
+    let mut server = default_server();
+    let now = connect_rtt_idle(&mut client, &mut server, RTT);
+
+    client
+        .migrate(Some(addr_v4()), Some(addr_v4()), true, now)
+        .unwrap();
+    // The RTT might be increased for the new path, so allow a little flexibility.
+    let rtt = client.paths.rtt();
+    assert!(rtt > RTT);
+    assert!(rtt < RTT * 2);
 }
 
 #[test]
@@ -334,6 +350,14 @@ fn migrate_same_fail() {
     ));
 }
 
+/// This gets the connection ID from a datagram using the default
+/// connection ID generator/decoder.
+fn get_cid(d: &Datagram) -> ConnectionIdRef {
+    let gen = CountingConnectionIdGenerator::default();
+    assert_eq!(d[0] & 0x80, 0); // Only support short packets for now.
+    gen.decode_cid(&mut Decoder::from(&d[1..])).unwrap()
+}
+
 fn migration(mut client: Connection) {
     let mut server = default_server();
     connect_force_idle(&mut client, &mut server);
@@ -346,6 +370,7 @@ fn migration(mut client: Connection) {
     let probe = client.process_output(now).dgram().unwrap();
     assert_v4_path(&probe, true); // Contains PATH_CHALLENGE.
     assert_eq!(client.stats().frame_tx.path_challenge, 1);
+    let probe_cid = ConnectionId::from(&get_cid(&probe));
 
     let resp = server.process(Some(probe), now).dgram().unwrap();
     assert_v4_path(&resp, true);
@@ -354,6 +379,7 @@ fn migration(mut client: Connection) {
 
     // Data continues to be exchanged on the new path.
     let client_data = send_something(&mut client, now);
+    assert_ne!(get_cid(&client_data), probe_cid);
     assert_v6_path(&client_data, false);
     server.process_input(client_data, now);
     let server_data = send_something(&mut server, now);
@@ -391,7 +417,11 @@ fn migration(mut client: Connection) {
     let client_confirmation = client.process_output(now).dgram().unwrap();
     assert_v4_path(&client_confirmation, false);
 
-    let server_confirmation = send_something(&mut server, now);
+    // The server has now sent 2 packets, so it is blocked on the pacer.  Wait.
+    let server_pacing = server.process_output(now).callback();
+    assert_ne!(server_pacing, Duration::new(0, 0));
+    // ... then confirm that the server sends on the new path still.
+    let server_confirmation = send_something(&mut server, now + server_pacing);
     assert_v4_path(&server_confirmation, false);
 }
 
@@ -411,6 +441,7 @@ fn migration_client_empty_cid() {
         addr(),
         addr(),
         ConnectionParameters::default(),
+        now(),
     )
     .unwrap();
     migration(client);
@@ -470,6 +501,7 @@ fn preferred_address(hs_client: SocketAddr, hs_server: SocketAddr, preferred: So
         hs_client,
         hs_server,
         ConnectionParameters::default(),
+        now(),
     )
     .unwrap();
     let spa = if preferred.ip().is_ipv6() {
@@ -702,7 +734,7 @@ fn migration_invalid_address() {
         assert_eq!(
             client.migrate(local, remote, true, now()).unwrap_err(),
             Error::InvalidMigration
-        )
+        );
     };
 
     // Providing neither address is pointless and therefore an error.
@@ -738,4 +770,172 @@ fn migration_invalid_address() {
             .unwrap_err(),
         Error::InvalidMigration
     );
+}
+
+/// This inserts a frame into packets that provides a single new
+/// connection ID and retires all others.
+struct RetireAll {
+    cid_gen: Rc<RefCell<dyn ConnectionIdGenerator>>,
+}
+
+impl crate::connection::test_internal::FrameWriter for RetireAll {
+    fn write_frames(&mut self, builder: &mut PacketBuilder) {
+        // Use a sequence number that is large enough that all existing values
+        // will be lower (so they get retired).  As the code doesn't care about
+        // gaps in sequence numbers, this is safe, even though the gap might
+        // hint that there are more outstanding connection IDs that are allowed.
+        const SEQNO: u64 = 100;
+        let cid = self.cid_gen.borrow_mut().generate_cid().unwrap();
+        builder
+            .encode_varint(FRAME_TYPE_NEW_CONNECTION_ID)
+            .encode_varint(SEQNO)
+            .encode_varint(SEQNO) // Retire Prior To
+            .encode_vec(1, &cid)
+            .encode(&[0x7f; 16]);
+    }
+}
+
+/// Test that forcing retirement of connection IDs forces retirement of all active
+/// connection IDs and the use of of newer one.
+#[test]
+fn retire_all() {
+    let mut client = default_client();
+    let cid_gen: Rc<RefCell<dyn ConnectionIdGenerator>> =
+        Rc::new(RefCell::new(CountingConnectionIdGenerator::default()));
+    let mut server = Connection::new_server(
+        test_fixture::DEFAULT_KEYS,
+        test_fixture::DEFAULT_ALPN,
+        Rc::clone(&cid_gen),
+        ConnectionParameters::default(),
+    )
+    .unwrap();
+    connect_force_idle(&mut client, &mut server);
+
+    let original_cid = ConnectionId::from(&get_cid(&send_something(&mut client, now())));
+
+    server.test_frame_writer = Some(Box::new(RetireAll { cid_gen }));
+    let ncid = send_something(&mut server, now());
+    server.test_frame_writer = None;
+
+    let new_cid_before = client.stats().frame_rx.new_connection_id;
+    let retire_cid_before = client.stats().frame_tx.retire_connection_id;
+    client.process_input(ncid, now());
+    let retire = send_something(&mut client, now());
+    assert_eq!(
+        client.stats().frame_rx.new_connection_id,
+        new_cid_before + 1
+    );
+    assert_eq!(
+        client.stats().frame_tx.retire_connection_id,
+        retire_cid_before + LOCAL_ACTIVE_CID_LIMIT
+    );
+
+    assert_ne!(get_cid(&retire), original_cid);
+}
+
+/// During a graceful migration, if the probed path can't get a new connection ID due
+/// to being forced to retire the one it is using, the migration will fail.
+#[test]
+fn retire_prior_to_migration_failure() {
+    let mut client = default_client();
+    let cid_gen: Rc<RefCell<dyn ConnectionIdGenerator>> =
+        Rc::new(RefCell::new(CountingConnectionIdGenerator::default()));
+    let mut server = Connection::new_server(
+        test_fixture::DEFAULT_KEYS,
+        test_fixture::DEFAULT_ALPN,
+        Rc::clone(&cid_gen),
+        ConnectionParameters::default(),
+    )
+    .unwrap();
+    connect_force_idle(&mut client, &mut server);
+
+    let original_cid = ConnectionId::from(&get_cid(&send_something(&mut client, now())));
+
+    client
+        .migrate(Some(addr_v4()), Some(addr_v4()), false, now())
+        .unwrap();
+
+    // The client now probes the new path.
+    let probe = client.process_output(now()).dgram().unwrap();
+    assert_v4_path(&probe, true);
+    assert_eq!(client.stats().frame_tx.path_challenge, 1);
+    let probe_cid = ConnectionId::from(&get_cid(&probe));
+    assert_ne!(original_cid, probe_cid);
+
+    // Have the server receive the probe, but separately have it decide to
+    // retire all of the available connection IDs.
+    server.test_frame_writer = Some(Box::new(RetireAll { cid_gen }));
+    let retire_all = send_something(&mut server, now());
+    server.test_frame_writer = None;
+
+    let resp = server.process(Some(probe), now()).dgram().unwrap();
+    assert_v4_path(&resp, true);
+    assert_eq!(server.stats().frame_tx.path_response, 1);
+    assert_eq!(server.stats().frame_tx.path_challenge, 1);
+
+    // Have the client receive the NEW_CONNECTION_ID with Retire Prior To.
+    client.process_input(retire_all, now());
+    // This packet contains the probe response, which should be fine, but it
+    // also includes PATH_CHALLENGE for the new path, and the client can't
+    // respond without a connection ID.  We treat this as a connection error.
+    client.process_input(resp, now());
+    assert!(matches!(
+        client.state(),
+        State::Closing {
+            error: ConnectionError::Transport(Error::InvalidMigration),
+            ..
+        }
+    ));
+}
+
+/// The timing of when frames arrive can mean that the migration path can
+/// get the last available connection ID.
+#[test]
+fn retire_prior_to_migration_success() {
+    let mut client = default_client();
+    let cid_gen: Rc<RefCell<dyn ConnectionIdGenerator>> =
+        Rc::new(RefCell::new(CountingConnectionIdGenerator::default()));
+    let mut server = Connection::new_server(
+        test_fixture::DEFAULT_KEYS,
+        test_fixture::DEFAULT_ALPN,
+        Rc::clone(&cid_gen),
+        ConnectionParameters::default(),
+    )
+    .unwrap();
+    connect_force_idle(&mut client, &mut server);
+
+    let original_cid = ConnectionId::from(&get_cid(&send_something(&mut client, now())));
+
+    client
+        .migrate(Some(addr_v4()), Some(addr_v4()), false, now())
+        .unwrap();
+
+    // The client now probes the new path.
+    let probe = client.process_output(now()).dgram().unwrap();
+    assert_v4_path(&probe, true);
+    assert_eq!(client.stats().frame_tx.path_challenge, 1);
+    let probe_cid = ConnectionId::from(&get_cid(&probe));
+    assert_ne!(original_cid, probe_cid);
+
+    // Have the server receive the probe, but separately have it decide to
+    // retire all of the available connection IDs.
+    server.test_frame_writer = Some(Box::new(RetireAll { cid_gen }));
+    let retire_all = send_something(&mut server, now());
+    server.test_frame_writer = None;
+
+    let resp = server.process(Some(probe), now()).dgram().unwrap();
+    assert_v4_path(&resp, true);
+    assert_eq!(server.stats().frame_tx.path_response, 1);
+    assert_eq!(server.stats().frame_tx.path_challenge, 1);
+
+    // Have the client receive the NEW_CONNECTION_ID with Retire Prior To second.
+    // As this occurs in a very specific order, migration succeeds.
+    client.process_input(resp, now());
+    client.process_input(retire_all, now());
+
+    // Migration succeeds and the new path gets the last connection ID.
+    let dgram = send_something(&mut client, now());
+    assert_v4_path(&dgram, false);
+    assert_ne!(get_cid(&dgram), original_cid);
+    assert_ne!(get_cid(&dgram), probe_cid);
 }

@@ -19,6 +19,11 @@ ChromeUtils.defineModuleGetter(
   "ReaderMode",
   "resource://gre/modules/ReaderMode.jsm"
 );
+ChromeUtils.defineModuleGetter(
+  this,
+  "pktApi",
+  "chrome://pocket/content/pktApi.jsm"
+);
 
 const gStringBundle = Services.strings.createBundle(
   "chrome://global/locale/aboutReader.properties"
@@ -109,6 +114,45 @@ class AboutReaderParent extends JSWindowActorParent {
         gCachedArticles.delete(message.data.url);
         return cachedArticle;
       }
+      case "Reader:PocketLoginStatusRequest": {
+        return pktApi.isUserLoggedIn();
+      }
+      case "Reader:PocketGetArticleInfo": {
+        return new Promise(resolve => {
+          pktApi.getArticleInfo(message.data.url, {
+            success: data => {
+              resolve(data);
+            },
+            error: error => {
+              resolve(null);
+            },
+          });
+        });
+      }
+      case "Reader:PocketGetArticleRecs": {
+        return new Promise(resolve => {
+          pktApi.getRecsForItem(message.data.itemID, {
+            success: data => {
+              resolve(data);
+            },
+            error: error => {
+              resolve(null);
+            },
+          });
+        });
+      }
+      case "Reader:PocketSaveArticle": {
+        return new Promise(resolve => {
+          pktApi.addLink(message.data.url, {
+            success: data => {
+              resolve(data);
+            },
+            error: error => {
+              resolve(null);
+            },
+          });
+        });
+      }
       case "Reader:FaviconRequest": {
         try {
           let preferredWidth = message.data.preferredWidth || 0;
@@ -192,7 +236,7 @@ class AboutReaderParent extends JSWindowActorParent {
       button.setAttribute("aria-label", closeText);
 
       menuitem.setAttribute("label", closeText);
-      menuitem.setAttribute("hidden", false);
+      menuitem.hidden = false;
       menuitem.setAttribute(
         "accesskey",
         gStringBundle.GetStringFromName("readerView.close.accesskey")
@@ -209,7 +253,7 @@ class AboutReaderParent extends JSWindowActorParent {
       button.setAttribute("aria-label", enterText);
 
       menuitem.setAttribute("label", enterText);
-      menuitem.setAttribute("hidden", !browser.isArticle);
+      menuitem.hidden = !browser.isArticle;
       menuitem.setAttribute(
         "accesskey",
         gStringBundle.GetStringFromName("readerView.enter.accesskey")

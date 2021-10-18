@@ -66,8 +66,7 @@ elif CONFIG['CPU_ARCH'] == 'aarch64' and CONFIG['CC_TYPE'] in ('clang', 'gcc'):
 
 DEFINES['SKIA_IMPLEMENTATION'] = 1
 
-if CONFIG['MOZ_ENABLE_SKIA_PDF_SFNTLY']:
-    DEFINES['SK_PDF_USE_SFNTLY'] = 1
+DEFINES['SK_PDF_USE_HARFBUZZ_SUBSETTING'] = 1
 
 if CONFIG['MOZ_TREE_FREETYPE']:
     DEFINES['SK_CAN_USE_DLOPEN'] = 0
@@ -99,14 +98,13 @@ if CONFIG['CC_TYPE'] in ('clang', 'clang-cl'):
     ]
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk', 'android'):
-    CXXFLAGS += CONFIG['MOZ_CAIRO_CFLAGS']
+    LOCAL_INCLUDES += [
+        "/gfx/cairo/cairo/src",
+    ]
     CXXFLAGS += CONFIG['CAIRO_FT_CFLAGS']
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gtk':
     CXXFLAGS += CONFIG['MOZ_PANGO_CFLAGS']
-
-if CONFIG['MOZ_ENABLE_SKIA_PDF_SFNTLY']:
-    LOCAL_INCLUDES += CONFIG['SFNTLY_INCLUDES']
 """
 
 import json

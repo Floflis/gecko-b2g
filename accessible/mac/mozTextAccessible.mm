@@ -5,11 +5,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "Accessible-inl.h"
+#include "AccAttributes.h"
 #include "HyperTextAccessible-inl.h"
+#include "LocalAccessible-inl.h"
 #include "mozilla/a11y/PDocAccessible.h"
 #include "nsCocoaUtils.h"
-#include "nsIPersistentProperties2.h"
 #include "nsObjCExceptions.h"
 #include "TextLeafAccessible.h"
 
@@ -76,67 +76,47 @@ inline NSString* ToNSString(id aValue) {
     // If the attribute exists, it has one of four values: true, false,
     // grammar, or spelling. We query the attribute value here in order
     // to find the correct string to return.
-    if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
+    RefPtr<AccAttributes> attributes;
+    if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
       HyperTextAccessible* text = acc->AsHyperText();
-      if (!text || !text->IsTextRole()) {
-        // we can't get the attribute, but we should still respect the
-        // invalid state flag
-        return @"true";
+      if (text && text->IsTextRole()) {
+        attributes = text->DefaultTextAttributes();
       }
-      nsAutoString invalidStr;
-      nsCOMPtr<nsIPersistentProperties> attributes =
-          text->DefaultTextAttributes();
-      nsAccUtils::GetAccAttr(attributes, nsGkAtoms::invalid, invalidStr);
-      if (invalidStr.IsEmpty()) {
-        // if the attribute had no value, we should still respect the
-        // invalid state flag.
-        return @"true";
-      }
-      return nsCocoaUtils::ToNSString(invalidStr);
     } else {
-      ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
-      // Similar to the acc case above, we iterate through our attributes
-      // to find the value for `invalid`.
-      AutoTArray<Attribute, 10> attrs;
-      proxy->DefaultTextAttributes(&attrs);
-      for (size_t i = 0; i < attrs.Length(); i++) {
-        if (attrs.ElementAt(i).Name() == "invalid") {
-          nsString invalidStr = attrs.ElementAt(i).Value();
-          if (invalidStr.IsEmpty()) {
-            break;
-          }
-          return nsCocoaUtils::ToNSString(invalidStr);
-        }
-      }
-      // if we iterated through our attributes and didn't find `invalid`,
-      // or if the invalid attribute had no value, we should still respect
-      // the invalid flag and return true.
+      RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
+      proxy->DefaultTextAttributes(&attributes);
+    }
+
+    nsAutoString invalidStr;
+    if (!attributes ||
+        !attributes->GetAttribute(nsGkAtoms::invalid, invalidStr)) {
       return @"true";
     }
+    return nsCocoaUtils::ToNSString(invalidStr);
   }
+
   // If the flag is not set, we return false.
   return @"false";
 }
 
 - (NSNumber*)moxInsertionPointLineNumber {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   int32_t lineNumber = -1;
-  if (mGeckoAccessible.IsAccessible()) {
+  if (mGeckoAccessible->IsLocal()) {
     if (HyperTextAccessible* textAcc =
-            mGeckoAccessible.AsAccessible()->AsHyperText()) {
+            mGeckoAccessible->AsLocal()->AsHyperText()) {
       lineNumber = textAcc->CaretLineNumber() - 1;
     }
   } else {
-    lineNumber = mGeckoAccessible.AsProxy()->CaretLineNumber() - 1;
+    lineNumber = mGeckoAccessible->AsRemote()->CaretLineNumber() - 1;
   }
 
   return (lineNumber >= 0) ? [NSNumber numberWithInt:lineNumber] : nil;
 }
 
 - (NSString*)moxRole {
-  if ([self ARIARole] == nsGkAtoms::textbox ||
-      [self stateWithMask:states::MULTI_LINE]) {
+  if ([self stateWithMask:states::MULTI_LINE]) {
     return NSAccessibilityTextAreaRole;
   }
 
@@ -144,15 +124,15 @@ inline NSString* ToNSString(id aValue) {
 }
 
 - (NSString*)moxSubrole {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   if (mRole == roles::PASSWORD_TEXT) {
     return NSAccessibilitySecureTextFieldSubrole;
   }
 
   if (mRole == roles::ENTRY) {
-    Accessible* acc = mGeckoAccessible.AsAccessible();
-    ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
+    LocalAccessible* acc = mGeckoAccessible->AsLocal();
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
     if ((acc && acc->IsSearchbox()) || (proxy && proxy->IsSearchbox())) {
       return @"AXSearchField";
     }
@@ -202,22 +182,22 @@ inline NSString* ToNSString(id aValue) {
 }
 
 - (void)moxSetValue:(id)value {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   nsString text;
   nsCocoaUtils::GetStringForNSString(value, text);
-  if (mGeckoAccessible.IsAccessible()) {
+  if (mGeckoAccessible->IsLocal()) {
     if (HyperTextAccessible* textAcc =
-            mGeckoAccessible.AsAccessible()->AsHyperText()) {
+            mGeckoAccessible->AsLocal()->AsHyperText()) {
       textAcc->ReplaceText(text);
     }
   } else {
-    mGeckoAccessible.AsProxy()->ReplaceText(text);
+    mGeckoAccessible->AsRemote()->ReplaceText(text);
   }
 }
 
 - (void)moxSetSelectedText:(NSString*)selectedText {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   NSString* stringValue = ToNSString(selectedText);
   if (!stringValue) {
@@ -226,16 +206,16 @@ inline NSString* ToNSString(id aValue) {
 
   int32_t start = 0, end = 0;
   nsString text;
-  if (mGeckoAccessible.IsAccessible()) {
+  if (mGeckoAccessible->IsLocal()) {
     if (HyperTextAccessible* textAcc =
-            mGeckoAccessible.AsAccessible()->AsHyperText()) {
+            mGeckoAccessible->AsLocal()->AsHyperText()) {
       textAcc->SelectionBoundsAt(0, &start, &end);
       textAcc->DeleteText(start, end - start);
       nsCocoaUtils::GetStringForNSString(stringValue, text);
       textAcc->InsertText(text, start);
     }
   } else {
-    ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
     nsString data;
     proxy->SelectionBoundsAt(0, data, &start, &end);
     proxy->DeleteText(start, end - start);
@@ -248,25 +228,27 @@ inline NSString* ToNSString(id aValue) {
   GeckoTextMarkerRange markerRange =
       [self textMarkerRangeFromRange:selectedTextRange];
 
-  markerRange.Select();
+  if (markerRange.IsValid()) {
+    markerRange.Select();
+  }
 }
 
 - (void)moxSetVisibleCharacterRange:(NSValue*)visibleCharacterRange {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   NSRange range;
   if (!ToNSRange(visibleCharacterRange, &range)) {
     return;
   }
 
-  if (mGeckoAccessible.IsAccessible()) {
+  if (mGeckoAccessible->IsLocal()) {
     if (HyperTextAccessible* textAcc =
-            mGeckoAccessible.AsAccessible()->AsHyperText()) {
+            mGeckoAccessible->AsLocal()->AsHyperText()) {
       textAcc->ScrollSubstringTo(range.location, range.location + range.length,
                                  nsIAccessibleScrollType::SCROLL_TYPE_TOP_EDGE);
     }
   } else {
-    mGeckoAccessible.AsProxy()->ScrollSubstringTo(
+    mGeckoAccessible->AsRemote()->ScrollSubstringTo(
         range.location, range.location + range.length,
         nsIAccessibleScrollType::SCROLL_TYPE_TOP_EDGE);
   }
@@ -283,8 +265,13 @@ inline NSString* ToNSString(id aValue) {
 }
 
 - (NSAttributedString*)moxAttributedStringForRange:(NSValue*)range {
-  return [[[NSAttributedString alloc]
-      initWithString:[self moxStringForRange:range]] autorelease];
+  GeckoTextMarkerRange markerRange = [self textMarkerRangeFromRange:range];
+
+  if (!markerRange.IsValid()) {
+    return nil;
+  }
+
+  return markerRange.AttributedText();
 }
 
 - (NSValue*)moxRangeForLine:(NSNumber*)line {
@@ -311,7 +298,7 @@ inline NSString* ToNSString(id aValue) {
 
 - (void)handleAccessibleTextChangeEvent:(NSString*)change
                                inserted:(BOOL)isInserted
-                            inContainer:(const AccessibleOrProxy&)container
+                            inContainer:(Accessible*)container
                                      at:(int32_t)start {
   GeckoTextMarker startMarker(container, start);
   NSDictionary* userInfo = @{
@@ -365,7 +352,7 @@ inline NSString* ToNSString(id aValue) {
 }
 
 - (GeckoTextMarkerRange)selection {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   id<MOXTextMarkerSupport> delegate = [self moxTextMarkerDelegate];
   GeckoTextMarkerRange selection =
@@ -417,7 +404,7 @@ inline NSString* ToNSString(id aValue) {
 }
 
 - (NSString*)moxStringForRange:(NSValue*)range {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   NSRange r = [range rangeValue];
   GeckoTextMarkerRange textMarkerRange(mGeckoAccessible);
@@ -429,12 +416,19 @@ inline NSString* ToNSString(id aValue) {
 }
 
 - (NSAttributedString*)moxAttributedStringForRange:(NSValue*)range {
-  return [[[NSAttributedString alloc]
-      initWithString:[self moxStringForRange:range]] autorelease];
+  MOZ_ASSERT(mGeckoAccessible);
+
+  NSRange r = [range rangeValue];
+  GeckoTextMarkerRange textMarkerRange(mGeckoAccessible);
+  textMarkerRange.mStart.mOffset += r.location;
+  textMarkerRange.mEnd.mOffset =
+      textMarkerRange.mStart.mOffset + r.location + r.length;
+
+  return textMarkerRange.AttributedText();
 }
 
 - (NSValue*)moxBoundsForRange:(NSValue*)range {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   NSRange r = [range rangeValue];
   GeckoTextMarkerRange textMarkerRange(mGeckoAccessible);

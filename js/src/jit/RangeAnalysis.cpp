@@ -7,15 +7,12 @@
 #include "jit/RangeAnalysis.h"
 
 #include "mozilla/MathAlgorithms.h"
-#include "mozilla/TemplateLib.h"
 
 #include <algorithm>
 
 #include "jsmath.h"
-#include "jsnum.h"
 
 #include "jit/CompileInfo.h"
-#include "jit/Ion.h"
 #include "jit/IonAnalysis.h"
 #include "jit/JitSpewer.h"
 #include "jit/MIR.h"
@@ -1792,9 +1789,10 @@ void MLoadDataViewElement::computeRange(TempAllocator& alloc) {
 }
 
 void MArrayLength::computeRange(TempAllocator& alloc) {
-  // Array lengths can go up to UINT32_MAX. We do a dynamic check and we have to
-  // return the range pre-bailouts, so use UINT32_MAX.
-  setRange(Range::NewUInt32Range(alloc, 0, UINT32_MAX));
+  // Array lengths can go up to UINT32_MAX. We will bail out if the array
+  // length > INT32_MAX.
+  MOZ_ASSERT(type() == MIRType::Int32);
+  setRange(Range::NewUInt32Range(alloc, 0, INT32_MAX));
 }
 
 void MInitializedLength::computeRange(TempAllocator& alloc) {
@@ -1814,18 +1812,16 @@ void MArrayBufferViewByteOffset::computeRange(TempAllocator& alloc) {
   }
 }
 
-void MTypedArrayElementShift::computeRange(TempAllocator& alloc) {
-  using mozilla::tl::FloorLog2;
+void MTypedArrayElementSize::computeRange(TempAllocator& alloc) {
+  constexpr auto MaxTypedArraySize = sizeof(double);
 
-  constexpr auto MaxTypedArrayShift = FloorLog2<sizeof(double)>::value;
-
-#define ASSERT_MAX_SHIFT(T, N)                                     \
-  static_assert(FloorLog2<sizeof(T)>::value <= MaxTypedArrayShift, \
+#define ASSERT_MAX_SIZE(_, T, N)                \
+  static_assert(sizeof(T) <= MaxTypedArraySize, \
                 "unexpected typed array type exceeding 64-bits storage");
-  JS_FOR_EACH_TYPED_ARRAY(ASSERT_MAX_SHIFT)
-#undef ASSERT_MAX_SHIFT
+  JS_FOR_EACH_TYPED_ARRAY(ASSERT_MAX_SIZE)
+#undef ASSERT_MAX_SIZE
 
-  setRange(Range::NewUInt32Range(alloc, 0, MaxTypedArrayShift));
+  setRange(Range::NewUInt32Range(alloc, 0, MaxTypedArraySize));
 }
 
 void MStringLength::computeRange(TempAllocator& alloc) {
@@ -1858,9 +1854,16 @@ void MInt32ToIntPtr::computeRange(TempAllocator& alloc) {
   setRange(new (alloc) Range(input()));
 }
 
+void MNonNegativeIntPtrToInt32::computeRange(TempAllocator& alloc) {
+  // We will bail out if the IntPtr value > INT32_MAX.
+  setRange(Range::NewUInt32Range(alloc, 0, INT32_MAX));
+}
+
 void MArrayPush::computeRange(TempAllocator& alloc) {
-  // MArrayPush returns the new array length.
-  setRange(Range::NewUInt32Range(alloc, 0, UINT32_MAX));
+  // MArrayPush returns the new array length. It bails out if the new length
+  // doesn't fit in an Int32.
+  MOZ_ASSERT(type() == MIRType::Int32);
+  setRange(Range::NewUInt32Range(alloc, 0, INT32_MAX));
 }
 
 void MMathFunction::computeRange(TempAllocator& alloc) {
@@ -1899,6 +1902,10 @@ void MNaNToZero::computeRange(TempAllocator& alloc) {
 ///////////////////////////////////////////////////////////////////////////////
 // Range Analysis
 ///////////////////////////////////////////////////////////////////////////////
+
+static BranchDirection NegateBranchDirection(BranchDirection dir) {
+  return (dir == FALSE_BRANCH) ? TRUE_BRANCH : FALSE_BRANCH;
+}
 
 bool RangeAnalysis::analyzeLoop(MBasicBlock* header) {
   MOZ_ASSERT(header->hasUniqueBackedge());
@@ -2350,6 +2357,20 @@ bool RangeAnalysis::tryHoistBoundsCheck(MBasicBlock* header,
   lowerCheck->setBailoutKind(BailoutKind::HoistBoundsCheck);
   preLoop->insertBefore(preLoop->lastIns(), lowerCheck);
 
+  // A common pattern for iterating over typed arrays is this:
+  //
+  //   for (var i = 0; i < ta.length; i++) {
+  //     use ta[i];
+  //   }
+  //
+  // Here |upperTerm| (= ta.length) is a NonNegativeIntPtrToInt32 instruction.
+  // Unwrap this if |length| is also an IntPtr so that we don't add an
+  // unnecessary bounds check and Int32ToIntPtr below.
+  if (upperTerm->isNonNegativeIntPtrToInt32() &&
+      length->type() == MIRType::IntPtr) {
+    upperTerm = upperTerm->toNonNegativeIntPtrToInt32()->input();
+  }
+
   // Hoist the loop invariant upper bounds checks.
   if (upperTerm != length || upperConstant >= 0) {
     // Hoist the bound check's length if it isn't already loop invariant.
@@ -2361,8 +2382,8 @@ bool RangeAnalysis::tryHoistBoundsCheck(MBasicBlock* header,
 
     // If the length is IntPtr, convert the upperTerm to that as well for the
     // bounds check.
-    if (length->type() == MIRType::IntPtr) {
-      MOZ_ASSERT(upperTerm->type() == MIRType::Int32);
+    if (length->type() == MIRType::IntPtr &&
+        upperTerm->type() == MIRType::Int32) {
       upperTerm = MInt32ToIntPtr::New(alloc(), upperTerm);
       upperTerm->computeRange(alloc());
       upperTerm->collectRangeInfoPreTrunc();
@@ -2457,7 +2478,7 @@ bool RangeAnalysis::addRangeAssertions() {
 
       // Perform range checking for all numeric and numeric-like types.
       if (!IsNumberType(ins->type()) && ins->type() != MIRType::Boolean &&
-          ins->type() != MIRType::Value) {
+          ins->type() != MIRType::Value && ins->type() != MIRType::IntPtr) {
         continue;
       }
 
@@ -2907,9 +2928,9 @@ static bool CloneForDeadBranches(TempAllocator& alloc,
   }
   clone->setRange(nullptr);
 
-  // Set UseRemoved flag on the cloned instruction in order to chain recover
+  // Set ImplicitlyUsed flag on the cloned instruction in order to chain recover
   // instruction for the bailout path.
-  clone->setUseRemovedUnchecked();
+  clone->setImplicitlyUsedUnchecked();
 
   candidate->block()->insertBefore(candidate, clone);
 
@@ -2942,7 +2963,7 @@ static TruncateKind ComputeRequestedTruncateKind(MDefinition* candidate,
   bool isObservableResult =
       false;  // Check if it can be read from another frame.
   bool isRecoverableResult = true;  // Check if it can safely be reconstructed.
-  bool hasUseRemoved = candidate->isUseRemoved();
+  bool isImplicitlyUsed = candidate->isImplicitlyUsed();
 
   TruncateKind kind = TruncateKind::Truncate;
   for (MUseIterator use(candidate->usesBegin()); use != candidate->usesEnd();
@@ -2951,7 +2972,7 @@ static TruncateKind ComputeRequestedTruncateKind(MDefinition* candidate,
       // Truncation is a destructive optimization, as such, we need to pay
       // attention to removed branches and prevent optimization
       // destructive optimizations if we have no alternative. (see
-      // UseRemoved flag)
+      // ImplicitlyUsed flag)
       isCapturedResult = true;
       isObservableResult =
           isObservableResult ||
@@ -2965,7 +2986,7 @@ static TruncateKind ComputeRequestedTruncateKind(MDefinition* candidate,
     MDefinition* consumer = use->consumer()->toDefinition();
     if (consumer->isRecoveredOnBailout()) {
       isCapturedResult = true;
-      hasUseRemoved = hasUseRemoved || consumer->isUseRemoved();
+      isImplicitlyUsed = isImplicitlyUsed || consumer->isImplicitlyUsed();
       continue;
     }
 
@@ -2988,15 +3009,15 @@ static TruncateKind ComputeRequestedTruncateKind(MDefinition* candidate,
   bool needsConversion = !candidate->range() || !candidate->range()->isInt32();
 
   // If the instruction is explicitly truncated (not indirectly) by all its
-  // uses and if it has no removed uses, then we can safely encode its
+  // uses and if it is not implicitly used, then we can safely encode its
   // truncated result as part of the resume point operands.  This is safe,
   // because even if we resume with a truncated double, the next baseline
   // instruction operating on this instruction is going to be a no-op.
   //
   // Note, that if the result can be observed from another frame, then this
   // optimization is not safe.
-  bool safeToConvert =
-      kind == TruncateKind::Truncate && !hasUseRemoved && !isObservableResult;
+  bool safeToConvert = kind == TruncateKind::Truncate && !isImplicitlyUsed &&
+                       !isObservableResult;
 
   // If the candidate instruction appears as operand of a resume point or a
   // recover instruction, and we have to truncate its result, then we might
@@ -3069,8 +3090,7 @@ static void RemoveTruncatesOnOutput(MDefinition* truncated) {
   }
 }
 
-static void AdjustTruncatedInputs(TempAllocator& alloc,
-                                  MDefinition* truncated) {
+void RangeAnalysis::adjustTruncatedInputs(MDefinition* truncated) {
   MBasicBlock* block = truncated->block();
   for (size_t i = 0, e = truncated->numOperands(); i < e; i++) {
     TruncateKind kind = truncated->operandTruncateKind(i);
@@ -3088,10 +3108,11 @@ static void AdjustTruncatedInputs(TempAllocator& alloc,
     } else {
       MInstruction* op;
       if (kind == TruncateKind::TruncateAfterBailouts) {
-        op = MToNumberInt32::New(alloc, truncated->getOperand(i));
+        MOZ_ASSERT(!mir->outerInfo().hadEagerTruncationBailout());
+        op = MToNumberInt32::New(alloc(), truncated->getOperand(i));
         op->setBailoutKind(BailoutKind::EagerTruncation);
       } else {
-        op = MTruncateToInt32::New(alloc, truncated->getOperand(i));
+        op = MTruncateToInt32::New(alloc(), truncated->getOperand(i));
       }
 
       if (truncated->isPhi()) {
@@ -3128,10 +3149,10 @@ bool RangeAnalysis::canTruncate(MDefinition* def, TruncateKind kind) const {
     if (kind == TruncateKind::TruncateAfterBailouts) {
       return false;
     }
-    for (uint32_t i = 0; i < def->numOperands(); i++) {
-      if (def->operandTruncateKind(i) <= TruncateKind::TruncateAfterBailouts) {
-        return false;
-      }
+    // MDiv and MMod always require TruncateAfterBailout for their operands.
+    // See MDiv::operandTruncateKind and MMod::operandTruncateKind.
+    if (def->isDiv() || def->isMod()) {
+      return false;
     }
   }
 
@@ -3209,6 +3230,15 @@ bool RangeAnalysis::truncate() {
         return false;
       }
 
+      // TruncateAfterBailouts keeps the bailout code as-is and
+      // continues with truncated operations, with the expectation
+      // that we are unlikely to bail out. If we do bail out, then we
+      // will set a flag in FinishBailoutToBaseline to prevent eager
+      // truncation when we recompile, to avoid bailout loops.
+      if (kind == TruncateKind::TruncateAfterBailouts) {
+        iter->setBailoutKind(BailoutKind::EagerTruncation);
+      }
+
       iter->truncate();
 
       // Delay updates of inputs/outputs to avoid creating node which
@@ -3251,7 +3281,7 @@ bool RangeAnalysis::truncate() {
     MDefinition* def = worklist.popCopy();
     def->setNotInWorklist();
     RemoveTruncatesOnOutput(def);
-    AdjustTruncatedInputs(alloc(), def);
+    adjustTruncatedInputs(def);
   }
 
   return true;

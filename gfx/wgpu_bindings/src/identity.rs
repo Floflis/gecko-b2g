@@ -34,7 +34,6 @@ pub struct IdentityRecyclerFactory {
     param: FactoryParam,
     free_adapter: extern "C" fn(id::AdapterId, FactoryParam),
     free_device: extern "C" fn(id::DeviceId, FactoryParam),
-    free_swap_chain: extern "C" fn(id::SwapChainId, FactoryParam),
     free_pipeline_layout: extern "C" fn(id::PipelineLayoutId, FactoryParam),
     free_shader_module: extern "C" fn(id::ShaderModuleId, FactoryParam),
     free_bind_group_layout: extern "C" fn(id::BindGroupLayoutId, FactoryParam),
@@ -43,6 +42,7 @@ pub struct IdentityRecyclerFactory {
     free_render_bundle: extern "C" fn(id::RenderBundleId, FactoryParam),
     free_render_pipeline: extern "C" fn(id::RenderPipelineId, FactoryParam),
     free_compute_pipeline: extern "C" fn(id::ComputePipelineId, FactoryParam),
+    free_query_set: extern "C" fn(id::QuerySetId, FactoryParam),
     free_buffer: extern "C" fn(id::BufferId, FactoryParam),
     free_texture: extern "C" fn(id::TextureId, FactoryParam),
     free_texture_view: extern "C" fn(id::TextureViewId, FactoryParam),
@@ -67,16 +67,6 @@ impl wgc::hub::IdentityHandlerFactory<id::DeviceId> for IdentityRecyclerFactory 
             fun: self.free_device,
             param: self.param,
             kind: "device",
-        }
-    }
-}
-impl wgc::hub::IdentityHandlerFactory<id::SwapChainId> for IdentityRecyclerFactory {
-    type Filter = IdentityRecycler<id::SwapChainId>;
-    fn spawn(&self, _min_index: u32) -> Self::Filter {
-        IdentityRecycler {
-            fun: self.free_swap_chain,
-            param: self.param,
-            kind: "swap_chain",
         }
     }
 }
@@ -157,6 +147,16 @@ impl wgc::hub::IdentityHandlerFactory<id::ComputePipelineId> for IdentityRecycle
             fun: self.free_compute_pipeline,
             param: self.param,
             kind: "compute_pipeline",
+        }
+    }
+}
+impl wgc::hub::IdentityHandlerFactory<id::QuerySetId> for IdentityRecyclerFactory {
+    type Filter = IdentityRecycler<id::QuerySetId>;
+    fn spawn(&self, _min_index: u32) -> Self::Filter {
+        IdentityRecycler {
+            fun: self.free_query_set,
+            param: self.param,
+            kind: "query_set",
         }
     }
 }

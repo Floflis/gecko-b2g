@@ -7,6 +7,7 @@
 
 #include "MediaEventSource.h"
 #include "mozilla/Maybe.h"
+#include "mozilla/MozPromise.h"
 #include "mozilla/Result.h"
 #include "mozilla/SpinEventLoopUntil.h"
 
@@ -29,6 +30,7 @@ T WaitFor(MediaEventSource<T>& aEvent) {
   MediaEventListener listener = aEvent.Connect(
       AbstractThread::GetCurrent(), [&](T aValue) { value = Some(aValue); });
   SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
+      "WaitFor(MediaEventSource<T>& aEvent)"_ns,
       [&] { return value.isSome(); });
   listener.Disconnect();
   return value.value();
@@ -37,14 +39,7 @@ T WaitFor(MediaEventSource<T>& aEvent) {
 /**
  * Specialization of WaitFor<T> for void.
  */
-void WaitFor(MediaEventSource<void>& aEvent) {
-  bool done = false;
-  MediaEventListener listener =
-      aEvent.Connect(AbstractThread::GetCurrent(), [&] { done = true; });
-  SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
-      [&] { return done; });
-  listener.Disconnect();
-}
+void WaitFor(MediaEventSource<void>& aEvent);
 
 /**
  * Variant of WaitFor that blocks the caller until a MozPromise has either been
@@ -59,6 +54,7 @@ Result<R, E> WaitFor(const RefPtr<MozPromise<R, E, Exc>>& aPromise) {
       [&](R aResult) { success = Some(aResult); },
       [&](E aError) { error = Some(aError); });
   SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
+      "WaitFor(const RefPtr<MozPromise<R, E, Exc>>& aPromise)"_ns,
       [&] { return success.isSome() || error.isSome(); });
   if (success.isSome()) {
     return success.extract();
@@ -80,6 +76,7 @@ void WaitUntil(MediaEventSource<T>& aEvent, const CallbackFunction& aF) {
         }
       });
   SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
+      "WaitUntil(MediaEventSource<T>& aEvent, const CallbackFunction& aF)"_ns,
       [&] { return done; });
   listener.Disconnect();
 }

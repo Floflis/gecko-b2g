@@ -135,6 +135,9 @@ class PermissionManager final : public nsIPermissionManager,
     enum { ALLOW_MEMMOVE = false };
 
     inline nsTArray<PermissionEntry>& GetPermissions() { return mPermissions; }
+    inline const nsTArray<PermissionEntry>& GetPermissions() const {
+      return mPermissions;
+    }
 
     inline int32_t GetPermissionIndex(uint32_t aType) const {
       for (uint32_t i = 0; i < mPermissions.Length(); ++i)
@@ -349,6 +352,16 @@ class PermissionManager final : public nsIPermissionManager,
   void WhenPermissionsAvailable(nsIPrincipal* aPrincipal,
                                 nsIRunnable* aRunnable);
 
+  /**
+   * Strip origin attributes for permissions, depending on permission isolation
+   * pref state.
+   * @param aForceStrip If true, strips user context and private browsing id,
+   * ignoring permission isolation prefs.
+   * @param aOriginAttributes object to strip.
+   */
+  static void MaybeStripOriginAttributes(bool aForceStrip,
+                                         OriginAttributes& aOriginAttributes);
+
  private:
   ~PermissionManager();
 
@@ -486,7 +499,8 @@ class PermissionManager final : public nsIPermissionManager,
                        NotifyOperationType aNotifyOperation,
                        DBOperationType aDBOperation,
                        const bool aIgnoreSessionPermissions = false,
-                       const nsACString* aOriginString = nullptr);
+                       const nsACString* aOriginString = nullptr,
+                       const bool aAllowPersistInPrivateBrowsing = false);
 
   void MaybeAddReadEntryFromMigration(const nsACString& aOrigin,
                                       const nsCString& aType,

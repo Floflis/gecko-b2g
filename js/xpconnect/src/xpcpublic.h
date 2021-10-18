@@ -81,7 +81,7 @@ class Scriptability {
 
   void Block();
   void Unblock();
-  void SetDocShellAllowsScript(bool aAllowed);
+  void SetWindowAllowsScript(bool aAllowed);
 
   static Scriptability& Get(JSObject* aScope);
 
@@ -92,9 +92,9 @@ class Scriptability {
   // Script may not run if this value is non-zero.
   uint32_t mScriptBlocks;
 
-  // Whether the docshell allows javascript in this scope. If this scope
-  // doesn't have a docshell, this value is always true.
-  bool mDocShellAllowsScript;
+  // Whether the DOM window allows javascript in this scope. If this scope
+  // doesn't have a window, this value is always true.
+  bool mWindowAllowsScript;
 
   // Whether this scope is immune to user-defined or addon-defined script
   // policy.
@@ -138,6 +138,7 @@ bool AllowContentXBLScope(JS::Realm* realm);
 JSObject* NACScope(JSObject* global);
 
 bool IsSandboxPrototypeProxy(JSObject* obj);
+bool IsWebExtensionContentScriptSandbox(JSObject* obj);
 
 // The JSContext argument represents the Realm that's asking the question.  This
 // is needed to properly answer without exposing information unnecessarily
@@ -192,10 +193,11 @@ struct RuntimeStats;
 
 }  // namespace JS
 
-#define XPC_WRAPPER_FLAGS (JSCLASS_HAS_PRIVATE | JSCLASS_FOREGROUND_FINALIZE)
+static_assert(JSCLASS_GLOBAL_APPLICATION_SLOTS > 0,
+              "Need at least one slot for JSCLASS_SLOT0_IS_NSISUPPORTS");
 
-#define XPCONNECT_GLOBAL_FLAGS_WITH_EXTRA_SLOTS(n)                            \
-  JSCLASS_DOM_GLOBAL | JSCLASS_HAS_PRIVATE | JSCLASS_PRIVATE_IS_NSISUPPORTS | \
+#define XPCONNECT_GLOBAL_FLAGS_WITH_EXTRA_SLOTS(n)    \
+  JSCLASS_DOM_GLOBAL | JSCLASS_SLOT0_IS_NSISUPPORTS | \
       JSCLASS_GLOBAL_FLAGS_WITH_SLOTS(DOM_GLOBAL_SLOTS + n)
 
 #define XPCONNECT_GLOBAL_EXTRA_SLOT_OFFSET \
@@ -551,6 +553,13 @@ nsGlobalWindowInner* WindowOrNull(JSObject* aObj);
  * because CCWs are not associated with a single global/realm.
  */
 nsGlobalWindowInner* WindowGlobalOrNull(JSObject* aObj);
+
+/**
+ * If |aObj| is a Sandbox object associated with a DOMWindow via a
+ * sandboxPrototype, then return that DOMWindow.
+ * |aCx| is used for checked unwrapping of the Window.
+ */
+nsGlobalWindowInner* SandboxWindowOrNull(JSObject* aObj, JSContext* aCx);
 
 /**
  * If |cx| is in a realm whose global is a window, returns the associated

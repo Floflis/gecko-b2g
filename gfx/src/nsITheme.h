@@ -76,11 +76,15 @@ class nsITheme : public nsISupports {
    * @param aWidgetType the -moz-appearance value to draw
    * @param aRect the rectangle defining the area occupied by the widget
    * @param aDirtyRect the rectangle that needs to be drawn
+   * @param DrawOverflow whether outlines, shadows and other such overflowing
+   *        things should be drawn. Honoring this creates better results for
+   *        box-shadow, though it's not a hard requirement.
    */
+  enum class DrawOverflow { No, Yes };
   NS_IMETHOD DrawWidgetBackground(gfxContext* aContext, nsIFrame* aFrame,
                                   StyleAppearance aWidgetType,
-                                  const nsRect& aRect,
-                                  const nsRect& aDirtyRect) = 0;
+                                  const nsRect& aRect, const nsRect& aDirtyRect,
+                                  DrawOverflow = DrawOverflow::Yes) = 0;
 
   /**
    * Create WebRender commands for the theme background.
@@ -107,8 +111,8 @@ class nsITheme : public nsISupports {
     LayoutDeviceIntCoord mVertical;
     LayoutDeviceIntCoord mHorizontal;
   };
-  virtual ScrollbarSizes GetScrollbarSizes(
-      nsPresContext*, StyleScrollbarWidth, Overlay) = 0;
+  virtual ScrollbarSizes GetScrollbarSizes(nsPresContext*, StyleScrollbarWidth,
+                                           Overlay) = 0;
 
   /**
    * Return the border for the widget, in device pixels.
@@ -148,6 +152,14 @@ class nsITheme : public nsISupports {
                                  StyleAppearance aWidgetType,
                                  /*INOUT*/ nsRect* aOverflowRect) {
     return false;
+  }
+
+  /**
+   * Get the preferred content-box size of a checkbox / radio button, in app
+   * units.  Historically 9px.
+   */
+  virtual nscoord GetCheckboxRadioPrefSize() {
+    return mozilla::CSSPixel::ToAppUnits(9);
   }
 
   /**
@@ -252,6 +264,7 @@ NS_DEFINE_STATIC_IID_ACCESSOR(nsITheme, NS_ITHEME_IID)
 //
 // Do not use directly, use nsPresContext::Theme instead.
 extern already_AddRefed<nsITheme> do_GetNativeThemeDoNotUseDirectly();
+extern already_AddRefed<nsITheme> do_GetAndroidNonNativeThemeDoNotUseDirectly();
 extern already_AddRefed<nsITheme> do_GetBasicNativeThemeDoNotUseDirectly();
 
 #endif

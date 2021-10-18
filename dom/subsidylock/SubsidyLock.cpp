@@ -8,8 +8,9 @@
 
 #include "SubsidyLockCallback.h"
 #include "mozilla/dom/BindingDeclarations.h"
-#include "mozilla/DOMEventTargetHelper.h"
 #include "mozilla/dom/DOMRequest.h"
+#include "mozilla/DOMEventTargetHelper.h"
+#include "mozilla/ErrorResult.h"
 #include "nsIPermissionManager.h"
 #include "nsIVariant.h"
 #include "nsJSUtils.h"
@@ -34,9 +35,6 @@ NS_INTERFACE_MAP_END
 
 SubsidyLock::SubsidyLock(nsPIDOMWindowInner* aWindow, uint32_t aClientId)
     : mClientId(aClientId), mWindow(aWindow) {
-  if (!CheckPermission("mobileconnection")) {
-    return;
-  }
 
   nsCOMPtr<nsISubsidyLockService> service =
       do_GetService(NS_SUBSIDY_LOCK_SERVICE_CONTRACTID);
@@ -69,17 +67,6 @@ nsPIDOMWindowInner* SubsidyLock::GetParentObject() const {
 JSObject* SubsidyLock::WrapObject(JSContext* aCx,
                                   JS::Handle<JSObject*> aGivenProto) {
   return SubsidyLock_Binding::Wrap(aCx, this, aGivenProto);
-}
-
-bool SubsidyLock::CheckPermission(const char* aType) const {
-  // nsCOMPtr<nsIPermissionManager> permMgr =
-  //  mozilla::services::GetPermissionManager();
-  // NS_ENSURE_TRUE(permMgr, false);
-
-  // uint32_t permission = nsIPermissionManager::DENY_ACTION;
-  // permMgr->TestPermissionFromWindow(mWindow, aType, &permission);
-  // return permission == nsIPermissionManager::ALLOW_ACTION;
-  return true;
 }
 
 // WebIDL interface

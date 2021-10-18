@@ -35,15 +35,14 @@
 #include "nsIGlobalObject.h"
 #include "nsMixedContentBlocker.h"
 #include "nsURLParsers.h"
-#include "js/Object.h"  // JS::GetClass
+#include "js/Object.h"              // JS::GetClass
+#include "js/PropertyAndElement.h"  // JS_DefineProperty
 
 namespace mozilla::dom::cache {
 
 using mozilla::ErrorResult;
-using mozilla::Unused;
 using mozilla::dom::quota::QuotaManager;
 using mozilla::ipc::BackgroundChild;
-using mozilla::ipc::IProtocol;
 using mozilla::ipc::PBackgroundChild;
 using mozilla::ipc::PrincipalInfo;
 using mozilla::ipc::PrincipalToPrincipalInfo;
@@ -78,8 +77,8 @@ bool IsTrusted(const PrincipalInfo& aPrincipalInfo, bool aTestingPrefEnabled) {
   }
 
   // Require a ContentPrincipal to avoid null principal, etc.
-  CACHE_TRY(OkIf(aPrincipalInfo.type() == PrincipalInfo::TContentPrincipalInfo),
-            false);
+  QM_TRY(OkIf(aPrincipalInfo.type() == PrincipalInfo::TContentPrincipalInfo),
+         false);
 
   // If we're in testing mode, then don't do any more work to determine if
   // the origin is trusted.  We have to run some tests as http.
@@ -105,30 +104,27 @@ bool IsTrusted(const PrincipalInfo& aPrincipalInfo, bool aTestingPrefEnabled) {
   int32_t schemeLen;
   uint32_t authPos;
   int32_t authLen;
-  CACHE_TRY(
-      urlParser->ParseURL(url, flatURL.Length(), &schemePos, &schemeLen,
-                          &authPos, &authLen, nullptr, nullptr),  // ignore path
-      false);
+  QM_TRY(MOZ_TO_RESULT(urlParser->ParseURL(url, flatURL.Length(), &schemePos,
+                                           &schemeLen, &authPos, &authLen,
+                                           nullptr, nullptr)),  // ignore path
+         false);
 
   const nsAutoCString scheme(Substring(flatURL, schemePos, schemeLen));
   if (scheme.LowerCaseEqualsLiteral("https") ||
-      scheme.LowerCaseEqualsLiteral("file")) {
-    return true;
-  }
-
-  if (StaticPrefs::extensions_backgroundServiceWorker_enabled_AtStartup() &&
+      scheme.LowerCaseEqualsLiteral("file") ||
       scheme.LowerCaseEqualsLiteral("moz-extension")) {
     return true;
   }
 
   uint32_t hostPos;
   int32_t hostLen;
-  CACHE_TRY(urlParser->ParseAuthority(url + authPos, authLen, nullptr,
-                                      nullptr,           // ignore username
-                                      nullptr, nullptr,  // ignore password
-                                      &hostPos, &hostLen,
-                                      nullptr),  // ignore port
-            false);
+  QM_TRY(MOZ_TO_RESULT(
+             urlParser->ParseAuthority(url + authPos, authLen, nullptr,
+                                       nullptr,           // ignore username
+                                       nullptr, nullptr,  // ignore password
+                                       &hostPos, &hostLen,
+                                       nullptr)),  // ignore port
+         false);
 
   return nsMixedContentBlocker::IsPotentiallyTrustworthyLoopbackHost(
       nsDependentCSubstring(url + authPos + hostPos, hostLen));
@@ -145,14 +141,14 @@ already_AddRefed<CacheStorage> CacheStorage::CreateOnMainThread(
   MOZ_ASSERT(NS_IsMainThread());
 
   PrincipalInfo principalInfo;
-  CACHE_TRY(PrincipalToPrincipalInfo(aPrincipal, &principalInfo), nullptr,
-            [&aRv](const nsresult rv) { aRv.Throw(rv); });
+  QM_TRY(MOZ_TO_RESULT(PrincipalToPrincipalInfo(aPrincipal, &principalInfo)),
+         nullptr, [&aRv](const nsresult rv) { aRv.Throw(rv); });
 
-  CACHE_TRY(OkIf(QuotaManager::IsPrincipalInfoValid(principalInfo)),
-            RefPtr{new CacheStorage(NS_ERROR_DOM_SECURITY_ERR)}.forget(),
-            [](const auto) {
-              NS_WARNING("CacheStorage not supported on invalid origins.");
-            });
+  QM_TRY(OkIf(QuotaManager::IsPrincipalInfoValid(principalInfo)),
+         RefPtr{new CacheStorage(NS_ERROR_DOM_SECURITY_ERR)}.forget(),
+         [](const auto) {
+           NS_WARNING("CacheStorage not supported on invalid origins.");
+         });
 
   const bool testingEnabled =
       aForceTrustedOrigin ||
@@ -195,8 +191,8 @@ already_AddRefed<CacheStorage> CacheStorage::CreateOnWorker(
   const PrincipalInfo& principalInfo =
       aWorkerPrivate->GetEffectiveStoragePrincipalInfo();
 
-  CACHE_TRY(OkIf(QuotaManager::IsPrincipalInfoValid(principalInfo)), nullptr,
-            [&aRv](const auto) { aRv.Throw(NS_ERROR_FAILURE); });
+  QM_TRY(OkIf(QuotaManager::IsPrincipalInfoValid(principalInfo)), nullptr,
+         [&aRv](const auto) { aRv.Throw(NS_ERROR_FAILURE); });
 
   // We have a number of cases where we want to skip the https scheme
   // validation:
@@ -558,24 +554,10 @@ OpenMode CacheStorage::GetOpenMode() const {
 
 bool CacheStorage::HasStorageAccess() const {
   NS_ASSERT_OWNINGTHREAD(CacheStorage);
-
-  StorageAccess access;
-
-  if (NS_IsMainThread()) {
-    nsCOMPtr<nsPIDOMWindowInner> window = do_QueryInterface(mGlobal);
-    if (NS_WARN_IF(!window)) {
-      return true;
-    }
-
-    access = StorageAllowedForWindow(window);
-  } else {
-    WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate();
-    MOZ_ASSERT(workerPrivate);
-
-    access = workerPrivate->StorageAccess();
+  if (NS_WARN_IF(!mGlobal)) {
+    return false;
   }
-
-  return access > StorageAccess::ePrivateBrowsing;
+  return mGlobal->GetStorageAccess() > StorageAccess::ePrivateBrowsing;
 }
 
 }  // namespace mozilla::dom::cache

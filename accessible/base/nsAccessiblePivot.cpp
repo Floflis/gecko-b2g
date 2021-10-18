@@ -27,7 +27,7 @@ class RuleCache : public PivotRule {
       : mRule(aRule), mPreFilter{0} {}
   ~RuleCache() {}
 
-  virtual uint16_t Match(const AccessibleOrProxy& aAccOrProxy) override;
+  virtual uint16_t Match(Accessible* aAcc) override;
 
  private:
   nsCOMPtr<nsIAccessibleTraversalRule> mRule;
@@ -38,7 +38,7 @@ class RuleCache : public PivotRule {
 ////////////////////////////////////////////////////////////////////////////////
 // nsAccessiblePivot
 
-nsAccessiblePivot::nsAccessiblePivot(Accessible* aRoot)
+nsAccessiblePivot::nsAccessiblePivot(LocalAccessible* aRoot)
     : mRoot(aRoot),
       mModalRoot(nullptr),
       mPosition(nullptr),
@@ -85,12 +85,13 @@ nsAccessiblePivot::GetPosition(nsIAccessible** aPosition) {
 
 NS_IMETHODIMP
 nsAccessiblePivot::SetPosition(nsIAccessible* aPosition) {
-  RefPtr<Accessible> position = nullptr;
+  RefPtr<LocalAccessible> position = nullptr;
 
   if (aPosition) {
     position = aPosition->ToInternalAccessible();
-    if (!position || !IsDescendantOf(position, GetActiveRoot()))
+    if (!position || !IsDescendantOf(position, GetActiveRoot())) {
       return NS_ERROR_INVALID_ARG;
+    }
   }
 
   // Swap old position with new position, saves us an AddRef/Release.
@@ -115,12 +116,13 @@ nsAccessiblePivot::GetModalRoot(nsIAccessible** aModalRoot) {
 
 NS_IMETHODIMP
 nsAccessiblePivot::SetModalRoot(nsIAccessible* aModalRoot) {
-  Accessible* modalRoot = nullptr;
+  LocalAccessible* modalRoot = nullptr;
 
   if (aModalRoot) {
     modalRoot = aModalRoot->ToInternalAccessible();
-    if (!modalRoot || !IsDescendantOf(modalRoot, mRoot))
+    if (!modalRoot || !IsDescendantOf(modalRoot, mRoot)) {
       return NS_ERROR_INVALID_ARG;
+    }
   }
 
   mModalRoot = modalRoot;
@@ -161,16 +163,18 @@ nsAccessiblePivot::SetTextRange(nsIAccessibleText* aTextAccessible,
   nsCOMPtr<nsIAccessible> xpcAcc = do_QueryInterface(aTextAccessible);
   NS_ENSURE_ARG(xpcAcc);
 
-  RefPtr<Accessible> acc = xpcAcc->ToInternalAccessible();
+  RefPtr<LocalAccessible> acc = xpcAcc->ToInternalAccessible();
   NS_ENSURE_ARG(acc);
 
   HyperTextAccessible* position = acc->AsHyperText();
-  if (!position || !IsDescendantOf(position, GetActiveRoot()))
+  if (!position || !IsDescendantOf(position, GetActiveRoot())) {
     return NS_ERROR_INVALID_ARG;
+  }
 
   // Make sure the given offsets don't exceed the character count.
-  if (aEndOffset > static_cast<int32_t>(position->CharacterCount()))
+  if (aEndOffset > static_cast<int32_t>(position->CharacterCount())) {
     return NS_ERROR_FAILURE;
+  }
 
   int32_t oldStart = mStartOffset, oldEnd = mEndOffset;
   mStartOffset = aStartOffset;
@@ -195,23 +199,23 @@ nsAccessiblePivot::MoveNext(nsIAccessibleTraversalRule* aRule,
   NS_ENSURE_ARG(aRule);
   *aResult = false;
 
-  Accessible* anchor = mPosition;
+  LocalAccessible* anchor = mPosition;
   if (aArgc > 0 && aAnchor) anchor = aAnchor->ToInternalAccessible();
 
   if (anchor &&
-      (anchor->IsDefunct() || !IsDescendantOf(anchor, GetActiveRoot())))
+      (anchor->IsDefunct() || !IsDescendantOf(anchor, GetActiveRoot()))) {
     return NS_ERROR_NOT_IN_TREE;
+  }
 
   Pivot pivot(GetActiveRoot());
   RuleCache rule(aRule);
-  AccessibleOrProxy wrappedAnchor = AccessibleOrProxy(anchor);
-  AccessibleOrProxy newPos =
-      pivot.Next(wrappedAnchor, rule, (aArgc > 1) ? aIncludeStart : false);
-  if (!newPos.IsNull() && newPos.IsAccessible()) {
-    *aResult = MovePivotInternal(newPos.AsAccessible(),
-                                 nsIAccessiblePivot::REASON_NEXT,
-                                 (aArgc > 2) ? aIsFromUserInput : true);
-  } else if (newPos.IsProxy()) {
+  Accessible* newPos =
+      pivot.Next(anchor, rule, (aArgc > 1) ? aIncludeStart : false);
+  if (newPos && newPos->IsLocal()) {
+    *aResult =
+        MovePivotInternal(newPos->AsLocal(), nsIAccessiblePivot::REASON_NEXT,
+                          (aArgc > 2) ? aIsFromUserInput : true);
+  } else if (newPos && newPos->IsRemote()) {
     // we shouldn't ever end up with a proxy here, but if we do for some
     // reason something is wrong. we should still return OK if we're null
     return NS_ERROR_FAILURE;
@@ -229,23 +233,23 @@ nsAccessiblePivot::MovePrevious(nsIAccessibleTraversalRule* aRule,
   NS_ENSURE_ARG(aRule);
   *aResult = false;
 
-  Accessible* anchor = mPosition;
+  LocalAccessible* anchor = mPosition;
   if (aArgc > 0 && aAnchor) anchor = aAnchor->ToInternalAccessible();
 
   if (anchor &&
-      (anchor->IsDefunct() || !IsDescendantOf(anchor, GetActiveRoot())))
+      (anchor->IsDefunct() || !IsDescendantOf(anchor, GetActiveRoot()))) {
     return NS_ERROR_NOT_IN_TREE;
+  }
 
   Pivot pivot(GetActiveRoot());
   RuleCache rule(aRule);
-  AccessibleOrProxy wrappedAnchor = AccessibleOrProxy(anchor);
-  AccessibleOrProxy newPos =
-      pivot.Prev(wrappedAnchor, rule, (aArgc > 1) ? aIncludeStart : false);
-  if (!newPos.IsNull() && newPos.IsAccessible()) {
-    *aResult = MovePivotInternal(newPos.AsAccessible(),
-                                 nsIAccessiblePivot::REASON_PREV,
-                                 (aArgc > 2) ? aIsFromUserInput : true);
-  } else if (newPos.IsProxy()) {
+  Accessible* newPos =
+      pivot.Prev(anchor, rule, (aArgc > 1) ? aIncludeStart : false);
+  if (newPos && newPos->IsLocal()) {
+    *aResult =
+        MovePivotInternal(newPos->AsLocal(), nsIAccessiblePivot::REASON_PREV,
+                          (aArgc > 2) ? aIsFromUserInput : true);
+  } else if (newPos && newPos->IsRemote()) {
     // we shouldn't ever end up with a proxy here, but if we do for some
     // reason something is wrong. we should still return OK if we're null
     return NS_ERROR_FAILURE;
@@ -261,17 +265,17 @@ nsAccessiblePivot::MoveFirst(nsIAccessibleTraversalRule* aRule,
   NS_ENSURE_ARG(aResult);
   NS_ENSURE_ARG(aRule);
 
-  Accessible* root = GetActiveRoot();
+  LocalAccessible* root = GetActiveRoot();
   NS_ENSURE_TRUE(root && !root->IsDefunct(), NS_ERROR_NOT_IN_TREE);
 
   Pivot pivot(GetActiveRoot());
   RuleCache rule(aRule);
-  AccessibleOrProxy newPos = pivot.First(rule);
-  if (!newPos.IsNull() && newPos.IsAccessible()) {
-    *aResult = MovePivotInternal(newPos.AsAccessible(),
-                                 nsIAccessiblePivot::REASON_FIRST,
-                                 (aArgc > 0) ? aIsFromUserInput : true);
-  } else if (newPos.IsProxy()) {
+  Accessible* newPos = pivot.First(rule);
+  if (newPos && newPos->IsLocal()) {
+    *aResult =
+        MovePivotInternal(newPos->AsLocal(), nsIAccessiblePivot::REASON_FIRST,
+                          (aArgc > 0) ? aIsFromUserInput : true);
+  } else if (newPos && newPos->IsRemote()) {
     // we shouldn't ever end up with a proxy here, but if we do for some
     // reason something is wrong. we should still return OK if we're null
     return NS_ERROR_FAILURE;
@@ -287,17 +291,17 @@ nsAccessiblePivot::MoveLast(nsIAccessibleTraversalRule* aRule,
   NS_ENSURE_ARG(aResult);
   NS_ENSURE_ARG(aRule);
 
-  Accessible* root = GetActiveRoot();
+  LocalAccessible* root = GetActiveRoot();
   NS_ENSURE_TRUE(root && !root->IsDefunct(), NS_ERROR_NOT_IN_TREE);
 
   Pivot pivot(root);
   RuleCache rule(aRule);
-  AccessibleOrProxy newPos = pivot.Last(rule);
-  if (!newPos.IsNull() && newPos.IsAccessible()) {
-    *aResult = MovePivotInternal(newPos.AsAccessible(),
-                                 nsIAccessiblePivot::REASON_LAST,
-                                 (aArgc > 0) ? aIsFromUserInput : true);
-  } else if (newPos.IsProxy()) {
+  Accessible* newPos = pivot.Last(rule);
+  if (newPos && newPos->IsLocal()) {
+    *aResult =
+        MovePivotInternal(newPos->AsLocal(), nsIAccessiblePivot::REASON_LAST,
+                          (aArgc > 0) ? aIsFromUserInput : true);
+  } else if (newPos && newPos->IsRemote()) {
     // we shouldn't ever end up with a proxy here, but if we do for some
     // reason something is wrong. we should still return OK if we're null
     return NS_ERROR_FAILURE;
@@ -317,11 +321,12 @@ nsAccessiblePivot::MoveNextByText(TextBoundaryType aBoundary,
   Pivot pivot(GetActiveRoot());
 
   int32_t newStart = mStartOffset, newEnd = mEndOffset;
-  Accessible* newPos = pivot.NextText(mPosition, &newStart, &newEnd, aBoundary);
+  LocalAccessible* newPos =
+      pivot.NextText(mPosition, &newStart, &newEnd, aBoundary);
   if (newPos) {
     *aResult = true;
     int32_t oldStart = mStartOffset, oldEnd = mEndOffset;
-    Accessible* oldPos = mPosition;
+    LocalAccessible* oldPos = mPosition;
     mStartOffset = newStart;
     mEndOffset = newEnd;
     mPosition = newPos;
@@ -344,11 +349,12 @@ nsAccessiblePivot::MovePreviousByText(TextBoundaryType aBoundary,
   Pivot pivot(GetActiveRoot());
 
   int32_t newStart = mStartOffset, newEnd = mEndOffset;
-  Accessible* newPos = pivot.PrevText(mPosition, &newStart, &newEnd, aBoundary);
+  LocalAccessible* newPos =
+      pivot.PrevText(mPosition, &newStart, &newEnd, aBoundary);
   if (newPos) {
     *aResult = true;
     int32_t oldStart = mStartOffset, oldEnd = mEndOffset;
-    Accessible* oldPos = mPosition;
+    LocalAccessible* oldPos = mPosition;
     mStartOffset = newStart;
     mEndOffset = newEnd;
     mPosition = newPos;
@@ -370,19 +376,19 @@ nsAccessiblePivot::MoveToPoint(nsIAccessibleTraversalRule* aRule, int32_t aX,
 
   *aResult = false;
 
-  Accessible* root = GetActiveRoot();
+  LocalAccessible* root = GetActiveRoot();
   NS_ENSURE_TRUE(root && !root->IsDefunct(), NS_ERROR_NOT_IN_TREE);
 
   RuleCache rule(aRule);
   Pivot pivot(root);
 
-  AccessibleOrProxy newPos = pivot.AtPoint(aX, aY, rule);
-  if ((!newPos.IsNull() && newPos.IsAccessible()) ||
+  Accessible* newPos = pivot.AtPoint(aX, aY, rule);
+  if ((newPos && newPos->IsLocal()) ||
       !aIgnoreNoMatch) {  // TODO does this need a proxy check?
-    *aResult = MovePivotInternal(newPos.AsAccessible(),
+    *aResult = MovePivotInternal(newPos ? newPos->AsLocal() : nullptr,
                                  nsIAccessiblePivot::REASON_POINT,
                                  (aArgc > 0) ? aIsFromUserInput : true);
-  } else if (newPos.IsProxy()) {
+  } else if (newPos && newPos->IsRemote()) {
     // we shouldn't ever end up with a proxy here, but if we do for some
     // reason something is wrong. we should still return OK if we're null
     return NS_ERROR_FAILURE;
@@ -411,23 +417,23 @@ nsAccessiblePivot::RemoveObserver(nsIAccessiblePivotObserver* aObserver) {
 
 // Private utility methods
 
-bool nsAccessiblePivot::IsDescendantOf(Accessible* aAccessible,
-                                       Accessible* aAncestor) {
+bool nsAccessiblePivot::IsDescendantOf(LocalAccessible* aAccessible,
+                                       LocalAccessible* aAncestor) {
   if (!aAncestor || aAncestor->IsDefunct()) return false;
 
   // XXX Optimize with IsInDocument() when appropriate. Blocked by bug 759875.
-  Accessible* accessible = aAccessible;
+  LocalAccessible* accessible = aAccessible;
   do {
     if (accessible == aAncestor) return true;
-  } while ((accessible = accessible->Parent()));
+  } while ((accessible = accessible->LocalParent()));
 
   return false;
 }
 
-bool nsAccessiblePivot::MovePivotInternal(Accessible* aPosition,
+bool nsAccessiblePivot::MovePivotInternal(LocalAccessible* aPosition,
                                           PivotMoveReason aReason,
                                           bool aIsFromUserInput) {
-  RefPtr<Accessible> oldPosition = std::move(mPosition);
+  RefPtr<LocalAccessible> oldPosition = std::move(mPosition);
   mPosition = aPosition;
   int32_t oldStart = mStartOffset, oldEnd = mEndOffset;
   mStartOffset = mEndOffset = -1;
@@ -436,14 +442,15 @@ bool nsAccessiblePivot::MovePivotInternal(Accessible* aPosition,
                              nsIAccessiblePivot::NO_BOUNDARY, aIsFromUserInput);
 }
 
-bool nsAccessiblePivot::NotifyOfPivotChange(Accessible* aOldPosition,
+bool nsAccessiblePivot::NotifyOfPivotChange(LocalAccessible* aOldPosition,
                                             int32_t aOldStart, int32_t aOldEnd,
                                             int16_t aReason,
                                             int16_t aBoundaryType,
                                             bool aIsFromUserInput) {
   if (aOldPosition == mPosition && aOldStart == mStartOffset &&
-      aOldEnd == mEndOffset)
+      aOldEnd == mEndOffset) {
     return false;
+  }
 
   nsCOMPtr<nsIAccessible> xpcOldPos = ToXPC(aOldPosition);  // death grip
   for (nsIAccessiblePivotObserver* obs : mObservers.ForwardRange()) {
@@ -455,7 +462,7 @@ bool nsAccessiblePivot::NotifyOfPivotChange(Accessible* aOldPosition,
   return true;
 }
 
-uint16_t RuleCache::Match(const AccessibleOrProxy& aAccOrProxy) {
+uint16_t RuleCache::Match(Accessible* aAcc) {
   uint16_t result = nsIAccessibleTraversalRule::FILTER_IGNORE;
 
   if (!mAcceptRoles) {
@@ -468,33 +475,36 @@ uint16_t RuleCache::Match(const AccessibleOrProxy& aAccOrProxy) {
 
   if (mPreFilter) {
     uint64_t state;
-    if (aAccOrProxy.IsAccessible()) {
-      state = aAccOrProxy.AsAccessible()->State();
+    if (aAcc->IsLocal()) {
+      state = aAcc->AsLocal()->State();
     } else {
-      state = aAccOrProxy.AsProxy()->State();
+      state = aAcc->AsRemote()->State();
     }
 
     if ((nsIAccessibleTraversalRule::PREFILTER_PLATFORM_PRUNED & mPreFilter) &&
-        nsAccUtils::MustPrune(aAccOrProxy)) {
+        nsAccUtils::MustPrune(aAcc)) {
       result |= nsIAccessibleTraversalRule::FILTER_IGNORE_SUBTREE;
     }
 
     if ((nsIAccessibleTraversalRule::PREFILTER_INVISIBLE & mPreFilter) &&
-        (state & states::INVISIBLE))
+        (state & states::INVISIBLE)) {
       return result;
+    }
 
     if ((nsIAccessibleTraversalRule::PREFILTER_OFFSCREEN & mPreFilter) &&
-        (state & states::OFFSCREEN))
+        (state & states::OFFSCREEN)) {
       return result;
+    }
 
     if ((nsIAccessibleTraversalRule::PREFILTER_NOT_FOCUSABLE & mPreFilter) &&
-        !(state & states::FOCUSABLE))
+        !(state & states::FOCUSABLE)) {
       return result;
+    }
 
-    if (aAccOrProxy.IsAccessible() &&
+    if (aAcc->IsLocal() &&
         (nsIAccessibleTraversalRule::PREFILTER_TRANSPARENT & mPreFilter) &&
         !(state & states::OPAQUE1)) {
-      nsIFrame* frame = aAccOrProxy.AsAccessible()->GetFrame();
+      nsIFrame* frame = aAcc->AsLocal()->GetFrame();
       if (frame && frame->StyleEffects()->mOpacity == 0.0f) {
         return result | nsIAccessibleTraversalRule::FILTER_IGNORE_SUBTREE;
       }
@@ -502,7 +512,7 @@ uint16_t RuleCache::Match(const AccessibleOrProxy& aAccOrProxy) {
   }
 
   if (mAcceptRoles->Length() > 0) {
-    uint32_t accessibleRole = aAccOrProxy.Role();
+    uint32_t accessibleRole = aAcc->Role();
     bool matchesRole = false;
     for (uint32_t idx = 0; idx < mAcceptRoles->Length(); idx++) {
       matchesRole = mAcceptRoles->ElementAt(idx) == accessibleRole;
@@ -515,7 +525,11 @@ uint16_t RuleCache::Match(const AccessibleOrProxy& aAccOrProxy) {
   }
 
   uint16_t matchResult = nsIAccessibleTraversalRule::FILTER_IGNORE;
-  DebugOnly<nsresult> rv = mRule->Match(ToXPC(aAccOrProxy), &matchResult);
+
+  // XXX: ToXPC takes an Accessible. This can go away when pivot
+  // removes AoP too.
+
+  DebugOnly<nsresult> rv = mRule->Match(ToXPC(aAcc), &matchResult);
   MOZ_ASSERT(NS_SUCCEEDED(rv));
 
   return result | matchResult;

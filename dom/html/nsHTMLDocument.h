@@ -34,14 +34,13 @@ class WindowProxyHolder;
 
 class nsHTMLDocument : public mozilla::dom::Document {
  protected:
-  typedef mozilla::dom::ReferrerPolicy ReferrerPolicy;
-  typedef mozilla::dom::Document Document;
-  typedef mozilla::Encoding Encoding;
+  using ReferrerPolicy = mozilla::dom::ReferrerPolicy;
+  using Document = mozilla::dom::Document;
+  using Encoding = mozilla::Encoding;
   template <typename T>
   using NotNull = mozilla::NotNull<T>;
 
  public:
-  using Document::GetPlugins;
   using Document::SetDocumentURI;
 
   nsHTMLDocument();
@@ -172,20 +171,15 @@ class nsHTMLDocument : public mozilla::dom::Document {
   /** # of forms in the document, synchronously set */
   int32_t mNumForms;
 
-  static void TryHintCharset(nsIContentViewer* aContentViewer,
-                             int32_t& aCharsetSource,
-                             NotNull<const Encoding*>& aEncoding);
+  static void TryReloadCharset(nsIContentViewer* aCv, int32_t& aCharsetSource,
+                               NotNull<const Encoding*>& aEncoding);
   void TryUserForcedCharset(nsIContentViewer* aCv, nsIDocShell* aDocShell,
                             int32_t& aCharsetSource,
-                            NotNull<const Encoding*>& aEncoding);
-  static void TryCacheCharset(nsICachingChannel* aCachingChannel,
-                              int32_t& aCharsetSource,
-                              NotNull<const Encoding*>& aEncoding);
+                            NotNull<const Encoding*>& aEncoding,
+                            bool& aForceAutoDetection);
   void TryParentCharset(nsIDocShell* aDocShell, int32_t& charsetSource,
-                        NotNull<const Encoding*>& aEncoding);
-  void TryTLD(int32_t& aCharsetSource, NotNull<const Encoding*>& aCharset);
-  static void TryFallback(int32_t& aCharsetSource,
-                          NotNull<const Encoding*>& aEncoding);
+                        NotNull<const Encoding*>& aEncoding,
+                        bool& aForceAutoDetection);
 
   // Load flags of the document's channel
   uint32_t mLoadFlags;

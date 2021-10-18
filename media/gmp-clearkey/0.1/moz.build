@@ -7,7 +7,7 @@
 with Files("**"):
     BUG_COMPONENT = ("Core", "Audio/Video: GMP")
 
-SharedLibrary("clearkey")
+GeckoSharedLibrary("clearkey", linkage=None)
 
 FINAL_TARGET = "dist/bin/gmp-clearkey/0.1"
 
@@ -74,3 +74,5 @@ elif CONFIG["CC_TYPE"] == "clang-cl":
         "-FI",
         "stdio.h",  # for sprintf() prototype
     ]
+
+REQUIRES_UNIFIED_BUILD = True

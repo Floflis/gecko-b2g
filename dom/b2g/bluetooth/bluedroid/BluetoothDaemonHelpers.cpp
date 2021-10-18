@@ -115,7 +115,13 @@ nsresult Convert(uint8_t aIn, BluetoothAvrcpEvent& aOut) {
       [0x05] = AVRCP_EVENT_PLAY_POS_CHANGED,
       [0x06] = static_cast<BluetoothAvrcpEvent>(0),
       [0x07] = static_cast<BluetoothAvrcpEvent>(0),
-      [0x08] = AVRCP_EVENT_APP_SETTINGS_CHANGED};
+      [0x08] = AVRCP_EVENT_APP_SETTINGS_CHANGED,
+      [0x09] = AVRCP_EVENT_NOW_PLAYING_CONTENT_CHANGED,
+      [0x0a] = AVRCP_EVENT_AVAL_PLAYER_CHANGE,
+      [0x0b] = AVRCP_EVENT_ADDR_PLAYER_CHANGE,
+      [0x0c] = AVRCP_EVENT_UIDS_CHANGED,
+      [0x0d] = AVRCP_EVENT_VOL_CHANGED,
+  };
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(!aIn, uint8_t, BluetoothAvrcpEvent) ||
       MOZ_HAL_IPC_CONVERT_WARN_IF(aIn == 0x06, uint8_t, BluetoothAvrcpEvent) ||
       MOZ_HAL_IPC_CONVERT_WARN_IF(aIn == 0x07, uint8_t, BluetoothAvrcpEvent) ||
@@ -182,7 +188,7 @@ nsresult Convert(uint8_t aIn, BluetoothAvrcpRemoteFeatureBits& aOut) {
       bits |= sAvrcpRemoteFeatureBits[i];
     }
   }
-  if (MOZ_HAL_IPC_CONVERT_WARN_IF(aIn << i, 'uint8_t',
+  if (MOZ_HAL_IPC_CONVERT_WARN_IF((aIn << i) != 0, 'uint8_t',
                                   BluetoothAvrcpRemoteFeatureBits)) {
     aOut = AVRCP_REMOTE_FEATURE_NONE;  // silences compiler warning
     return NS_ERROR_ILLEGAL_VALUE;
@@ -288,6 +294,19 @@ nsresult Convert(uint8_t aIn, BluetoothHandsfreeWbsConfig& aOut) {
     return NS_ERROR_ILLEGAL_VALUE;
   }
   aOut = sWbsConfig[aIn];
+  return NS_OK;
+}
+
+nsresult Convert(uint8_t aIn, BluetoothHandsfreeHfIndType& aOut) {
+  static const BluetoothHandsfreeHfIndType sHfIndType[] = {
+      [0x00] = HFP_HF_IND_NONE,
+      [0x01] = HFP_HF_IND_ENHANCED_DRIVER_SAFETY,
+      [0x02] = HFP_HF_IND_BATTERY_LEVEL_STATUS};
+  if (MOZ_HAL_IPC_CONVERT_WARN_IF(aIn >= MOZ_ARRAY_LENGTH(sHfIndType), uint8_t,
+                                  BluetoothHandsfreeHfIndType)) {
+    return NS_ERROR_ILLEGAL_VALUE;
+  }
+  aOut = sHfIndType[aIn];
   return NS_OK;
 }
 
@@ -527,12 +546,21 @@ nsresult Convert(const BluetoothAttributeHandle& aIn, uint16_t& aOut) {
 }
 
 nsresult Convert(BluetoothAvrcpEvent aIn, uint8_t& aOut) {
-  static const uint8_t sValue[] = {[AVRCP_EVENT_PLAY_STATUS_CHANGED] = 0x01,
-                                   [AVRCP_EVENT_TRACK_CHANGE] = 0x02,
-                                   [AVRCP_EVENT_TRACK_REACHED_END] = 0x03,
-                                   [AVRCP_EVENT_TRACK_REACHED_START] = 0x04,
-                                   [AVRCP_EVENT_PLAY_POS_CHANGED] = 0x05,
-                                   [AVRCP_EVENT_APP_SETTINGS_CHANGED] = 0x08};
+  static const uint8_t sValue[] = {
+      [AVRCP_EVENT_PLAY_STATUS_CHANGED] = 0x01,
+      [AVRCP_EVENT_TRACK_CHANGE] = 0x02,
+      [AVRCP_EVENT_TRACK_REACHED_END] = 0x03,
+      [AVRCP_EVENT_TRACK_REACHED_START] = 0x04,
+      [AVRCP_EVENT_PLAY_POS_CHANGED] = 0x05,
+      // 0x06, 0x07 doesn't exist
+      [AVRCP_EVENT_APP_SETTINGS_CHANGED] = 0x08,
+      [AVRCP_EVENT_NOW_PLAYING_CONTENT_CHANGED] = 0x09,
+      [AVRCP_EVENT_AVAL_PLAYER_CHANGE] = 0x0a,
+      [AVRCP_EVENT_ADDR_PLAYER_CHANGE] = 0x0b,
+      [AVRCP_EVENT_UIDS_CHANGED] = 0x0c,
+      [AVRCP_EVENT_VOL_CHANGED] = 0x0d,
+  };
+
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(aIn >= MOZ_ARRAY_LENGTH(sValue),
                                   BluetoothAvrcpEvent, uint8_t)) {
     return NS_ERROR_ILLEGAL_VALUE;
@@ -542,8 +570,8 @@ nsresult Convert(BluetoothAvrcpEvent aIn, uint8_t& aOut) {
 }
 
 nsresult Convert(BluetoothAvrcpNotification aIn, uint8_t& aOut) {
-  static const bool sValue[] = {
-      [AVRCP_NTF_INTERIM] = 0x00, [AVRCP_NTF_CHANGED] = 0x01};
+  static const bool sValue[] = {[AVRCP_NTF_INTERIM] = 0x00,
+                                [AVRCP_NTF_CHANGED] = 0x01};
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(
           static_cast<unsigned int>(aIn) >= MOZ_ARRAY_LENGTH(sValue),
           BluetoothAvrcpNotification, uint8_t)) {
@@ -596,8 +624,8 @@ nsresult Convert(BluetoothAvrcpStatus aIn, uint8_t& aOut) {
 }
 
 nsresult Convert(BluetoothHandsfreeAtResponse aIn, uint8_t& aOut) {
-  static const uint8_t sAtResponse[] = {
-      [HFP_AT_RESPONSE_ERROR] = 0x00, [HFP_AT_RESPONSE_OK] = 0x01};
+  static const uint8_t sAtResponse[] = {[HFP_AT_RESPONSE_ERROR] = 0x00,
+                                        [HFP_AT_RESPONSE_OK] = 0x01};
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(
           static_cast<unsigned int>(aIn) >= MOZ_ARRAY_LENGTH(sAtResponse),
           BluetoothHandsfreeAtResponse, uint8_t)) {
@@ -665,8 +693,8 @@ nsresult Convert(BluetoothHandsfreeCallMode aIn, uint8_t& aOut) {
 }
 
 nsresult Convert(BluetoothHandsfreeCallMptyType aIn, uint8_t& aOut) {
-  static const uint8_t sCallMptyType[] = {
-      [HFP_CALL_MPTY_TYPE_SINGLE] = 0x00, [HFP_CALL_MPTY_TYPE_MULTI] = 0x01};
+  static const uint8_t sCallMptyType[] = {[HFP_CALL_MPTY_TYPE_SINGLE] = 0x00,
+                                          [HFP_CALL_MPTY_TYPE_MULTI] = 0x01};
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(
           static_cast<unsigned int>(aIn) >= MOZ_ARRAY_LENGTH(sCallMptyType),
           BluetoothHandsfreeCallMptyType, uint8_t)) {
@@ -692,8 +720,8 @@ nsresult Convert(BluetoothHandsfreeNetworkState aIn, uint8_t& aOut) {
 }
 
 nsresult Convert(BluetoothHandsfreeServiceType aIn, uint8_t& aOut) {
-  static const uint8_t sServiceType[] = {
-      [HFP_SERVICE_TYPE_HOME] = 0x00, [HFP_SERVICE_TYPE_ROAMING] = 0x01};
+  static const uint8_t sServiceType[] = {[HFP_SERVICE_TYPE_HOME] = 0x00,
+                                         [HFP_SERVICE_TYPE_ROAMING] = 0x01};
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(
           static_cast<unsigned int>(aIn) >= MOZ_ARRAY_LENGTH(sServiceType),
           BluetoothHandsfreeServiceType, uint8_t)) {
@@ -705,8 +733,8 @@ nsresult Convert(BluetoothHandsfreeServiceType aIn, uint8_t& aOut) {
 }
 
 nsresult Convert(BluetoothHandsfreeVolumeType aIn, uint8_t& aOut) {
-  static const uint8_t sVolumeType[] = {
-      [HFP_VOLUME_TYPE_SPEAKER] = 0x00, [HFP_VOLUME_TYPE_MICROPHONE] = 0x01};
+  static const uint8_t sVolumeType[] = {[HFP_VOLUME_TYPE_SPEAKER] = 0x00,
+                                        [HFP_VOLUME_TYPE_MICROPHONE] = 0x01};
   if (MOZ_HAL_IPC_CONVERT_WARN_IF(
           static_cast<unsigned int>(aIn) >= MOZ_ARRAY_LENGTH(sVolumeType),
           BluetoothHandsfreeVolumeType, uint8_t)) {
@@ -875,8 +903,8 @@ nsresult Convert(BluetoothGattWriteType aIn, int32_t& aOut) {
 }
 
 nsresult Convert(BluetoothHidProtocolMode aIn, uint8_t& aOut) {
-  static const uint8_t sMode[] = {
-      [HID_PROTOCOL_MODE_REPORT] = 0x00, [HID_PROTOCOL_MODE_BOOT] = 0x01};
+  static const uint8_t sMode[] = {[HID_PROTOCOL_MODE_REPORT] = 0x00,
+                                  [HID_PROTOCOL_MODE_BOOT] = 0x01};
   if (aIn == HID_PROTOCOL_MODE_UNSUPPORTED) {
     /* This case is handled separately to not populate
      * |sValue| with empty entries. */
@@ -1078,11 +1106,71 @@ nsresult PackPDU(const BluetoothAvrcpEventParamPair& aIn,
                       aIn.mParam.mIds, aIn.mParam.mValues, aIn.mParam.mNumAttr),
                   aPDU);
       break;
+    case AVRCP_EVENT_AVAL_PLAYER_CHANGE:
+      /* no data to pack */
+      rv = NS_OK;
+      break;
+    case AVRCP_EVENT_ADDR_PLAYER_CHANGE:
+      rv = PackPDU(aIn.mParam.mPlayerId, aIn.mParam.mUidCounter, aPDU);
+      break;
     default:
       rv = NS_ERROR_ILLEGAL_VALUE;
       break;
   }
   return rv;
+}
+
+nsresult PackPDU(const nsTArray<BluetoothAvrcpItemPlayer>& aIn,
+                 DaemonSocketPDU& aPDU) {
+  size_t len = aIn.Length();
+
+  const uint8_t type = AVRCP_ITEM_PLAYER;
+  nsresult rv;
+  for (size_t i = 0; i < len; ++i) {
+    rv = PackPDU(type, aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+    rv = PackPDU(aIn[i].mPlayerId, aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+    rv = PackPDU(aIn[i].mMajorType, aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+    rv = PackPDU(aIn[i].mSubType, aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+    rv = PackPDU(aIn[i].mPlayStatus, aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+
+    for (int j = 0; j < AVRCP_FEATURE_BIT_MASK_SIZE; ++j) {
+      rv = PackPDU(aIn[i].mFeatures[j], aPDU);
+      if (NS_FAILED(rv)) {
+        return rv;
+      }
+    }
+
+    rv = PackPDU(aIn[i].mCharsetId, aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+
+    NS_ConvertUTF16toUTF8 stringUTF8(aIn[i].mName);
+    rv = PackPDU(
+        PackConversion<size_t, uint16_t>(stringUTF8.Length()),
+        PackArray<uint8_t>(reinterpret_cast<const uint8_t*>(stringUTF8.get()),
+                           stringUTF8.Length()),
+        aPDU);
+    if (NS_FAILED(rv)) {
+      return rv;
+    }
+  }
+  return NS_OK;
 }
 
 nsresult PackPDU(BluetoothSdpType aIn, DaemonSocketPDU& aPDU) {
@@ -1120,7 +1208,7 @@ nsresult PackPDU(const BluetoothSdpRecord& aIn, DaemonSocketPDU& aPDU) {
   switch (aIn.mType) {
     case SDP_TYPE_MAP_MAS: {
       const BluetoothMasRecord* const masRecord =
-          (const BluetoothMasRecord* const) & aIn;
+          (const BluetoothMasRecord* const)&aIn;
 
       rv = PackPDU(masRecord->mSupportedFeatures, aPDU);
       if (NS_FAILED(rv)) {
@@ -1324,14 +1412,6 @@ nsresult PackPDU(const BluetoothGattId& aIn, DaemonSocketPDU& aPDU) {
   return PackPDU(aIn.mInstanceId, aPDU);
 }
 
-nsresult PackPDU(const BluetoothGattServiceId& aIn, DaemonSocketPDU& aPDU) {
-  nsresult rv = PackPDU(aIn.mId, aPDU);
-  if (NS_FAILED(rv)) {
-    return rv;
-  }
-  return PackPDU(aIn.mIsPrimary, aPDU);
-}
-
 nsresult PackPDU(const nsTArray<BluetoothGattDbElement>& aIn,
                  DaemonSocketPDU& aPDU) {
   size_t len = aIn.Length();
@@ -1517,6 +1597,11 @@ nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHandsfreeWbsConfig& aOut) {
       aPDU, UnpackConversion<uint8_t, BluetoothHandsfreeWbsConfig>(aOut));
 }
 
+nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHandsfreeHfIndType& aOut) {
+  return UnpackPDU(
+      aPDU, UnpackConversion<uint8_t, BluetoothHandsfreeHfIndType>(aOut));
+}
+
 nsresult UnpackPDU(DaemonSocketPDU& aPDU,
                    BluetoothHandsfreeVoiceRecognitionState& aOut) {
   return UnpackPDU(
@@ -1666,16 +1751,6 @@ nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothGattId& aOut) {
   }
   /* unpack instance id */
   return UnpackPDU(aPDU, aOut.mInstanceId);
-}
-
-nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothGattServiceId& aOut) {
-  /* unpack id */
-  nsresult rv = UnpackPDU(aPDU, aOut.mId);
-  if (NS_FAILED(rv)) {
-    return rv;
-  }
-  /* unpack isPrimary */
-  return UnpackPDU(aPDU, aOut.mIsPrimary);
 }
 
 nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothGattReadParam& aOut) {
@@ -1831,7 +1906,21 @@ nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHidInfoParam& aOut) {
 }
 
 nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHidReport& aOut) {
-  return UnpackPDU(aPDU, aOut.mReportData);
+  /* unpack data length of report */
+  uint16_t dataLength = 0;
+  nsresult rv = UnpackPDU(aPDU, dataLength);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+
+  /* unpack report data */
+  uint8_t data[dataLength];
+  rv = UnpackPDU(aPDU, UnpackArray<uint8_t>(data, dataLength));
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  aOut.mReportData.AppendElements(data, dataLength);
+  return NS_OK;
 }
 
 nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothHidProtocolMode& aOut) {
@@ -1863,19 +1952,10 @@ nsresult UnpackPDU(DaemonSocketPDU& aPDU, BluetoothSdpRecord& aOut) {
   if (NS_FAILED(rv)) {
     return rv;
   }
-
-  uint16_t len;
-  rv = UnpackPDU(aPDU, len);
+  rv = UnpackPDU(aPDU, UnpackCString0(aOut.mServiceName));
   if (NS_FAILED(rv)) {
     return rv;
   }
-  const uint8_t* data = aPDU.Consume(len);
-  if (MOZ_HAL_IPC_UNPACK_WARN_IF(!data, BluetoothSdpRecord)) {
-    return NS_ERROR_ILLEGAL_VALUE;
-  }
-  aOut.mServiceName =
-      nsDependentCString(reinterpret_cast<const char*>(data), len);
-
   rv = UnpackPDU(aPDU, aOut.mRfcommChannelNumber);
   if (NS_FAILED(rv)) {
     return rv;

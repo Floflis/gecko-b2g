@@ -9,11 +9,7 @@ do-not-track-option-default-content-blocking-known =
 do-not-track-option-always =
     .label = Always
 
-pref-page-title =
-    { PLATFORM() ->
-        [windows] Options
-       *[other] Preferences
-    }
+settings-page-title = Settings
 
 # This is used to determine the width of the search field in about:preferences,
 # in order to make the entire placeholder string visible
@@ -23,13 +19,9 @@ pref-page-title =
 # Notice: The value of the `.style` attribute is a CSS string, and the `width`
 # is the name of the CSS property. It is intended only to adjust the element's width.
 # Do not translate.
-search-input-box =
+search-input-box2 =
     .style = width: 15.4em
-    .placeholder =
-        { PLATFORM() ->
-            [windows] Find in Options
-           *[other] Find in Preferences
-        }
+    .placeholder = Find in Settings
 
 managed-notice = Your browser is being managed by your organization.
 
@@ -52,16 +44,16 @@ pane-privacy-title = Privacy & Security
 category-privacy =
     .tooltiptext = { pane-privacy-title }
 
-pane-sync-title2 = { -sync-brand-short-name }
-category-sync2 =
-    .tooltiptext = { pane-sync-title2 }
+pane-sync-title3 = Sync
+category-sync3 =
+    .tooltiptext = { pane-sync-title3 }
 
 pane-experimental-title = { -brand-short-name } Experiments
 category-experimental =
     .tooltiptext = { -brand-short-name } Experiments
 pane-experimental-subtitle = Proceed with Caution
 pane-experimental-search-results-header = { -brand-short-name } Experiments: Proceed with Caution
-pane-experimental-description = Changing advanced configuration preferences can impact { -brand-short-name } performance or security.
+pane-experimental-description2 = Changing advanced configuration settings can impact { -brand-short-name } performance or security.
 
 pane-experimental-reset =
   .label = Restore Defaults
@@ -127,25 +119,14 @@ extension-controlled-enable = To enable the extension go to <img data-l10n-name=
 search-results-header = Search Results
 
 # `<span data-l10n-name="query"></span>` will be replaced by the search term.
-search-results-empty-message =
-    { PLATFORM() ->
-        [windows] Sorry! There are no results in Options for “<span data-l10n-name="query"></span>”.
-       *[other] Sorry! There are no results in Preferences for “<span data-l10n-name="query"></span>”.
-    }
+search-results-empty-message2 =
+        Sorry! There are no results in Settings for “<span data-l10n-name="query"></span>”.
 
 search-results-help-link = Need help? Visit <a data-l10n-name="url">{ -brand-short-name } Support</a>
 
 ## General Section
 
 startup-header = Startup
-
-# { -brand-short-name } will be 'Firefox Developer Edition',
-# since this setting is only exposed in Firefox Developer Edition
-separate-profile-mode =
-    .label = Allow { -brand-short-name } and Firefox to run at the same time
-use-firefox-sync = Tip: This uses separate profiles. Use { -sync-brand-short-name } to share data between them.
-get-started-not-logged-in = Sign in to { -sync-brand-short-name }…
-get-started-configured = Open { -sync-brand-short-name } preferences
 
 always-check-default =
     .label = Always check if { -brand-short-name } is your default browser
@@ -158,8 +139,8 @@ set-as-my-default-browser =
     .label = Make Default…
     .accesskey = D
 
-startup-restore-previous-session =
-    .label = Restore previous session
+startup-restore-windows-and-tabs =
+    .label = Open previous windows and tabs
     .accesskey = s
 
 startup-restore-warn-on-quit =
@@ -178,16 +159,25 @@ open-new-link-as-tabs =
     .label = Open links in tabs instead of new windows
     .accesskey = w
 
-warn-on-close-multiple-tabs =
-    .label = Warn you when closing multiple tabs
+confirm-on-close-multiple-tabs =
+    .label = Confirm before closing multiple tabs
     .accesskey = m
+
+# This string is used for the confirm before quitting preference.
+# Variables:
+#   $quitKey (String) - the quit keyboard shortcut, and formatted
+#                       in the same manner as it would appear,
+#                       for example, in the File menu.
+confirm-on-quit-with-key =
+    .label = Confirm before quitting with { $quitKey }
+    .accesskey = b
 
 warn-on-open-many-tabs =
     .label = Warn you when opening multiple tabs might slow down { -brand-short-name }
     .accesskey = d
 
-switch-links-to-new-tabs =
-    .label = When you open a link in a new tab, switch to it immediately
+switch-to-new-tabs =
+    .label = When you open a link, image or media in a new tab, switch to it immediately
     .accesskey = h
 
 show-tabs-in-taskbar =
@@ -230,7 +220,6 @@ containers-remove-alert-msg =
 
 containers-remove-ok-button = Remove this Container
 containers-remove-cancel-button = Don’t remove this Container
-
 
 ## General Section - Language & Appearance
 
@@ -282,6 +271,8 @@ confirm-browser-language-change-button = Apply and Restart
 translate-web-pages =
     .label = Translate web content
     .accesskey = T
+
+fx-translate-web-pages = { -translations-brand-name }
 
 # The <img> element is replaced by the logo of the provider
 # used to provide machine translations for web pages.
@@ -453,20 +444,24 @@ update-application-manual =
     .label = Never check for updates (not recommended)
     .accesskey = N
 
+update-application-background-enabled =
+    .label = When { -brand-short-name } is not running
+    .accesskey = W
+
 update-application-warning-cross-user-setting = This setting will apply to all Windows accounts and { -brand-short-name } profiles using this installation of { -brand-short-name }.
 
 update-application-use-service =
     .label = Use a background service to install updates
     .accesskey = b
 
-update-setting-write-failure-title = Error saving Update preferences
+update-setting-write-failure-title2 = Error saving Update settings
 
 # Variables:
 #   $path (String) - Path to the configuration file
 # The newlines between the main text and the line containing the path is
 # intentional so the path is easier to identify.
-update-setting-write-failure-message =
-    { -brand-short-name } encountered an error and didn’t save this change. Note that setting this update preference requires permission to write to the file below. You or a system administrator may be able resolve the error by granting the Users group full control to this file.
+update-setting-write-failure-message2 =
+    { -brand-short-name } encountered an error and didn’t save this change. Note that changing this update setting requires permission to write to the file below. You or a system administrator may be able resolve the error by granting the Users group full control to this file.
 
     Could not write to file: { $path }
 
@@ -616,11 +611,6 @@ home-prefs-content-description = Choose what content you want on your Firefox Ho
 
 home-prefs-search-header =
     .label = Web Search
-home-prefs-topsites-header =
-    .label = Top Sites
-home-prefs-topsites-description = The sites you visit most
-home-prefs-topsites-by-option-sponsored =
-    .label = Sponsored Top Sites
 home-prefs-shortcuts-header =
     .label = Shortcuts
 home-prefs-shortcuts-description = Sites you save or visit
@@ -632,17 +622,14 @@ home-prefs-shortcuts-by-option-sponsored =
 
 home-prefs-recommended-by-header =
     .label = Recommended by { $provider }
-home-prefs-recommended-by-description-update = Exceptional content from across the web, curated by { $provider }
 home-prefs-recommended-by-description-new = Exceptional content curated by { $provider }, part of the { -brand-product-name } family
+
 ##
 
 home-prefs-recommended-by-learn-more = How it works
 home-prefs-recommended-by-option-sponsored-stories =
     .label = Sponsored Stories
 
-home-prefs-highlights-header =
-    .label = Highlights
-home-prefs-highlights-description = A selection of sites that you’ve saved or visited
 home-prefs-highlights-option-visited-pages =
     .label = Visited Pages
 home-prefs-highlights-options-bookmarks =
@@ -662,7 +649,6 @@ home-prefs-recent-activity-description = A selection of recent sites and content
 # and non-essential but also not entirely trivial and useless.
 home-prefs-snippets-header =
     .label = Snippets
-home-prefs-snippets-description = Updates from { -vendor-short-name } and { -brand-product-name }
 
 home-prefs-snippets-description-new = Tips and news from { -vendor-short-name } and { -brand-product-name }
 
@@ -710,7 +696,7 @@ search-show-suggestions-above-history-option =
 search-show-suggestions-private-windows =
     .label = Show search suggestions in Private Windows
 
-suggestions-addressbar-settings-generic = Change preferences for other address bar suggestions
+suggestions-addressbar-settings-generic2 = Change settings for other address bar suggestions
 
 search-suggestions-cant-show = Search suggestions will not be shown in location bar results because you have configured { -brand-short-name } to never remember history.
 
@@ -746,12 +732,8 @@ search-keyword-warning-bookmark = You have chosen a keyword that is currently in
 
 ## Containers Section
 
-containers-back-button =
-    .aria-label =
-      { PLATFORM() ->
-          [windows] Back to Options
-         *[other] Back to Preferences
-      }
+containers-back-button2 =
+    .aria-label = Back to Settings
 containers-header = Container Tabs
 containers-add-button =
     .label = Add New Container
@@ -761,8 +743,8 @@ containers-new-tab-check =
     .label = Select a container for each new tab
     .accesskey = S
 
-containers-preferences-button =
-    .label = Preferences
+containers-settings-button =
+    .label = Settings
 containers-remove-button =
     .label = Remove
 
@@ -770,10 +752,10 @@ containers-remove-button =
 ## more discrete ("signed in" no longer means "and sync is connected").
 
 sync-signedout-caption = Take Your Web With You
-sync-signedout-description = Synchronize your bookmarks, history, tabs, passwords, add-ons, and preferences across all your devices.
+sync-signedout-description2 = Synchronize your bookmarks, history, tabs, passwords, add-ons, and settings across all your devices.
 
-sync-signedout-account-signin2 =
-    .label = Sign in to { -sync-brand-short-name }…
+sync-signedout-account-signin3 =
+    .label = Sign in to sync…
     .accesskey = i
 
 # This message contains two links and two icon images.
@@ -819,11 +801,11 @@ prefs-syncing-on = Syncing: ON
 
 prefs-syncing-off = Syncing: OFF
 
-prefs-sync-setup =
-    .label = Set Up { -sync-brand-short-name }…
-    .accesskey = S
+prefs-sync-turn-on-syncing =
+    .label = Turn on syncing…
+    .accesskey = s
 
-prefs-sync-offer-setup-label = Synchronize your bookmarks, history, tabs, passwords, add-ons, and preferences across all your devices.
+prefs-sync-offer-setup-label2 = Synchronize your bookmarks, history, tabs, passwords, add-ons, and settings across all your devices.
 
 prefs-sync-now =
     .labelnotsyncing = Sync Now
@@ -841,11 +823,7 @@ sync-currently-syncing-logins-passwords = Logins and passwords
 sync-currently-syncing-addresses = Addresses
 sync-currently-syncing-creditcards = Credit cards
 sync-currently-syncing-addons = Add-ons
-sync-currently-syncing-prefs =
-    { PLATFORM() ->
-        [windows] Options
-       *[other] Preferences
-    }
+sync-currently-syncing-settings = Settings
 
 sync-change-options =
     .label = Change…
@@ -894,12 +872,8 @@ sync-engine-addons =
     .tooltiptext = Extensions and themes for Firefox desktop
     .accesskey = A
 
-sync-engine-prefs =
-    .label =
-        { PLATFORM() ->
-            [windows] Options
-           *[other] Preferences
-        }
+sync-engine-settings =
+    .label = Settings
     .tooltiptext = General, Privacy, and Security settings you’ve changed
     .accesskey = s
 
@@ -973,6 +947,10 @@ forms-primary-pw-former-name = Formerly known as Master Password
 
 forms-primary-pw-fips-title = You are currently in FIPS mode. FIPS requires a non-empty Primary Password.
 forms-master-pw-fips-desc = Password Change Failed
+forms-windows-sso =
+    .label = Allow Windows single sign-on for Microsoft, work, and school accounts
+forms-windows-sso-learn-more-link = Learn more
+forms-windows-sso-desc = Manage accounts in your device settings
 
 ## OS Authentication dialog
 
@@ -1148,15 +1126,18 @@ enhanced-tracking-protection-setting-strict =
 enhanced-tracking-protection-setting-custom =
   .label = Custom
   .accesskey = C
+
 ##
 
 content-blocking-etp-standard-desc = Balanced for protection and performance. Pages will load normally.
 content-blocking-etp-strict-desc = Stronger protection, but may cause some sites or content to break.
 content-blocking-etp-custom-desc = Choose which trackers and scripts to block.
+content-blocking-etp-blocking-desc = { -brand-short-name } blocks the following:
 
 content-blocking-private-windows = Tracking content in Private Windows
-content-blocking-cross-site-cookies = Cross-site cookies
+content-blocking-cross-site-cookies-in-all-windows = Cross-site cookies in all windows (includes tracking cookies)
 content-blocking-cross-site-tracking-cookies = Cross-site tracking cookies
+content-blocking-all-cross-site-cookies-private-windows = Cross-site cookies in Private Windows
 content-blocking-cross-site-tracking-cookies-plus-isolate = Cross-site tracking cookies, and isolate remaining cookies
 content-blocking-social-media-trackers = Social media trackers
 content-blocking-all-cookies = All cookies
@@ -1255,9 +1236,12 @@ permissions-block-popups =
     .label = Block pop-up windows
     .accesskey = B
 
-permissions-block-popups-exceptions =
+# "popup" is a misspelling that is more popular than the correct spelling of
+# "pop-up" so it's included as a search keyword, not displayed in the UI.
+permissions-block-popups-exceptions-button =
     .label = Exceptions…
     .accesskey = E
+    .searchkeywords = popups
 
 permissions-addon-install-warning =
     .label = Warn you when websites try to install add-ons
@@ -1294,10 +1278,8 @@ addon-recommendations-link = Learn more
 # or builds with no Telemetry support available.
 collection-health-report-disabled = Data reporting is disabled for this build configuration
 
-collection-backlogged-crash-reports =
-    .label = Allow { -brand-short-name } to send backlogged crash reports on your behalf
+collection-backlogged-crash-reports-with-link = Allow { -brand-short-name } to send backlogged crash reports on your behalf <a data-l10n-name="crash-reports-link">Learn more</a>
     .accesskey = c
-collection-backlogged-crash-reports-link = Learn more
 
 ## Privacy Section - Security
 ##
@@ -1337,33 +1319,13 @@ certs-devices =
     .label = Security Devices…
     .accesskey = D
 
-space-alert-learn-more-button =
-    .label = Learn More
-    .accesskey = L
+space-alert-over-5gb-settings-button =
+    .label = Open Settings
+    .accesskey = O
 
-space-alert-over-5gb-pref-button =
-    .label =
-        { PLATFORM() ->
-            [windows] Open Options
-           *[other] Open Preferences
-        }
-    .accesskey =
-        { PLATFORM() ->
-            [windows] O
-           *[other] O
-        }
+space-alert-over-5gb-message2 = <strong>{ -brand-short-name } is running out of disk space.</strong> Website contents may not display properly. You can clear stored data in Settings > Privacy & Security > Cookies and Site Data.
 
-space-alert-over-5gb-message =
-    { PLATFORM() ->
-        [windows] { -brand-short-name } is running out of disk space. Website contents may not display properly. You can clear stored data in Options > Privacy & Security > Cookies and Site Data.
-       *[other] { -brand-short-name } is running out of disk space. Website contents may not display properly. You can clear stored data in Preferences > Privacy & Security > Cookies and Site Data.
-    }
-
-space-alert-under-5gb-ok-button =
-    .label = OK, Got it
-    .accesskey = K
-
-space-alert-under-5gb-message = { -brand-short-name } is running out of disk space. Website contents may not display properly. Visit “Learn More” to optimize your disk usage for better browsing experience.
+space-alert-under-5gb-message2 = <strong>{ -brand-short-name } is running out of disk space.</strong> Website contents may not display properly. Visit “Learn more” to optimize your disk usage for better browsing experience.
 
 ## Privacy Section - HTTPS-Only
 
@@ -1383,6 +1345,7 @@ httpsonly-radio-disabled =
     .label = Don’t enable HTTPS-Only Mode
 
 ## The following strings are used in the Download section of settings
+
 desktop-folder-name = Desktop
 downloads-folder-name = Downloads
 choose-download-folder-title = Choose Download Folder:

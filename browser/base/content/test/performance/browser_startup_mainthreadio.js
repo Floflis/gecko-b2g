@@ -33,6 +33,8 @@ const LINUX = AppConstants.platform == "linux";
 const WIN = AppConstants.platform == "win";
 const MAC = AppConstants.platform == "macosx";
 
+const kNSSDBPrefix = AppConstants.NIGHTLY_BUILD ? "gecko-no-share-" : "";
+
 const kSharedFontList = SpecialPowers.getBoolPref("gfx.e10s.font-list.shared");
 
 /* This is an object mapping string phases of startup to lists of known cases
@@ -214,13 +216,6 @@ const startupPhases = {
       read: 1,
       close: 1,
     },
-    {
-      // bug 1546838
-      path: "ProfD:xulstore/data.mdb",
-      condition: WIN,
-      read: 1,
-      write: 1,
-    },
   ],
 
   "before opening first browser window": [
@@ -269,6 +264,7 @@ const startupPhases = {
     {
       // bug 1541246
       path: "ProfD:extensions",
+      ignoreIfUnused: true, // bug 1649590
       condition: WIN,
       stat: 1,
     },
@@ -349,12 +345,6 @@ const startupPhases = {
       condition: WIN && !AppConstants.MOZILLA_OFFICIAL,
       stat: 1,
     },
-    {
-      // bug 1546838
-      path: "ProfD:xulstore/data.mdb",
-      condition: MAC,
-      write: 1,
-    },
   ],
 
   // We are at this phase once we are ready to handle user events.
@@ -369,29 +359,35 @@ const startupPhases = {
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:cert9.db",
-      condition: WIN,
-      read: 5,
-      stat: 2,
+      path: `ProfD:cert9.db`,
+      condition: WIN && AppConstants.NIGHTLY_BUILD,
+      stat: 1,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:cert9.db",
+      path: `ProfD:${kNSSDBPrefix}cert9.db`,
+      condition: WIN,
+      read: 5,
+      stat: AppConstants.NIGHTLY_BUILD ? 5 : 4,
+    },
+    {
+      // bug 1370516 - NSS should be initialized off main thread.
+      path: `ProfD:${kNSSDBPrefix}cert9.db`,
       condition: WIN,
       ignoreIfUnused: true, // if canonicalize(ProfD) == ProfD, we'll use the previous entry.
       canonicalize: true,
-      stat: 2,
+      stat: 4,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:cert9.db-journal",
+      path: `ProfD:${kNSSDBPrefix}cert9.db-journal`,
       condition: WIN,
       canonicalize: true,
       stat: 3,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:cert9.db-wal",
+      path: `ProfD:${kNSSDBPrefix}cert9.db-wal`,
       condition: WIN,
       canonicalize: true,
       stat: 3,
@@ -404,29 +400,35 @@ const startupPhases = {
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:key4.db",
-      condition: WIN,
-      read: 8,
-      stat: 2,
+      path: `ProfD:key4.db`,
+      condition: WIN && AppConstants.NIGHTLY_BUILD,
+      stat: 1,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:key4.db",
+      path: `ProfD:${kNSSDBPrefix}key4.db`,
+      condition: WIN,
+      read: 8,
+      stat: AppConstants.NIGHTLY_BUILD ? 5 : 4,
+    },
+    {
+      // bug 1370516 - NSS should be initialized off main thread.
+      path: `ProfD:${kNSSDBPrefix}key4.db`,
       condition: WIN,
       ignoreIfUnused: true, // if canonicalize(ProfD) == ProfD, we'll use the previous entry.
       canonicalize: true,
-      stat: 2,
+      stat: 4,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:key4.db-journal",
+      path: `ProfD:${kNSSDBPrefix}key4.db-journal`,
       condition: WIN,
       canonicalize: true,
       stat: 5,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
-      path: "ProfD:key4.db-wal",
+      path: `ProfD:${kNSSDBPrefix}key4.db-wal`,
       condition: WIN,
       canonicalize: true,
       stat: 5,
@@ -445,6 +447,13 @@ const startupPhases = {
       ignoreIfUnused: true,
       stat: 1,
       close: 1,
+    },
+    {
+      // Bug 1649590
+      path: "ProfD:extensions",
+      ignoreIfUnused: true,
+      condition: WIN,
+      stat: 1,
     },
   ],
 
@@ -478,8 +487,8 @@ const startupPhases = {
       ignoreIfUnused: true,
       stat: 4,
       fsync: 3,
-      read: 36,
-      write: 148,
+      read: 47,
+      write: 170,
     },
     {
       // bug 1391590
@@ -495,7 +504,7 @@ const startupPhases = {
       fsync: 2,
       read: 4,
       stat: 3,
-      write: 1310,
+      write: 1320,
     },
     {
       // bug 1391590
@@ -532,13 +541,13 @@ const startupPhases = {
       write: 1300,
     },
     {
-      path: "ProfD:key4.db-journal",
+      path: `ProfD:${kNSSDBPrefix}key4.db-journal`,
       condition: WIN,
       canonicalize: true,
       stat: 2,
     },
     {
-      path: "ProfD:key4.db-wal",
+      path: `ProfD:${kNSSDBPrefix}key4.db-wal`,
       condition: WIN,
       canonicalize: true,
       stat: 2,

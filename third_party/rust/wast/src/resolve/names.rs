@@ -31,7 +31,7 @@ pub struct Resolver<'a> {
     tables: Namespace<'a>,
     memories: Namespace<'a>,
     types: Namespace<'a>,
-    events: Namespace<'a>,
+    tags: Namespace<'a>,
     modules: Namespace<'a>,
     instances: Namespace<'a>,
     datas: Namespace<'a>,
@@ -76,7 +76,7 @@ impl<'a> Resolver<'a> {
                     ItemKind::Memory(_) => self.memories.register(i.item.id, "memory")?,
                     ItemKind::Table(_) => self.tables.register(i.item.id, "table")?,
                     ItemKind::Global(_) => self.globals.register(i.item.id, "global")?,
-                    ItemKind::Event(_) => self.events.register(i.item.id, "event")?,
+                    ItemKind::Tag(_) => self.tags.register(i.item.id, "tag")?,
                     ItemKind::Module(_) => self.modules.register(i.item.id, "module")?,
                     ItemKind::Instance(_) => self.instances.register(i.item.id, "instance")?,
                 }
@@ -125,15 +125,15 @@ impl<'a> Resolver<'a> {
             }
             ModuleField::Elem(e) => self.elems.register(e.id, "elem")?,
             ModuleField::Data(d) => self.datas.register(d.id, "data")?,
-            ModuleField::Event(e) => self.events.register(e.id, "event")?,
-            ModuleField::Alias(a) => match a.item_kind() {
+            ModuleField::Tag(t) => self.tags.register(t.id, "tag")?,
+            ModuleField::Alias(a) => match a.kind {
                 ExportKind::Func => self.funcs.register(a.id, "func")?,
                 ExportKind::Table => self.tables.register(a.id, "table")?,
                 ExportKind::Memory => self.memories.register(a.id, "memory")?,
                 ExportKind::Global => self.globals.register(a.id, "global")?,
                 ExportKind::Instance => self.instances.register(a.id, "instance")?,
                 ExportKind::Module => self.modules.register(a.id, "module")?,
-                ExportKind::Event => self.events.register(a.id, "event")?,
+                ExportKind::Tag => self.tags.register(a.id, "tag")?,
                 ExportKind::Type => {
                     self.type_info.push(TypeInfo::Other);
                     self.types.register(a.id, "type")?
@@ -237,10 +237,8 @@ impl<'a> Resolver<'a> {
                         }
                     }
                     ElemPayload::Exprs { exprs, ty } => {
-                        for funcref in exprs {
-                            if let Some(idx) = funcref {
-                                self.resolve_item_ref(idx)?;
-                            }
+                        for expr in exprs {
+                            self.resolve_expr(expr)?;
                         }
                         self.resolve_heaptype(&mut ty.heap)?;
                     }
@@ -274,9 +272,9 @@ impl<'a> Resolver<'a> {
                 Ok(())
             }
 
-            ModuleField::Event(e) => {
-                match &mut e.ty {
-                    EventType::Exception(ty) => {
+            ModuleField::Tag(t) => {
+                match &mut t.ty {
+                    TagType::Exception(ty) => {
                         self.resolve_type_use(ty)?;
                     }
                 }
@@ -310,15 +308,11 @@ impl<'a> Resolver<'a> {
             }
 
             ModuleField::Alias(a) => {
-                match &mut a.kind {
-                    AliasKind::InstanceExport { instance, .. } => {
+                match &mut a.source {
+                    AliasSource::InstanceExport { instance, .. } => {
                         self.resolve_item_ref(instance)?;
                     }
-                    AliasKind::Outer {
-                        module,
-                        index,
-                        kind,
-                    } => {
+                    AliasSource::Outer { module, index } => {
                         match (index, module) {
                             // If both indices are numeric then don't try to
                             // resolve anything since we could fail to walk up
@@ -328,7 +322,7 @@ impl<'a> Resolver<'a> {
                             (index, module) => {
                                 parents
                                     .resolve(module)?
-                                    .resolve(index, Ns::from_export(kind))?;
+                                    .resolve(index, Ns::from_export(&a.kind))?;
                             }
                         }
                     }
@@ -371,7 +365,7 @@ impl<'a> Resolver<'a> {
 
     fn resolve_item_sig(&self, item: &mut ItemSig<'a>) -> Result<(), Error> {
         match &mut item.kind {
-            ItemKind::Func(t) | ItemKind::Event(EventType::Exception(t)) => {
+            ItemKind::Func(t) | ItemKind::Tag(TagType::Exception(t)) => {
                 self.resolve_type_use(t)?;
             }
             ItemKind::Global(t) => self.resolve_valtype(&mut t.ty)?,
@@ -424,7 +418,7 @@ impl<'a> Resolver<'a> {
             Ns::Memory => self.memories.resolve(idx, "memory"),
             Ns::Instance => self.instances.resolve(idx, "instance"),
             Ns::Module => self.modules.resolve(idx, "module"),
-            Ns::Event => self.events.resolve(idx, "event"),
+            Ns::Tag => self.tags.resolve(idx, "tag"),
             Ns::Type => self.types.resolve(idx, "type"),
         }
     }
@@ -434,7 +428,22 @@ impl<'a> Resolver<'a> {
         K: Into<ExportKind> + Copy,
     {
         match item {
-            ItemRef::Item { idx, kind, exports } => {
+            ItemRef::Item {
+                idx,
+                kind,
+                exports,
+                #[cfg(wast_check_exhaustive)]
+                visited,
+            } => {
+                #[cfg(wast_check_exhaustive)]
+                {
+                    if !*visited {
+                        return Err(Error::new(
+                            idx.span(),
+                            format!("BUG: this index wasn't visited"),
+                        ));
+                    }
+                }
                 debug_assert!(exports.len() == 0);
                 self.resolve(
                     idx,
@@ -445,7 +454,7 @@ impl<'a> Resolver<'a> {
                         ExportKind::Memory => Ns::Memory,
                         ExportKind::Instance => Ns::Instance,
                         ExportKind::Module => Ns::Module,
-                        ExportKind::Event => Ns::Event,
+                        ExportKind::Tag => Ns::Tag,
                         ExportKind::Type => Ns::Type,
                     },
                 )?;
@@ -775,19 +784,23 @@ impl<'a, 'b> ExprResolver<'a, 'b> {
             }
 
             Throw(i) => {
-                self.resolver.resolve(i, Ns::Event)?;
+                self.resolver.resolve(i, Ns::Tag)?;
             }
             Rethrow(i) => {
                 self.resolve_label(i)?;
             }
             Catch(i) => {
-                self.resolver.resolve(i, Ns::Event)?;
+                self.resolver.resolve(i, Ns::Tag)?;
+            }
+            Delegate(i) => {
+                // Since a delegate starts counting one layer out from the
+                // current try-delegate block, we pop before we resolve labels.
+                self.blocks.pop();
+                self.resolve_label(i)?;
             }
 
-            BrOnCast(b) => {
-                self.resolve_label(&mut b.label)?;
-                self.resolver.resolve_heaptype(&mut b.val)?;
-                self.resolver.resolve_heaptype(&mut b.rtt)?;
+            BrOnCast(l) | BrOnFunc(l) | BrOnData(l) | BrOnI31(l) => {
+                self.resolve_label(l)?;
             }
 
             Select(s) => {
@@ -810,25 +823,16 @@ impl<'a, 'b> ExprResolver<'a, 'b> {
             | ArrayLen(i) => {
                 self.resolver.resolve(i, Ns::Type)?;
             }
-            RTTCanon(t) => {
-                self.resolver.resolve_heaptype(t)?;
+            RTTCanon(i) => {
+                self.resolver.resolve(i, Ns::Type)?;
             }
-            RTTSub(s) => {
-                self.resolver.resolve_heaptype(&mut s.input_rtt)?;
-                self.resolver.resolve_heaptype(&mut s.output_rtt)?;
-            }
-            RefTest(t) | RefCast(t) => {
-                self.resolver.resolve_heaptype(&mut t.val)?;
-                self.resolver.resolve_heaptype(&mut t.rtt)?;
+            RTTSub(i) => {
+                self.resolver.resolve(i, Ns::Type)?;
             }
 
             StructSet(s) | StructGet(s) | StructGetS(s) | StructGetU(s) => {
                 self.resolver.resolve(&mut s.r#struct, Ns::Type)?;
                 self.resolver.fields.resolve(&mut s.field, "field")?;
-            }
-            StructNarrow(s) => {
-                self.resolver.resolve_valtype(&mut s.from)?;
-                self.resolver.resolve_valtype(&mut s.to)?;
             }
 
             RefNull(ty) => self.resolver.resolve_heaptype(ty)?,

@@ -17,6 +17,7 @@
 
 #include "mozilla/AddonManagerWebAPI.h"
 #include "mozilla/ClearOnShutdown.h"
+#include "mozilla/Components.h"
 #include "mozilla/ErrorNames.h"
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/Unused.h"
@@ -95,13 +96,13 @@ ChannelListHolder::~ChannelListHolder() {
   }
 }
 
-static LinkedList<ChannelWrapper>& ChannelList() {
+static LinkedList<ChannelWrapper>* GetChannelList() {
   static UniquePtr<ChannelListHolder> sChannelList;
-  if (!sChannelList) {
+  if (!sChannelList && !PastShutdownPhase(ShutdownPhase::XPCOMShutdown)) {
     sChannelList.reset(new ChannelListHolder());
-    ClearOnShutdown(&sChannelList, ShutdownPhase::Shutdown);
+    ClearOnShutdown(&sChannelList, ShutdownPhase::XPCOMShutdown);
   }
-  return *sChannelList;
+  return sChannelList.get();
 }
 
 NS_IMPL_CYCLE_COLLECTING_ADDREF(ChannelWrapper::ChannelWrapperStub)
@@ -122,7 +123,9 @@ ChannelWrapper::ChannelWrapper(nsISupports* aParent, nsIChannel* aChannel)
     : ChannelHolder(aChannel), mParent(aParent) {
   mStub = new ChannelWrapperStub(this);
 
-  ChannelList().insertBack(this);
+  if (auto* list = GetChannelList()) {
+    list->insertBack(this);
+  }
 }
 
 ChannelWrapper::~ChannelWrapper() {
@@ -144,10 +147,7 @@ already_AddRefed<ChannelWrapper> ChannelWrapper::Get(const GlobalObject& global,
 
   nsCOMPtr<nsIWritablePropertyBag2> props = do_QueryInterface(channel);
   if (props) {
-    Unused << props->GetPropertyAsInterface(CHANNELWRAPPER_PROP_KEY,
-                                            NS_GET_IID(ChannelWrapper),
-                                            getter_AddRefs(wrapper));
-
+    wrapper = do_GetProperty(props, CHANNELWRAPPER_PROP_KEY);
     if (wrapper) {
       // Assume cached attributes may have changed at this point.
       wrapper->ClearCachedAttributes();
@@ -246,35 +246,40 @@ void ChannelWrapper::UpgradeToSecure(ErrorResult& aRv) {
   }
 }
 
-void ChannelWrapper::Suspend(ErrorResult& aRv) {
+void ChannelWrapper::Suspend(const nsCString& aProfileMarkerText,
+                             ErrorResult& aRv) {
   if (!mSuspended) {
     nsresult rv = NS_ERROR_UNEXPECTED;
     if (nsCOMPtr<nsIChannel> chan = MaybeChannel()) {
-      mSuspendTime = mozilla::TimeStamp::NowUnfuzzed();
       rv = chan->Suspend();
     }
     if (NS_FAILED(rv)) {
       aRv.Throw(rv);
     } else {
       mSuspended = true;
+      MOZ_ASSERT(mSuspendedMarkerText.IsVoid());
+      mSuspendedMarkerText = aProfileMarkerText;
+      PROFILER_MARKER_TEXT("Extension Suspend", NETWORK,
+                           MarkerOptions(MarkerTiming::IntervalStart()),
+                           mSuspendedMarkerText);
     }
   }
 }
 
-void ChannelWrapper::Resume(const nsCString& aText, ErrorResult& aRv) {
+void ChannelWrapper::Resume(ErrorResult& aRv) {
   if (mSuspended) {
     nsresult rv = NS_ERROR_UNEXPECTED;
     if (nsCOMPtr<nsIChannel> chan = MaybeChannel()) {
       rv = chan->Resume();
-
-      PROFILER_MARKER_TEXT("Extension Suspend", NETWORK,
-                           MarkerTiming::IntervalUntilNowFrom(mSuspendTime),
-                           aText);
     }
     if (NS_FAILED(rv)) {
       aRv.Throw(rv);
     } else {
       mSuspended = false;
+      PROFILER_MARKER_TEXT("Extension Suspend", NETWORK,
+                           MarkerOptions(MarkerTiming::IntervalEnd()),
+                           mSuspendedMarkerText);
+      mSuspendedMarkerText = VoidCString();
     }
   }
 }
@@ -743,7 +748,7 @@ void ChannelWrapper::RegisterTraceableChannel(const WebExtensionPolicy& aAddon,
     return;
   }
 
-  mAddonEntries.Put(aAddon.Id(), aBrowserParent);
+  mAddonEntries.InsertOrUpdate(aAddon.Id(), aBrowserParent);
   if (!mChannelEntry) {
     mChannelEntry = WebRequestService::GetSingleton().RegisterChannel(this);
     CheckEventListeners();
@@ -804,6 +809,7 @@ MozContentPolicyType GetContentPolicyType(ExtContentPolicyType aType) {
     case ExtContentPolicy::TYPE_DTD:
       return MozContentPolicyType::Xml_dtd;
     case ExtContentPolicy::TYPE_FONT:
+    case ExtContentPolicy::TYPE_UA_FONT:
       return MozContentPolicyType::Font;
     case ExtContentPolicy::TYPE_MEDIA:
       return MozContentPolicyType::Media;
@@ -817,6 +823,7 @@ MozContentPolicyType GetContentPolicyType(ExtContentPolicyType aType) {
       return MozContentPolicyType::Web_manifest;
     case ExtContentPolicy::TYPE_SPECULATIVE:
       return MozContentPolicyType::Speculative;
+    case ExtContentPolicy::TYPE_PROXIED_WEBRTC_MEDIA:
     case ExtContentPolicy::TYPE_INVALID:
     case ExtContentPolicy::TYPE_OTHER:
     case ExtContentPolicy::TYPE_SAVEAS_DOWNLOAD:
@@ -987,7 +994,8 @@ void ChannelWrapper::GetUrlClassification(
 }
 
 bool ChannelWrapper::ThirdParty() const {
-  nsCOMPtr<mozIThirdPartyUtil> thirdPartyUtil = services::GetThirdPartyUtil();
+  nsCOMPtr<mozIThirdPartyUtil> thirdPartyUtil =
+      components::ThirdPartyUtil::Service();
   if (NS_WARN_IF(!thirdPartyUtil)) {
     return true;
   }

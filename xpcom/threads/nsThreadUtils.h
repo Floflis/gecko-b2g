@@ -313,7 +313,6 @@ inline already_AddRefed<nsIThread> do_GetMainThread() {
 
 //-----------------------------------------------------------------------------
 
-#ifdef MOZILLA_INTERNAL_API
 // Fast access to the current thread.  Will create an nsIThread if one does not
 // exist already!  Do not release the returned pointer!  If you want to use this
 // pointer from some other thread, then you will need to AddRef it.  Otherwise,
@@ -336,7 +335,6 @@ extern nsIThread* NS_GetCurrentThreadNoCreate();
  *   Name of the thread. A C language null-terminated string.
  */
 extern void NS_SetCurrentThreadName(const char* aName);
-#endif
 
 //-----------------------------------------------------------------------------
 
@@ -460,7 +458,6 @@ class IdleRunnable : public DiscardableRunnable, public nsIIdleRunnable {
  public:
   NS_DECL_ISUPPORTS_INHERITED
 
-  IdleRunnable() : DiscardableRunnable("IdleRunnable") {}
   explicit IdleRunnable(const char* aName) : DiscardableRunnable(aName) {}
 
  protected:
@@ -513,7 +510,7 @@ class PrioritizableRunnable : public Runnable, public nsIRunnablePriority {
   uint32_t mPriority;
 };
 
-extern already_AddRefed<nsIRunnable> CreateMediumHighRunnable(
+extern already_AddRefed<nsIRunnable> CreateRenderBlockingRunnable(
     already_AddRefed<nsIRunnable>&& aRunnable);
 
 namespace detail {
@@ -637,8 +634,9 @@ already_AddRefed<mozilla::CancelableRunnable> NS_NewCancelableRunnableFunction(
     const char* aName, Function&& aFunc) {
   class FuncCancelableRunnable final : public mozilla::CancelableRunnable {
    public:
-    static_assert(std::is_void_v<decltype(
-                      std::declval<std::remove_reference_t<Function>>()())>);
+    static_assert(
+        std::is_void_v<
+            decltype(std::declval<std::remove_reference_t<Function>>()())>);
 
     NS_INLINE_DECL_REFCOUNTING_INHERITED(FuncCancelableRunnable,
                                          CancelableRunnable)
@@ -1111,8 +1109,9 @@ struct ParameterStorage
 };
 
 template <class T>
-static auto HasSetDeadlineTest(int) -> SFINAE1True<decltype(
-    std::declval<T>().SetDeadline(std::declval<mozilla::TimeStamp>()))>;
+static auto HasSetDeadlineTest(int)
+    -> SFINAE1True<decltype(std::declval<T>().SetDeadline(
+        std::declval<mozilla::TimeStamp>()))>;
 
 template <class T>
 static auto HasSetDeadlineTest(long) -> std::false_type;
@@ -1940,28 +1939,6 @@ typedef LogTaskBase<PresShell> LogPresShellObserver;
 typedef LogTaskBase<dom::FrameRequestCallback> LogFrameRequestCallback;
 // If you add new types don't forget to add:
 // `template class LogTaskBase<YourType>;` to nsThreadUtils.cpp
-
-class DelayedRunnable : public mozilla::Runnable, public nsITimerCallback {
- public:
-  DelayedRunnable(already_AddRefed<nsIEventTarget> aTarget,
-                  already_AddRefed<nsIRunnable> aRunnable, uint32_t aDelay);
-
-  NS_DECL_ISUPPORTS_INHERITED
-  NS_DECL_NSIRUNNABLE
-  NS_DECL_NSITIMERCALLBACK
-
-  nsresult Init();
-
- private:
-  ~DelayedRunnable() = default;
-  nsresult DoRun();
-
-  const nsCOMPtr<nsIEventTarget> mTarget;
-  nsCOMPtr<nsIRunnable> mWrappedRunnable;
-  nsCOMPtr<nsITimer> mTimer;
-  const mozilla::TimeStamp mDelayedFrom;
-  uint32_t mDelay;
-};
 
 }  // namespace mozilla
 

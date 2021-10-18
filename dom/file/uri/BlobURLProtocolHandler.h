@@ -75,6 +75,7 @@ class BlobURLProtocolHandler final : public nsIProtocolHandler,
                            nsIPrincipal* aLoadingPrincipal,
                            nsIPrincipal* aTriggeringPrincipal,
                            const OriginAttributes& aOriginAttributes,
+                           uint64_t aInnerWindowId,
                            const Maybe<nsID>& blobAgentClusterId,
                            bool aAlsoIfRevoked = false);
 
@@ -103,6 +104,12 @@ class BlobURLProtocolHandler final : public nsIProtocolHandler,
   // depending on whether the "remove it from the hashtable" timer has
   // fired.  See RemoveDataEntry().
   static bool GetBlobURLPrincipal(nsIURI* aURI, nsIPrincipal** aPrincipal);
+
+  // Check if metadata about Blob URLs created with this principal should be
+  // broadcast into every content process. This is currently the case for
+  // extension blob URLs and system principal blob URLs, as they can be loaded
+  // by system code and content scripts respectively.
+  static bool IsBlobURLBroadcastPrincipal(nsIPrincipal* aPrincipal);
 
  private:
   ~BlobURLProtocolHandler();

@@ -173,7 +173,6 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
             config_options=self.config_options,
             all_actions=[
                 "clobber",
-                "setup-avds",
                 "download-and-extract",
                 "download-and-process-manifest",
                 "create-virtualenv",
@@ -233,13 +232,16 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
         if self.is_android:
             dirs["abs_xre_dir"] = os.path.join(abs_dirs["abs_work_dir"], "hostutils")
         if self.is_emulator:
-            dirs["abs_avds_dir"] = os.path.join(abs_dirs["abs_work_dir"], ".android")
             fetches_dir = os.environ.get("MOZ_FETCHES_DIR")
             if fetches_dir:
                 dirs["abs_sdk_dir"] = os.path.join(fetches_dir, "android-sdk-linux")
+                dirs["abs_avds_dir"] = os.path.join(fetches_dir, "android-device")
             else:
                 dirs["abs_sdk_dir"] = os.path.join(
                     abs_dirs["abs_work_dir"], "android-sdk-linux"
+                )
+                dirs["abs_avds_dir"] = os.path.join(
+                    abs_dirs["abs_work_dir"], "android-device"
                 )
             if self.config["enable_webrender"]:
                 # AndroidMixin uses this when launching the emulator. We only want
@@ -259,10 +261,7 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
             dirs["abs_test_install_dir"], "config", "marionette_requirements.txt"
         )
 
-        # marionette_requirements.txt must use the legacy resolver until bug 1684969 is resolved.
-        self.register_virtualenv_module(
-            requirements=[requirements], two_pass=True, legacy_resolver=True
-        )
+        self.register_virtualenv_module(requirements=[requirements], two_pass=True)
 
     def _query_geckodriver(self):
         path = None
@@ -328,6 +327,7 @@ class WebPlatformTest(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidM
 
         if (
             self.is_android
+            or mozinfo.info["tsan"]
             or "wdspec" in test_types
             or "fission.autostart=true" in c["extra_prefs"]
             or

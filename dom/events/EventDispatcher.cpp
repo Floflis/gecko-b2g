@@ -23,7 +23,6 @@
 #include "CompositionEvent.h"
 #include "DeviceMotionEvent.h"
 #include "DragEvent.h"
-#include "GeckoProfiler.h"
 #include "KeyboardEvent.h"
 #include "Layers.h"
 #include "mozilla/BasePrincipal.h"
@@ -40,6 +39,7 @@
 #include "mozilla/dom/MutationEvent.h"
 #include "mozilla/dom/NotifyPaintEvent.h"
 #include "mozilla/dom/PageTransitionEvent.h"
+#include "mozilla/dom/PerformanceEventTiming.h"
 #include "mozilla/dom/PointerEvent.h"
 #include "mozilla/dom/RootedDictionary.h"
 #include "mozilla/dom/ScrollAreaEvent.h"
@@ -58,17 +58,13 @@
 #include "mozilla/ipc/MessageChannel.h"
 #include "mozilla/MiscEvents.h"
 #include "mozilla/MouseEvents.h"
+#include "mozilla/ProfilerLabels.h"
+#include "mozilla/ProfilerMarkers.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TextEvents.h"
 #include "mozilla/TouchEvents.h"
 #include "mozilla/Unused.h"
-
-#ifdef MOZ_TASK_TRACER
-#  include "GeckoTaskTracer.h"
-#  include "mozilla/dom/Element.h"
-#  include "mozilla/Likely.h"
-using namespace mozilla::tasktracer;
-#endif
 
 namespace mozilla {
 
@@ -387,7 +383,7 @@ class EventTargetChainItem {
     bool mIsChromeHandler : 1;
 
    private:
-    typedef uint32_t RawFlags;
+    using RawFlags = uint32_t;
     void SetRawFlags(RawFlags aRawFlags) {
       static_assert(
           sizeof(EventTargetChainFlags) <= sizeof(RawFlags),
@@ -736,31 +732,15 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
   NS_ENSURE_TRUE(!nsContentUtils::IsInStableOrMetaStableState(),
                  NS_ERROR_DOM_INVALID_STATE_ERR);
 
-#ifdef MOZ_TASK_TRACER
-  if (MOZ_UNLIKELY(mozilla::tasktracer::IsStartLogging())) {
-    nsAutoCString eventType;
-    nsAutoString eventTypeU16;
-    if (aDOMEvent) {
-      aDOMEvent->GetType(eventTypeU16);
-    } else {
-      Event::GetWidgetEventType(aEvent, eventTypeU16);
-    }
-    CopyUTF16toUTF8(eventTypeU16, eventType);
-
-    nsCOMPtr<Element> element = do_QueryInterface(aTarget);
-    nsAutoString elementId;
-    nsAutoString elementTagName;
-    if (element) {
-      element->GetId(elementId);
-      element->GetTagName(elementTagName);
-    }
-    AddLabel("Event [%s] dispatched at target [id:%s tag:%s]", eventType.get(),
-             NS_ConvertUTF16toUTF8(elementId).get(),
-             NS_ConvertUTF16toUTF8(elementTagName).get());
-  }
-#endif
-
   nsCOMPtr<EventTarget> target = do_QueryInterface(aTarget);
+
+  RefPtr<PerformanceEventTiming> eventTimingEntry;
+  // Similar to PerformancePaintTiming, we don't need to
+  // expose them for printing documents
+  if (aPresContext && !aPresContext->IsPrintingOrPrintPreview()) {
+    eventTimingEntry =
+        PerformanceEventTiming::TryGenerateEventTiming(target, aEvent);
+  }
 
   bool retargeted = false;
 
@@ -1003,6 +983,22 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
           chain[i].PreHandleEvent(preVisitor);
         }
 
+        RefPtr<nsRefreshDriver> refreshDriver;
+        if (aPresContext && aPresContext->GetRootPresContext() &&
+            aEvent->IsTrusted() &&
+            (aEvent->mMessage == eKeyPress ||
+             aEvent->mMessage == eMouseClick)) {
+          refreshDriver = aPresContext->GetRootPresContext()->RefreshDriver();
+          if (refreshDriver) {
+            refreshDriver->EnterUserInputProcessing();
+          }
+        }
+        auto cleanup = MakeScopeExit([&] {
+          if (refreshDriver) {
+            refreshDriver->ExitUserInputProcessing();
+          }
+        });
+
         clearTargets = ShouldClearTargets(aEvent);
 
         // Handle the chain.
@@ -1010,7 +1006,6 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
         MOZ_RELEASE_ASSERT(!aEvent->mPath);
         aEvent->mPath = &chain;
 
-#ifdef MOZ_GECKO_PROFILER
         if (profiler_is_active()) {
           // Add a profiler label and a profiler marker for the actual
           // dispatch of the event.
@@ -1045,9 +1040,8 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
                 baseprofiler::SpliceableJSONWriter& aWriter,
                 const ProfilerString16View& aEventType,
                 const TimeStamp& aStartTime, const TimeStamp& aEventTimeStamp) {
-              aWriter.StringProperty(
-                  "eventType", NS_ConvertUTF16toUTF8(aEventType.Data(),
-                                                     aEventType.Length()));
+              aWriter.StringProperty("eventType",
+                                     NS_ConvertUTF16toUTF8(aEventType));
               // This is the event processing latency, which is the time from
               // when the event was created, to when it was started to be
               // processed. Note that the computation of this latency is
@@ -1058,18 +1052,18 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
             }
             static MarkerSchema MarkerTypeDisplay() {
               using MS = MarkerSchema;
-              MS schema{MS::Location::markerChart, MS::Location::markerTable,
-                        MS::Location::timelineOverview};
+              MS schema{MS::Location::MarkerChart, MS::Location::MarkerTable,
+                        MS::Location::TimelineOverview};
               schema.SetChartLabel("{marker.data.eventType}");
               schema.SetTooltipLabel("{marker.data.eventType} - DOMEvent");
               schema.SetTableLabel("{marker.data.eventType}");
               schema.AddKeyLabelFormat("latency", "Latency",
-                                       MS::Format::duration);
+                                       MS::Format::Duration);
               return schema;
             }
           };
 
-          auto startTime = TimeStamp::NowUnfuzzed();
+          auto startTime = TimeStamp::Now();
           profiler_add_marker("DOMEvent", geckoprofiler::category::DOM,
                               {MarkerTiming::IntervalStart(),
                                MarkerInnerWindowId(innerWindowId)},
@@ -1083,22 +1077,36 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
               "DOMEvent", geckoprofiler::category::DOM,
               {MarkerTiming::IntervalEnd(), std::move(innerWindowId)},
               DOMEventMarker{}, typeStr, startTime, aEvent->mTimeStamp);
-        } else
-#endif
-        {
+        } else {
           EventTargetChainItem::HandleEventTargetChain(chain, postVisitor,
                                                        aCallback, cd);
         }
         aEvent->mPath = nullptr;
 
-        if (aEvent->mMessage == eKeyPress && aEvent->IsTrusted()) {
-          if (aPresContext && aPresContext->GetRootPresContext()) {
-            nsRefreshDriver* driver =
-                aPresContext->GetRootPresContext()->RefreshDriver();
-            if (driver && driver->HasPendingTick()) {
-              driver->RegisterCompositionPayload(
-                  {layers::CompositionPayloadType::eKeyPress,
-                   aEvent->mTimeStamp});
+        if (aPresContext && aPresContext->GetRootPresContext() &&
+            aEvent->IsTrusted()) {
+          nsRefreshDriver* driver =
+              aPresContext->GetRootPresContext()->RefreshDriver();
+          if (driver && driver->HasPendingTick()) {
+            switch (aEvent->mMessage) {
+              case eKeyPress:
+                driver->RegisterCompositionPayload(
+                    {layers::CompositionPayloadType::eKeyPress,
+                     aEvent->mTimeStamp});
+                break;
+              case eMouseClick: {
+                if (aEvent->AsMouseEvent()->mInputSource ==
+                        MouseEvent_Binding::MOZ_SOURCE_MOUSE ||
+                    aEvent->AsMouseEvent()->mInputSource ==
+                        MouseEvent_Binding::MOZ_SOURCE_TOUCH) {
+                  driver->RegisterCompositionPayload(
+                      {layers::CompositionPayloadType::eMouseUpFollowedByClick,
+                       aEvent->mTimeStamp});
+                }
+                break;
+              }
+              default:
+                break;
             }
           }
         }
@@ -1118,6 +1126,9 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
   aEvent->mFlags.mIsBeingDispatched = false;
   aEvent->mFlags.mDispatchedAtLeastOnce = true;
 
+  if (eventTimingEntry) {
+    eventTimingEntry->FinalizeEventTiming(aEvent->mTarget);
+  }
   // https://dom.spec.whatwg.org/#concept-event-dispatch
   // step 10. If clearTargets, then:
   //          1. Set event's target to null.

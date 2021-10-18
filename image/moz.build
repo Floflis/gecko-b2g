@@ -14,7 +14,10 @@ if CONFIG["FUZZING_INTERFACES"]:
 with Files("**"):
     BUG_COMPONENT = ("Core", "ImageLib")
 
-BROWSER_CHROME_MANIFESTS += ["test/browser/browser.ini"]
+BROWSER_CHROME_MANIFESTS += [
+    "test/browser/browser.ini",
+    "test/browser/browser_sandbox_headless.ini",
+]
 
 MOCHITEST_MANIFESTS += ["test/mochitest/mochitest.ini"]
 
@@ -61,6 +64,8 @@ EXPORTS.mozilla.image += [
     "encoders/png/nsPNGEncoder.h",
     "ICOFileHeaders.h",
     "ImageMemoryReporter.h",
+    "Resolution.h",
+    "SourceSurfaceBlobImage.h",
 ]
 
 UNIFIED_SOURCES += [
@@ -93,14 +98,15 @@ UNIFIED_SOURCES += [
     "ScriptedNotificationObserver.cpp",
     "ShutdownTracker.cpp",
     "SourceBuffer.cpp",
+    "SourceSurfaceBlobImage.cpp",
     "SurfaceCache.cpp",
     "SurfaceCacheUtils.cpp",
     "SurfacePipe.cpp",
     "SVGDocumentWrapper.cpp",
     "VectorImage.cpp",
 ]
-if CONFIG["MOZ_ENABLE_SKIA"]:
-    UNIFIED_SOURCES += ["Downscaler.cpp"]
+
+UNIFIED_SOURCES += ["Downscaler.cpp"]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
     SOURCES += ["DecodePool.cpp"]
@@ -115,16 +121,17 @@ LOCAL_INCLUDES += [
     # Because SVGDocumentWrapper.cpp includes "mozilla/dom/SVGSVGElement.h"
     "/dom/base",
     "/dom/svg",
+    # Because imgFrame.cpp includes "cairo.h"
+    "/gfx/cairo/cairo/src",
     # We need to instantiate the decoders
     "/image/decoders",
     # For URI-related functionality
     "/netwerk/base",
+    # For nsHttpChannel.h
+    "/netwerk/protocol/http",
     # DecodePool uses thread-related facilities.
     "/xpcom/threads",
 ]
-
-# Because imgFrame.cpp includes "cairo.h"
-CXXFLAGS += CONFIG["MOZ_CAIRO_CFLAGS"]
 
 LOCAL_INCLUDES += CONFIG["SKIA_INCLUDES"]
 

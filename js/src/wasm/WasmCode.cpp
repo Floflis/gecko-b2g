@@ -20,12 +20,15 @@
 
 #include "mozilla/BinarySearch.h"
 #include "mozilla/EnumeratedRange.h"
+#include "mozilla/Sprintf.h"
 
 #include <algorithm>
 
 #include "jsnum.h"
 
+#include "jit/Disassemble.h"
 #include "jit/ExecutableAllocator.h"
+#include "jit/MacroAssembler.h"
 #ifdef JS_ION_PERF
 #  include "jit/PerfSpewer.h"
 #endif
@@ -37,8 +40,6 @@
 #include "wasm/WasmProcess.h"
 #include "wasm/WasmSerialize.h"
 #include "wasm/WasmStubs.h"
-
-#include "jit/MacroAssembler-inl.h"
 
 using namespace js;
 using namespace js::jit;
@@ -535,14 +536,21 @@ size_t CacheableChars::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
 size_t MetadataTier::serializedSize() const {
   return SerializedPodVectorSize(funcToCodeRange) +
          SerializedPodVectorSize(codeRanges) +
-         SerializedPodVectorSize(callSites) + trapSites.serializedSize() +
-         SerializedVectorSize(funcImports) + SerializedVectorSize(funcExports);
+         SerializedPodVectorSize(callSites) +
+#ifdef ENABLE_WASM_EXCEPTIONS
+         SerializedPodVectorSize(tryNotes) +
+#endif
+         trapSites.serializedSize() + SerializedVectorSize(funcImports) +
+         SerializedVectorSize(funcExports);
 }
 
 size_t MetadataTier::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
   return funcToCodeRange.sizeOfExcludingThis(mallocSizeOf) +
          codeRanges.sizeOfExcludingThis(mallocSizeOf) +
          callSites.sizeOfExcludingThis(mallocSizeOf) +
+#ifdef ENABLE_WASM_EXCEPTIONS
+         tryNotes.sizeOfExcludingThis(mallocSizeOf) +
+#endif
          trapSites.sizeOfExcludingThis(mallocSizeOf) +
          SizeOfVectorExcludingThis(funcImports, mallocSizeOf) +
          SizeOfVectorExcludingThis(funcExports, mallocSizeOf);
@@ -552,6 +560,9 @@ uint8_t* MetadataTier::serialize(uint8_t* cursor) const {
   cursor = SerializePodVector(cursor, funcToCodeRange);
   cursor = SerializePodVector(cursor, codeRanges);
   cursor = SerializePodVector(cursor, callSites);
+#ifdef ENABLE_WASM_EXCEPTIONS
+  cursor = SerializePodVector(cursor, tryNotes);
+#endif
   cursor = trapSites.serialize(cursor);
   cursor = SerializeVector(cursor, funcImports);
   cursor = SerializeVector(cursor, funcExports);
@@ -563,6 +574,9 @@ uint8_t* MetadataTier::serialize(uint8_t* cursor) const {
   (cursor = DeserializePodVector(cursor, &funcToCodeRange)) &&
       (cursor = DeserializePodVector(cursor, &codeRanges)) &&
       (cursor = DeserializePodVector(cursor, &callSites)) &&
+#ifdef ENABLE_WASM_EXCEPTIONS
+      (cursor = DeserializePodVector(cursor, &tryNotes)) &&
+#endif
       (cursor = trapSites.deserialize(cursor)) &&
       (cursor = DeserializeVector(cursor, &funcImports)) &&
       (cursor = DeserializeVector(cursor, &funcExports));
@@ -619,12 +633,7 @@ bool LazyStubSegment::addStubs(size_t codeLength,
     codeRanges_.back().offsetBy(offsetInSegment);
     i++;
 
-    if (funcExports[funcExportIndex].funcType().hasUnexposableArgOrRet()) {
-      continue;
-    }
-    if (funcExports[funcExportIndex]
-            .funcType()
-            .temporarilyUnsupportedReftypeForEntry()) {
+    if (!funcExports[funcExportIndex].canHaveJitEntry()) {
       continue;
     }
 
@@ -682,11 +691,8 @@ bool LazyStubTier::createMany(const Uint32Vector& funcExportIndices,
   DebugOnly<uint32_t> numExpectedRanges = 0;
   for (uint32_t funcExportIndex : funcExportIndices) {
     const FuncExport& fe = funcExports[funcExportIndex];
-    // Entries with unsupported types get only the interp exit
-    bool unsupportedType =
-        fe.funcType().hasUnexposableArgOrRet() ||
-        fe.funcType().temporarilyUnsupportedReftypeForEntry();
-    numExpectedRanges += (unsupportedType ? 1 : 2);
+    // Exports that don't support a jit entry get only the interp entry.
+    numExpectedRanges += (fe.canHaveJitEntry() ? 2 : 1);
     void* calleePtr =
         moduleSegmentBase + metadata.codeRange(fe).funcUncheckedCallEntry();
     Maybe<ImmPtr> callee;
@@ -704,6 +710,9 @@ bool LazyStubTier::createMany(const Uint32Vector& funcExportIndices,
   MOZ_ASSERT(masm.callSites().empty());
   MOZ_ASSERT(masm.callSiteTargets().empty());
   MOZ_ASSERT(masm.trapSites().empty());
+#ifdef ENABLE_WASM_EXCEPTIONS
+  MOZ_ASSERT(masm.tryNotes().empty());
+#endif
 
   if (masm.oom()) {
     return false;
@@ -731,8 +740,9 @@ bool LazyStubTier::createMany(const Uint32Vector& funcExportIndices,
   size_t interpRangeIndex;
   uint8_t* codePtr = nullptr;
   if (!segment->addStubs(codeLength, funcExportIndices, funcExports, codeRanges,
-                         &codePtr, &interpRangeIndex))
+                         &codePtr, &interpRangeIndex)) {
     return false;
+  }
 
   masm.executableCopy(codePtr);
   PatchDebugSymbolicAccesses(codePtr, masm);
@@ -774,12 +784,8 @@ bool LazyStubTier::createMany(const Uint32Vector& funcExportIndices,
     MOZ_ALWAYS_TRUE(
         exports_.insert(exports_.begin() + exportIndex, std::move(lazyExport)));
 
-    // Functions with unsupported types in their sig have only one entry
-    // (interp).  All other functions get an extra jit entry.
-    bool unsupportedType =
-        fe.funcType().hasUnexposableArgOrRet() ||
-        fe.funcType().temporarilyUnsupportedReftypeForEntry();
-    interpRangeIndex += (unsupportedType ? 1 : 2);
+    // Exports that don't support a jit entry get only the interp entry.
+    interpRangeIndex += (fe.canHaveJitEntry() ? 2 : 1);
   }
 
   return true;
@@ -792,8 +798,9 @@ bool LazyStubTier::createOne(uint32_t funcExportIndex,
     return false;
   }
 
-  // This happens on the executing thread (called via GetInterpEntry), so no
-  // need to flush the icaches on all the threads.
+  // This happens on the executing thread (when createOne is called from
+  // GetInterpEntryAndEnsureStubs), so no need to flush the icaches on all the
+  // threads.
   bool flushAllThreadIcaches = false;
 
   size_t stubSegmentIndex;
@@ -805,16 +812,8 @@ bool LazyStubTier::createOne(uint32_t funcExportIndex,
   const UniqueLazyStubSegment& segment = stubSegments_[stubSegmentIndex];
   const CodeRangeVector& codeRanges = segment->codeRanges();
 
-  // Functions that have unsupported types in their sig don't get a jit
-  // entry.
-  if (codeTier.metadata()
-          .funcExports[funcExportIndex]
-          .funcType()
-          .temporarilyUnsupportedReftypeForEntry() ||
-      codeTier.metadata()
-          .funcExports[funcExportIndex]
-          .funcType()
-          .hasUnexposableArgOrRet()) {
+  // Exports that don't support a jit entry get only the interp entry.
+  if (!codeTier.metadata().funcExports[funcExportIndex].canHaveJitEntry()) {
     MOZ_ASSERT(codeRanges.length() >= 1);
     MOZ_ASSERT(codeRanges.back().isInterpEntry());
     return true;
@@ -904,6 +903,11 @@ bool MetadataTier::clone(const MetadataTier& src) {
   if (!debugTrapFarJumpOffsets.appendAll(src.debugTrapFarJumpOffsets)) {
     return false;
   }
+#ifdef ENABLE_WASM_EXCEPTIONS
+  if (!tryNotes.appendAll(src.tryNotes)) {
+    return false;
+  }
+#endif
 
   for (Trap trap : MakeEnumeratedRange(Trap::Limit)) {
     if (!trapSites[trap].appendAll(src.trapSites[trap])) {
@@ -930,9 +934,10 @@ bool MetadataTier::clone(const MetadataTier& src) {
 
 size_t Metadata::serializedSize() const {
   return sizeof(pod()) + SerializedVectorSize(types) +
-         SerializedPodVectorSize(globals) + SerializedPodVectorSize(tables) +
+         SerializedPodVectorSize(typesRenumbering) +
+         SerializedVectorSize(globals) + SerializedPodVectorSize(tables) +
 #ifdef ENABLE_WASM_EXCEPTIONS
-         SerializedPodVectorSize(events) +
+         SerializedPodVectorSize(tags) +
 #endif
          sizeof(moduleName) + SerializedPodVectorSize(funcNames) +
          filename.serializedSize() + sourceMapURL.serializedSize();
@@ -943,10 +948,11 @@ uint8_t* Metadata::serialize(uint8_t* cursor) const {
              debugFuncReturnTypes.empty());
   cursor = WriteBytes(cursor, &pod(), sizeof(pod()));
   cursor = SerializeVector(cursor, types);
-  cursor = SerializePodVector(cursor, globals);
+  cursor = SerializePodVector(cursor, typesRenumbering);
+  cursor = SerializeVector(cursor, globals);
   cursor = SerializePodVector(cursor, tables);
 #ifdef ENABLE_WASM_EXCEPTIONS
-  cursor = SerializePodVector(cursor, events);
+  cursor = SerializePodVector(cursor, tags);
 #endif
   cursor = WriteBytes(cursor, &moduleName, sizeof(moduleName));
   cursor = SerializePodVector(cursor, funcNames);
@@ -958,10 +964,11 @@ uint8_t* Metadata::serialize(uint8_t* cursor) const {
 /* static */ const uint8_t* Metadata::deserialize(const uint8_t* cursor) {
   (cursor = ReadBytes(cursor, &pod(), sizeof(pod()))) &&
       (cursor = DeserializeVector(cursor, &types)) &&
-      (cursor = DeserializePodVector(cursor, &globals)) &&
+      (cursor = DeserializePodVector(cursor, &typesRenumbering)) &&
+      (cursor = DeserializeVector(cursor, &globals)) &&
       (cursor = DeserializePodVector(cursor, &tables)) &&
 #ifdef ENABLE_WASM_EXCEPTIONS
-      (cursor = DeserializePodVector(cursor, &events)) &&
+      (cursor = DeserializePodVector(cursor, &tags)) &&
 #endif
       (cursor = ReadBytes(cursor, &moduleName, sizeof(moduleName))) &&
       (cursor = DeserializePodVector(cursor, &funcNames)) &&
@@ -975,10 +982,11 @@ uint8_t* Metadata::serialize(uint8_t* cursor) const {
 
 size_t Metadata::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
   return SizeOfVectorExcludingThis(types, mallocSizeOf) +
+         typesRenumbering.sizeOfExcludingThis(mallocSizeOf) +
          globals.sizeOfExcludingThis(mallocSizeOf) +
          tables.sizeOfExcludingThis(mallocSizeOf) +
 #ifdef ENABLE_WASM_EXCEPTIONS
-         events.sizeOfExcludingThis(mallocSizeOf) +
+         tags.sizeOfExcludingThis(mallocSizeOf) +
 #endif
          funcNames.sizeOfExcludingThis(mallocSizeOf) +
          filename.sizeOfExcludingThis(mallocSizeOf) +
@@ -1121,6 +1129,23 @@ const CodeRange* CodeTier::lookupRange(const void* pc) const {
   return LookupInSorted(metadata_->codeRanges, target);
 }
 
+#ifdef ENABLE_WASM_EXCEPTIONS
+const wasm::WasmTryNote* CodeTier::lookupWasmTryNote(const void* pc) const {
+  size_t target = (uint8_t*)pc - segment_->base();
+  const WasmTryNoteVector& tryNotes = metadata_->tryNotes;
+
+  // We find the first hit (there may be multiple) to obtain the innermost
+  // handler, which is why we cannot binary search here.
+  for (const auto& tryNote : tryNotes) {
+    if (target >= tryNote.begin && target < tryNote.end) {
+      return &tryNote;
+    }
+  }
+
+  return nullptr;
+}
+#endif
+
 bool JumpTables::init(CompileMode mode, const ModuleSegment& ms,
                       const CodeRangeVector& codeRanges) {
   static_assert(JSScript::offsetOfJitCodeRaw() == 0,
@@ -1183,7 +1208,8 @@ bool Code::initialize(const LinkData& linkData) {
   return true;
 }
 
-bool Code::setTier2(UniqueCodeTier tier2, const LinkData& linkData) const {
+bool Code::setAndBorrowTier2(UniqueCodeTier tier2, const LinkData& linkData,
+                             const CodeTier** borrowedTier) const {
   MOZ_RELEASE_ASSERT(!hasTier2());
   MOZ_RELEASE_ASSERT(tier2->tier() == Tier::Optimized &&
                      tier1_->tier() == Tier::Baseline);
@@ -1193,15 +1219,20 @@ bool Code::setTier2(UniqueCodeTier tier2, const LinkData& linkData) const {
   }
 
   tier2_ = std::move(tier2);
+  *borrowedTier = &*tier2_;
 
   return true;
 }
 
 void Code::commitTier2() const {
   MOZ_RELEASE_ASSERT(!hasTier2());
-  MOZ_RELEASE_ASSERT(tier2_.get());
   hasTier2_ = true;
   MOZ_ASSERT(hasTier2());
+
+  // To maintain the invariant that tier2_ is never read without the tier having
+  // been committed, this checks tier2_ here instead of before setting hasTier2_
+  // (as would be natural).  See comment in WasmCode.h.
+  MOZ_RELEASE_ASSERT(tier2_.get());
 }
 
 uint32_t Code::getFuncIndex(JSFunction* fun) const {
@@ -1248,11 +1279,13 @@ const CodeTier& Code::codeTier(Tier tier) const {
         MOZ_ASSERT(tier1_->initialized());
         return *tier1_;
       }
-      if (tier2_) {
-        MOZ_ASSERT(tier2_->initialized());
-        return *tier2_;
-      }
-      MOZ_CRASH("No code segment at this tier");
+      // It is incorrect to ask for the optimized tier without there being such
+      // a tier and the tier having been committed.  The guard here could
+      // instead be `if (hasTier2()) ... ` but codeTier(t) should not be called
+      // in contexts where that test is necessary.
+      MOZ_RELEASE_ASSERT(hasTier2());
+      MOZ_ASSERT(tier2_->initialized());
+      return *tier2_;
   }
   MOZ_CRASH();
 }
@@ -1284,8 +1317,9 @@ const CallSite* Code::lookupCallSite(void* returnAddress) const {
 
     size_t match;
     if (BinarySearch(CallSiteRetAddrOffset(metadata(t).callSites), lowerBound,
-                     upperBound, target, &match))
+                     upperBound, target, &match)) {
       return &metadata(t).callSites[match];
+    }
   }
 
   return nullptr;
@@ -1310,6 +1344,19 @@ const StackMap* Code::lookupStackMap(uint8_t* nextPC) const {
   }
   return nullptr;
 }
+
+#ifdef ENABLE_WASM_EXCEPTIONS
+const wasm::WasmTryNote* Code::lookupWasmTryNote(void* pc, Tier* tier) const {
+  for (Tier t : tiers()) {
+    const WasmTryNote* result = codeTier(t).lookupWasmTryNote(pc);
+    if (result) {
+      *tier = t;
+      return result;
+    }
+  }
+  return nullptr;
+}
+#endif
 
 struct TrapSitePCOffset {
   const TrapSiteVector& trapSites;
@@ -1482,6 +1529,65 @@ uint8_t* Code::serialize(uint8_t* cursor, const LinkData& linkData) const {
 
   *out = code;
   return cursor;
+}
+
+void Code::disassemble(JSContext* cx, Tier tier, int kindSelection,
+                       PrintCallback printString) const {
+  const MetadataTier& metadataTier = metadata(tier);
+  const CodeTier& codeTier = this->codeTier(tier);
+  const ModuleSegment& segment = codeTier.segment();
+
+  for (const CodeRange& range : metadataTier.codeRanges) {
+    if (kindSelection & (1 << range.kind())) {
+      MOZ_ASSERT(range.begin() < segment.length());
+      MOZ_ASSERT(range.end() < segment.length());
+
+      const char* kind;
+      char kindbuf[128];
+      switch (range.kind()) {
+        case CodeRange::Function:
+          kind = "Function";
+          break;
+        case CodeRange::InterpEntry:
+          kind = "InterpEntry";
+          break;
+        case CodeRange::JitEntry:
+          kind = "JitEntry";
+          break;
+        case CodeRange::ImportInterpExit:
+          kind = "ImportInterpExit";
+          break;
+        case CodeRange::ImportJitExit:
+          kind = "ImportJitExit";
+          break;
+        default:
+          SprintfLiteral(kindbuf, "CodeRange::Kind(%d)", range.kind());
+          kind = kindbuf;
+          break;
+      }
+      const char* separator =
+          "\n--------------------------------------------------\n";
+      // The buffer is quite large in order to accomodate mangled C++ names;
+      // lengths over 3500 have been observed in the wild.
+      char buf[4096];
+      if (range.hasFuncIndex()) {
+        const char* funcName = "(unknown)";
+        UTF8Bytes namebuf;
+        if (metadata().getFuncNameStandalone(range.funcIndex(), &namebuf) &&
+            namebuf.append('\0')) {
+          funcName = namebuf.begin();
+        }
+        SprintfLiteral(buf, "%sKind = %s, index = %d, name = %s:\n", separator,
+                       kind, range.funcIndex(), funcName);
+      } else {
+        SprintfLiteral(buf, "%sKind = %s\n", separator, kind);
+      }
+      printString(buf);
+
+      uint8_t* theCode = segment.base() + range.begin();
+      jit::Disassemble(theCode, range.end() - range.begin(), printString);
+    }
+  }
 }
 
 void wasm::PatchDebugSymbolicAccesses(uint8_t* codeBase, MacroAssembler& masm) {

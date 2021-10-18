@@ -32,6 +32,12 @@
 
   ChromeUtils.defineModuleGetter(
     LazyModules,
+    "NetUtil",
+    "resource://gre/modules/NetUtil.jsm"
+  );
+
+  ChromeUtils.defineModuleGetter(
+    LazyModules,
     "RemoteWebNavigation",
     "resource://gre/modules/RemoteWebNavigation.jsm"
   );
@@ -50,6 +56,41 @@
   );
 
   XPCOMUtils.defineLazyGlobalGetters(this, ["AudioChannelHandler"]);
+
+  Object.defineProperty(LazyModules, "ProcessHangMonitor", {
+    configurable: true,
+    get() {
+      // Import if we can - this is a browser/ module so it may not be
+      // available, in which case we return null. We replace this getter
+      // when the module becomes available (should be on delayed startup
+      // when the first browser window loads, via BrowserGlue.jsm ).
+      const kURL = "resource:///modules/ProcessHangMonitor.jsm";
+      if (Cu.isModuleLoaded(kURL)) {
+        let { ProcessHangMonitor } = ChromeUtils.import(kURL);
+        Object.defineProperty(LazyModules, "ProcessHangMonitor", {
+          value: ProcessHangMonitor,
+        });
+        return ProcessHangMonitor;
+      }
+      return null;
+    },
+  });
+
+  // Get SessionStore module in the same as ProcessHangMonitor above.
+  Object.defineProperty(LazyModules, "SessionStore", {
+    configurable: true,
+    get() {
+      const kURL = "resource:///modules/sessionstore/SessionStore.jsm";
+      if (Cu.isModuleLoaded(kURL)) {
+        let { SessionStore } = ChromeUtils.import(kURL);
+        Object.defineProperty(LazyModules, "SessionStore", {
+          value: SessionStore,
+        });
+        return SessionStore;
+      }
+      return null;
+    },
+  });
 
   const elementsToDestroyOnUnload = new Set();
 
@@ -73,6 +114,9 @@
       super();
 
       this.onPageHide = this.onPageHide.bind(this);
+      this.onDragOver = this.onDragOver.bind(this);
+      this.onDrop = this.onDrop.bind(this);
+      this.onDragStart = this.onDragStart.bind(this);
 
       this.isNavigating = false;
 
@@ -93,77 +137,15 @@
         return new LazyModules.PopupBlocker(this);
       });
 
-      this.addEventListener(
-        "dragover",
-        event => {
-          if (!this.droppedLinkHandler || event.defaultPrevented) {
-            return;
-          }
-
-          // For drags that appear to be internal text (for example, tab drags),
-          // set the dropEffect to 'none'. This prevents the drop even if some
-          // other listener cancelled the event.
-          var types = event.dataTransfer.types;
-          if (
-            types.includes("text/x-moz-text-internal") &&
-            !types.includes("text/plain")
-          ) {
-            event.dataTransfer.dropEffect = "none";
-            event.stopPropagation();
-            event.preventDefault();
-          }
-
-          // No need to handle "dragover" in e10s, since nsDocShellTreeOwner.cpp in the child process
-          // handles that case using "@mozilla.org/content/dropped-link-handler;1" service.
-          if (this.isRemoteBrowser) {
-            return;
-          }
-
-          let linkHandler = Services.droppedLinkHandler;
-          if (linkHandler.canDropLink(event, false)) {
-            event.preventDefault();
-          }
-        },
-        { mozSystemGroup: true }
-      );
-
-      this.addEventListener(
-        "drop",
-        event => {
-          // No need to handle "drop" in e10s, since nsDocShellTreeOwner.cpp in the child process
-          // handles that case using "@mozilla.org/content/dropped-link-handler;1" service.
-          if (
-            !this.droppedLinkHandler ||
-            event.defaultPrevented ||
-            this.isRemoteBrowser
-          ) {
-            return;
-          }
-
-          let linkHandler = Services.droppedLinkHandler;
-          try {
-            // Pass true to prevent the dropping of javascript:/data: URIs
-            var links = linkHandler.dropLinks(event, true);
-          } catch (ex) {
-            return;
-          }
-
-          if (links.length) {
-            let triggeringPrincipal = linkHandler.getTriggeringPrincipal(event);
-            this.droppedLinkHandler(event, links, triggeringPrincipal);
-          }
-        },
-        { mozSystemGroup: true }
-      );
-
-      this.addEventListener("dragstart", event => {
-        // If we're a remote browser dealing with a dragstart, stop it
-        // from propagating up, since our content process should be dealing
-        // with the mouse movement.
-        if (this.isRemoteBrowser) {
-          event.stopPropagation();
-        }
+      this.addEventListener("dragover", this.onDragOver, {
+        mozSystemGroup: true,
       });
+
+      this.addEventListener("drop", this.onDrop, {
+        mozSystemGroup: true,
+      });
+
+      this.addEventListener("dragstart", this.onDragStart);
     }
 
     resetFields() {
@@ -221,8 +203,6 @@
       this._characterSet = "";
 
       this._mayEnableCharacterEncodingMenu = null;
-
-      this._charsetAutodetected = false;
 
       this._contentPrincipal = null;
 
@@ -325,7 +305,7 @@
     get documentURI() {
       return this.isRemoteBrowser
         ? this._documentURI
-        : this.contentDocument.documentURIObject;
+        : this.contentDocument?.documentURIObject;
     }
 
     get documentContentType() {
@@ -364,30 +344,6 @@
 
     get dateTimePicker() {
       return document.getElementById(this.getAttribute("datetimepicker"));
-    }
-
-    /**
-     * Provides a node to hang popups (such as the datetimepicker) from.
-     * If this <browser> isn't the descendant of a <stack>, null is returned
-     * instead and popup code must handle this case.
-     */
-    get popupAnchor() {
-      let stack = this.closest("stack");
-      if (!stack) {
-        return null;
-      }
-
-      let popupAnchor = stack.querySelector(".popup-anchor");
-      if (popupAnchor) {
-        return popupAnchor;
-      }
-
-      // Create an anchor for the popup
-      popupAnchor = document.createElement("div");
-      popupAnchor.className = "popup-anchor";
-      popupAnchor.hidden = true;
-      stack.appendChild(popupAnchor);
-      return popupAnchor;
     }
 
     set suspendMediaWhenInactive(val) {
@@ -546,7 +502,7 @@
       }
 
       return this.docShell
-        .QueryInterface(Ci.nsIInterfaceRequestor)
+        ?.QueryInterface(Ci.nsIInterfaceRequestor)
         .getInterface(Ci.nsIWebProgress);
     }
 
@@ -560,17 +516,11 @@
         : this.contentDocument.title;
     }
 
-    set characterSet(val) {
+    forceEncodingDetection() {
       if (this.isRemoteBrowser) {
-        this.sendMessageToActor(
-          "UpdateCharacterSet",
-          { value: val },
-          "BrowserTab"
-        );
-        this._characterSet = val;
+        this.sendMessageToActor("ForceEncodingDetection", {}, "BrowserTab");
       } else {
-        this.docShell.charset = val;
-        this.docShell.gatherCharsetMenuTelemetry();
+        this.docShell.forceEncodingDetection();
       }
     }
 
@@ -587,18 +537,6 @@
     set mayEnableCharacterEncodingMenu(aMayEnable) {
       if (this.isRemoteBrowser) {
         this._mayEnableCharacterEncodingMenu = aMayEnable;
-      }
-    }
-
-    get charsetAutodetected() {
-      return this.isRemoteBrowser
-        ? this._charsetAutodetected
-        : this.docShell.charsetAutodetected;
-    }
-
-    set charsetAutodetected(aAutodetected) {
-      if (this.isRemoteBrowser) {
-        this._charsetAutodetected = aAutodetected;
       }
     }
 
@@ -818,6 +756,7 @@
         postData,
         headers,
         csp,
+        remoteTypeOverride,
       } = aParams;
       let loadFlags =
         aParams.loadFlags ||
@@ -830,6 +769,7 @@
         loadFlags,
         postData,
         headers,
+        remoteTypeOverride,
       };
       this._wrapURIChangeCall(() =>
         this.webNavigation.loadURI(aURI, loadURIOptions)
@@ -876,14 +816,18 @@
         aNotifyMask = Ci.nsIWebProgress.NOTIFY_ALL;
       }
 
-      this.webProgress.addProgressListener(aListener, aNotifyMask);
+      this.webProgress?.addProgressListener(aListener, aNotifyMask);
     }
 
     removeProgressListener(aListener) {
-      this.webProgress.removeProgressListener(aListener);
+      this.webProgress?.removeProgressListener(aListener);
     }
 
     onPageHide(aEvent) {
+      // If we're browsing from the tab crashed UI to a URI that keeps
+      // this browser non-remote, we'll handle that here.
+      LazyModules.SessionStore?.maybeExitCrashedState(this);
+
       if (!this.docShell || !this.fastFind) {
         return;
       }
@@ -894,6 +838,70 @@
         tabBrowser.selectedBrowser == this
       ) {
         this.fastFind.setDocShell(this.docShell);
+      }
+    }
+
+    onDragOver(event) {
+      if (!this.droppedLinkHandler || event.defaultPrevented) {
+        return;
+      }
+
+      // For drags that appear to be internal text (for example, tab drags),
+      // set the dropEffect to 'none'. This prevents the drop even if some
+      // other listener cancelled the event.
+      var types = event.dataTransfer.types;
+      if (
+        types.includes("text/x-moz-text-internal") &&
+        !types.includes("text/plain")
+      ) {
+        event.dataTransfer.dropEffect = "none";
+        event.stopPropagation();
+        event.preventDefault();
+      }
+
+      // No need to handle "dragover" in e10s, since nsDocShellTreeOwner.cpp in the child process
+      // handles that case using "@mozilla.org/content/dropped-link-handler;1" service.
+      if (this.isRemoteBrowser) {
+        return;
+      }
+
+      let linkHandler = Services.droppedLinkHandler;
+      if (linkHandler.canDropLink(event, false)) {
+        event.preventDefault();
+      }
+    }
+
+    onDrop(event) {
+      // No need to handle "drop" in e10s, since nsDocShellTreeOwner.cpp in the child process
+      // handles that case using "@mozilla.org/content/dropped-link-handler;1" service.
+      if (
+        !this.droppedLinkHandler ||
+        event.defaultPrevented ||
+        this.isRemoteBrowser
+      ) {
+        return;
+      }
+
+      let linkHandler = Services.droppedLinkHandler;
+      try {
+        // Pass true to prevent the dropping of javascript:/data: URIs
+        var links = linkHandler.dropLinks(event, true);
+      } catch (ex) {
+        return;
+      }
+
+      if (links.length) {
+        let triggeringPrincipal = linkHandler.getTriggeringPrincipal(event);
+        this.droppedLinkHandler(event, links, triggeringPrincipal);
+      }
+    }
+
+    onDragStart(event) {
+      // If we're a remote browser dealing with a dragstart, stop it
+      // from propagating up, since our content process should be dealing
+      // with the mouse movement.
+      if (this.isRemoteBrowser) {
+        event.stopPropagation();
       }
     }
 
@@ -1004,6 +1012,7 @@
           aboutBlank,
           this.loadContext
         );
+        this._contentPartitionedPrincipal = this._contentPrincipal;
         // CSP for about:blank is null; if we ever change _contentPrincipal above,
         // we should re-evaluate the CSP here.
         this._csp = null;
@@ -1026,12 +1035,12 @@
           this.messageManager.addMessageListener(`WebView::${item}`, this);
         });
         this.webViewRequestId = 0;
-        // End WebView additions.
 
         this.messageManager.loadFrameScript(
-          "chrome://global/content/browser-child.js",
+          "chrome://global/content/webview-child.js",
           true
         );
+        // End WebView additions.
 
         if (!this.hasAttribute("disablehistory")) {
           Services.obs.addObserver(
@@ -1087,6 +1096,13 @@
     destroy() {
       elementsToDestroyOnUnload.delete(this);
 
+      // If we're browsing from the tab crashed UI to a URI that causes the tab
+      // to go remote again, we catch this here, because swapping out the
+      // non-remote browser for a remote one doesn't cause the pagehide event
+      // to be fired. Previously, we used to do this in the frame script's
+      // unload handler.
+      LazyModules.SessionStore?.maybeExitCrashedState(this);
+
       // Make sure that any open select is closed.
       if (this.hasAttribute("selectmenulist")) {
         let menulist = document.getElementById(
@@ -1111,6 +1127,16 @@
       if (!this.isRemoteBrowser) {
         this.removeEventListener("pagehide", this.onPageHide, true);
       }
+
+      this.removeEventListener("dragover", this.onDragOver, {
+        mozSystemGroup: true,
+      });
+      this.removeEventListener("dragstart", this.onDragStart, {
+        mozSystemGroup: true,
+      });
+      this.removeEventListener("drop", this.onDrop, {
+        mozSystemGroup: true,
+      });
     }
 
     receiveMessage(aMessage) {
@@ -1277,6 +1303,11 @@
       let mm = this.messageManager;
       if (mm) {
         mm.sendAsyncMessage("WebView::SetCursorEnable", { enable });
+      } else if (!enable) {
+        // The browser child is destroyed. We need to remove the cursor from
+        // the screen when disabling virtual cursor.
+        const domWindowUtils = window.windowUtils;
+        domWindowUtils.sendMouseEvent("mouseout", -1, -1, 0, 0, 0);
       }
     }
 
@@ -1300,6 +1331,80 @@
         });
         mm.sendAsyncMessage("WebView::GetCursorEnabled", { id });
       });
+    }
+
+    webViewDownload(url) {
+      console.log(`webViewDownload ${url}`);
+      let uri = Services.io.newURI(url);
+      let channel = LazyModules.NetUtil.newChannel({
+        uri,
+        loadingPrincipal: this._contentPrincipal,
+        securityFlags:
+          Ci.nsILoadInfo.SEC_ALLOW_CROSS_ORIGIN_INHERITS_SEC_CONTEXT,
+        contentPolicyType: Ci.nsIContentPolicy.TYPE_OTHER,
+      });
+
+      channel.loadInfo.cookieJarSettings = this.cookieJarSettings;
+      if (uri.schemeIs("data")) {
+        channel.contentDispositionFilename = "download";
+      }
+
+      if (channel instanceof Ci.nsIHttpChannel) {
+        if (channel instanceof Ci.nsIHttpChannelInternal) {
+          channel.forceAllowThirdPartyCookie = true;
+        }
+        try {
+          let referrerInfo = Cc["@mozilla.org/referrer-info;1"].createInstance(
+            Ci.nsIReferrerInfo
+          );
+          referrerInfo.init(
+            Ci.nsIReferrerInfo.NO_REFERRER,
+            false,
+            this.currentURI
+          );
+          channel.referrerInfo = referrerInfo;
+        } catch (e) {
+          console.error(`webViewDownload set referrerInfo ${e}`);
+        }
+      }
+
+      function DownloadListener() {}
+      DownloadListener.prototype = {
+        extListener: null,
+        onStartRequest(request, context) {
+          let extHelperAppSvc = Cc[
+            "@mozilla.org/uriloader/external-helper-app-service;1"
+          ].getService(Ci.nsIExternalHelperAppService);
+          let channel = request.QueryInterface(Ci.nsIChannel);
+
+          this.extListener = extHelperAppSvc.doContent(
+            channel.contentType,
+            request,
+            null,
+            true
+          );
+
+          this.extListener?.onStartRequest(request, context);
+        },
+        onStopRequest(request, context, statusCode) {
+          this.extListener?.onStopRequest(request, context, statusCode);
+        },
+        onDataAvailable(request, context, inputStream, offset, count) {
+          this.extListener?.onDataAvailable(
+            request,
+            context,
+            inputStream,
+            offset,
+            count
+          );
+        },
+        QueryInterface: ChromeUtils.generateQI([
+          Ci.nsIStreamListener,
+          Ci.nsIRequestObserver,
+        ]),
+      };
+
+      channel.asyncOpen(new DownloadListener());
     }
 
     webViewcreateEvent(evtName, detail, cancelable) {
@@ -1351,7 +1456,6 @@
       aLocation,
       aCharset,
       aMayEnableCharacterEncodingMenu,
-      aCharsetAutodetected,
       aDocumentURI,
       aTitle,
       aContentPrincipal,
@@ -1367,7 +1471,6 @@
         if (aCharset != null) {
           this._characterSet = aCharset;
           this._mayEnableCharacterEncodingMenu = aMayEnableCharacterEncodingMenu;
-          this._charsetAutodetected = aCharsetAutodetected;
         }
 
         if (aContentType != null) {
@@ -1438,35 +1541,6 @@
     }
 
     createAboutBlankContentViewer(aPrincipal, aPartitionedPrincipal) {
-      if (this.isRemoteBrowser) {
-        // Ensure that the content process has the permissions which are
-        // needed to create a document with the given principal.
-        let permissionPrincipal = BrowserUtils.principalWithMatchingOA(
-          aPrincipal,
-          this.contentPrincipal
-        );
-        this.frameLoader.remoteTab.transmitPermissionsForPrincipal(
-          permissionPrincipal
-        );
-
-        // This still uses the message manager, for the following reasons:
-        //
-        // 1. Due to bug 1523638, it's virtually certain that, if we've just created
-        //    this <xul:browser>, that the WindowGlobalParent for the top-level frame
-        //    of this browser doesn't exist yet, so it's not possible to get at a
-        //    JS Window Actor for it.
-        //
-        // 2. JS Window Actors are tied to the principals for the frames they're running
-        //    in - switching principals is therefore self-destructive and unexpected.
-        //
-        // So we'll continue to use the message manager until we come up with a better
-        // solution.
-        this.messageManager.sendAsyncMessage(
-          "BrowserElement:CreateAboutBlank",
-          { principal: aPrincipal, partitionedPrincipal: aPartitionedPrincipal }
-        );
-        return;
-      }
       let principal = BrowserUtils.principalWithMatchingOA(
         aPrincipal,
         this.contentPrincipal
@@ -1475,10 +1549,18 @@
         aPartitionedPrincipal,
         this.contentPartitionedPrincipal
       );
-      this.docShell.createAboutBlankContentViewer(
-        principal,
-        partitionedPrincipal
-      );
+
+      if (this.isRemoteBrowser) {
+        this.frameLoader.remoteTab.createAboutBlankContentViewer(
+          principal,
+          partitionedPrincipal
+        );
+      } else {
+        this.docShell.createAboutBlankContentViewer(
+          principal,
+          partitionedPrincipal
+        );
+      }
     }
 
     stopScroll() {
@@ -1498,7 +1580,6 @@
             .getActor("AutoScroll")
             .sendAsyncMessage("Autoscroll:Stop", {});
         }
-        this._autoScrollBrowsingContext = null;
 
         try {
           Services.obs.removeObserver(this.observer, "apz:cancel-autoscroll");
@@ -1506,17 +1587,17 @@
           // It's not clear why this sometimes throws an exception
         }
 
-        if (this.isRemoteBrowser && this._autoScrollScrollId != null) {
-          let { remoteTab } = this.frameLoader;
-          if (remoteTab) {
-            remoteTab.stopApzAutoscroll(
-              this._autoScrollScrollId,
-              this._autoScrollPresShellId
-            );
-          }
+        if (this._autoScrollScrollId != null) {
+          this._autoScrollBrowsingContext.stopApzAutoscroll(
+            this._autoScrollScrollId,
+            this._autoScrollPresShellId
+          );
+
           this._autoScrollScrollId = null;
           this._autoScrollPresShellId = null;
         }
+
+        this._autoScrollBrowsingContext = null;
       }
     }
 
@@ -1619,29 +1700,23 @@
       window.addEventListener("keyup", this, true);
 
       let usingApz = false;
+
       if (
-        this.isRemoteBrowser &&
         scrollId != null &&
         this.mPrefs.getBoolPref("apz.autoscroll.enabled", false)
       ) {
-        let { remoteTab } = this.frameLoader;
-        if (remoteTab) {
-          // If APZ is handling the autoscroll, it may decide to cancel
-          // it of its own accord, so register an observer to allow it
-          // to notify us of that.
-          Services.obs.addObserver(
-            this.observer,
-            "apz:cancel-autoscroll",
-            true
-          );
+        // If APZ is handling the autoscroll, it may decide to cancel
+        // it of its own accord, so register an observer to allow it
+        // to notify us of that.
+        Services.obs.addObserver(this.observer, "apz:cancel-autoscroll", true);
 
-          usingApz = remoteTab.startApzAutoscroll(
-            screenX,
-            screenY,
-            scrollId,
-            presShellId
-          );
-        }
+        usingApz = browsingContext.startApzAutoscroll(
+          screenX,
+          screenY,
+          scrollId,
+          presShellId
+        );
+
         // Save the IDs for later
         this._autoScrollScrollId = scrollId;
         this._autoScrollPresShellId = presShellId;
@@ -1687,6 +1762,10 @@
           }
           case "mouseup":
           case "mousedown":
+            // The following mouse click/auxclick event on the autoscroller
+            // shouldn't be fired in web content for compatibility with Chrome.
+            aEvent.preventClickEvent();
+          // fallthrough
           case "contextmenu": {
             if (!this._ignoreMouseEvents) {
               // Use a timeout to prevent the mousedown from opening the popup again.
@@ -1703,6 +1782,9 @@
             break;
           }
           case "popuphidden": {
+            // TODO: When the autoscroller is closed by clicking outside of it,
+            //       we need to prevent following click event for compatibility
+            //       with Chrome.  However, there is no way to do that for now.
             this._autoScrollPopup.removeEventListener(
               "popuphidden",
               this,
@@ -1810,7 +1892,6 @@
             "_documentContentType",
             "_characterSet",
             "_mayEnableCharacterEncodingMenu",
-            "_charsetAutodetected",
             "_contentPrincipal",
             "_contentPartitionedPrincipal",
             "_isSyntheticDocument",
@@ -1921,6 +2002,15 @@
           return { permitUnload: true };
         }
 
+        // Don't bother asking if this browser is hung:
+        let { ProcessHangMonitor } = LazyModules;
+        if (
+          ProcessHangMonitor?.findActiveReport(this) ||
+          ProcessHangMonitor?.findPausedReport(this)
+        ) {
+          return { permitUnload: true };
+        }
+
         let result;
         let success;
 
@@ -1938,7 +2028,8 @@
         // The permitUnload() promise will, alas, not call its resolution
         // callbacks after the browser window the promise lives in has closed,
         // so we have to check for that case explicitly.
-        Services.tm.spinEventLoopUntilOrShutdown(
+        Services.tm.spinEventLoopUntilOrQuit(
+          "browser-custom-element.js:permitUnload",
           () => window.closed || success !== undefined
         );
         if (success) {
@@ -1953,14 +2044,6 @@
       return {
         permitUnload: this.docShell.contentViewer.permitUnload(),
       };
-    }
-
-    print(aOuterWindowID, aPrintSettings) {
-      if (!this.frameLoader) {
-        throw Components.Exception("No frame loader.", Cr.NS_ERROR_FAILURE);
-      }
-
-      return this.frameLoader.print(aOuterWindowID, aPrintSettings);
     }
 
     async drawSnapshot(x, y, w, h, scale, backgroundColor) {

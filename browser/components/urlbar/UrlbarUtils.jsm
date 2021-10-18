@@ -10,11 +10,12 @@
  */
 
 var EXPORTED_SYMBOLS = [
+  "L10nCache",
+  "SkippableTimer",
   "UrlbarMuxer",
   "UrlbarProvider",
   "UrlbarQueryContext",
   "UrlbarUtils",
-  "SkippableTimer",
 ];
 
 const { XPCOMUtils } = ChromeUtils.import(
@@ -40,17 +41,38 @@ XPCOMUtils.defineLazyModuleGetters(this, {
 var UrlbarUtils = {
   // Extensions are allowed to add suggestions if they have registered a keyword
   // with the omnibox API. This is the maximum number of suggestions an extension
-  // is allowed to add for a given search string.
+  // is allowed to add for a given search string using the omnibox API.
   // This value includes the heuristic result.
-  MAXIMUM_ALLOWED_EXTENSION_MATCHES: 6,
+  MAX_OMNIBOX_RESULT_COUNT: 6,
 
-  // This is used by UnifiedComplete, the new implementation will use
-  // PROVIDER_TYPE and RESULT_TYPE
+  // Results are categorized into groups to help the muxer compose them.  See
+  // UrlbarUtils.getResultGroup.  Since result groups are stored in result
+  // groups and result groups are stored in prefs, additions and changes to
+  // result groups may require adding UI migrations to BrowserGlue.  Be careful
+  // about making trivial changes to existing groups, like renaming them,
+  // because we don't want to make downgrades unnecessarily hard.
   RESULT_GROUP: {
-    HEURISTIC: "heuristic",
+    ABOUT_PAGES: "aboutPages",
     GENERAL: "general",
-    SUGGESTION: "suggestion",
-    EXTENSION: "extension",
+    GENERAL_PARENT: "generalParent",
+    FORM_HISTORY: "formHistory",
+    HEURISTIC_AUTOFILL: "heuristicAutofill",
+    HEURISTIC_ENGINE_ALIAS: "heuristicEngineAlias",
+    HEURISTIC_EXTENSION: "heuristicExtension",
+    HEURISTIC_FALLBACK: "heuristicFallback",
+    HEURISTIC_BOOKMARK_KEYWORD: "heuristicBookmarkKeyword",
+    HEURISTIC_OMNIBOX: "heuristicOmnibox",
+    HEURISTIC_PRELOADED: "heuristicPreloaded",
+    HEURISTIC_SEARCH_TIP: "heuristicSearchTip",
+    HEURISTIC_TEST: "heuristicTest",
+    HEURISTIC_TOKEN_ALIAS_ENGINE: "heuristicTokenAliasEngine",
+    INPUT_HISTORY: "inputHistory",
+    OMNIBOX: "extension",
+    PRELOADED: "preloaded",
+    REMOTE_SUGGESTION: "remoteSuggestion",
+    REMOTE_TAB: "remoteTab",
+    SUGGESTED_INDEX: "suggestedIndex",
+    TAIL_SUGGESTION: "tailSuggestion",
   },
 
   // Defines provider types.
@@ -106,7 +128,7 @@ var UrlbarUtils = {
   },
 
   /**
-   * Buckets used for logging telemetry to the FX_URLBAR_SELECTED_RESULT_TYPE_2
+   * Groups used for logging telemetry to the FX_URLBAR_SELECTED_RESULT_TYPE_2
    * histogram.
    */
   SELECTED_RESULT_TYPES: {
@@ -133,11 +155,10 @@ var UrlbarUtils = {
   // This defines icon locations that are commonly used in the UI.
   ICON: {
     // DEFAULT is defined lazily so it doesn't eagerly initialize PlacesUtils.
-    EXTENSION: "chrome://browser/content/extension.svg",
+    EXTENSION: "chrome://mozapps/skin/extensions/extension.svg",
     HISTORY: "chrome://browser/skin/history.svg",
     SEARCH_GLASS: "chrome://global/skin/icons/search-glass.svg",
-    SEARCH_GLASS_INVERTED: "chrome://browser/skin/search-glass-inverted.svg",
-    TIP: "chrome://browser/skin/tip.svg",
+    TIP: "chrome://global/skin/icons/lightbulb.svg",
   },
 
   // The number of results by which Page Up/Down move the selection.
@@ -163,33 +184,16 @@ var UrlbarUtils = {
     SUGGESTED: 2,
   },
 
-  // UnifiedComplete's autocomplete results store their titles and tags together
-  // in their comments.  This separator is used to separate them.  When we
-  // rewrite UnifiedComplete for quantumbar, we should stop using this old hack
-  // and store titles and tags separately.  It's important that this be a
-  // character that no title would ever have.  We use \x1F, the non-printable
-  // unit separator.
+  // UrlbarProviderPlaces's autocomplete results store their titles and tags
+  // together in their comments.  This separator is used to separate them.
+  // After bug 1717511, we should stop using this old hack and store titles and
+  // tags separately.  It's important that this be a character that no title
+  // would ever have.  We use \x1F, the non-printable unit separator.
   TITLE_TAGS_SEPARATOR: "\x1F",
 
   // Regex matching single word hosts with an optional port; no spaces, auth or
   // path-like chars are admitted.
   REGEXP_SINGLE_WORD: /^[^\s@:/?#]+(:\d+)?$/,
-
-  // Names of engines shipped in Firefox that search the web in general.  These
-  // are used to update the input placeholder when entering search mode.
-  // TODO (Bug 1658661): Don't hardcode this list; store search engine category
-  // information someplace better.
-  WEB_ENGINE_NAMES: new Set([
-    "百度", // Baidu
-    "百度搜索", // "Baidu Search", the name of Baidu's OpenSearch engine.
-    "Bing",
-    "DuckDuckGo",
-    "Ecosia",
-    "Google",
-    "Qwant",
-    "Yandex",
-    "Яндекс", // Yandex, non-EN
-  ]),
 
   // Valid entry points for search mode. If adding a value here, please update
   // telemetry documentation and Scalars.yaml.
@@ -208,6 +212,16 @@ var UrlbarUtils = {
     "touchbar",
     "typed",
   ]),
+
+  // The favicon service stores icons for URLs with the following protocols.
+  PROTOCOLS_WITH_ICONS: [
+    "chrome:",
+    "moz-extension:",
+    "about:",
+    "http:",
+    "https:",
+    "ftp:",
+  ],
 
   // Search mode objects corresponding to the local shortcuts in the view, in
   // order they appear.  Pref names are relative to the `browser.urlbar` branch.
@@ -386,7 +400,9 @@ var UrlbarUtils = {
       highlightType == this.HIGHLIGHT.SUGGESTED ? 1 : 0
     );
     let compareIgnoringDiacritics;
-    for (let { lowerCaseValue: needle } of tokens) {
+    for (let i = 0, totalTokensLength = 0; i < tokens.length; i++) {
+      const { lowerCaseValue: needle } = tokens[i];
+
       // Ideally we should never hit the empty token case, but just in case
       // the `needle` check protects us from an infinite loop.
       if (!needle) {
@@ -459,6 +475,12 @@ var UrlbarUtils = {
           }
         }
       }
+
+      totalTokensLength += needle.length;
+      if (totalTokensLength > UrlbarUtils.MAX_TEXT_LENGTH) {
+        // Limit the number of tokens to reduce calculate time.
+        break;
+      }
     }
     // Starting from the collision array, generate [start, len] tuples
     // representing the ranges to be highlighted.
@@ -472,6 +494,89 @@ var UrlbarUtils = {
       index = hits.indexOf(1, index + len);
     }
     return ranges;
+  },
+
+  /**
+   * Returns the group for a result.
+   *
+   * @param {UrlbarResult} result
+   *   The result.
+   * @returns {UrlbarUtils.RESULT_GROUP}
+   *   The reuslt's group.
+   */
+  getResultGroup(result) {
+    if (result.group) {
+      return result.group;
+    }
+
+    if (result.hasSuggestedIndex && !result.isSuggestedIndexRelativeToGroup) {
+      return UrlbarUtils.RESULT_GROUP.SUGGESTED_INDEX;
+    }
+    if (result.heuristic) {
+      switch (result.providerName) {
+        case "AliasEngines":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_ENGINE_ALIAS;
+        case "Autofill":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_AUTOFILL;
+        case "BookmarkKeywords":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_BOOKMARK_KEYWORD;
+        case "HeuristicFallback":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_FALLBACK;
+        case "Omnibox":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_OMNIBOX;
+        case "PreloadedSites":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_PRELOADED;
+        case "TokenAliasEngines":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_TOKEN_ALIAS_ENGINE;
+        case "UrlbarProviderSearchTips":
+          return UrlbarUtils.RESULT_GROUP.HEURISTIC_SEARCH_TIP;
+        default:
+          if (result.providerName.startsWith("TestProvider")) {
+            return UrlbarUtils.RESULT_GROUP.HEURISTIC_TEST;
+          }
+          break;
+      }
+      if (result.providerType == UrlbarUtils.PROVIDER_TYPE.EXTENSION) {
+        return UrlbarUtils.RESULT_GROUP.HEURISTIC_EXTENSION;
+      }
+      Cu.reportError(
+        "Returning HEURISTIC_FALLBACK for unrecognized heuristic result: " +
+          result
+      );
+      return UrlbarUtils.RESULT_GROUP.HEURISTIC_FALLBACK;
+    }
+
+    switch (result.providerName) {
+      case "AboutPages":
+        return UrlbarUtils.RESULT_GROUP.ABOUT_PAGES;
+      case "InputHistory":
+        return UrlbarUtils.RESULT_GROUP.INPUT_HISTORY;
+      case "PreloadedSites":
+        return UrlbarUtils.RESULT_GROUP.PRELOADED;
+      case "UrlbarProviderQuickSuggest":
+        return UrlbarUtils.RESULT_GROUP.GENERAL_PARENT;
+      default:
+        break;
+    }
+
+    switch (result.type) {
+      case UrlbarUtils.RESULT_TYPE.SEARCH:
+        if (result.source == UrlbarUtils.RESULT_SOURCE.HISTORY) {
+          return UrlbarUtils.RESULT_GROUP.FORM_HISTORY;
+        }
+        if (result.payload.tail) {
+          return UrlbarUtils.RESULT_GROUP.TAIL_SUGGESTION;
+        }
+        if (result.payload.suggestion) {
+          return UrlbarUtils.RESULT_GROUP.REMOTE_SUGGESTION;
+        }
+        break;
+      case UrlbarUtils.RESULT_TYPE.OMNIBOX:
+        return UrlbarUtils.RESULT_GROUP.OMNIBOX;
+      case UrlbarUtils.RESULT_TYPE.REMOTE_TAB:
+        return UrlbarUtils.RESULT_GROUP.REMOTE_TAB;
+    }
+    return UrlbarUtils.RESULT_GROUP.GENERAL;
   },
 
   /**
@@ -567,6 +672,26 @@ var UrlbarUtils = {
   },
 
   /**
+   * Gets a default icon for a URL.
+   * @param {string} url
+   * @returns {string} A URI pointing to an icon for `url`.
+   */
+  getIconForUrl(url) {
+    if (typeof url == "string") {
+      return UrlbarUtils.PROTOCOLS_WITH_ICONS.some(p => url.startsWith(p))
+        ? "page-icon:" + url
+        : UrlbarUtils.ICON.DEFAULT;
+    }
+    if (
+      url instanceof URL &&
+      UrlbarUtils.PROTOCOLS_WITH_ICONS.includes(url.protocol)
+    ) {
+      return "page-icon:" + url.href;
+    }
+    return UrlbarUtils.ICON.DEFAULT;
+  },
+
+  /**
    * Returns a search mode object if a token should enter search mode when
    * typed. This does not handle engine aliases.
    *
@@ -653,6 +778,8 @@ var UrlbarUtils = {
    *        Whether to trim a trailing `?`.
    * @param {boolean} options.trimEmptyHash
    *        Whether to trim a trailing `#`.
+   * @param {boolean} options.trimTrailingDot
+   *        Whether to trim a trailing '.'.
    * @returns {array} [modified, prefix, suffix]
    *          modified: {string} The modified spec.
    *          prefix: {string} The parts stripped from the prefix, if any.
@@ -683,6 +810,10 @@ var UrlbarUtils = {
     if (options.trimSlash && spec.endsWith("/")) {
       spec = spec.slice(0, -1);
       suffix = "/" + suffix;
+    }
+    if (options.trimTrailingDot && spec.endsWith(".")) {
+      spec = spec.slice(0, -1);
+      suffix = "." + suffix;
     }
     return [spec, prefix, suffix];
   },
@@ -816,8 +947,7 @@ var UrlbarUtils = {
    * @returns {array} If `str` is a URL, then [prefix, remainder].  Otherwise, ["", str].
    */
   stripURLPrefix(str) {
-    const REGEXP_STRIP_PREFIX = /^[a-z]+:(?:\/){0,2}/i;
-    let match = REGEXP_STRIP_PREFIX.exec(str);
+    let match = UrlbarTokenizer.REGEXP_PREFIX.exec(str);
     if (!match) {
       return ["", str];
     }
@@ -850,8 +980,8 @@ var UrlbarUtils = {
       userContextId: window.gBrowser.selectedBrowser.getAttribute(
         "usercontextid"
       ),
-      allowSearchSuggestions: false,
-      providers: ["UnifiedComplete", "HeuristicFallback"],
+      prohibitRemoteResults: true,
+      providers: ["AliasEngines", "BookmarkKeywords", "HeuristicFallback"],
     };
     if (window.gURLBar.searchMode) {
       let searchMode = window.gURLBar.searchMode;
@@ -949,6 +1079,51 @@ var UrlbarUtils = {
   },
 
   /**
+   * Return whether the candidate can autofill to the url.
+   *
+   * @param {string} url
+   * @param {string} candidate
+   * @param {string} checkFragmentOnly
+   *                 If want to check the fragment only, pass true.
+   *                 Otherwise, check whole url.
+   * @returns {boolean} true: can autofill
+   */
+  canAutofillURL(url, candidate, checkFragmentOnly = false) {
+    if (
+      !checkFragmentOnly &&
+      (url.length <= candidate.length ||
+        !url.toLocaleLowerCase().startsWith(candidate.toLocaleLowerCase()))
+    ) {
+      return false;
+    }
+
+    if (!UrlbarTokenizer.REGEXP_PREFIX.test(url)) {
+      url = "http://" + url;
+    }
+
+    if (!UrlbarTokenizer.REGEXP_PREFIX.test(candidate)) {
+      candidate = "http://" + candidate;
+    }
+
+    try {
+      url = new URL(url);
+      candidate = new URL(candidate);
+    } catch (e) {
+      return false;
+    }
+
+    if (
+      !checkFragmentOnly &&
+      candidate.href.endsWith("/") &&
+      (url.pathname.length > candidate.pathname.length || url.hash)
+    ) {
+      return false;
+    }
+
+    return url.hash.startsWith(candidate.hash);
+  },
+
+  /**
    * Extracts a telemetry type from a result, used by scalars and event
    * telemetry.
    *
@@ -1002,6 +1177,20 @@ var UrlbarUtils = {
         return "dynamic";
     }
     return "unknown";
+  },
+
+  /**
+   * Unescape the given uri to use as UI.
+   * NOTE: If the length of uri is over MAX_TEXT_LENGTH,
+   *       return the given uri as it is.
+   *
+   * @param {string} uri will be unescaped.
+   * @returns {string} Unescaped uri.
+   */
+  unEscapeURIForUI(uri) {
+    return uri.length > UrlbarUtils.MAX_TEXT_LENGTH
+      ? uri
+      : Services.textToSubURI.unEscapeURIForUI(uri);
   },
 };
 
@@ -1062,6 +1251,9 @@ UrlbarUtils.RESULT_PAYLOAD_SCHEMA = {
       isPrivateEngine: {
         type: "boolean",
       },
+      isGeneralPurposeEngine: {
+        type: "boolean",
+      },
       keyword: {
         type: "string",
       },
@@ -1104,6 +1296,12 @@ UrlbarUtils.RESULT_PAYLOAD_SCHEMA = {
       displayUrl: {
         type: "string",
       },
+      helpL10nId: {
+        type: "string",
+      },
+      helpUrl: {
+        type: "string",
+      },
       icon: {
         type: "string",
       },
@@ -1113,8 +1311,26 @@ UrlbarUtils.RESULT_PAYLOAD_SCHEMA = {
       isSponsored: {
         type: "boolean",
       },
+      qsSuggestion: {
+        type: "string",
+      },
       sendAttributionRequest: {
         type: "boolean",
+      },
+      sponsoredAdvertiser: {
+        type: "string",
+      },
+      sponsoredBlockId: {
+        type: "number",
+      },
+      sponsoredClickUrl: {
+        type: "string",
+      },
+      sponsoredImpressionUrl: {
+        type: "string",
+      },
+      sponsoredTileId: {
+        type: "number",
       },
       tags: {
         type: "array",
@@ -1177,7 +1393,7 @@ UrlbarUtils.RESULT_PAYLOAD_SCHEMA = {
   },
   [UrlbarUtils.RESULT_TYPE.REMOTE_TAB]: {
     type: "object",
-    required: ["device", "url"],
+    required: ["device", "url", "lastUsed"],
     properties: {
       device: {
         type: "string",
@@ -1187,6 +1403,9 @@ UrlbarUtils.RESULT_PAYLOAD_SCHEMA = {
       },
       icon: {
         type: "string",
+      },
+      lastUsed: {
+        type: "number",
       },
       title: {
         type: "string",
@@ -1310,11 +1529,11 @@ class UrlbarQueryContext {
    * @param {object} [options.searchMode]
    *   The input's current search mode.  See UrlbarInput.setSearchMode for a
    *   description.
-   * @param {boolean} [options.allowSearchSuggestions]
-   *   Whether to allow search suggestions.  This is a veto, meaning that when
-   *   false, suggestions will not be fetched, but when true, some other
-   *   condition may still prohibit suggestions, like private browsing mode.
-   *   Defaults to true.
+   * @param {boolean} [options.prohibitRemoteResults]
+   *   This provides a short-circuit override for `context.allowRemoteResults`.
+   *   If it's false, then `allowRemoteResults` will do its usual checks to
+   *   determine whether remote results are allowed. If it's true, then
+   *   `allowRemoteResults` will immediately return false. Defaults to false.
    * @param {string} [options.formHistoryName]
    *   The name under which the local form history is registered.
    */
@@ -1334,9 +1553,9 @@ class UrlbarQueryContext {
 
     // Manage optional properties of options.
     for (let [prop, checkFn, defaultValue] of [
-      ["allowSearchSuggestions", v => true, true],
       ["currentPage", v => typeof v == "string" && !!v.length],
       ["formHistoryName", v => typeof v == "string" && !!v.length],
+      ["prohibitRemoteResults", v => true, false],
       ["providers", v => Array.isArray(v) && v.length],
       ["searchMode", v => v && typeof v == "object"],
       ["sources", v => Array.isArray(v) && v.length],
@@ -1423,6 +1642,47 @@ class UrlbarQueryContext {
     }
 
     return null;
+  }
+
+  /**
+   * Returns whether results from remote services are generally allowed for the
+   * context. Callers can impose further restrictions as appropriate, but
+   * typically they should not fetch remote results if this returns false.
+   *
+   * @param {string} [searchString]
+   *   Usually this is just the context's search string, but if you need to
+   *   fetch remote results based on a modified version, you can pass it here.
+   * @returns {boolean}
+   *   Whether remote results are allowed.
+   */
+  allowRemoteResults(searchString = this.searchString) {
+    if (this.prohibitRemoteResults) {
+      return false;
+    }
+
+    // We're unlikely to get useful remote results for a single character.
+    if (searchString.length < 2) {
+      return false;
+    }
+
+    // Disallow remote results if only an origin is typed to avoid disclosing
+    // sites the user visits. This also catches partially typed origins, like
+    // mozilla.o, because the fixup check below can't validate them.
+    if (
+      this.tokens.length == 1 &&
+      this.tokens[0].type == UrlbarTokenizer.TYPE.POSSIBLE_ORIGIN
+    ) {
+      return false;
+    }
+
+    // Disallow remote results for strings containing tokens that look like URIs
+    // to avoid disclosing information about networks and passwords.
+    if (this.fixupInfo?.href && !this.fixupInfo?.isSearch) {
+      return false;
+    }
+
+    // Allow remote results.
+    return true;
   }
 }
 
@@ -1565,11 +1825,44 @@ class UrlbarProvider {
   /**
    * Called when the user starts and ends an engagement with the urlbar.
    *
-   * @param {boolean} isPrivate True if the engagement is in a private context.
-   * @param {string} state The state of the engagement, one of: start,
-   *        engagement, abandonment, discard.
+   * @param {boolean} isPrivate
+   *   True if the engagement is in a private context.
+   * @param {string} state
+   *   The state of the engagement, one of the following strings:
+   *
+   *   * start
+   *       A new query has started in the urlbar.
+   *   * engagement
+   *       The user picked a result in the urlbar or used paste-and-go.
+   *   * abandonment
+   *       The urlbar was blurred (i.e., lost focus).
+   *   * discard
+   *       This doesn't correspond to a user action, but it means that the
+   *       urlbar has discarded the engagement for some reason, and the
+   *       `onEngagement` implementation should ignore it.
+   *
+   * @param {UrlbarQueryContext} queryContext
+   *   The engagement's query context.  This is *not* guaranteed to be defined
+   *   when `state` is "start".  It will always be defined for "engagement" and
+   *   "abandonment".
+   * @param {object} details
+   *   This is defined only when `state` is "engagement" or "abandonment", and
+   *   it describes the search string and picked result.  For "engagement", it
+   *   has the following properties:
+   *
+   *   * {string} searchString
+   *       The search string for the engagement's query.
+   *   * {number} selIndex
+   *       The index of the picked result.
+   *   * {string} selType
+   *       The type of the selected result.  See TelemetryEvent.record() in
+   *       UrlbarController.jsm.
+   *   * {string} provider
+   *       The name of the provider that produced the picked result.
+   *
+   *   For "abandonment", only `searchString` is defined.
    */
-  onEngagement(isPrivate, state) {}
+  onEngagement(isPrivate, state, queryContext, details) {}
 
   /**
    * Called when a result from the provider is selected. "Selected" refers to
@@ -1754,5 +2047,181 @@ class SkippableTimer {
     if (isError) {
       Cu.reportError(line);
     }
+  }
+}
+
+/**
+ * This class implements a cache for l10n strings. Cached strings can be
+ * accessed synchronously, avoiding the asynchronicity of `data-l10n-id` and
+ * `document.l10n.setAttributes`, which can lead to text pop-in and flickering
+ * as strings are fetched from Fluent. (`document.l10n.formatValueSync` is also
+ * sync but should not be used since it may perform sync I/O.)
+ *
+ * Values stored and returned by the cache are JS objects similar to
+ * `L10nMessage` objects, not bare strings. This allows the cache to store not
+ * only l10n strings with bare values but also strings that define attributes
+ * (e.g., ".label = My label value"). See `get` for details.
+ */
+class L10nCache {
+  /**
+   * @param {Localization} l10n
+   *   A `Localization` object like `document.l10n`. This class keeps a weak
+   *   reference to this object, so the caller or something else must hold onto
+   *   it.
+   */
+  constructor(l10n) {
+    this.l10n = Cu.getWeakReference(l10n);
+  }
+
+  /**
+   * Gets a cached l10n message.
+   *
+   * @param {string} id
+   *   The string's Fluent ID.
+   * @param {object} [args]
+   *   The Fluent arguments as passed to `l10n.setAttributes`.
+   * @returns {object}
+   *   The message object or undefined if it's not cached. The message object is
+   *   similar to `L10nMessage` (defined in Localization.webidl) but its
+   *   attributes are stored differently for convenience. It looks like this:
+   *
+   *     { value, attributes }
+   *
+   *   The properties are:
+   *
+   *     {string} value
+   *       The bare value of the string. If the string does not have a bare
+   *       value (i.e., it has only attributes), this will be null.
+   *     {object} attributes
+   *       A mapping from attribute names to their values. If the string doesn't
+   *       have any attributes, this will be null.
+   *
+   *   For example, if we cache these strings from an ftl file:
+   *
+   *     foo = Foo's value
+   *     bar =
+   *       .label = Bar's label value
+   *
+   *   Then:
+   *
+   *     cache.get("foo")
+   *     // => { value: "Foo's value", attributes: null }
+   *     cache.get("bar")
+   *     // => { value: null, attributes: { label: "Bar's label value" }}
+   */
+  get(id, args = undefined) {
+    return this._messagesByKey.get(this._key(id, args));
+  }
+
+  /**
+   * Fetches a string from Fluent and caches it.
+   *
+   * @param {string} id
+   *   The string's Fluent ID.
+   * @param {object} [args]
+   *   The Fluent arguments as passed to `l10n.setAttributes`.
+   */
+  async add(id, args = undefined) {
+    let l10n = this.l10n.get();
+    if (!l10n) {
+      return;
+    }
+    let messages = await l10n.formatMessages([{ id, args }]);
+    if (!messages?.length) {
+      Cu.reportError(
+        "l10n.formatMessages returned an unexpected value for ID: " + id
+      );
+      return;
+    }
+    let message = messages[0];
+    if (message.attributes) {
+      // Convert `attributes` from an array of `{ name, value }` objects to one
+      // object mapping names to values.
+      message.attributes = message.attributes.reduce(
+        (valuesByName, { name, value }) => {
+          valuesByName[name] = value;
+          return valuesByName;
+        },
+        {}
+      );
+    }
+    this._messagesByKey.set(this._key(id, args), message);
+  }
+
+  /**
+   * Fetches and caches a string if it's not already cached. This is just a
+   * slight optimization over `add` that avoids calling into Fluent
+   * unnecessarily.
+   *
+   * @param {string} id
+   *   The string's Fluent ID.
+   * @param {object} [args]
+   *   The Fluent arguments as passed to `l10n.setAttributes`.
+   */
+  async ensure(id, args = undefined) {
+    if (!this.get(id, args)) {
+      await this.add(id, args);
+    }
+  }
+
+  /**
+   * Fetches and caches strings that aren't already cached.
+   *
+   * @param {array} idArgs
+   *   An array of `{ id, args }` objects.
+   */
+  async ensureAll(idArgs) {
+    let promises = [];
+    for (let { id, args } of idArgs) {
+      promises.push(this.ensure(id, args));
+    }
+    await Promise.all(promises);
+  }
+
+  /**
+   * Removes a cached string.
+   *
+   * @param {string} id
+   *   The string's Fluent ID.
+   * @param {object} [args]
+   *   The Fluent arguments as passed to `l10n.setAttributes`.
+   */
+  delete(id, args = undefined) {
+    this._messagesByKey.delete(this._key(id, args));
+  }
+
+  /**
+   * Removes all cached strings.
+   */
+  clear() {
+    this._messagesByKey.clear();
+  }
+
+  /**
+   * Cache keys => cached message objects
+   */
+  _messagesByKey = new Map();
+
+  /**
+   * Returns a cache key for a string in `_messagesByKey`.
+   *
+   * @param {string} id
+   *   The string's Fluent ID.
+   * @param {object} [args]
+   *   The Fluent arguments as passed to `l10n.setAttributes`.
+   * @returns {string}
+   *   The cache key.
+   */
+  _key(id, args) {
+    // Keys are `id` plus JSON'ed `args` values. `JSON.stringify` doesn't
+    // guarantee a particular ordering of object properties, so instead of
+    // stringifying `args` as is, sort its entries by key and then pull out the
+    // values. The final key is a JSON'ed array of `id` concatenated with the
+    // sorted-by-key `args` values.
+    let argValues = Object.entries(args || [])
+      .sort(([key1], [key2]) => key1.localeCompare(key2))
+      .map(([_, value]) => value);
+    let parts = [id].concat(argValues);
+    return JSON.stringify(parts);
   }
 }

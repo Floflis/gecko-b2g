@@ -5,7 +5,7 @@
 // except according to those terms.
 
 use super::super::super::{ConnectionError, ERROR_AEAD_LIMIT_REACHED};
-use super::super::{Connection, Error, Output, State, StreamType, LOCAL_IDLE_TIMEOUT};
+use super::super::{Connection, ConnectionParameters, Error, Output, State, StreamType};
 use super::{
     connect, connect_force_idle, default_client, default_server, maybe_authenticate,
     send_and_receive, send_something, AT_LEAST_PTO,
@@ -15,11 +15,12 @@ use crate::packet::PacketNumber;
 use crate::path::PATH_MTU_V6;
 
 use neqo_common::{qdebug, Datagram};
+use std::mem;
 use test_fixture::{self, now};
 
 fn check_discarded(peer: &mut Connection, pkt: Datagram, dropped: usize, dups: usize) {
     // Make sure to flush any saved datagrams before doing this.
-    let _ = peer.process_output(now());
+    mem::drop(peer.process_output(now()));
 
     let before = peer.stats();
     let out = peer.process(Some(pkt), now());
@@ -33,7 +34,7 @@ fn assert_update_blocked(c: &mut Connection) {
     assert_eq!(
         c.initiate_key_update().unwrap_err(),
         Error::KeyUpdateBlocked
-    )
+    );
 }
 
 fn overwrite_invocations(n: PacketNumber) {
@@ -103,10 +104,8 @@ fn key_update_client() {
     assert_update_blocked(&mut client);
 
     // Initiating an update should only increase the write epoch.
-    assert_eq!(
-        Output::Callback(LOCAL_IDLE_TIMEOUT),
-        client.process(None, now)
-    );
+    let idle_timeout = ConnectionParameters::default().get_idle_timeout();
+    assert_eq!(Output::Callback(idle_timeout), client.process(None, now));
     assert_eq!(client.get_epochs(), (Some(4), Some(3)));
 
     // Send something to propagate the update.
@@ -116,7 +115,7 @@ fn key_update_client() {
     assert_eq!(server.get_epochs(), (Some(4), Some(3)));
     let res = server.process(None, now);
     if let Output::Callback(t) = res {
-        assert!(t < LOCAL_IDLE_TIMEOUT);
+        assert!(t < idle_timeout);
     } else {
         panic!("server should now be waiting to clear keys");
     }
@@ -134,7 +133,7 @@ fn key_update_client() {
     let dgram = client.process(None, now).dgram();
     assert!(dgram.is_some()); // Drop this packet.
     assert_eq!(client.get_epochs(), (Some(4), Some(3)));
-    let _ = server.process(None, now);
+    mem::drop(server.process(None, now));
     assert_eq!(server.get_epochs(), (Some(4), Some(4)));
 
     // Even though the server has updated, it hasn't received an ACK yet.
@@ -148,7 +147,7 @@ fn key_update_client() {
     // This is the first packet that the client has received from the server
     // with new keys, so its read timer just started.
     if let Output::Callback(t) = res {
-        assert!(t < LOCAL_IDLE_TIMEOUT);
+        assert!(t < ConnectionParameters::default().get_idle_timeout());
     } else {
         panic!("client should now be waiting to clear keys");
     }
@@ -159,7 +158,7 @@ fn key_update_client() {
     assert_update_blocked(&mut server);
 
     now += AT_LEAST_PTO;
-    let _ = client.process(None, now);
+    mem::drop(client.process(None, now));
     assert_eq!(client.get_epochs(), (Some(4), Some(4)));
 }
 
@@ -175,7 +174,7 @@ fn key_update_consecutive() {
 
     // Server sends something.
     // Send twice and drop the first to induce an ACK from the client.
-    let _ = send_something(&mut server, now); // Drop this.
+    mem::drop(send_something(&mut server, now)); // Drop this.
 
     // Another packet from the server will cause the client to ACK and update keys.
     let dgram = send_and_receive(&mut server, &mut client, now);
@@ -187,7 +186,7 @@ fn key_update_consecutive() {
         assert_eq!(server.get_epochs(), (Some(4), Some(3)));
         // Now move the server temporarily into the future so that it
         // rotates the keys.  The client stays in the present.
-        let _ = server.process(None, now + AT_LEAST_PTO);
+        mem::drop(server.process(None, now + AT_LEAST_PTO));
         assert_eq!(server.get_epochs(), (Some(4), Some(4)));
     } else {
         panic!("server should have a timer set");
@@ -277,9 +276,13 @@ fn exhaust_read_keys() {
     ));
 
     client.process_input(dgram.unwrap(), now());
-    assert!(matches!(client.state(), State::Draining {
-        error: ConnectionError::Transport(Error::PeerError(ERROR_AEAD_LIMIT_REACHED)), ..
-    }));
+    assert!(matches!(
+        client.state(),
+        State::Draining {
+            error: ConnectionError::Transport(Error::PeerError(ERROR_AEAD_LIMIT_REACHED)),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -289,7 +292,7 @@ fn automatic_update_write_keys() {
     connect_force_idle(&mut client, &mut server);
 
     overwrite_invocations(UPDATE_WRITE_KEYS_AT);
-    let _ = send_something(&mut client, now());
+    mem::drop(send_something(&mut client, now()));
     assert_eq!(client.get_epochs(), (Some(4), Some(3)));
 }
 
@@ -301,10 +304,10 @@ fn automatic_update_write_keys_later() {
 
     overwrite_invocations(UPDATE_WRITE_KEYS_AT + 2);
     // No update after the first.
-    let _ = send_something(&mut client, now());
+    mem::drop(send_something(&mut client, now()));
     assert_eq!(client.get_epochs(), (Some(3), Some(3)));
     // The second will update though.
-    let _ = send_something(&mut client, now());
+    mem::drop(send_something(&mut client, now()));
     assert_eq!(client.get_epochs(), (Some(4), Some(3)));
 }
 

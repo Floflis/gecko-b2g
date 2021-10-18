@@ -41,7 +41,8 @@ nsresult HttpBackgroundChannelChild::Init(HttpChannelChild* aChannelChild) {
 
   if (NS_WARN_IF(!CreateBackgroundChannel())) {
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
-    mChannelChild->mCreateBackgroundChannelFailed = true;
+    // mChannelChild may be nulled already. Use aChannelChild
+    aChannelChild->mCreateBackgroundChannelFailed = true;
 #endif
     mChannelChild = nullptr;
     return NS_ERROR_FAILURE;
@@ -188,7 +189,8 @@ bool HttpBackgroundChannelChild::IsWaitingOnStartRequest() {
 IPCResult HttpBackgroundChannelChild::RecvOnStartRequest(
     const nsHttpResponseHead& aResponseHead, const bool& aUseResponseHead,
     const nsHttpHeaderArray& aRequestHeaders,
-    const HttpChannelOnStartRequestArgs& aArgs) {
+    const HttpChannelOnStartRequestArgs& aArgs,
+    const HttpChannelAltDataStream& aAltData) {
   LOG((
       "HttpBackgroundChannelChild::RecvOnStartRequest [this=%p, status=%" PRIx32
       "]\n",
@@ -203,7 +205,7 @@ IPCResult HttpBackgroundChannelChild::RecvOnStartRequest(
       aArgs.dataFromSocketProcess() ? ODA_FROM_SOCKET : ODA_FROM_PARENT;
 
   mChannelChild->ProcessOnStartRequest(aResponseHead, aUseResponseHead,
-                                       aRequestHeaders, aArgs);
+                                       aRequestHeaders, aArgs, aAltData);
   // Allow to queue other runnable since OnStartRequest Event already hits the
   // child's mEventQ.
   OnStartRequestReceived(aArgs.multiPartID());

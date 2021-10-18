@@ -12,7 +12,6 @@
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/Sprintf.h"
 #include "mozilla/TextUtils.h"
-#include "mozilla/Unused.h"
 #include "mozilla/Vector.h"
 #include "mozilla/WrappingOperations.h"
 
@@ -33,6 +32,7 @@
 #endif
 #include <type_traits>
 
+#include "jsapi.h"
 #include "jsexn.h"
 #include "jsnum.h"
 
@@ -42,10 +42,13 @@
 #include "jit/AtomicOperations.h"
 #include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject, JS::NewArrayObject
 #include "js/ArrayBuffer.h"  // JS::{IsArrayBufferObject,GetArrayBufferData,GetArrayBuffer{ByteLength,Data}}
+#include "js/CallAndConstruct.h"  // JS::IsCallable, JS_CallFunctionValue
 #include "js/CharacterEncoding.h"
 #include "js/experimental/TypedData.h"  // JS_GetArrayBufferView{Type,Data}, JS_GetTypedArrayByteLength, JS_IsArrayBufferViewObject, JS_IsTypedArrayObject
 #include "js/friend/ErrorMessages.h"    // js::GetErrorMessage, JSMSG_*
-#include "js/Object.h"  // JS::GetPrivate, JS::GetReservedSlot, JS::SetPrivate
+#include "js/GlobalObject.h"            // JS::CurrentGlobalOrNull
+#include "js/Object.h"  // JS::GetMaybePtrFromReservedSlot, JS::GetReservedSlot, JS::SetReservedSlot
+#include "js/PropertyAndElement.h"  // JS_DefineFunction, JS_DefineFunctions, JS_DefineProperties, JS_DefineProperty, JS_DefinePropertyById, JS_DefineUCProperty, JS_Enumerate, JS_GetElement, JS_GetProperty, JS_GetPropertyById
 #include "js/PropertySpec.h"
 #include "js/SharedArrayBuffer.h"  // JS::{GetSharedArrayBuffer{ByteLength,Data},IsSharedArrayBufferObject}
 #include "js/StableStringChars.h"
@@ -54,7 +57,7 @@
 #include "js/Vector.h"
 #include "util/Text.h"
 #include "util/Unicode.h"
-#include "util/Windows.h"
+#include "util/WindowsWrapper.h"
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"
 #include "vm/JSObject.h"
@@ -555,7 +558,7 @@ static const JSClassOps sCDataFinalizerClassOps = {
 };
 static const JSClass sCDataFinalizerClass = {
     "CDataFinalizer",
-    JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(CDATAFINALIZER_SLOTS) |
+    JSCLASS_HAS_RESERVED_SLOTS(CDATAFINALIZER_SLOTS) |
         JSCLASS_FOREGROUND_FINALIZE,
     &sCDataFinalizerClassOps};
 
@@ -826,7 +829,7 @@ bool CDataArrayProxyHandler::set(JSContext* cx, HandleObject proxy, HandleId id,
 }
 
 static JSObject* MaybeUnwrapArrayWrapper(JSObject* obj) {
-  if (IsProxy(obj) &&
+  if (obj->is<ProxyObject>() &&
       obj->as<ProxyObject>().handler() == &CDataArrayProxyHandler::singleton) {
     return obj->as<ProxyObject>().target();
   }
@@ -1259,8 +1262,8 @@ static bool ArgumentLengthError(JSContext* cx, const char* fun,
   return false;
 }
 
-static bool ArrayLengthMismatch(JSContext* cx, unsigned expectedLength,
-                                HandleObject arrObj, unsigned actualLength,
+static bool ArrayLengthMismatch(JSContext* cx, size_t expectedLength,
+                                HandleObject arrObj, size_t actualLength,
                                 HandleValue actual, ConversionType convType) {
   MOZ_ASSERT(arrObj && CType::IsCType(arrObj));
 
@@ -1851,8 +1854,8 @@ static bool VariadicArgumentTypeError(JSContext* cx, uint32_t index,
   return false;
 }
 
-MOZ_MUST_USE JSObject* GetThisObject(JSContext* cx, const CallArgs& args,
-                                     const char* msg) {
+[[nodiscard]] JSObject* GetThisObject(JSContext* cx, const CallArgs& args,
+                                      const char* msg) {
   if (!args.thisv().isObject()) {
     IncompatibleThisProto(cx, msg, args.thisv());
     return nullptr;
@@ -3262,6 +3265,13 @@ bool CanConvertTypedArrayItemTo(JSObject* baseType, JSObject* valObj,
   return elementTypeCode == baseTypeCode;
 }
 
+static CDataFinalizer::Private* GetFinalizerPrivate(JSObject* obj) {
+  MOZ_ASSERT(CDataFinalizer::IsCDataFinalizer(obj));
+
+  using T = CDataFinalizer::Private;
+  return JS::GetMaybePtrFromReservedSlot<T>(obj, SLOT_DATAFINALIZER_PRIVATE);
+}
+
 // Implicitly convert Value 'val' to a C binary representation of CType
 // 'targetType', storing the result in 'buffer'. Adequate space must be
 // provided in 'buffer' by the caller. This function generally does minimal
@@ -3305,7 +3315,7 @@ static bool ImplicitConvert(JSContext* cx, HandleValue val,
       sourceData = valObj;
       sourceType = CDataFinalizer::GetCType(cx, sourceData);
 
-      auto* p = (CDataFinalizer::Private*)JS::GetPrivate(sourceData);
+      CDataFinalizer::Private* p = GetFinalizerPrivate(sourceData);
 
       if (!p) {
         // We have called |dispose| or |forget| already.
@@ -3642,15 +3652,15 @@ static bool ImplicitConvert(JSContext* cx, HandleValue val,
           // Check that array is consistent with type, then
           // copy the array.
           const bool bufferShared = cls == ESClass::SharedArrayBuffer;
-          uint32_t sourceLength =
-              bufferShared ? JS::GetSharedArrayBufferByteLength(valObj)
-                           : JS::GetArrayBufferByteLength(valObj);
+          size_t sourceLength = bufferShared
+                                    ? JS::GetSharedArrayBufferByteLength(valObj)
+                                    : JS::GetArrayBufferByteLength(valObj);
           size_t elementSize = CType::GetSize(baseType);
           size_t arraySize = elementSize * targetLength;
-          if (arraySize != size_t(sourceLength)) {
+          if (arraySize != sourceLength) {
             MOZ_ASSERT(!funObj);
-            return ArrayLengthMismatch(cx, arraySize, targetType,
-                                       size_t(sourceLength), val, convType);
+            return ArrayLengthMismatch(cx, arraySize, targetType, sourceLength,
+                                       val, convType);
           }
           SharedMem<void*> target = SharedMem<void*>::unshared(buffer);
           JS::AutoCheckCannotGC nogc;
@@ -3673,13 +3683,13 @@ static bool ImplicitConvert(JSContext* cx, HandleValue val,
                              arrObj, arrIndex);
           }
 
-          uint32_t sourceLength = JS_GetTypedArrayByteLength(valObj);
+          size_t sourceLength = JS_GetTypedArrayByteLength(valObj);
           size_t elementSize = CType::GetSize(baseType);
           size_t arraySize = elementSize * targetLength;
-          if (arraySize != size_t(sourceLength)) {
+          if (arraySize != sourceLength) {
             MOZ_ASSERT(!funObj);
-            return ArrayLengthMismatch(cx, arraySize, targetType,
-                                       size_t(sourceLength), val, convType);
+            return ArrayLengthMismatch(cx, arraySize, targetType, sourceLength,
+                                       val, convType);
           }
           SharedMem<void*> target = SharedMem<void*>::unshared(buffer);
           JS::AutoCheckCannotGC nogc;
@@ -4111,9 +4121,9 @@ static void BuildTypeSource(JSContext* cx, JSObject* typeObj_, bool makeShort,
 // resulting string can ImplicitConvert successfully if passed to another data
 // constructor. (This is important when called recursively, since fields of
 // structs and arrays are converted with ImplicitConvert.)
-static MOZ_MUST_USE bool BuildDataSource(JSContext* cx, HandleObject typeObj,
-                                         void* data, bool isImplicit,
-                                         AutoString& result) {
+[[nodiscard]] static bool BuildDataSource(JSContext* cx, HandleObject typeObj,
+                                          void* data, bool isImplicit,
+                                          AutoString& result) {
   TypeCode type = CType::GetTypeCode(typeObj);
   switch (type) {
     case TYPE_bool:
@@ -4509,7 +4519,7 @@ void CType::Finalize(JSFreeOp* fop, JSObject* obj) {
 
 void CType::Trace(JSTracer* trc, JSObject* obj) {
   // Make sure our TypeCode slot is legit. If it's not, bail.
-  Value slot = obj->as<NativeObject>().getSlot(SLOT_TYPECODE);
+  Value slot = obj->as<NativeObject>().getReservedSlot(SLOT_TYPECODE);
   if (slot.isUndefined()) {
     return;
   }
@@ -5652,7 +5662,7 @@ bool ArrayType::Getter(JSContext* cx, HandleObject obj, HandleId idval,
   size_t length = GetLength(typeObj);
   bool ok = jsidToSize(cx, idval, true, &index);
   int32_t dummy;
-  if (!ok && JSID_IS_SYMBOL(idval)) {
+  if (!ok && idval.isSymbol()) {
     return true;
   }
   bool dummy2;
@@ -5699,7 +5709,7 @@ bool ArrayType::Setter(JSContext* cx, HandleObject obj, HandleId idval,
   size_t length = GetLength(typeObj);
   bool ok = jsidToSize(cx, idval, true, &index);
   int32_t dummy;
-  if (!ok && JSID_IS_SYMBOL(idval)) {
+  if (!ok && idval.isSymbol()) {
     return true;
   }
   bool dummy2;
@@ -5999,8 +6009,7 @@ bool StructType::DefineInternal(JSContext* cx, JSObject* typeObj_,
 
       if (!JS_DefineUCProperty(cx, prototype, nameChars.twoByteChars(),
                                name->length(), getterObj, setterObj,
-                               JSPROP_ENUMERATE | JSPROP_PERMANENT |
-                                   JSPROP_GETTER | JSPROP_SETTER)) {
+                               JSPROP_ENUMERATE | JSPROP_PERMANENT)) {
         return false;
       }
 
@@ -7801,7 +7810,7 @@ static bool GetThisDataObject(JSContext* cx, const CallArgs& args,
       return IncompatibleThisProto(cx, funName, args.thisv());
     }
 
-    auto* p = (CDataFinalizer::Private*)JS::GetPrivate(obj);
+    CDataFinalizer::Private* p = GetFinalizerPrivate(obj);
     if (!p) {
       return EmptyFinalizerCallError(cx, funName);
     }
@@ -7932,7 +7941,7 @@ bool CData::ReadStringReplaceMalformed(JSContext* cx, unsigned argc,
                           js::StringBufferArena);
 }
 
-using TypedArrayConstructor = JSObject* (*)(JSContext*, uint32_t);
+using TypedArrayConstructor = JSObject* (*)(JSContext*, size_t);
 
 template <typename Type>
 TypedArrayConstructor GetTypedArrayConstructorImpl() {
@@ -8153,7 +8162,7 @@ bool CDataFinalizer::Methods::ToSource(JSContext* cx, unsigned argc,
                                  InformalValueTypeName(args.thisv()));
   }
 
-  auto* p = (CDataFinalizer::Private*)JS::GetPrivate(objThis);
+  CDataFinalizer::Private* p = GetFinalizerPrivate(objThis);
 
   JSString* strMessage;
   if (!p) {
@@ -8217,7 +8226,7 @@ bool CDataFinalizer::Methods::ToString(JSContext* cx, unsigned argc,
 
   JSString* strMessage;
   RootedValue value(cx);
-  if (!JS::GetPrivate(objThis)) {
+  if (!GetFinalizerPrivate(objThis)) {
     // Pre-check whether CDataFinalizer::GetValue can fail
     // to avoid reporting an error when not appropriate.
     strMessage = JS_NewStringCopyZ(cx, "[CDataFinalizer - empty]");
@@ -8255,7 +8264,7 @@ bool CDataFinalizer::GetValue(JSContext* cx, JSObject* obj,
                               MutableHandleValue aResult) {
   MOZ_ASSERT(IsCDataFinalizer(obj));
 
-  auto* p = (CDataFinalizer::Private*)JS::GetPrivate(obj);
+  CDataFinalizer::Private* p = GetFinalizerPrivate(obj);
 
   if (!p) {
     // We have called |dispose| or |forget| already.
@@ -8454,7 +8463,8 @@ bool CDataFinalizer::Construct(JSContext* cx, unsigned argc, Value* vp) {
   p->cargs_size = sizeArg;
   p->code = code;
 
-  JS::SetPrivate(objResult, p.release());
+  JS::SetReservedSlot(objResult, SLOT_DATAFINALIZER_PRIVATE,
+                      JS::PrivateValue(p.release()));
   args.rval().setObject(*objResult);
   return true;
 }
@@ -8524,7 +8534,7 @@ bool CDataFinalizer::Methods::Forget(JSContext* cx, unsigned argc, Value* vp) {
                                  args.thisv());
   }
 
-  auto* p = (CDataFinalizer::Private*)JS::GetPrivate(obj);
+  CDataFinalizer::Private* p = GetFinalizerPrivate(obj);
 
   if (!p) {
     return EmptyFinalizerCallError(cx, "CDataFinalizer.prototype.forget");
@@ -8570,7 +8580,7 @@ bool CDataFinalizer::Methods::Dispose(JSContext* cx, unsigned argc, Value* vp) {
                                  args.thisv());
   }
 
-  auto* p = (CDataFinalizer::Private*)JS::GetPrivate(obj);
+  CDataFinalizer::Private* p = GetFinalizerPrivate(obj);
 
   if (!p) {
     return EmptyFinalizerCallError(cx, "CDataFinalizer.prototype.dispose");
@@ -8629,7 +8639,7 @@ bool CDataFinalizer::Methods::Dispose(JSContext* cx, unsigned argc, Value* vp) {
  * strong references.
  */
 void CDataFinalizer::Finalize(JSFreeOp* fop, JSObject* obj) {
-  auto* p = (CDataFinalizer::Private*)JS::GetPrivate(obj);
+  CDataFinalizer::Private* p = GetFinalizerPrivate(obj);
 
   if (!p) {
     return;
@@ -8665,10 +8675,11 @@ void CDataFinalizer::Cleanup(CDataFinalizer::Private* p, JSObject* obj) {
 
   MOZ_ASSERT(CDataFinalizer::IsCDataFinalizer(obj));
 
-  JS::SetPrivate(obj, nullptr);
-  for (int i = 0; i < CDATAFINALIZER_SLOTS; ++i) {
-    JS_SetReservedSlot(obj, i, JS::NullValue());
-  }
+  static_assert(CDATAFINALIZER_SLOTS == 3, "Code below must clear all slots");
+
+  JS::SetReservedSlot(obj, SLOT_DATAFINALIZER_PRIVATE, JS::UndefinedValue());
+  JS::SetReservedSlot(obj, SLOT_DATAFINALIZER_VALTYPE, JS::NullValue());
+  JS::SetReservedSlot(obj, SLOT_DATAFINALIZER_CODETYPE, JS::NullValue());
 }
 
 /*******************************************************************************

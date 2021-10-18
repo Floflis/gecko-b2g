@@ -4,10 +4,11 @@
 
 from __future__ import absolute_import
 import os
+import six
 
 
 def toolchain_task_definitions():
-    from taskgraph.generator import load_tasks_for_kind
+    from gecko_taskgraph.generator import load_tasks_for_kind
 
     # Don't import globally to allow this module being imported without
     # the taskgraph module being available (e.g. standalone js)
@@ -18,8 +19,12 @@ def toolchain_task_definitions():
     toolchains = load_tasks_for_kind(params, "toolchain", root_dir=root_dir)
     aliased = {}
     for t in toolchains.values():
-        alias = t.attributes.get("toolchain-alias")
-        if alias:
+        aliases = t.attributes.get("toolchain-alias")
+        if not aliases:
+            aliases = []
+        if isinstance(aliases, six.text_type):
+            aliases = [aliases]
+        for alias in aliases:
             aliased["toolchain-{}".format(alias)] = t
     toolchains.update(aliased)
 

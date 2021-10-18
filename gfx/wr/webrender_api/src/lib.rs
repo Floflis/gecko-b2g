@@ -64,6 +64,9 @@ use std::sync::Arc;
 use std::os::raw::c_void;
 use peek_poke::PeekPoke;
 
+/// Defined here for cbindgen
+pub const MAX_RENDER_TASK_SIZE: i32 = 16384;
+
 /// Width and height in device pixels of image tiles.
 pub type TileSize = u16;
 
@@ -159,7 +162,7 @@ impl Default for PipelineId {
 impl PipelineId {
     ///
     pub fn dummy() -> Self {
-        PipelineId(0, 0)
+        PipelineId(!0, !0)
     }
 }
 
@@ -185,7 +188,7 @@ impl ExternalEvent {
 }
 
 /// Describe whether or not scrolling should be clamped by the content bounds.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Copy, Clone, Deserialize, Serialize)]
 pub enum ScrollClamping {
     ///
     ToContentBounds,
@@ -274,11 +277,9 @@ impl NotificationRequest {
 /// the RenderBackendThread.
 pub trait ApiHitTester: Send + Sync {
     /// Does a hit test on display items in the specified document, at the given
-    /// point. If a pipeline_id is specified, it is used to further restrict the
-    /// hit results so that only items inside that pipeline are matched. The vector
-    /// of hit results will contain all display items that match, ordered from
-    /// front to back.
-    fn hit_test(&self, pipeline_id: Option<PipelineId>, point: WorldPoint) -> HitTestResult;
+    /// point. The vector of hit results will contain all display items that match,
+    /// ordered from front to back.
+    fn hit_test(&self, point: WorldPoint) -> HitTestResult;
 }
 
 /// A hit tester requested to the render backend thread but not necessarily ready yet.
@@ -475,7 +476,7 @@ pub struct PropertyValue<T> {
 /// animated properties.
 #[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Default)]
 pub struct DynamicProperties {
-    ///
+    /// transform list
     pub transforms: Vec<PropertyValue<LayoutTransform>>,
     /// opacity
     pub floats: Vec<PropertyValue<f32>>,
@@ -483,11 +484,80 @@ pub struct DynamicProperties {
     pub colors: Vec<PropertyValue<ColorF>>,
 }
 
+impl DynamicProperties {
+    /// Extend the properties.
+    pub fn extend(&mut self, other: Self) {
+        self.transforms.extend(other.transforms);
+        self.floats.extend(other.floats);
+        self.colors.extend(other.colors);
+    }
+}
+
 /// A C function that takes a pointer to a heap allocation and returns its size.
 ///
 /// This is borrowed from the malloc_size_of crate, upon which we want to avoid
 /// a dependency from WebRender.
 pub type VoidPtrToSizeFn = unsafe extern "C" fn(ptr: *const c_void) -> usize;
+
+/// A configuration option that can be changed at runtime.
+///
+/// # Adding a new configuration option
+///
+///  - Add a new enum variant here.
+///  - Add the entry in WR_BOOL_PARAMETER_LIST in gfxPlatform.cpp.
+///  - React to the parameter change anywhere in WebRender where a SetParam message is received.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Parameter {
+    Bool(BoolParameter, bool),
+}
+
+
+/// Boolean configuration option.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BoolParameter {
+    PboUploads = 0,
+    Multithreading = 1,
+    BatchedUploads = 2,
+    DrawCallsForTextureCopy = 3,
+}
+
+bitflags! {
+    /// Flags to track why we are rendering.
+    #[repr(C)]
+    #[derive(Default, Deserialize, MallocSizeOf, Serialize)]
+    pub struct RenderReasons: u32 {
+        /// Equivalent of empty() for the C++ side.
+        const NONE                          = 0;
+        const SCENE                         = 1 << 0;
+        const ANIMATED_PROPERTY             = 1 << 1;
+        const RESOURCE_UPDATE               = 1 << 2;
+        const ASYNC_IMAGE                   = 1 << 3;
+        const CLEAR_RESOURCES               = 1 << 4;
+        const APZ                           = 1 << 5;
+        /// Window resize
+        const RESIZE                        = 1 << 6;
+        /// Various widget-related reasons
+        const WIDGET                        = 1 << 7;
+        /// See Frame::must_be_drawn
+        const TEXTURE_CACHE_FLUSH           = 1 << 8;
+        const SNAPSHOT                      = 1 << 9;
+        const POST_RESOURCE_UPDATES_HOOK    = 1 << 10;
+        const CONFIG_CHANGE                 = 1 << 11;
+        const CONTENT_SYNC                  = 1 << 12;
+        const FLUSH                         = 1 << 13;
+        const TESTING                       = 1 << 14;
+        const OTHER                         = 1 << 15;
+        /// Vsync isn't actually "why" we render but it can be useful
+        /// to see which frames were driven by the vsync scheduler so
+        /// we store a bit for it.
+        const VSYNC                         = 1 << 16;
+    }
+}
+
+impl RenderReasons {
+    pub const NUM_BITS: u32 = 17;
+}
 
 bitflags! {
     /// Flags to enable/disable various builtin debugging tools.
@@ -574,15 +644,6 @@ pub enum PrimitiveKeyKind {
 }
 
 ///
-#[derive(Clone)]
-pub struct ScrollNodeState {
-    ///
-    pub id: ExternalScrollId,
-    ///
-    pub scroll_offset: LayoutVector2D,
-}
-
-///
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollLocation {
     /// Scroll by a certain amount.
@@ -593,32 +654,17 @@ pub enum ScrollLocation {
     End,
 }
 
-/// Represents a zoom factor.
-#[derive(Clone, Copy, Debug)]
-pub struct ZoomFactor(f32);
-
-impl ZoomFactor {
-    /// Construct a new zoom factor.
-    pub fn new(scale: f32) -> Self {
-        ZoomFactor(scale)
-    }
-
-    /// Get the zoom factor as an untyped float.
-    pub fn get(self) -> f32 {
-        self.0
-    }
-}
-
 /// Crash annotations included in crash reports.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub enum CrashAnnotation {
     CompileShader = 0,
+    DrawShader = 1,
 }
 
 /// Handler to expose support for annotating crash reports.
 pub trait CrashAnnotator : Send {
-    fn set(&self, annotation: CrashAnnotation, value: &str);
+    fn set(&self, annotation: CrashAnnotation, value: &std::ffi::CStr);
     fn clear(&self, annotation: CrashAnnotation);
     fn box_clone(&self) -> Box<dyn CrashAnnotator>;
 }
@@ -636,7 +682,11 @@ pub struct CrashAnnotatorGuard<'a> {
 }
 
 impl<'a> CrashAnnotatorGuard<'a> {
-    pub fn new(annotator: &'a Option<Box<dyn CrashAnnotator>>, annotation: CrashAnnotation, value: &str) -> Self {
+    pub fn new(
+        annotator: &'a Option<Box<dyn CrashAnnotator>>,
+        annotation: CrashAnnotation,
+        value: &std::ffi::CStr,
+    ) -> Self {
         if let Some(ref annotator) = annotator {
             annotator.set(annotation, value);
         }

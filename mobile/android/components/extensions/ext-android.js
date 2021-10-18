@@ -328,8 +328,7 @@ class Tab extends TabBase {
   }
 
   get cookieStoreId() {
-    // Expose the same session context ID that the GeckoView app is sending to us.
-    return this.window.moduleManager.settings.unsafeSessionContextId;
+    return getCookieStoreIdForTab(this, this.nativeTab);
   }
 
   get height() {
@@ -599,31 +598,6 @@ extensions.on("startup", (type, extension) => {
     () => new WindowManager(extension)
   );
 });
-
-// This function is pretty tightly tied to Extension.jsm.
-// Its job is to fill in the |tab| property of the sender.
-const getSender = (extension, target, sender) => {
-  let tabId = -1;
-  if ("tabId" in sender) {
-    // The message came from a privileged extension page running in a tab. In
-    // that case, it should include a tabId property (which is filled in by the
-    // page-open listener below).
-    tabId = sender.tabId;
-    delete sender.tabId;
-  } else if (ChromeUtils.getClassName(target) == "XULFrameElement") {
-    tabId = tabTracker.getBrowserData(target).tabId;
-  }
-
-  if (tabId != null && tabId >= 0) {
-    const tab = extension.tabManager.get(tabId, null);
-    if (tab) {
-      sender.tab = tab.convert();
-    }
-  }
-};
-
-// Used by Extension.jsm
-global.tabGetSender = getSender;
 
 /* eslint-disable mozilla/balanced-listeners */
 extensions.on("page-shutdown", (type, context) => {

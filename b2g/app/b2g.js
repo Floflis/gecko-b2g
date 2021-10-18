@@ -62,6 +62,10 @@ pref("network.cookie.cookieBehavior", 0);
 // spdy
 pref("network.http.spdy.push-allowance", 32768);
 
+pref("network.http.customheader.hosts", "ssp.kaiads.com,kaios-analytics.com,kaios-wallet.com");
+pref("network.http.customheader.name", "X-Kai-Ads");
+pref("network.http.customheader.version", "v1");
+
 // See bug 545869 for details on why these are set the way they are
 pref("network.buffer.cache.count", 24);
 pref("network.buffer.cache.size",  16384);
@@ -182,16 +186,13 @@ pref("geo.cell.scan", true);
 // URL for geolocating service, the original URL of B2G OS is
 // "https://location.services.mozilla.com/v1/geolocate?key=%MOZILLA_API_KEY%"
 // Empty string would disable WiFi/cell geolocating service
-pref("geo.wifi.uri", "");
+pref("geo.provider.network.url", "https://global.skyhookwireless.com/wps2/json/location?key=%GONK_GEOLOCATION_API_KEY%");
 
-// whether the network geolocation provider need authorization header or not
-pref("geo.provider.need_authorization", false);
+// whether to ask location provider to use IP address to determine location
+pref("geo.provider.network.considerIp", false);
 
 // the secret API key of location service
-pref("geo.authorization.key", "%GONK_GEO_API_KEY%");
-
-// URL for geolocation crowdsourcing
-pref("geo.stumbler.url", "https://location.services.mozilla.com/v1/geosubmit?key=%MOZILLA_API_KEY%");
+pref("geo.authorization.key", "%GONK_GEOLOCATION_API_KEY%");
 
 // Whether to clean up location provider when Geolocation setting is turned off.
 pref("geo.provider.ondemand_cleanup", true);
@@ -333,6 +334,11 @@ pref("media.eme.apiVisible", true);
 // MediaDecoderReader's mVideoQueue.
 pref("media.video-queue.default-size", 3);
 
+// videocontrols related settings.
+pref("media.videocontrols.keyboard-tab-to-all-controls", false);
+pref("media.videocontrols.keyboard-enter-to-toggle-pause", true);
+pref("media.videocontrols.volume-control-override", true);
+
 // Optimize images' memory usage
 pref("image.downscale-during-decode.enabled", true);
 pref("image.mem.allow_locking_in_content_processes", true);
@@ -355,6 +361,9 @@ pref("dom.w3c_touch_events.safetyY", 120); // escape borders in units of 1/240"
 
 #ifdef MOZ_SAFE_BROWSING
 pref("browser.safebrowsing.enabled", true);
+pref("browser.contentblocking.features.standard", "-tp,tpPrivate,cookieBehavior0,-cm,-fp");
+pref("browser.contentblocking.features.strict", "tp,tpPrivate,cookieBehavior5,cookieBehaviorPBM5,cm,fp,stp,lvl2");
+pref("browser.contentblocking.features.disable", "-tp,-tpPrivate,cookieBehavior0,-cm,-fp");
 // Prevent loading of pages identified as malware
 pref("browser.safebrowsing.malware.enabled", true);
 pref("browser.safebrowsing.downloads.enabled", true);
@@ -393,9 +402,7 @@ pref("urlclassifier.gethash.timeout_ms", 5000);
 pref("urlclassifier.max-complete-age", 2700);
 
 // Tracking protection
-pref("privacy.trackingprotection.enabled", true);
-pref("privacy.trackingprotection.pbmode.enabled", true);
-
+pref("privacy.trackingprotection.lower_network_priority", true);
 #endif
 
 // True if this is the first time we are showing about:firstrun
@@ -432,6 +439,9 @@ pref("dom.ipc.browser_frames.oop_by_default", false);
 
 pref("dom.meta-viewport.enabled", true);
 
+// Enable the Visual Viewport API
+pref("dom.visualviewport.enabled", true);
+
 // SMS/MMS
 pref("dom.sms.enabled", true);
 
@@ -463,6 +473,12 @@ pref("dom.permissions.manager.enabled", true);
 
 // controls if we want camera support
 pref("device.camera.enabled", true);
+// Empirically, this is the value returned by hal::GetTotalSystemMemory()
+// when Flame's memory is limited to 512MiB. If the camera stack determines
+// it is running on a low memory platform, features that can be reliably
+// supported will be disabled. This threshold can be adjusted to suit other
+// platforms; and set to 0 to disable the low-memory check altogether.
+pref("camera.control.low_memory_thresholdMB", 404);
 pref("media.realtime_decoder.enabled", true);
 
 // TCPSocket
@@ -1107,8 +1123,13 @@ pref("dom.passpoint.supported", false);
 // Control wifi during emergency session
 pref("dom.emergency.wifi-control", true);
 
-// Enable IPv6 tethering router mode in Gecko
-pref("dom.b2g_ipv6_router_mode", true);
+// Customize whether tethering could be turned on again after wifi is turned off
+pref("wifi.affect.tethering", false);
+// Customize whether wifi could be turned on again after tethering is turned off
+pref("tethering.affect.wifi", false);
+
+// Setup IPv6 address generate mode in Gecko
+pref("dom.b2g_ipv6_addr_mode", 0);
 
 // Support primary sim switch
 pref("ril.support.primarysim.switch", false);
@@ -1126,7 +1147,11 @@ pref("b2g.system_startup_url", "chrome://b2g/content/system/index.html");
 // pref("b2g.system_startup_url", "chrome://system/content/index.html");
 
 // Use system app browser url
+#if !defined(API_DAEMON_PORT) || API_DAEMON_PORT == 80
 pref("b2g.system_app_browser_url", "http://system.localhost/browser/browser.html");
+#else
+pref("b2g.system_app_browser_url", "http://system.localhost:@API_DAEMON_PORT@/browser/browser.html");
+#endif
 
 pref("devtools.console.stdout.content", true);
 
@@ -1152,6 +1177,7 @@ pref("devtools.debugger.prompt-connection", false);
 pref("devtools.console.stdout.chrome", true);
 pref("browser.dom.window.dump.enabled", true);
 pref("consoleservice.logcat", true);
+pref("dom.activity.debug", true);
 #endif
 
 // Start the b2g in e10s mode same as the browser
@@ -1168,7 +1194,7 @@ pref("dom.security.skip_remote_script_assertion_in_system_priv_context", true);
 // Disable WebRender by default
 pref("gfx.webrender.all", false);
 pref("gfx.webrender.enabled", false);
-pref("gfx.webrender.force-disabled", true);
+pref("gfx.webrender.force-legacy-layers", true);
 pref("gfx.webrender.picture-tile-width", 256);
 pref("gfx.webrender.picture-tile-height", 512);
 
@@ -1213,6 +1239,9 @@ pref("font.name-list.emoji", "KaiOS Emoji");
 // Disable the path check in file system.
 pref("dom.filesystem.pathcheck.disabled", true);
 
+// Disable the native font source of freetype.
+pref("gfx.font_rendering.native_font_source_none", true);
+
 // KaiOS Captive Portal URL
 pref("captivedetect.canonicalURL", "http://detectportal.kaiostech.com/success.txt");
 pref("captivedetect.canonicalContent", "success");
@@ -1226,7 +1255,26 @@ pref("device.mvs", true);
 #endif
 
 pref("voice-input.enabled", false);
+#if !defined(API_DAEMON_PORT) || API_DAEMON_PORT == 80
 pref("voice-input.icon-url", "http://shared.localhost/style/voice-input/icons/voice-input.svg");
+#else
+pref("voice-input.icon-url", "http://shared.localhost:@API_DAEMON_PORT@/style/voice-input/icons/voice-input.svg");
+#endif
 pref("voice-input.supported-types", "text, search, url, tel, number, month, week");
+pref("voice-input.excluded-x-inputmodes", "native, plain, simplified, spell");
+
+pref("dom.storage.next_gen", false);
 
 pref("dom.popup_allowed_events", "change click dblclick auxclick mouseup pointerup notificationclick reset submit touchend contextmenu keydown keyup");
+
+pref("dom.hand-held-friendly.forceEnable", true);
+
+pref("dom.webshare.enabled", true);
+
+// Workaround https://bugzilla.mozilla.org/show_bug.cgi?id=1725339 until
+// a better solution for b2g system app is found.
+pref("security.disallow_privileged_https_subdocuments_loads", false);
+
+// Workaround https://bugzilla.mozilla.org/show_bug.cgi?id=1735117 since
+// the system app needs to load resources from http://shared.localhost
+pref("security.disallow_privileged_https_stylesheet_loads", false);

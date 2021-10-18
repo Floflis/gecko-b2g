@@ -11,6 +11,7 @@
 
 #include "nsFrameList.h"
 #include "nsPlaceholderFrame.h"
+#include "nsPresContext.h"
 #include "nsContainerFrame.h"
 
 using namespace mozilla;
@@ -305,16 +306,15 @@ void nsFrameIterator::Prev() {
           result = parent;
         }
         break;
-      } else {
-        result = GetParentFrameNotPopup(parent);
-        if (!result || IsRootFrame(result) ||
-            (mLockScroll && result->IsScrollFrame())) {
-          result = nullptr;
-          break;
-        }
-        if (mType == ePreOrder) break;
-        parent = result;
       }
+      result = GetParentFrameNotPopup(parent);
+      if (!result || IsRootFrame(result) ||
+          (mLockScroll && result->IsScrollFrame())) {
+        result = nullptr;
+        break;
+      }
+      if (mType == ePreOrder) break;
+      parent = result;
     }
   }
 

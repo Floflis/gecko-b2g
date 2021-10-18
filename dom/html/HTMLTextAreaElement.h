@@ -32,7 +32,7 @@ class PresState;
 
 namespace dom {
 
-class HTMLFormSubmission;
+class FormData;
 
 class HTMLTextAreaElement final : public TextControlElement,
                                   public nsStubMutationObserver,
@@ -56,17 +56,23 @@ class HTMLTextAreaElement final : public TextControlElement,
   // Element
   virtual bool IsInteractiveHTMLContent() const override { return true; }
 
+  // nsGenericHTMLElement
+  virtual bool IsDisabledForEvents(WidgetEvent* aEvent) override;
+
+  // nsGenericHTMLFormElement
+  void SaveState() override;
+  bool RestoreState(PresState* aState) override;
+
   // nsIFormControl
   MOZ_CAN_RUN_SCRIPT_BOUNDARY
   NS_IMETHOD Reset() override;
-  NS_IMETHOD SubmitNamesValues(HTMLFormSubmission* aFormSubmission) override;
-  NS_IMETHOD SaveState() override;
-  virtual bool RestoreState(PresState* aState) override;
-  virtual bool IsDisabledForEvents(WidgetEvent* aEvent) override;
+  NS_IMETHOD SubmitNamesValues(FormData* aFormData) override;
 
   virtual void FieldSetDisabledChanged(bool aNotify) override;
 
   virtual EventStates IntrinsicState() const override;
+
+  void SetLastValueChangeWasInteractive(bool);
 
   // TextControlElement
   virtual nsresult SetValueChanged(bool aValueChanged) override;
@@ -91,9 +97,6 @@ class HTMLTextAreaElement final : public TextControlElement,
   MOZ_CAN_RUN_SCRIPT virtual void UnbindFromFrame(
       nsTextControlFrame* aFrame) override;
   MOZ_CAN_RUN_SCRIPT virtual nsresult CreateEditor() override;
-  virtual void UpdateOverlayTextVisibility(bool aNotify) override;
-  virtual bool GetPlaceholderVisibility() override;
-  virtual bool GetPreviewVisibility() override;
   virtual void SetPreviewValue(const nsAString& aValue) override;
   virtual void GetPreviewValue(nsAString& aValue) override;
   virtual void EnablePreview() override;
@@ -178,8 +181,8 @@ class HTMLTextAreaElement final : public TextControlElement,
   void SetDisabled(bool aDisabled, ErrorResult& aError) {
     SetHTMLBoolAttr(nsGkAtoms::disabled, aDisabled, aError);
   }
-  // nsGenericHTMLFormElementWithState::GetForm is fine
-  using nsGenericHTMLFormElementWithState::GetForm;
+  // nsGenericHTMLFormControlElementWithState::GetForm is fine
+  using nsGenericHTMLFormControlElementWithState::GetForm;
   int32_t MaxLength() const { return GetIntAttr(nsGkAtoms::maxlength, -1); }
   int32_t UsedMaxLength() const final { return MaxLength(); }
   void SetMaxLength(int32_t aMaxLength, ErrorResult& aError) {
@@ -288,7 +291,7 @@ class HTMLTextAreaElement final : public TextControlElement,
   MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual ~HTMLTextAreaElement();
 
   // get rid of the compiler warning
-  using nsGenericHTMLFormElementWithState::IsSingleLineTextControl;
+  using nsGenericHTMLFormControlElementWithState::IsSingleLineTextControl;
 
   virtual JSObject* WrapNode(JSContext* aCx,
                              JS::Handle<JSObject*> aGivenProto) override;

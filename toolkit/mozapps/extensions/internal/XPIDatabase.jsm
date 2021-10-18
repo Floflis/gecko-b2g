@@ -28,7 +28,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   DeferredTask: "resource://gre/modules/DeferredTask.jsm",
   ExtensionUtils: "resource://gre/modules/ExtensionUtils.jsm",
   FileUtils: "resource://gre/modules/FileUtils.jsm",
-  OS: "resource://gre/modules/osfile.jsm",
   PermissionsUtils: "resource://gre/modules/PermissionsUtils.jsm",
   Services: "resource://gre/modules/Services.jsm",
 
@@ -39,13 +38,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   XPIProvider: "resource://gre/modules/addons/XPIProvider.jsm",
   verifyBundleSignedState: "resource://gre/modules/addons/XPIInstall.jsm",
 });
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
-  "allowPrivateBrowsingByDefault",
-  "extensions.allowPrivateBrowsingByDefault",
-  true
-);
 
 const { nsIBlocklistService } = Ci;
 
@@ -169,10 +161,7 @@ const SIGNED_TYPES = new Set(["extension", "locale", "theme"]);
 // Time to wait before async save of XPI JSON database, in milliseconds
 const ASYNC_SAVE_DELAY_MS = 20;
 
-const LOCALE_BUNDLES = [
-  "chrome://global/locale/global-extension-fields.properties",
-  "chrome://global/locale/app-extension-fields.properties",
-].map(url => Services.strings.createBundle(url));
+const l10n = new Localization(["browser/appExtensionFields.ftl"], true);
 
 /**
  * Schedules an idle task, and returns a promise which resolves to an
@@ -622,6 +611,10 @@ class AddonInternal {
     }
   }
 
+  recordAddonBlockChangeTelemetry(reason) {
+    Blocklist.recordAddonBlockChangeTelemetry(this.wrapper, reason);
+  }
+
   async setUserDisabled(val, allowSystemAddons = false) {
     if (val == (this.userDisabled || this.softDisabled)) {
       return;
@@ -751,7 +744,6 @@ class AddonInternal {
     // when the extension has opted out or it gets the permission automatically
     // on every extension startup (as system, privileged and builtin addons).
     if (
-      !allowPrivateBrowsingByDefault &&
       this.type === "extension" &&
       this.incognito !== "not_allowed" &&
       this.signedState !== AddonManager.SIGNEDSTATE_PRIVILEGED &&
@@ -767,6 +759,9 @@ class AddonInternal {
       }
       if (!Services.policies.isAllowed(`disable-extension:${this.id}`)) {
         permissions &= ~AddonManager.PERM_CAN_DISABLE;
+      }
+      if (Services.policies.getExtensionSettings(this.id)?.updates_disabled) {
+        permissions &= ~AddonManager.PERM_CAN_UPGRADE;
       }
     }
 
@@ -1327,15 +1322,6 @@ function chooseValue(aAddon, aObj, aProp) {
     return [repositoryAddon[aProp], true];
   }
 
-  let id = `extension.${aAddon.id}.${aProp}`;
-  for (let bundle of LOCALE_BUNDLES) {
-    try {
-      return [bundle.GetStringFromName(id), false];
-    } catch (e) {
-      // Ignore missing overrides.
-    }
-  }
-
   return [objValue, false];
 }
 
@@ -1433,9 +1419,58 @@ defineAddonWrapperProperty("signedDate", function() {
   });
 });
 
+// Add to this Map if you need to change an addon's Fluent ID. Keep it in sync
+// with the list in browser_verify_l10n_strings.js
+const updatedAddonFluentIds = new Map([
+  ["extension-default-theme-name", "extension-default-theme-name-auto"],
+]);
+
 ["name", "description", "creator", "homepageURL"].forEach(function(aProp) {
   defineAddonWrapperProperty(aProp, function() {
     let addon = addonFor(this);
+
+    let formattedMessage;
+    // We want to make sure that all built-in themes that are localizable can
+    // actually localized, particularly those for thunderbird and desktop.
+    if (
+      (aProp === "name" || aProp === "description") &&
+      addon.location.name === KEY_APP_BUILTINS &&
+      addon.type === "theme"
+    ) {
+      // Built-in themes are localized with Fluent instead of the WebExtension API.
+      let addonIdPrefix = addon.id.replace("@mozilla.org", "");
+      if (addonIdPrefix.endsWith("colorway")) {
+        // Colorway themes combine an unlocalized color name with a localized
+        // variant name. Their ids have the format
+        // {colorName}-{variantName}-colorway@mozilla.org.
+        if (aProp == "description") {
+          // Colorway themes do not have a description.
+          return null;
+        }
+        let [colorName, variantName] = addonIdPrefix.split("-", 2);
+        // We're not using toLocaleUpperCase because these color names are
+        // always in English.
+        colorName = colorName[0].toUpperCase() + colorName.slice(1);
+        let defaultFluentId = `extension-colorways-${variantName}-name`;
+        let fluentId =
+          updatedAddonFluentIds.get(defaultFluentId) || defaultFluentId;
+        [formattedMessage] = l10n.formatMessagesSync([
+          {
+            id: fluentId,
+            args: {
+              "colorway-name": colorName,
+            },
+          },
+        ]);
+      } else {
+        let defaultFluentId = `extension-${addonIdPrefix}-${aProp}`;
+        let fluentId =
+          updatedAddonFluentIds.get(defaultFluentId) || defaultFluentId;
+        [formattedMessage] = l10n.formatMessagesSync([{ id: fluentId }]);
+      }
+
+      return formattedMessage.value;
+    }
 
     let [result, usedRepository] = chooseValue(
       addon,
@@ -1548,9 +1583,8 @@ this.XPIDatabase = {
 
   async _saveNow() {
     try {
-      let json = JSON.stringify(this);
       let path = this.jsonFile.path;
-      await OS.File.writeAtomic(path, json, { tmpPath: `${path}.tmp` });
+      await IOUtils.writeJSON(path, this, { tmpPath: `${path}.tmp` });
 
       if (!this._schemaVersionSet) {
         // Update the XPIDB schema version preference the first time we
@@ -1568,7 +1602,10 @@ this.XPIDatabase = {
     } catch (error) {
       logger.warn("Failed to save XPI database", error);
       this._saveError = error;
-      throw error;
+
+      if (!(error instanceof DOMException) || error.name !== "AbortError") {
+        throw error;
+      }
     }
   },
 
@@ -1662,34 +1699,35 @@ this.XPIDatabase = {
   /**
    * Parse loaded data, reconstructing the database if the loaded data is not valid
    *
-   * @param {string} aData
-   *        The stringified add-on JSON to parse.
+   * @param {object} aInputAddons
+   *        The add-on JSON to parse.
    * @param {boolean} aRebuildOnError
    *        If true, synchronously reconstruct the database from installed add-ons
    */
-  async parseDB(aData, aRebuildOnError) {
+  async parseDB(aInputAddons, aRebuildOnError) {
     try {
       let parseTimer = AddonManagerPrivate.simpleTimer("XPIDB_parseDB_MS");
-      let inputAddons = JSON.parse(aData);
 
-      if (!("schemaVersion" in inputAddons) || !("addons" in inputAddons)) {
+      if (!("schemaVersion" in aInputAddons) || !("addons" in aInputAddons)) {
         let error = new Error("Bad JSON file contents");
         error.rebuildReason = "XPIDB_rebuildBadJSON_MS";
         throw error;
       }
 
-      if (inputAddons.schemaVersion <= 27) {
+      if (aInputAddons.schemaVersion <= 27) {
         // Types were translated in bug 857456.
-        for (let addon of inputAddons.addons) {
+        for (let addon of aInputAddons.addons) {
           migrateAddonLoader(addon);
         }
-      } else if (inputAddons.schemaVersion != DB_SCHEMA) {
+      } else if (aInputAddons.schemaVersion != DB_SCHEMA) {
         // For now, we assume compatibility for JSON data with a
         // mismatched schema version, though we throw away any fields we
         // don't know about (bug 902956)
-        this._recordStartupError(`schemaMismatch-${inputAddons.schemaVersion}`);
+        this._recordStartupError(
+          `schemaMismatch-${aInputAddons.schemaVersion}`
+        );
         logger.debug(
-          `JSON schema mismatch: expected ${DB_SCHEMA}, actual ${inputAddons.schemaVersion}`
+          `JSON schema mismatch: expected ${DB_SCHEMA}, actual ${aInputAddons.schemaVersion}`
         );
       }
 
@@ -1698,7 +1736,7 @@ this.XPIDatabase = {
       // If we got here, we probably have good data
       // Make AddonInternal instances from the loaded data and save them
       let addonDB = new Map();
-      await forEach(inputAddons.addons, loadedAddon => {
+      await forEach(aInputAddons.addons, loadedAddon => {
         if (loadedAddon.path) {
           try {
             loadedAddon._sourceBundle = new nsIFile(loadedAddon.path);
@@ -1769,16 +1807,13 @@ this.XPIDatabase = {
     logger.debug(`Starting async load of XPI database ${this.jsonFile.path}`);
     this._dbPromise = (async () => {
       try {
-        let byteArray = await OS.File.read(this.jsonFile.path, null);
+        let json = await IOUtils.readJSON(this.jsonFile.path);
 
         logger.debug("Finished async read of XPI database, parsing...");
         await this.maybeIdleDispatch();
-        let text = new TextDecoder().decode(byteArray);
-
-        await this.maybeIdleDispatch();
-        await this.parseDB(text, true);
+        await this.parseDB(json, true);
       } catch (error) {
-        if (error.becauseNoSuchFile) {
+        if (error instanceof DOMException && error.name === "NotFoundError") {
           if (Services.prefs.getIntPref(PREF_DB_SCHEMA, 0)) {
             this._recordStartupError("dbMissing");
           }
@@ -1968,18 +2003,24 @@ this.XPIDatabase = {
     let enableTheme;
 
     let addons = this.getAddonsByType("theme");
+    let updateDisabledStatePromises = [];
+
     for (let theme of addons) {
       if (theme.visible) {
         if (!aId && theme.id == DEFAULT_THEME_ID) {
           enableTheme = theme;
         } else if (theme.id != aId && !theme.pendingUninstall) {
-          this.updateAddonDisabledState(theme, {
-            userDisabled: true,
-            becauseSelecting: true,
-          });
+          updateDisabledStatePromises.push(
+            this.updateAddonDisabledState(theme, {
+              userDisabled: true,
+              becauseSelecting: true,
+            })
+          );
         }
       }
     }
+
+    await Promise.all(updateDisabledStatePromises);
 
     if (enableTheme) {
       await this.updateAddonDisabledState(enableTheme, {
@@ -2634,10 +2675,9 @@ this.XPIDatabase = {
     // Notify any other providers that a new theme has been enabled
     if (aAddon.type === "theme") {
       if (!isDisabled) {
-        AddonManagerPrivate.notifyAddonChanged(aAddon.id, aAddon.type);
-        this.updateXPIStates(aAddon);
+        await AddonManagerPrivate.notifyAddonChanged(aAddon.id, aAddon.type);
       } else if (isDisabled && !becauseSelecting) {
-        AddonManagerPrivate.notifyAddonChanged(null, "theme");
+        await AddonManagerPrivate.notifyAddonChanged(null, "theme");
       }
     }
 
@@ -2668,8 +2708,9 @@ this.XPIDatabase = {
           if (aRepoAddon) {
             logger.debug("updateAddonRepositoryData got info for " + addon.id);
             addon._repositoryAddon = aRepoAddon;
-            this.updateAddonDisabledState(addon);
+            return this.updateAddonDisabledState(addon);
           }
+          return undefined;
         })
       )
     );
@@ -3393,10 +3434,21 @@ this.XPIDatabaseReconcile = {
             addonsToCheckAgainstBlocklist
           );
           await Promise.all(
-            addons.map(addon => {
-              return (
-                addon && addon.updateBlocklistState({ updateDatabase: false })
-              );
+            addons.map(async addon => {
+              if (!addon) {
+                return;
+              }
+              let oldState = addon.blocklistState;
+              // TODO 1712316: updateBlocklistState with object parameter only
+              // works if addon is an AddonInternal instance. But addon is an
+              // AddonWrapper instead. Consequently updateDate:false is ignored.
+              await addon.updateBlocklistState({ updateDatabase: false });
+              if (oldState !== addon.blocklistState) {
+                Blocklist.recordAddonBlockChangeTelemetry(
+                  addon,
+                  "addon_db_modified"
+                );
+              }
             })
           );
 

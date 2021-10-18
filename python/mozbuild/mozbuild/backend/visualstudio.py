@@ -27,6 +27,7 @@ from ..frontend.data import (
     LocalInclude,
     Program,
     Sources,
+    SandboxedWasmLibrary,
     UnifiedSources,
 )
 from mozbuild.base import ExecutionSummary
@@ -109,7 +110,7 @@ class VisualStudioBackend(CommonBackend):
             # for us instead.
             self._process_unified_sources(obj)
 
-        elif isinstance(obj, Library):
+        elif isinstance(obj, Library) and not isinstance(obj, SandboxedWasmLibrary):
             self._libs_to_paths[obj.basename] = reldir
 
         elif isinstance(obj, Program) or isinstance(obj, HostProgram):
@@ -623,6 +624,10 @@ class VisualStudioBackend(CommonBackend):
 
             n = pg.appendChild(doc.createElement("LocalDebuggerCommandArguments"))
             n.appendChild(doc.createTextNode(debugger[1]))
+
+        # Sets IntelliSense to use c++17 Language Standard
+        n = pg.appendChild(doc.createElement("AdditionalOptions"))
+        n.appendChild(doc.createTextNode("/std:c++17"))
 
         i = project.appendChild(doc.createElement("Import"))
         i.setAttribute("Project", "$(VCTargetsPath)\\Microsoft.Cpp.props")

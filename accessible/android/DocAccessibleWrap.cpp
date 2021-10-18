@@ -4,8 +4,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "Accessible-inl.h"
-#include "AccessibleOrProxy.h"
+#include "LocalAccessible-inl.h"
+#include "AccAttributes.h"
 #include "DocAccessibleChild.h"
 #include "DocAccessibleWrap.h"
 #include "nsIDocShell.h"
@@ -13,7 +13,6 @@
 #include "nsLayoutUtils.h"
 #include "nsAccessibilityService.h"
 #include "nsAccUtils.h"
-#include "nsIPersistentProperties2.h"
 #include "Pivot.h"
 #include "SessionAccessibility.h"
 #include "TraversalRule.h"
@@ -53,7 +52,7 @@ AccessibleWrap* DocAccessibleWrap::GetAccessibleByID(int32_t aID) const {
 
   // If the ID is not in the hash table, check the IDs of the child docs.
   for (uint32_t i = 0; i < ChildDocumentCount(); i++) {
-    auto childDoc = reinterpret_cast<AccessibleWrap*>(GetChildDocumentAt(i));
+    auto childDoc = static_cast<AccessibleWrap*>(GetChildDocumentAt(i));
     if (childDoc->VirtualViewID() == aID) {
       return childDoc;
     }
@@ -110,17 +109,25 @@ void DocAccessibleWrap::CacheViewportCallback(nsITimer* aTimer,
       continue;
     }
 
-    Accessible* visibleAcc = docAcc->GetAccessibleOrContainer(content);
+    LocalAccessible* visibleAcc = docAcc->GetAccessibleOrContainer(content);
     if (!visibleAcc) {
       continue;
     }
 
-    for (Accessible* acc = visibleAcc; acc && acc != docAcc->Parent();
-         acc = acc->Parent()) {
-      if (inViewAccs.Contains(acc->UniqueID())) {
+    for (LocalAccessible* acc = visibleAcc; acc && acc != docAcc->LocalParent();
+         acc = acc->LocalParent()) {
+      const bool alreadyPresent =
+          inViewAccs.WithEntryHandle(acc->UniqueID(), [&](auto&& entry) {
+            if (entry) {
+              return true;
+            }
+
+            entry.Insert(RefPtr{acc});
+            return false;
+          });
+      if (alreadyPresent) {
         break;
       }
-      inViewAccs.Put(acc->UniqueID(), RefPtr{acc});
     }
   }
 
@@ -128,7 +135,7 @@ void DocAccessibleWrap::CacheViewportCallback(nsITimer* aTimer,
     DocAccessibleChild* ipcDoc = docAcc->IPCDoc();
     nsTArray<BatchData> cacheData(inViewAccs.Count());
     for (auto iter = inViewAccs.Iter(); !iter.Done(); iter.Next()) {
-      Accessible* accessible = iter.Data();
+      LocalAccessible* accessible = iter.Data();
       nsAutoString name;
       accessible->Name(name);
       nsAutoString textValue;
@@ -143,27 +150,27 @@ void DocAccessibleWrap::CacheViewportCallback(nsITimer* aTimer,
           accessible->State(), accessible->Bounds(), accessible->ActionCount(),
           name, textValue, nodeID, description, UnspecifiedNaN<double>(),
           UnspecifiedNaN<double>(), UnspecifiedNaN<double>(),
-          UnspecifiedNaN<double>(), nsTArray<Attribute>()));
+          UnspecifiedNaN<double>(), nullptr));
     }
 
     ipcDoc->SendBatch(eBatch_Viewport, cacheData);
   } else if (RefPtr<SessionAccessibility> sessionAcc =
                  SessionAccessibility::GetInstanceFor(docAcc)) {
     nsTArray<AccessibleWrap*> accessibles(inViewAccs.Count());
-    for (auto iter = inViewAccs.Iter(); !iter.Done(); iter.Next()) {
-      accessibles.AppendElement(
-          static_cast<AccessibleWrap*>(iter.Data().get()));
+    for (const auto& entry : inViewAccs) {
+      accessibles.AppendElement(static_cast<AccessibleWrap*>(entry.GetWeak()));
     }
 
     sessionAcc->ReplaceViewportCache(accessibles);
   }
 
   if (docAcc->mCachePivotBoundaries) {
-    AccessibleOrProxy accOrProxy = AccessibleOrProxy(docAcc);
-    a11y::Pivot pivot(accOrProxy);
+    a11y::Pivot pivot(docAcc);
     TraversalRule rule(java::SessionAccessibility::HTML_GRANULARITY_DEFAULT);
-    Accessible* first = pivot.First(rule).AsAccessible();
-    Accessible* last = pivot.Last(rule).AsAccessible();
+    Accessible* maybeFirst = pivot.First(rule);
+    Accessible* maybeLast = pivot.Last(rule);
+    LocalAccessible* first = maybeFirst ? maybeFirst->AsLocal() : nullptr;
+    LocalAccessible* last = maybeLast ? maybeLast->AsLocal() : nullptr;
 
     // If first/last are null, pass the root document as pivot boundary.
     if (IPCAccessibilityActive()) {
@@ -222,8 +229,8 @@ void DocAccessibleWrap::CacheFocusPath(AccessibleWrap* aAccessible) {
   if (IPCAccessibilityActive()) {
     DocAccessibleChild* ipcDoc = IPCDoc();
     nsTArray<BatchData> cacheData;
-    for (AccessibleWrap* acc = aAccessible; acc && acc != this->Parent();
-         acc = static_cast<AccessibleWrap*>(acc->Parent())) {
+    for (AccessibleWrap* acc = aAccessible; acc && acc != this->LocalParent();
+         acc = static_cast<AccessibleWrap*>(acc->LocalParent())) {
       nsAutoString name;
       acc->Name(name);
       nsAutoString textValue;
@@ -232,25 +239,23 @@ void DocAccessibleWrap::CacheFocusPath(AccessibleWrap* aAccessible) {
       acc->WrapperDOMNodeID(nodeID);
       nsAutoString description;
       acc->Description(description);
-      nsCOMPtr<nsIPersistentProperties> props = acc->Attributes();
-      nsTArray<Attribute> attributes;
-      nsAccUtils::PersistentPropertiesToArray(props, &attributes);
+      RefPtr<AccAttributes> attributes = acc->Attributes();
       cacheData.AppendElement(
           BatchData(acc->Document()->IPCDoc(), UNIQUE_ID(acc), acc->State(),
                     acc->Bounds(), acc->ActionCount(), name, textValue, nodeID,
                     description, acc->CurValue(), acc->MinValue(),
                     acc->MaxValue(), acc->Step(), attributes));
-      mFocusPath.Put(acc->UniqueID(), RefPtr{acc});
+      mFocusPath.InsertOrUpdate(acc->UniqueID(), RefPtr{acc});
     }
 
     ipcDoc->SendBatch(eBatch_FocusPath, cacheData);
   } else if (RefPtr<SessionAccessibility> sessionAcc =
                  SessionAccessibility::GetInstanceFor(this)) {
     nsTArray<AccessibleWrap*> accessibles;
-    for (AccessibleWrap* acc = aAccessible; acc && acc != this->Parent();
-         acc = static_cast<AccessibleWrap*>(acc->Parent())) {
+    for (AccessibleWrap* acc = aAccessible; acc && acc != this->LocalParent();
+         acc = static_cast<AccessibleWrap*>(acc->LocalParent())) {
       accessibles.AppendElement(acc);
-      mFocusPath.Put(acc->UniqueID(), RefPtr{acc});
+      mFocusPath.InsertOrUpdate(acc->UniqueID(), RefPtr{acc});
     }
 
     sessionAcc->ReplaceFocusPathCache(accessibles);
@@ -266,18 +271,17 @@ void DocAccessibleWrap::UpdateFocusPathBounds() {
     DocAccessibleChild* ipcDoc = IPCDoc();
     nsTArray<BatchData> boundsData(mFocusPath.Count());
     for (auto iter = mFocusPath.Iter(); !iter.Done(); iter.Next()) {
-      Accessible* accessible = iter.Data();
+      LocalAccessible* accessible = iter.Data();
       if (!accessible || accessible->IsDefunct()) {
         MOZ_ASSERT_UNREACHABLE("Focus path cached accessible is gone.");
         continue;
       }
 
-      boundsData.AppendElement(
-          BatchData(accessible->Document()->IPCDoc(), UNIQUE_ID(accessible), 0,
-                    accessible->Bounds(), 0, nsString(), nsString(), nsString(),
-                    nsString(), UnspecifiedNaN<double>(),
-                    UnspecifiedNaN<double>(), UnspecifiedNaN<double>(),
-                    UnspecifiedNaN<double>(), nsTArray<Attribute>()));
+      boundsData.AppendElement(BatchData(
+          accessible->Document()->IPCDoc(), UNIQUE_ID(accessible), 0,
+          accessible->Bounds(), 0, nsString(), nsString(), nsString(),
+          nsString(), UnspecifiedNaN<double>(), UnspecifiedNaN<double>(),
+          UnspecifiedNaN<double>(), UnspecifiedNaN<double>(), nullptr));
     }
 
     ipcDoc->SendBatch(eBatch_BoundsUpdate, boundsData);
@@ -285,7 +289,7 @@ void DocAccessibleWrap::UpdateFocusPathBounds() {
                  SessionAccessibility::GetInstanceFor(this)) {
     nsTArray<AccessibleWrap*> accessibles(mFocusPath.Count());
     for (auto iter = mFocusPath.Iter(); !iter.Done(); iter.Next()) {
-      Accessible* accessible = iter.Data();
+      LocalAccessible* accessible = iter.Data();
       if (!accessible || accessible->IsDefunct()) {
         MOZ_ASSERT_UNREACHABLE("Focus path cached accessible is gone.");
         continue;

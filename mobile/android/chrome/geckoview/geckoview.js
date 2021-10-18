@@ -19,6 +19,8 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   GeckoViewSettings: "resource://gre/modules/GeckoViewSettings.jsm",
   GeckoViewUtils: "resource://gre/modules/GeckoViewUtils.jsm",
   HistogramStopwatch: "resource://gre/modules/GeckoViewTelemetry.jsm",
+  InitializationTracker: "resource://gre/modules/GeckoViewTelemetry.jsm",
+  SafeBrowsing: "resource://gre/modules/SafeBrowsing.jsm",
   RemoteSecuritySettings:
     "resource://gre/modules/psm/RemoteSecuritySettings.jsm",
 });
@@ -499,6 +501,7 @@ function createBrowser() {
   browser.setAttribute("maychangeremoteness", "true");
   browser.setAttribute("remote", "true");
   browser.setAttribute("remoteType", E10SUtils.DEFAULT_REMOTE_TYPE);
+  browser.setAttribute("messagemanagergroup", "browsers");
 
   return browser;
 }
@@ -512,12 +515,6 @@ function startup() {
 
   const browser = createBrowser();
   ModuleManager.init(browser, [
-    {
-      name: "ExtensionContent",
-      onInit: {
-        frameScript: "chrome://geckoview/content/extension-content.js",
-      },
-    },
     {
       name: "GeckoViewContent",
       onInit: {
@@ -561,13 +558,6 @@ function startup() {
             allFrames: true,
           },
         },
-      },
-    },
-    {
-      name: "GeckoViewMedia",
-      onEnable: {
-        resource: "resource://gre/modules/GeckoViewMedia.jsm",
-        frameScript: "chrome://geckoview/content/GeckoViewMediaChild.js",
       },
     },
     {
@@ -670,7 +660,41 @@ function startup() {
     {
       name: "GeckoViewAutofill",
       onInit: {
-        frameScript: "chrome://geckoview/content/GeckoViewAutofillChild.js",
+        actors: {
+          GeckoViewAutoFill: {
+            child: {
+              moduleURI: "resource:///actors/GeckoViewAutoFillChild.jsm",
+              events: {
+                DOMFormHasPassword: {
+                  mozSystemGroup: true,
+                  capture: false,
+                },
+                DOMInputPasswordAdded: {
+                  mozSystemGroup: true,
+                  capture: false,
+                },
+                pagehide: {
+                  mozSystemGroup: true,
+                  capture: false,
+                },
+                pageshow: {
+                  mozSystemGroup: true,
+                  capture: false,
+                },
+                focusin: {
+                  mozSystemGroup: true,
+                  capture: false,
+                },
+                focusout: {
+                  mozSystemGroup: true,
+                  capture: false,
+                },
+                "PasswordManager:onFormSubmit": {},
+              },
+            },
+            allFrames: true,
+          },
+        },
       },
     },
     {
@@ -678,6 +702,26 @@ function startup() {
       onEnable: {
         resource: "resource://gre/modules/GeckoViewMediaControl.jsm",
         frameScript: "chrome://geckoview/content/GeckoViewMediaControlChild.js",
+      },
+    },
+    {
+      name: "GeckoViewAutocomplete",
+      onInit: {
+        actors: {
+          FormAutofill: {
+            parent: {
+              moduleURI: "resource://autofill/FormAutofillParent.jsm",
+            },
+            child: {
+              moduleURI: "resource://autofill/FormAutofillChild.jsm",
+              events: {
+                focusin: {},
+                DOMFormBeforeSubmit: {},
+              },
+            },
+            allFrames: true,
+          },
+        },
       },
     },
   ]);
@@ -720,7 +764,14 @@ function startup() {
     });
 
     InitLater(() => {
+      // TODO bug 1730026: this runs too often. It should run once.
       RemoteSecuritySettings.init();
+    });
+
+    InitLater(() => {
+      // Initialize safe browsing module. This is required for content
+      // blocking features and manages blocklist downloads and updates.
+      SafeBrowsing.init();
     });
 
     // This should always go last, since the idle tasks (except for the ones with
@@ -736,9 +787,23 @@ function startup() {
         "browser-idle-startup-tasks-finished"
       )
     );
+
+    InitLater(() => {
+      // This lets Marionette and the Remote Agent (used for our CDP and the
+      // upcoming WebDriver BiDi implementation) start listening (when enabled).
+      // Both GeckoView and these two remote protocols do most of their
+      // initialization in "profile-after-change", and there is no order enforced
+      // between them.  Therefore we defer asking both components to startup
+      // until after all "profile-after-change" handlers (including this one)
+      // have completed.
+      Services.obs.notifyObservers(null, "marionette-startup-requested");
+      Services.obs.notifyObservers(null, "remote-startup-requested");
+    });
   });
 
   // Move focus to the content window at the end of startup,
   // so things like text selection can work properly.
   browser.focus();
+
+  InitializationTracker.onInitialized(performance.now());
 }

@@ -16,11 +16,11 @@ async function createTabWithRandomValue(url) {
 }
 
 function isValueInClosedData(rval) {
-  return ss.getClosedTabData(window).includes(rval);
+  return JSON.stringify(ss.getClosedTabData(window)).includes(rval);
 }
 
 function restoreClosedTabWithValue(rval) {
-  let closedTabData = JSON.parse(ss.getClosedTabData(window));
+  let closedTabData = ss.getClosedTabData(window);
   let index = closedTabData.findIndex(function(data) {
     return (data.state.extData && data.state.extData.foobar) == rval;
   });
@@ -83,11 +83,8 @@ add_task(async function save_worthy_tabs_remote_final() {
 
   // Replace about:blank with a new remote page.
   let entryReplaced = promiseOnHistoryReplaceEntry(browser);
-  await SpecialPowers.spawn(browser, [], async () => {
-    let webNavigation = docShell.QueryInterface(Ci.nsIWebNavigation);
-    webNavigation.loadURI("https://example.com/", {
-      triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
-    });
+  browser.loadURI("https://example.com/", {
+    triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
   });
   await entryReplaced;
 
@@ -97,8 +94,12 @@ add_task(async function save_worthy_tabs_remote_final() {
   // Remove the tab before the update arrives.
   let promise = promiseRemoveTabAndSessionState(tab);
 
-  // No tab state worth saving (that we know about yet).
-  ok(!isValueInClosedData(r), "closed tab not saved");
+  // With SHIP, we'll do the final tab state update sooner than we did before.
+  if (!Services.appinfo.sessionHistoryInParent) {
+    // No tab state worth saving (that we know about yet).
+    ok(!isValueInClosedData(r), "closed tab not saved");
+  }
+
   await promise;
 
   // Turns out there is a tab state worth saving.
@@ -118,8 +119,12 @@ add_task(async function save_worthy_tabs_nonremote_final() {
   // Remove the tab before the update arrives.
   let promise = promiseRemoveTabAndSessionState(tab);
 
-  // No tab state worth saving (that we know about yet).
-  ok(!isValueInClosedData(r), "closed tab not saved");
+  // With SHIP, we'll do the final tab state update sooner than we did before.
+  if (!Services.appinfo.sessionHistoryInParent) {
+    // No tab state worth saving (that we know about yet).
+    ok(!isValueInClosedData(r), "closed tab not saved");
+  }
+
   await promise;
 
   // Turns out there is a tab state worth saving.
@@ -133,16 +138,27 @@ add_task(async function dont_save_empty_tabs_final() {
 
   // Replace the current page with an about:blank entry.
   let entryReplaced = promiseOnHistoryReplaceEntry(browser);
-  await SpecialPowers.spawn(browser, [], async () => {
-    content.location.replace("about:blank");
+
+  // We're doing a cross origin navigation, so we can't reliably use a
+  // SpecialPowers task here. Instead we just emulate a location.replace() call.
+  browser.loadURI("about:blank", {
+    loadFlags:
+      Ci.nsIWebNavigation.LOAD_FLAGS_STOP_CONTENT |
+      Ci.nsIWebNavigation.LOAD_FLAGS_REPLACE_HISTORY,
+    triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
   });
+
   await entryReplaced;
 
   // Remove the tab before the update arrives.
   let promise = promiseRemoveTabAndSessionState(tab);
 
-  // Tab state deemed worth saving (yet).
-  ok(isValueInClosedData(r), "closed tab saved");
+  // With SHIP, we'll do the final tab state update sooner than we did before.
+  if (!Services.appinfo.sessionHistoryInParent) {
+    // Tab state deemed worth saving (yet).
+    ok(isValueInClosedData(r), "closed tab saved");
+  }
+
   await promise;
 
   // Turns out we don't want to save the tab state.

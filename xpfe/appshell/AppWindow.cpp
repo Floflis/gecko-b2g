@@ -11,13 +11,13 @@
 #include <algorithm>
 
 // Helper classes
-#include "GeckoProfiler.h"
 #include "nsPrintfCString.h"
 #include "nsString.h"
 #include "nsWidgetsCID.h"
 #include "nsThreadUtils.h"
 #include "nsNetCID.h"
 #include "nsQueryObject.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/Sprintf.h"
 
 // Interfaces needed to be included
@@ -71,6 +71,7 @@
 
 #ifdef XP_WIN
 #  include "mozilla/PreXULSkeletonUI.h"
+#  include "nsIWindowsUIUtils.h"
 #endif
 
 #ifdef MOZ_NEW_XULSTORE
@@ -80,7 +81,7 @@
 #include "mozilla/dom/DocumentL10n.h"
 
 #ifdef XP_MACOSX
-#  include "nsINativeMenuService.h"
+#  include "mozilla/widget/NativeMenuSupport.h"
 #  define USE_NATIVE_MENUS
 #endif
 
@@ -112,9 +113,11 @@ using dom::AutoNoJSAPI;
 using dom::BrowserHost;
 using dom::BrowsingContext;
 using dom::Document;
+using dom::DocumentL10n;
 using dom::Element;
 using dom::EventTarget;
 using dom::LoadURIOptions;
+using dom::Promise;
 
 AppWindow::AppWindow(uint32_t aChromeFlags)
     : mChromeTreeOwner(nullptr),
@@ -509,7 +512,8 @@ NS_IMETHODIMP AppWindow::ShowModal() {
 
   {
     AutoNoJSAPI nojsapi;
-    SpinEventLoopUntil([&]() { return !mContinueModalLoop; });
+    SpinEventLoopUntil("AppWindow::ShowModal"_ns,
+                       [&]() { return !mContinueModalLoop; });
   }
 
   mContinueModalLoop = false;
@@ -957,6 +961,9 @@ NS_IMETHODIMP AppWindow::SetVisibility(bool aVisibility) {
   if (mDebuting) {
     return NS_OK;
   }
+
+  NS_ENSURE_STATE(mDocShell);
+
   mDebuting = true;  // (Show / Focus is recursive)
 
   // XXXTAB Do we really need to show docshell and the window?  Isn't
@@ -1011,12 +1018,6 @@ NS_IMETHODIMP AppWindow::GetMainWidget(nsIWidget** aMainWidget) {
 
   *aMainWidget = mWindow;
   NS_IF_ADDREF(*aMainWidget);
-  return NS_OK;
-}
-
-NS_IMETHODIMP AppWindow::SetFocus() {
-  // XXX First Check In
-  NS_ASSERTION(false, "Not Yet Implemented");
   return NS_OK;
 }
 
@@ -1877,9 +1878,12 @@ nsresult AppWindow::MaybeSaveEarlyWindowPersistentValues(
   }
   settings.searchbarSpan = searchbar;
 
-  Element* bookmarksToolbar = doc->GetElementById(u"PersonalToolbar"_ns);
-  bookmarksToolbar->GetAttribute(u"collapsed"_ns, attributeValue);
-  settings.bookmarksToolbarShown = attributeValue.EqualsLiteral("false");
+  nsAutoString bookmarksVisibility;
+  Preferences::GetString("browser.toolbars.bookmarks.visibility",
+                         bookmarksVisibility);
+  settings.bookmarksToolbarShown =
+      bookmarksVisibility.EqualsLiteral("always") ||
+      bookmarksVisibility.EqualsLiteral("newtab");
 
   Element* menubar = doc->GetElementById(u"toolbar-menubar"_ns);
   menubar->GetAttribute(u"autohide"_ns, attributeValue);
@@ -1909,6 +1913,37 @@ nsresult AppWindow::MaybeSaveEarlyWindowPersistentValues(
   }
 
   settings.rtlEnabled = intl::LocaleService::GetInstance()->IsAppLocaleRTL();
+
+  bool isInTabletMode = false;
+  bool autoTouchModePref =
+      Preferences::GetBool("browser.touchmode.auto", false);
+  if (autoTouchModePref) {
+    nsCOMPtr<nsIWindowsUIUtils> uiUtils(
+        do_GetService("@mozilla.org/windows-ui-utils;1"));
+    if (!NS_WARN_IF(!uiUtils)) {
+      uiUtils->GetInTabletMode(&isInTabletMode);
+    }
+  }
+
+  if (isInTabletMode) {
+    settings.uiDensity = SkeletonUIDensity::Touch;
+  } else {
+    int uiDensityPref = Preferences::GetInt("browser.uidensity", 0);
+    switch (uiDensityPref) {
+      case 0: {
+        settings.uiDensity = SkeletonUIDensity::Default;
+        break;
+      }
+      case 1: {
+        settings.uiDensity = SkeletonUIDensity::Compact;
+        break;
+      }
+      case 2: {
+        settings.uiDensity = SkeletonUIDensity::Touch;
+        break;
+      }
+    }
+  }
 
   Unused << PersistPreXULSkeletonUIValues(settings);
 #endif
@@ -2304,7 +2339,8 @@ NS_IMETHODIMP AppWindow::CreateNewContentWindow(
 
   {
     AutoNoJSAPI nojsapi;
-    SpinEventLoopUntil([&]() { return !appWin->IsLocked(); });
+    SpinEventLoopUntil("AppWindow::CreateNewContentWindow"_ns,
+                       [&]() { return !appWin->IsLocked(); });
   }
 
   NS_ENSURE_STATE(appWin->mPrimaryContentShell ||
@@ -2907,6 +2943,15 @@ void AppWindow::FinishFullscreenChange(bool aInFullscreen) {
   }
 }
 
+void AppWindow::MacFullscreenMenubarOverlapChanged(
+    mozilla::DesktopCoord aOverlapAmount) {
+  if (mDocShell) {
+    if (nsCOMPtr<nsPIDOMWindowOuter> ourWindow = mDocShell->GetWindow()) {
+      ourWindow->MacFullscreenMenubarOverlapChanged(aOverlapAmount);
+    }
+  }
+}
+
 void AppWindow::OcclusionStateChanged(bool aIsFullyOccluded) {
   nsCOMPtr<nsPIDOMWindowOuter> ourWindow =
       mDocShell ? mDocShell->GetWindow() : nullptr;
@@ -2983,11 +3028,6 @@ static void LoadNativeMenus(Document* aDoc, nsIWidget* aParentWindow) {
   if (gfxPlatform::IsHeadless()) {
     return;
   }
-  nsCOMPtr<nsINativeMenuService> nms =
-      do_GetService("@mozilla.org/widget/nativemenuservice;1");
-  if (!nms) {
-    return;
-  }
 
   // Find the menubar tag (if there is more than one, we ignore all but
   // the first).
@@ -3001,11 +3041,12 @@ static void LoadNativeMenus(Document* aDoc, nsIWidget* aParentWindow) {
     menubarNode = menubarElements->Item(0);
   }
 
+  using widget::NativeMenuSupport;
   if (menubarNode) {
     nsCOMPtr<Element> menubarContent(do_QueryInterface(menubarNode));
-    nms->CreateNativeMenuBar(aParentWindow, menubarContent);
+    NativeMenuSupport::CreateNativeMenuBar(aParentWindow, menubarContent);
   } else {
-    nms->CreateNativeMenuBar(aParentWindow, nullptr);
+    NativeMenuSupport::CreateNativeMenuBar(aParentWindow, nullptr);
   }
 }
 
@@ -3295,6 +3336,12 @@ void AppWindow::WidgetListenerDelegate::FullscreenWillChange(
 void AppWindow::WidgetListenerDelegate::FullscreenChanged(bool aInFullscreen) {
   RefPtr<AppWindow> holder = mAppWindow;
   holder->FullscreenChanged(aInFullscreen);
+}
+
+void AppWindow::WidgetListenerDelegate::MacFullscreenMenubarOverlapChanged(
+    DesktopCoord aOverlapAmount) {
+  RefPtr<AppWindow> holder = mAppWindow;
+  return holder->MacFullscreenMenubarOverlapChanged(aOverlapAmount);
 }
 
 void AppWindow::WidgetListenerDelegate::OcclusionStateChanged(

@@ -32,6 +32,7 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/LoadInfo.h"
 #include "mozilla/Services.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Unused.h"
@@ -237,12 +238,34 @@ mozilla::ipc::IPCResult FetchEventOpChild::RecvRespondWith(
 
   switch (aResult.type()) {
     case IPCFetchEventRespondWithResult::TIPCSynthesizeResponseArgs:
+      mInterceptedChannel->SetFetchHandlerStart(
+          aResult.get_IPCSynthesizeResponseArgs()
+              .timeStamps()
+              .fetchHandlerStart());
+      mInterceptedChannel->SetFetchHandlerFinish(
+          aResult.get_IPCSynthesizeResponseArgs()
+              .timeStamps()
+              .fetchHandlerFinish());
       SynthesizeResponse(std::move(aResult.get_IPCSynthesizeResponseArgs()));
       break;
     case IPCFetchEventRespondWithResult::TResetInterceptionArgs:
-      ResetInterception();
+      mInterceptedChannel->SetFetchHandlerStart(
+          aResult.get_ResetInterceptionArgs().timeStamps().fetchHandlerStart());
+      mInterceptedChannel->SetFetchHandlerFinish(
+          aResult.get_ResetInterceptionArgs()
+              .timeStamps()
+              .fetchHandlerFinish());
+      ResetInterception(false);
       break;
     case IPCFetchEventRespondWithResult::TCancelInterceptionArgs:
+      mInterceptedChannel->SetFetchHandlerStart(
+          aResult.get_CancelInterceptionArgs()
+              .timeStamps()
+              .fetchHandlerStart());
+      mInterceptedChannel->SetFetchHandlerFinish(
+          aResult.get_CancelInterceptionArgs()
+              .timeStamps()
+              .fetchHandlerFinish());
       CancelInterception(aResult.get_CancelInterceptionArgs().status());
       break;
     default:
@@ -440,12 +463,12 @@ void FetchEventOpChild::SynthesizeResponse(IPCSynthesizeResponseArgs&& aArgs) {
   MaybeScheduleRegistrationUpdate();
 }
 
-void FetchEventOpChild::ResetInterception() {
+void FetchEventOpChild::ResetInterception(bool aBypass) {
   AssertIsOnMainThread();
   MOZ_ASSERT(mInterceptedChannel);
   MOZ_ASSERT(!mInterceptedChannelHandled);
 
-  nsresult rv = mInterceptedChannel->ResetInterception();
+  nsresult rv = mInterceptedChannel->ResetInterception(aBypass);
 
   if (NS_WARN_IF(NS_FAILED(rv))) {
     NS_WARNING("Failed to resume intercepted network request!");
@@ -463,6 +486,22 @@ void FetchEventOpChild::CancelInterception(nsresult aStatus) {
   MOZ_ASSERT(mInterceptedChannel);
   MOZ_ASSERT(!mInterceptedChannelHandled);
   MOZ_ASSERT(NS_FAILED(aStatus));
+
+  // Report a navigation fault if this is a navigation (and we have an active
+  // worker, which should be the case in non-shutdown/content-process-crash
+  // situations).
+  RefPtr<ServiceWorkerInfo> mActive = mRegistration->GetActive();
+  if (mActive && mArgs.isNonSubresourceRequest()) {
+    mActive->ReportNavigationFault();
+    // Additional mitigations such as unregistering the registration are handled
+    // in ServiceWorkerRegistrationInfo::MaybeScheduleUpdate which will be
+    // called by MaybeScheduleRegistrationUpdate which gets called by our call
+    // to ResetInterception.
+    if (StaticPrefs::dom_serviceWorkers_mitigations_bypass_on_fault()) {
+      ResetInterception(true);
+      return;
+    }
+  }
 
   mInterceptedChannel->CancelInterception(aStatus);
   mInterceptedChannelHandled = true;

@@ -20,14 +20,16 @@
 #include "gfxFontConstants.h"
 #include "mozilla/gfx/2D.h"
 #include "cutils/properties.h"
+#include "nsITheme.h"
 
 static const char16_t UNICODE_BULLET = 0x2022;
 
-nsLookAndFeel::nsLookAndFeel(const LookAndFeelCache* aCache) {}
+nsLookAndFeel::nsLookAndFeel() = default;
 
 nsLookAndFeel::~nsLookAndFeel() {}
 
-nsresult nsLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
+nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme,
+                                       nscolor& aColor) {
   nsresult rv = NS_OK;
 
 #define BASE_ACTIVE_COLOR NS_RGB(0xaa, 0xaa, 0xaa)
@@ -84,19 +86,10 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
       // not used?
       aColor = TEXT_NORMAL_COLOR;
       break;
-    case ColorID::TextSelectBackground:
-      aColor = NS_RGBA(0x00, 0x73, 0xe6, 0x66);
-      break;
     case ColorID::IMESelectedRawTextBackground:
     case ColorID::IMESelectedConvertedTextBackground:
       // still used
       aColor = BASE_SELECTED_COLOR;
-      break;
-    case ColorID::TextSelectForegroundCustom:
-      aColor = NS_RGB(0x4d, 0x4d, 0x4d);
-      break;
-    case ColorID::TextSelectForeground:
-      aColor = NS_DONT_CHANGE_COLOR;
       break;
     case ColorID::IMESelectedRawTextForeground:
     case ColorID::IMESelectedConvertedTextForeground:
@@ -260,11 +253,11 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, nscolor& aColor) {
       aColor = FG_PRELIGHT_COLOR;
       break;
     case ColorID::MozCellhighlight:
-    case ColorID::MozHtmlCellhighlight:
+    case ColorID::Selecteditem:
       aColor = BASE_ACTIVE_COLOR;
       break;
     case ColorID::MozCellhighlighttext:
-    case ColorID::MozHtmlCellhighlighttext:
+    case ColorID::Selecteditemtext:
       aColor = TEXT_ACTIVE_COLOR;
       break;
     case ColorID::MozMenuhover:
@@ -344,12 +337,7 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       aResult = eScrollThumbStyle_Proportional;
       break;
 
-    case IntID::TouchEnabled:
-      aResult = 1;
-      break;
-
     case IntID::WindowsDefaultTheme:
-    case IntID::WindowsThemeIdentifier:
     case IntID::OperatingSystemVersionIdentifier:
       aResult = 0;
       rv = NS_ERROR_NOT_IMPLEMENTED;
@@ -386,6 +374,10 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
     case IntID::ContextMenuOffsetVertical:
     case IntID::ContextMenuOffsetHorizontal:
       aResult = 2;
+      break;
+
+    case IntID::UseOverlayScrollbars:
+      aResult = 1;
       break;
 
     default:

@@ -16,6 +16,7 @@
 #include "gc/RelocationOverlay.h"
 #include "js/Id.h"
 #include "js/Value.h"
+#include "vm/StringType.h"
 #include "vm/TaggedProto.h"
 
 #include "gc/Nursery-inl.h"
@@ -64,8 +65,10 @@ struct MightBeForwarded {
   static_assert(!std::is_same_v<Cell, T> && !std::is_same_v<TenuredCell, T>);
 
 #define CAN_FORWARD_KIND_OR(_1, _2, Type, _3, _4, _5, canCompact) \
-  (std::is_base_of_v<Type, T> && canCompact) ||
+  std::is_base_of_v<Type, T> ? canCompact:
 
+  // FOR_EACH_ALLOCKIND doesn't cover every possible type: make sure
+  // to default to `true` for unknown types.
   static constexpr bool value = FOR_EACH_ALLOCKIND(CAN_FORWARD_KIND_OR) true;
 #undef CAN_FORWARD_KIND_OR
 };
@@ -96,7 +99,9 @@ inline T MaybeForwarded(T t) {
 }
 
 inline const JSClass* MaybeForwardedObjectClass(const JSObject* obj) {
-  return MaybeForwarded(obj->group())->clasp();
+  Shape* shape = MaybeForwarded(obj->shape());
+  BaseShape* baseShape = MaybeForwarded(shape->base());
+  return baseShape->clasp();
 }
 
 template <typename T>
@@ -133,6 +138,29 @@ inline bool IsAboutToBeFinalizedDuringMinorSweep(Cell** cellp) {
   }
 
   return !Nursery::getForwardedPointer(cellp);
+}
+
+// Special case pre-write barrier for strings used during rope flattening. This
+// is a work around as tracing these strings is problematic for two reasons:
+//  - they may have had their cell headers overwritten with temporary GC data
+//  - interior rope nodes may be transformed into dependent strings before their
+//    base nodes have been transformed into linear strings
+inline void PreWriteBarrierDuringFlattening(JSString* str) {
+  MOZ_ASSERT(str);
+  MOZ_ASSERT(!JS::RuntimeHeapIsMajorCollecting());
+
+  if (IsInsideNursery(str) || str->isPermanentAndMayBeShared()) {
+    return;
+  }
+
+  auto* cell = reinterpret_cast<TenuredCell*>(str);
+  JS::shadow::Zone* zone = cell->shadowZoneFromAnyThread();
+
+  MOZ_ASSERT(CurrentThreadCanAccessRuntime(zone->runtimeFromAnyThread()));
+
+  if (zone->needsIncrementalBarrier()) {
+    PerformIncrementalBarrierDuringFlattening(str);
+  }
 }
 
 #ifdef JSGC_HASH_TABLE_CHECKS

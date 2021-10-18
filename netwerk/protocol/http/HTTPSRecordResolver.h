@@ -9,6 +9,7 @@
 
 #include "nsICancelable.h"
 #include "nsIDNSListener.h"
+#include "nsHttpConnectionInfo.h"
 
 namespace mozilla {
 namespace net {
@@ -25,6 +26,8 @@ class HTTPSRecordResolver : public nsIDNSListener {
   nsresult FetchHTTPSRRInternal(nsIEventTarget* aTarget,
                                 nsICancelable** aDNSRequest);
   void PrefetchAddrRecord(const nsACString& aTargetName, bool aRefreshDNS);
+
+  void Close();
 
  protected:
   virtual ~HTTPSRecordResolver();

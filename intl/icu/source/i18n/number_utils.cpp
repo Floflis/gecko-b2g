@@ -180,12 +180,6 @@ void DecNum::_setTo(const char* str, int32_t maxDigits, UErrorCode& status) {
         status = U_UNSUPPORTED_ERROR;
         return;
     }
-
-    // For consistency with Java BigDecimal, no support for DecNum that is NaN or Infinity!
-    if (decNumberIsSpecial(fData.getAlias())) {
-        status = U_UNSUPPORTED_ERROR;
-        return;
-    }
 }
 
 void
@@ -258,7 +252,10 @@ void DecNum::toString(ByteSink& output, UErrorCode& status) const {
     }
     // "string must be at least dn->digits+14 characters long"
     int32_t minCapacity = fData.getAlias()->digits + 14;
-    MaybeStackArray<char, 30> buffer(minCapacity);
+    MaybeStackArray<char, 30> buffer(minCapacity, status);
+    if (U_FAILURE(status)) {
+        return;
+    }
     uprv_decNumberToString(fData, buffer.getAlias());
     output.Append(buffer.getAlias(), static_cast<int32_t>(uprv_strlen(buffer.getAlias())));
 }

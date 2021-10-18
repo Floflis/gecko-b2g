@@ -1,4 +1,6 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* clang-format off */
+/* -*- Mode: Objective-C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* clang-format on */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -14,6 +16,7 @@
 #include "mozilla/dom/ToJSValue.h"
 #include "mozilla/Services.h"
 #include "nsString.h"
+#include "js/PropertyAndElement.h"  // JS_Enumerate, JS_GetElement, JS_GetProperty, JS_GetPropertyById, JS_HasOwnProperty, JS_SetUCProperty
 
 #import "mozAccessible.h"
 
@@ -37,12 +40,12 @@ id xpcAccessibleMacNSObjectWrapper::GetNativeObject() const { return mNativeObje
 NS_IMPL_ISUPPORTS_INHERITED(xpcAccessibleMacInterface, xpcAccessibleMacNSObjectWrapper,
                             nsIAccessibleMacInterface)
 
-xpcAccessibleMacInterface::xpcAccessibleMacInterface(AccessibleOrProxy aObj)
+xpcAccessibleMacInterface::xpcAccessibleMacInterface(Accessible* aObj)
     : xpcAccessibleMacNSObjectWrapper(GetNativeFromGeckoAccessible(aObj)) {}
 
 NS_IMETHODIMP
 xpcAccessibleMacInterface::GetAttributeNames(nsTArray<nsString>& aAttributeNames) {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_BEGIN_TRY_BLOCK_RETURN
 
   if (!mNativeObject || [mNativeObject isExpired]) {
     return NS_ERROR_NOT_AVAILABLE;
@@ -56,12 +59,12 @@ xpcAccessibleMacInterface::GetAttributeNames(nsTArray<nsString>& aAttributeNames
 
   return NS_OK;
 
-  NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE)
 }
 
 NS_IMETHODIMP
 xpcAccessibleMacInterface::GetParameterizedAttributeNames(nsTArray<nsString>& aAttributeNames) {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_BEGIN_TRY_BLOCK_RETURN
 
   if (!mNativeObject || [mNativeObject isExpired]) {
     return NS_ERROR_NOT_AVAILABLE;
@@ -75,12 +78,12 @@ xpcAccessibleMacInterface::GetParameterizedAttributeNames(nsTArray<nsString>& aA
 
   return NS_OK;
 
-  NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE)
 }
 
 NS_IMETHODIMP
 xpcAccessibleMacInterface::GetActionNames(nsTArray<nsString>& aActionNames) {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_BEGIN_TRY_BLOCK_RETURN
 
   if (!mNativeObject || [mNativeObject isExpired]) {
     return NS_ERROR_NOT_AVAILABLE;
@@ -94,12 +97,12 @@ xpcAccessibleMacInterface::GetActionNames(nsTArray<nsString>& aActionNames) {
 
   return NS_OK;
 
-  NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE)
 }
 
 NS_IMETHODIMP
 xpcAccessibleMacInterface::PerformAction(const nsAString& aActionName) {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_BEGIN_TRY_BLOCK_RETURN
 
   if (!mNativeObject || [mNativeObject isExpired]) {
     return NS_ERROR_NOT_AVAILABLE;
@@ -110,13 +113,13 @@ xpcAccessibleMacInterface::PerformAction(const nsAString& aActionName) {
 
   return NS_OK;
 
-  NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE)
 }
 
 NS_IMETHODIMP
 xpcAccessibleMacInterface::GetAttributeValue(const nsAString& aAttributeName, JSContext* aCx,
                                              JS::MutableHandleValue aResult) {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_BEGIN_TRY_BLOCK_RETURN
 
   if (!mNativeObject || [mNativeObject isExpired]) {
     return NS_ERROR_NOT_AVAILABLE;
@@ -125,7 +128,7 @@ xpcAccessibleMacInterface::GetAttributeValue(const nsAString& aAttributeName, JS
   NSString* attribName = nsCocoaUtils::ToNSString(aAttributeName);
   return NSObjectToJsValue([mNativeObject accessibilityAttributeValue:attribName], aCx, aResult);
 
-  NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT
+  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE)
 }
 
 NS_IMETHODIMP
@@ -170,8 +173,6 @@ xpcAccessibleMacInterface::GetParameterizedAttributeValue(const nsAString& aAttr
   NSString* attribName = nsCocoaUtils::ToNSString(aAttributeName);
   return NSObjectToJsValue(
       [mNativeObject accessibilityAttributeValue:attribName forParameter:paramObj], aCx, aResult);
-
-  return NS_OK;
 }
 
 bool xpcAccessibleMacInterface::SupportsSelector(SEL aSelector) {
@@ -256,6 +257,35 @@ nsresult xpcAccessibleMacInterface::NSObjectToJsValue(id aObj, JSContext* aCx,
       JS_SetUCProperty(aCx, obj, strKey.get(), strKey.Length(), value);
     }
     aResult.setObject(*obj);
+  } else if ([aObj isKindOfClass:[NSAttributedString class]]) {
+    NSAttributedString* attrStr = (NSAttributedString*)aObj;
+    __block NSMutableArray* attrRunArray = [[NSMutableArray alloc] init];
+
+    [attrStr
+        enumerateAttributesInRange:NSMakeRange(0, [attrStr length])
+                           options:NSAttributedStringEnumerationLongestEffectiveRangeNotRequired
+                        usingBlock:^(NSDictionary* attributes, NSRange range, BOOL* stop) {
+                          NSString* str = [[attrStr string] substringWithRange:range];
+                          if (!str || !attributes) {
+                            return;
+                          }
+
+                          NSMutableDictionary* attrRun = [attributes mutableCopy];
+                          attrRun[@"string"] = str;
+
+                          [attrRunArray addObject:attrRun];
+                        }];
+
+    // The attributed string is represented in js as an array of objects.
+    // Each object represents a run of text where the "string" property is the
+    // string value and all the AX* properties are the attributes.
+    return NSObjectToJsValue(attrRunArray, aCx, aResult);
+  } else if (CFGetTypeID(aObj) == CGColorGetTypeID()) {
+    const CGFloat* components = CGColorGetComponents((CGColorRef)aObj);
+    NSString* hexString =
+        [NSString stringWithFormat:@"#%02x%02x%02x", (int)(components[0] * 0xff),
+                                   (int)(components[1] * 0xff), (int)(components[2] * 0xff)];
+    return NSObjectToJsValue(hexString, aCx, aResult);
   } else if ([aObj respondsToSelector:@selector(isAccessibilityElement)]) {
     // We expect all of our accessibility objects to implement isAccessibilityElement
     // at the very least. If it is implemented we will assume its an accessibility object.

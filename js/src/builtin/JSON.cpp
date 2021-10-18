@@ -18,8 +18,9 @@
 
 #include "builtin/Array.h"
 #include "builtin/BigInt.h"
+#include "js/CallAndConstruct.h"      // JS::IsCallable
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
-#include "js/friend/StackLimits.h"    // js::CheckRecursionLimit
+#include "js/friend/StackLimits.h"    // js::AutoCheckRecursionLimit
 #include "js/Object.h"                // JS::GetBuiltinClass
 #include "js/PropertySpec.h"
 #include "js/StableStringChars.h"
@@ -29,7 +30,8 @@
 #include "vm/JSContext.h"
 #include "vm/JSObject.h"
 #include "vm/JSONParser.h"
-#include "vm/PlainObject.h"  // js::PlainObject
+#include "vm/PlainObject.h"    // js::PlainObject
+#include "vm/WellKnownAtom.h"  // js_*_str
 
 #include "builtin/Array-inl.h"
 #include "builtin/Boolean-inl.h"
@@ -481,13 +483,13 @@ static bool JO(JSContext* cx, HandleObject obj, StringifyContext* scx) {
     RootedValue outputValue(cx);
 #ifdef DEBUG
     if (scx->maybeSafely) {
-      RootedNativeObject nativeObj(cx, &obj->as<NativeObject>());
-      Rooted<PropertyResult> prop(cx);
-      if (!NativeLookupOwnPropertyNoResolve(cx, nativeObj, id, &prop)) {
+      PropertyResult prop;
+      if (!NativeLookupOwnPropertyNoResolve(cx, &obj->as<NativeObject>(), id,
+                                            &prop)) {
         return false;
       }
-      MOZ_ASSERT(prop && prop.isNativeProperty() &&
-                 prop.shape()->isDataDescriptor());
+      MOZ_ASSERT(prop.isNativeProperty() &&
+                 prop.propertyInfo().isDataDescriptor());
     }
 #endif  // DEBUG
     if (!GetProperty(cx, obj, obj, id, &outputValue)) {
@@ -529,6 +531,38 @@ static bool JO(JSContext* cx, HandleObject obj, StringifyContext* scx) {
   return scx->sb.append('}');
 }
 
+// For JSON.stringify and JSON.parse with a reviver function, we need to know
+// the length of an object for which JS::IsArray returned true. This must be
+// either an ArrayObject or a proxy wrapping one.
+static MOZ_ALWAYS_INLINE bool GetLengthPropertyForArray(JSContext* cx,
+                                                        HandleObject obj,
+                                                        uint32_t* lengthp) {
+  if (MOZ_LIKELY(obj->is<ArrayObject>())) {
+    *lengthp = obj->as<ArrayObject>().length();
+    return true;
+  }
+
+  MOZ_ASSERT(obj->is<ProxyObject>());
+
+  uint64_t len = 0;
+  if (!GetLengthProperty(cx, obj, &len)) {
+    return false;
+  }
+
+  // A scripted proxy wrapping an array can return a length value larger than
+  // UINT32_MAX. Stringification will likely report an OOM in this case. Match
+  // other JS engines and report an early error in this case, although
+  // technically this is observable, for example when stringifying with a
+  // replacer function.
+  if (len > UINT32_MAX) {
+    ReportAllocationOverflow(cx);
+    return false;
+  }
+
+  *lengthp = uint32_t(len);
+  return true;
+}
+
 /* ES5 15.12.3 JA. */
 static bool JA(JSContext* cx, HandleObject obj, StringifyContext* scx) {
   /*
@@ -553,7 +587,7 @@ static bool JA(JSContext* cx, HandleObject obj, StringifyContext* scx) {
 
   /* Step 6. */
   uint32_t length;
-  if (!GetLengthProperty(cx, obj, &length)) {
+  if (!GetLengthPropertyForArray(cx, obj, &length)) {
     return false;
   }
 
@@ -639,7 +673,8 @@ static bool Str(JSContext* cx, const Value& v, StringifyContext* scx) {
   /* Step 11 must be handled by the caller. */
   MOZ_ASSERT(!IsFilteredValue(v));
 
-  if (!CheckRecursionLimit(cx)) {
+  AutoCheckRecursionLimit recursion(cx);
+  if (!recursion.check(cx)) {
     return false;
   }
 
@@ -745,7 +780,7 @@ bool js::Stringify(JSContext* cx, MutableHandleValue vp, JSObject* replacer_,
 
       /* Step 4b(iii)(2-3). */
       uint32_t len;
-      if (!GetLengthProperty(cx, replacer, &len)) {
+      if (!GetLengthPropertyForArray(cx, replacer, &len)) {
         return false;
       }
 
@@ -866,7 +901,7 @@ bool js::Stringify(JSContext* cx, MutableHandleValue vp, JSObject* replacer_,
     // function is present.
 
     /* Step 9. */
-    wrapper = NewBuiltinClassInstance<PlainObject>(cx);
+    wrapper = NewPlainObject(cx);
     if (!wrapper) {
       return false;
     }
@@ -893,7 +928,8 @@ bool js::Stringify(JSContext* cx, MutableHandleValue vp, JSObject* replacer_,
 /* ES5 15.12.2 Walk. */
 static bool Walk(JSContext* cx, HandleObject holder, HandleId name,
                  HandleValue reviver, MutableHandleValue vp) {
-  if (!CheckRecursionLimit(cx)) {
+  AutoCheckRecursionLimit recursion(cx);
+  if (!recursion.check(cx)) {
     return false;
   }
 
@@ -915,7 +951,7 @@ static bool Walk(JSContext* cx, HandleObject holder, HandleId name,
     if (isArray) {
       /* Step 2a(ii). */
       uint32_t length;
-      if (!GetLengthProperty(cx, obj, &length)) {
+      if (!GetLengthPropertyForArray(cx, obj, &length)) {
         return false;
       }
 
@@ -944,8 +980,11 @@ static bool Walk(JSContext* cx, HandleObject holder, HandleId name,
           }
         } else {
           /* Step 2a(iii)(3). The spec deliberately ignores strict failure. */
-          Rooted<PropertyDescriptor> desc(cx);
-          desc.setDataDescriptor(newElement, JSPROP_ENUMERATE);
+          Rooted<PropertyDescriptor> desc(
+              cx, PropertyDescriptor::Data(newElement,
+                                           {JS::PropertyAttribute::Configurable,
+                                            JS::PropertyAttribute::Enumerable,
+                                            JS::PropertyAttribute::Writable}));
           if (!DefineProperty(cx, obj, id, desc, ignored)) {
             return false;
           }
@@ -980,8 +1019,11 @@ static bool Walk(JSContext* cx, HandleObject holder, HandleId name,
           }
         } else {
           /* Step 2b(ii)(3). The spec deliberately ignores strict failure. */
-          Rooted<PropertyDescriptor> desc(cx);
-          desc.setDataDescriptor(newElement, JSPROP_ENUMERATE);
+          Rooted<PropertyDescriptor> desc(
+              cx, PropertyDescriptor::Data(newElement,
+                                           {JS::PropertyAttribute::Configurable,
+                                            JS::PropertyAttribute::Enumerable,
+                                            JS::PropertyAttribute::Writable}));
           if (!DefineProperty(cx, obj, id, desc, ignored)) {
             return false;
           }
@@ -1001,7 +1043,7 @@ static bool Walk(JSContext* cx, HandleObject holder, HandleId name,
 }
 
 static bool Revive(JSContext* cx, HandleValue reviver, MutableHandleValue vp) {
-  RootedPlainObject obj(cx, NewBuiltinClassInstance<PlainObject>(cx));
+  RootedPlainObject obj(cx, NewPlainObject(cx));
   if (!obj) {
     return false;
   }

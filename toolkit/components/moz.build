@@ -38,11 +38,11 @@ DIRS += [
     "enterprisepolicies",
     "extensions",
     "featuregates",
+    "formautofill",
     "filewatcher",
     "finalizationwitness",
     "find",
     "forgetaboutsite",
-    "fuzzyfox",
     "glean",
     "httpsonlyerror",
     "jsoncpp/src/lib_json",
@@ -116,7 +116,7 @@ if CONFIG["MOZ_UPDATE_AGENT"]:
 DIRS += ["build"]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
-    DIRS += ["gfx"]
+    DIRS += ["aboutthirdparty", "gfx"]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] != "android":
     EXTRA_JS_MODULES += [
@@ -129,6 +129,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] != "android":
 
 if CONFIG["MOZ_BUILD_APP"] == "browser":
     DIRS += ["normandy", "messaging-system"]
+
+if CONFIG["MOZ_BUILD_APP"] in ["browser", "comm/mail"]:
+    DIRS += ["nimbus"]
 
 if CONFIG["MOZ_BACKGROUNDTASKS"]:
     DIRS += ["backgroundtasks"]

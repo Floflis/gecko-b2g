@@ -124,14 +124,16 @@ class PCUuidGenerator : public mozilla::JsepUuidGenerator {
 // count and records the elapsed time when the count falls to zero. The
 // elapsed time is recorded in seconds.
 struct PeerConnectionAutoTimer {
-  PeerConnectionAutoTimer() : mRefCnt(0), mStart(TimeStamp::Now()){};
+  PeerConnectionAutoTimer()
+      : mRefCnt(0), mStart(TimeStamp::Now()), mUsedAV(false){};
   void RegisterConnection();
-  void UnregisterConnection();
+  void UnregisterConnection(bool aContainedAV);
   bool IsStopped();
 
  private:
   int64_t mRefCnt;
   TimeStamp mStart;
+  bool mUsedAV;
 };
 
 // Enter an API call and check that the state is OK,
@@ -434,6 +436,12 @@ class PeerConnectionImpl final
   static bool HostnameInPref(const char* aPrefList, nsIURI* aDocURI);
 
   void StampTimecard(const char* aEvent);
+
+  bool RelayOnly() const {
+    return mJsConfiguration.mIceTransportPolicy.WasPassed() &&
+           mJsConfiguration.mIceTransportPolicy.Value() ==
+               dom::RTCIceTransportPolicy::Relay;
+  }
 
  private:
   virtual ~PeerConnectionImpl();

@@ -11,6 +11,7 @@
 #include "mozilla/dom/DocumentFragment.h"
 #include "mozilla/dom/SanitizerBinding.h"
 #include "nsString.h"
+#include "nsIGlobalObject.h"
 #include "nsIParserUtils.h"
 #include "nsTreeSanitizer.h"
 
@@ -31,13 +32,12 @@ class GlobalObject;
 class Sanitizer final : public nsISupports, public nsWrapperCache {
  public:
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
-  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(Sanitizer)
+  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(Sanitizer);
 
-  explicit Sanitizer(nsIGlobalObject* aGlobal) : mGlobal(aGlobal) {
+  explicit Sanitizer(nsIGlobalObject* aGlobal, const SanitizerConfig& aOptions)
+      : mGlobal(aGlobal), mTreeSanitizer(nsIParserUtils::SanitizerAllowStyle) {
     MOZ_ASSERT(aGlobal);
-    // FIXME(freddyb): Waiting for wicg-draft to evolve. Bug 1658564.
-    mSanitizationFlags = nsIParserUtils::SanitizerAllowStyle |
-                         nsIParserUtils::SanitizerAllowComments;
+    mTreeSanitizer.WithWebSanitizerOptions(aOptions);
   }
 
   nsIGlobalObject* GetParentObject() const { return mGlobal; }
@@ -50,7 +50,7 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
    * @return a new Sanitizer object, with methods as below
    */
   static already_AddRefed<Sanitizer> Constructor(
-      const GlobalObject& aGlobal, const SanitizerOptions& aOptions,
+      const GlobalObject& aGlobal, const SanitizerConfig& aOptions,
       ErrorResult& aRv);
 
   /**
@@ -59,17 +59,28 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
    * @return DocumentFragment of the sanitized HTML
    */
   already_AddRefed<DocumentFragment> Sanitize(
-      const Optional<mozilla::dom::StringOrDocumentFragmentOrDocument>& aInput,
-      ErrorResult& aRv);
+      const mozilla::dom::DocumentFragmentOrDocument& aInput, ErrorResult& aRv);
 
   /**
-   * sanitizeToString WebIDL method.
+   * sanitizeFor method.
+   * @param aElement      name of HTML element to be constructed
    * @param aInput       "bad" HTML that needs to be sanitized
-   * @param outSanitized out-param for the string of sanitized HTML
+   * @return DocumentFragment of the sanitized HTML
    */
-  void SanitizeToString(
-      const Optional<StringOrDocumentFragmentOrDocument>& aInput,
-      nsAString& outSanitized, ErrorResult& aRv);
+  already_AddRefed<Element> SanitizeFor(const nsAString& aElement,
+                                        const nsAString& aInput,
+                                        ErrorResult& aRv);
+
+  /**
+   * Sanitizes a fragment in place. This assumes that the fragment
+   * belongs but an inert document.
+   *
+   * @param aFragment Fragment to be sanitized in place
+   * @return DocumentFragment
+   */
+
+  RefPtr<DocumentFragment> SanitizeFragment(RefPtr<DocumentFragment> aFragment,
+                                            ErrorResult& aRv);
 
   /**
    * Logs localized message to either content console or browser console
@@ -83,8 +94,7 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
  private:
   ~Sanitizer() = default;
   already_AddRefed<DocumentFragment> InputToNewFragment(
-      const Optional<mozilla::dom::StringOrDocumentFragmentOrDocument>& aInput,
-      ErrorResult& aRv);
+      const mozilla::dom::DocumentFragmentOrDocument& aInput, ErrorResult& aRv);
   /**
    * Logs localized message to either content console or browser console
    * @param aMessage           Message to log
@@ -95,9 +105,9 @@ class Sanitizer final : public nsISupports, public nsWrapperCache {
   static void LogMessage(const nsAString& aMessage, uint32_t aFlags,
                          uint64_t aInnerWindowID, bool aFromPrivateWindow);
 
-  SanitizerOptions mOptions;
-  uint32_t mSanitizationFlags;
-  nsCOMPtr<nsIGlobalObject> mGlobal;
+  RefPtr<nsIGlobalObject> mGlobal;
+  SanitizerConfig mOptions;
+  nsTreeSanitizer mTreeSanitizer;
 };
 }  // namespace dom
 }  // namespace mozilla

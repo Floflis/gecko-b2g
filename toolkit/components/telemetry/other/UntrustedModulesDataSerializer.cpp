@@ -7,7 +7,8 @@
 #include "UntrustedModulesDataSerializer.h"
 
 #include "core/TelemetryCommon.h"
-#include "js/Array.h"  // JS::NewArrayObject
+#include "js/Array.h"               // JS::NewArrayObject
+#include "js/PropertyAndElement.h"  // JS_DefineElement, JS_DefineProperty, JS_GetProperty
 #include "jsapi.h"
 #include "mozilla/dom/ToJSValue.h"
 #include "nsITelemetry.h"
@@ -420,19 +421,23 @@ nsresult UntrustedModulesDataSerializer::AddSingleData(
     const UntrustedModulesData& aData) {
   // Serialize each entry in the modules hashtable out to the "modules" array
   // and store the indices in |mIndexMap|
-  for (auto iter = aData.mModules.ConstIter(); !iter.Done(); iter.Next()) {
-    auto addPtr = mIndexMap.LookupForAdd(iter.Key());
-    if (!addPtr) {
-      addPtr.OrInsert([idx = mCurModulesArrayIdx]() { return idx; });
+  for (const auto& entry : aData.mModules) {
+    if (!mIndexMap.WithEntryHandle(entry.GetKey(), [&](auto&& addPtr) {
+          if (!addPtr) {
+            addPtr.Insert(mCurModulesArrayIdx);
 
-      JS::RootedValue jsModule(mCx);
-      if (!SerializeModule(mCx, &jsModule, iter.Data(), mFlags) ||
-          !JS_DefineElement(mCx, mModulesArray, mCurModulesArrayIdx, jsModule,
-                            JSPROP_ENUMERATE)) {
-        return NS_ERROR_FAILURE;
-      }
+            JS::RootedValue jsModule(mCx);
+            if (!SerializeModule(mCx, &jsModule, entry.GetData(), mFlags) ||
+                !JS_DefineElement(mCx, mModulesArray, mCurModulesArrayIdx,
+                                  jsModule, JSPROP_ENUMERATE)) {
+              return false;
+            }
 
-      ++mCurModulesArrayIdx;
+            ++mCurModulesArrayIdx;
+          }
+          return true;
+        })) {
+      return NS_ERROR_FAILURE;
     }
   }
 
@@ -529,8 +534,8 @@ nsresult UntrustedModulesDataSerializer::Add(
     return mCtorResult;
   }
 
-  for (auto iter = aData.ConstIter(); !iter.Done(); iter.Next()) {
-    const RefPtr<UntrustedModulesDataContainer>& container = iter.Data();
+  for (const RefPtr<UntrustedModulesDataContainer>& container :
+       aData.Values()) {
     if (!container) {
       continue;
     }

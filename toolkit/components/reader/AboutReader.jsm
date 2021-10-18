@@ -26,18 +26,20 @@ ChromeUtils.defineModuleGetter(
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "UITelemetry",
-  "resource://gre/modules/UITelemetry.jsm"
+  "PluralForm",
+  "resource://gre/modules/PluralForm.jsm"
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "PluralForm",
-  "resource://gre/modules/PluralForm.jsm"
+  "NimbusFeatures",
+  "resource://nimbus/ExperimentAPI.jsm"
 );
 
 var gStrings = Services.strings.createBundle(
   "chrome://global/locale/aboutReader.properties"
 );
+
+Services.telemetry.setEventRecordingEnabled("readermode", true);
 
 const zoomOnCtrl =
   Services.prefs.getIntPref("mousewheel.with_control.action", 3) == 3;
@@ -132,6 +134,13 @@ var AboutReader = function(actor, articlePromise) {
   });
   this._intersectionObs.observe(doc.querySelector(".top-anchor"));
 
+  this._ctaIntersectionObserver = new win.IntersectionObserver(
+    this._pocketCTAObserved.bind(this),
+    {
+      threshold: 0.5,
+    }
+  );
+
   Services.obs.addObserver(this, "inner-window-destroyed");
 
   this._setupButton(
@@ -200,7 +209,11 @@ var AboutReader = function(actor, articlePromise) {
 
   this._setupLineHeightButtons();
 
-  if (win.speechSynthesis && Services.prefs.getBoolPref("narrate.enabled")) {
+  if (
+    win.speechSynthesis &&
+    Services.prefs.getBoolPref("narrate.enabled") &&
+    !Services.prefs.getBoolPref("privacy.resistFingerprinting", false)
+  ) {
     new NarrateControls(win, this._languagePromise);
   }
 
@@ -312,6 +325,7 @@ AboutReader.prototype = {
         ) {
           let btn = this._doc.createElement("button");
           btn.dataset.buttonid = message.data.id;
+          btn.dataset.telemetryId = `reader-${message.data.telemetryId}`;
           btn.className = "button " + message.data.id;
           let tip = this._doc.createElement("span");
           tip.className = "hover-label";
@@ -377,6 +391,21 @@ AboutReader.prototype = {
         }
         break;
       case "click":
+        const buttonLabel = target.attributes.getNamedItem(`data-telemetry-id`)
+          ?.value;
+
+        if (buttonLabel) {
+          Services.telemetry.recordEvent(
+            "readermode",
+            "button",
+            "click",
+            null,
+            {
+              label: buttonLabel,
+            }
+          );
+        }
+
         if (target.classList.contains("dropdown-toggle")) {
           this._toggleDropdownClicked(aEvent);
         }
@@ -434,8 +463,15 @@ AboutReader.prototype = {
 
         this._actor.readerModeHidden();
         this.clearActor();
+
+        // Disconnect and delete IntersectionObservers to prevent memory leaks:
+
         this._intersectionObs.unobserve(this._doc.querySelector(".top-anchor"));
+        this._ctaIntersectionObserver.disconnect();
+
         delete this._intersectionObs;
+        delete this._ctaIntersectionObserver;
+
         break;
     }
   },
@@ -777,6 +813,41 @@ AboutReader.prototype = {
     this._showContent(article);
   },
 
+  async _requestPocketLoginStatus() {
+    let isLoggedIn = await this._actor.sendQuery(
+      "Reader:PocketLoginStatusRequest"
+    );
+
+    return isLoggedIn;
+  },
+
+  async _requestPocketArticleInfo(url) {
+    let articleInfo = await this._actor.sendQuery(
+      "Reader:PocketGetArticleInfo",
+      {
+        url,
+      }
+    );
+
+    return articleInfo?.item_preview?.item_id;
+  },
+
+  async _requestPocketArticleRecs(itemID) {
+    let recs = await this._actor.sendQuery("Reader:PocketGetArticleRecs", {
+      itemID,
+    });
+
+    return recs;
+  },
+
+  async _savePocketArticle(url) {
+    let result = await this._actor.sendQuery("Reader:PocketSaveArticle", {
+      url,
+    });
+
+    return result;
+  },
+
   async _requestFavicon() {
     let iconDetails = await this._actor.sendQuery("Reader:FaviconRequest", {
       url: this._article.url,
@@ -958,6 +1029,9 @@ AboutReader.prototype = {
         cancelable: false,
       })
     );
+
+    // Show Pocket CTA block after article has loaded to prevent it flashing in prematurely
+    this._setupPocketCTA();
   },
 
   _hideContent() {
@@ -1017,10 +1091,6 @@ AboutReader.prototype = {
           if (!aEvent.isTrusted) {
             return;
           }
-
-          // Just pass the ID of the button as an extra and hope the ID doesn't change
-          // unless the context changes
-          UITelemetry.addEvent("action.1", "button", null, id);
 
           let labels = segmentedButton.children;
           for (let label of labels) {
@@ -1217,6 +1287,205 @@ AboutReader.prototype = {
   _goToReference(ref) {
     if (ref) {
       this._win.location.hash = ref;
+    }
+  },
+
+  _enableDismissCTA() {
+    let elDismissCta = this._doc.querySelector(`.pocket-dismiss-cta`);
+
+    elDismissCta?.addEventListener(`click`, e => {
+      this._doc.querySelector("#pocket-cta-container").hidden = true;
+
+      Services.telemetry.recordEvent(
+        "readermode",
+        "pocket_cta",
+        "close_cta",
+        null,
+        {}
+      );
+    });
+  },
+
+  _enableRecShowHide() {
+    let elPocketRecs = this._doc.querySelector(`.pocket-recs`);
+    let elCollapseRecs = this._doc.querySelector(`.pocket-collapse-recs`);
+
+    let toggleRecsVisibility = () => {
+      let isClosed = elPocketRecs.classList.contains(`closed`);
+
+      isClosed = !isClosed; // Toggle
+
+      if (isClosed) {
+        elPocketRecs.classList.add(`closed`);
+        elCollapseRecs.classList.add(`closed`);
+
+        Services.telemetry.recordEvent(
+          "readermode",
+          "pocket_cta",
+          "minimize_recs_click",
+          null,
+          {}
+        );
+      } else {
+        elPocketRecs.classList.remove(`closed`);
+        elCollapseRecs.classList.remove(`closed`);
+      }
+    };
+
+    elCollapseRecs?.addEventListener(`click`, e => {
+      toggleRecsVisibility();
+    });
+  },
+
+  _buildPocketRec(title, url, publisher, thumb, time) {
+    let fragment = this._doc.createDocumentFragment();
+
+    let elContainer = this._doc.createElement(`div`);
+    let elTitle = this._doc.createElement(`header`);
+    let elMetadata = this._doc.createElement(`p`);
+    let elThumb = this._doc.createElement(`img`);
+    let elSideWrap = this._doc.createElement(`div`);
+    let elTop = this._doc.createElement(`a`);
+    let elBottom = this._doc.createElement(`div`);
+    let elAdd = this._doc.createElement(`button`);
+
+    elAdd.classList.add(`pocket-btn-add`);
+    elBottom.classList.add(`pocket-rec-bottom`);
+    elTop.classList.add(`pocket-rec-top`);
+    elSideWrap.classList.add(`pocket-rec-side`);
+    elContainer.classList.add(`pocket-rec`);
+    elTitle.classList.add(`pocket-rec-title`);
+    elMetadata.classList.add(`pocket-rec-meta`);
+
+    elTop.setAttribute(`href`, url);
+
+    elTop.addEventListener(`click`, e => {
+      Services.telemetry.recordEvent(
+        "readermode",
+        "pocket_cta",
+        "rec_click",
+        null,
+        {
+          url,
+        }
+      );
+    });
+
+    elThumb.classList.add(`pocket-rec-thumb`);
+    elThumb.setAttribute(`loading`, `lazy`);
+    elThumb.setAttribute(
+      `src`,
+      `https://img-getpocket.cdn.mozilla.net/132x132/filters:format(jpeg):quality(60):no_upscale():strip_exif()/${thumb}`
+    );
+
+    elAdd.textContent = `Save`;
+    elTitle.textContent = title;
+
+    if (publisher && time) {
+      elMetadata.textContent = `${publisher} · ${time} min`;
+    } else if (publisher) {
+      elMetadata.textContent = `${publisher}`;
+    } else if (time) {
+      elMetadata.textContent = `${time} min`;
+    }
+
+    elSideWrap.appendChild(elTitle);
+    elSideWrap.appendChild(elMetadata);
+    elTop.appendChild(elSideWrap);
+    elTop.appendChild(elThumb);
+    elBottom.appendChild(elAdd);
+    elContainer.appendChild(elTop);
+    elContainer.appendChild(elBottom);
+    fragment.appendChild(elContainer);
+
+    elAdd.addEventListener(`click`, e => {
+      this._savePocketArticle(url);
+      elAdd.textContent = `Saved`;
+      elAdd.classList.add(`saved`);
+    });
+
+    return fragment;
+  },
+
+  async _getAndBuildPocketRecs() {
+    let elTarget = this._doc.querySelector(`.pocket-recs`);
+    let url = this._getOriginalUrl();
+    let itemID = await this._requestPocketArticleInfo(url);
+    let articleRecs = await this._requestPocketArticleRecs(itemID);
+
+    articleRecs.recommendations.forEach(rec => {
+      // Parse a domain from the article URL in case the Publisher name isn't available
+      let parsedDomain = new URL(rec.item?.normal_url)?.hostname;
+
+      // Calculate read time from word count in case it's not available
+      let calculatedReadTime = Math.ceil(rec.item?.word_count / 220);
+
+      let elRec = this._buildPocketRec(
+        rec.item?.title,
+        rec.item?.normal_url,
+        rec.item?.domain_metadata?.name || parsedDomain,
+        rec.item?.top_image_url,
+        rec.item?.time_to_read || calculatedReadTime
+      );
+
+      elTarget.appendChild(elRec);
+    });
+  },
+
+  _pocketCTAObserved(entries) {
+    if (entries && entries[0]?.isIntersecting) {
+      this._ctaIntersectionObserver.disconnect();
+
+      Services.telemetry.recordEvent(
+        "readermode",
+        "pocket_cta",
+        "cta_seen",
+        null,
+        {}
+      );
+    }
+  },
+
+  async _setupPocketCTA() {
+    let ctaVersion = NimbusFeatures.readerMode.getAllVariables()
+      ?.pocketCTAVersion;
+    let isLoggedInUser = await this._requestPocketLoginStatus();
+    let elPocketCTAWrapper = this._doc.querySelector("#pocket-cta-container");
+
+    // Show the Pocket CTA container if the pref is set and valid
+    if (ctaVersion === `cta-and-recs` || ctaVersion === `cta-only`) {
+      if (ctaVersion === `cta-and-recs` && isLoggedInUser) {
+        this._getAndBuildPocketRecs();
+        this._enableRecShowHide();
+      } else if (ctaVersion === `cta-and-recs` && !isLoggedInUser) {
+        // Fall back to cta only for logged out users:
+        ctaVersion = `cta-only`;
+      }
+
+      if (ctaVersion == `cta-only`) {
+        this._enableDismissCTA();
+      }
+
+      elPocketCTAWrapper.hidden = false;
+      elPocketCTAWrapper.classList.add(`pocket-cta-container-${ctaVersion}`);
+
+      // Set up tracking for sign up buttons
+      this._doc.querySelectorAll(`.pocket-sign-up`).forEach(el => {
+        el.addEventListener(`click`, e => {
+          Services.telemetry.recordEvent(
+            "readermode",
+            "pocket_cta",
+            "sign_up_click",
+            null,
+            {}
+          );
+        });
+      });
+
+      // Set up tracking for user seeing CTA
+      this._ctaIntersectionObserver.observe(
+        this._doc.querySelector(`#pocket-cta-container`)
+      );
     }
   },
 };

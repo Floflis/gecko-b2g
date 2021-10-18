@@ -15,6 +15,7 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/Storage.h"
+#include "mozilla/ipc/PBackgroundSharedTypes.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsID.h"
 #include "nsISupports.h"
@@ -30,12 +31,6 @@ class nsPIDOMWindowInner;
 namespace mozilla {
 
 class ErrorResult;
-
-namespace ipc {
-
-class PrincipalInfo;
-
-}  // namespace ipc
 
 namespace dom {
 
@@ -70,7 +65,7 @@ class LSRequestResponse;
  * parent Datastore at the moment the Snapshot was created.
  */
 class LSObject final : public Storage {
-  typedef mozilla::ipc::PrincipalInfo PrincipalInfo;
+  using PrincipalInfo = mozilla::ipc::PrincipalInfo;
 
   friend nsGlobalWindowInner;
 
@@ -82,6 +77,7 @@ class LSObject final : public Storage {
 
   uint32_t mPrivateBrowsingId;
   Maybe<nsID> mClientId;
+  Maybe<PrincipalInfo> mClientPrincipalInfo;
   nsCString mOrigin;
   nsCString mOriginKey;
   nsString mDocumentURI;
@@ -110,13 +106,6 @@ class LSObject final : public Storage {
                                      nsIPrincipal* aStoragePrincipal,
                                      const nsAString& aDocumentURI,
                                      bool aPrivate, LSObject** aObject);
-
-  /**
-   * Used for requests from the parent process to the parent process; in that
-   * case we want ActorsParent to know our event-target and this is better than
-   * trying to tunnel the pointer through IPC.
-   */
-  static already_AddRefed<nsISerialEventTarget> GetSyncLoopEventTarget();
 
   /**
    * Helper invoked by ContentChild::OnChannelReceivedMessage when a sync IPC
@@ -155,6 +144,8 @@ class LSObject final : public Storage {
   bool IsForkOf(const Storage* aStorage) const override;
 
   int64_t GetOriginQuotaUsage() const override;
+
+  void Disconnect() override;
 
   uint32_t GetLength(nsIPrincipal& aSubjectPrincipal,
                      ErrorResult& aError) override;

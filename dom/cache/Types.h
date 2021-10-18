@@ -9,7 +9,7 @@
 
 #include <functional>
 #include <stdint.h>
-#include "mozilla/dom/quota/QuotaInfo.h"
+#include "mozilla/dom/quota/CommonMetadata.h"
 #include "nsCOMPtr.h"
 #include "nsIFile.h"
 #include "nsIInputStream.h"
@@ -26,10 +26,12 @@ enum Namespace {
 };
 static const Namespace INVALID_NAMESPACE = NUMBER_OF_NAMESPACES;
 
-typedef int64_t CacheId;
+using CacheId = int64_t;
 static const CacheId INVALID_CACHE_ID = -1;
 
-struct QuotaInfo : quota::QuotaInfo {
+// XXX Rename to OriginMetadata.
+// XXX Consider inheritance from ClientMetadata.
+struct QuotaInfo : quota::OriginMetadata {
   nsCOMPtr<nsIFile> mDir;
   int64_t mDirectoryLockId = -1;
 };
@@ -39,7 +41,7 @@ struct DeletionInfo {
   int64_t mDeletedPaddingSize = 0;
 };
 
-typedef std::function<void(nsCOMPtr<nsIInputStream>&&)> InputStreamResolver;
+using InputStreamResolver = std::function<void(nsCOMPtr<nsIInputStream>&&)>;
 
 enum class OpenMode : uint8_t { Eager, Lazy, NumTypes };
 

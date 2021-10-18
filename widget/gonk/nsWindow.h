@@ -49,8 +49,10 @@ struct InputContextAction;
 class nsScreenGonk;
 class GLCursorImageManager;
 
-class nsWindow : public nsBaseWidget {
+class nsWindow final : public nsBaseWidget {
  public:
+  using nsBaseWidget::GetWindowRenderer;
+
   nsWindow();
 
   NS_DECL_ISUPPORTS_INHERITED
@@ -109,20 +111,17 @@ class nsWindow : public nsBaseWidget {
       override;
   virtual void EndRemoteDrawing() override;
 
-  void SetCursor(nsCursor aDefaultCursor, imgIContainer* aImageCursor,
-                 uint32_t aHotspotX, uint32_t aHotspotY) override;
+  void SetCursor(const Cursor&) override;
 
-  void UpdateCursorSourceMap(nsCursor aCursor);
+  void UpdateCursorSourceMap(Cursor aCursor);
   already_AddRefed<mozilla::gfx::SourceSurface> RestyleCursorElement(
-      nsCursor aCursor);
+      Cursor aCursor);
 
   virtual float GetDPI() override;
-  virtual bool IsVsyncSupported();
+  virtual bool GetVsyncSupport();
+  virtual uint32_t GetScreenId();
   virtual double GetDefaultScaleInternal() override;
-  virtual mozilla::layers::LayerManager* GetLayerManager(
-      PLayerTransactionChild* aShadowManager = nullptr,
-      LayersBackend aBackendHint = mozilla::layers::LayersBackend::LAYERS_NONE,
-      LayerManagerPersistence aPersistence = LAYER_MANAGER_CURRENT) override;
+  virtual WindowRenderer* GetWindowRenderer() override;
   virtual void DestroyCompositor() override;
 
   virtual CompositorBridgeParent* NewCompositorBridgeParent(int aSurfaceWidth,
@@ -168,8 +167,8 @@ class nsWindow : public nsBaseWidget {
   // event (like a keypress or mouse click).
   void UserActivity();
 
-  void DrawWindowOverlay(LayerManagerComposite* aManager,
-                         LayoutDeviceIntRect aRect);
+//   void DrawWindowOverlay(LayerManagerComposite* aManager,
+//                          LayoutDeviceIntRect aRect);
 
  private:
   void EnsureGLCursorImageManager();

@@ -250,6 +250,11 @@ void nsNSSSocketInfo::SetHandshakeCompleted() {
           ("[%p] nsNSSSocketInfo::SetHandshakeCompleted\n", (void*)mFd));
 
   mIsFullHandshake = false;  // reset for next handshake on this connection
+
+  if (mTlsHandshakeCallback) {
+    auto callback = std::move(mTlsHandshakeCallback);
+    Unused << callback->HandshakeDone();
+  }
 }
 
 void nsNSSSocketInfo::SetNegotiatedNPN(const char* value, uint32_t length) {
@@ -321,7 +326,13 @@ nsNSSSocketInfo::DriveHandshake() {
 
   if (rv != SECSuccess) {
     PRErrorCode errorCode = PR_GetError();
-    MOZ_DIAGNOSTIC_ASSERT(errorCode, "handshake failed without error code");
+    MOZ_ASSERT(errorCode, "handshake failed without error code");
+    // There is a bug in NSS. Sometimes SSL_ForceHandshake will return
+    // SECFailure without setting an error code. In these cases, cancel
+    // the connection with SEC_ERROR_LIBRARY_FAILURE.
+    if (!errorCode) {
+      errorCode = SEC_ERROR_LIBRARY_FAILURE;
+    }
     if (errorCode == PR_WOULD_BLOCK_ERROR) {
       return NS_BASE_STREAM_WOULD_BLOCK;
     }
@@ -435,6 +446,28 @@ void nsNSSSocketInfo::SetSharedOwningReference(SharedSSLState* aRef) {
   mOwningSharedRef = aRef;
 }
 
+NS_IMETHODIMP
+nsNSSSocketInfo::DisableEarlyData() {
+  if (!mFd) {
+    return NS_OK;
+  }
+  if (IsCanceled()) {
+    return NS_OK;
+  }
+
+  if (SSL_OptionSet(mFd, SSL_ENABLE_0RTT_DATA, false) != SECSuccess) {
+    return NS_ERROR_FAILURE;
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsNSSSocketInfo::SetHandshakeCallbackListener(
+    nsITlsHandshakeCallbackListener* callback) {
+  mTlsHandshakeCallback = callback;
+  return NS_OK;
+}
+
 void nsSSLIOLayerHelpers::Cleanup() {
   MutexAutoLock lock(mutex);
   mTLSIntoleranceInfo.Clear();
@@ -518,7 +551,7 @@ void nsSSLIOLayerHelpers::rememberTolerantAtVersion(const nsACString& hostName,
 
   entry.AssertInvariant();
 
-  mTLSIntoleranceInfo.Put(key, entry);
+  mTLSIntoleranceInfo.InsertOrUpdate(key, entry);
 }
 
 void nsSSLIOLayerHelpers::forgetIntolerance(const nsACString& hostName,
@@ -536,7 +569,7 @@ void nsSSLIOLayerHelpers::forgetIntolerance(const nsACString& hostName,
     entry.intoleranceReason = 0;
 
     entry.AssertInvariant();
-    mTLSIntoleranceInfo.Put(key, entry);
+    mTLSIntoleranceInfo.InsertOrUpdate(key, entry);
   }
 }
 
@@ -581,7 +614,7 @@ bool nsSSLIOLayerHelpers::rememberIntolerantAtVersion(
   entry.intolerant = intolerant;
   entry.intoleranceReason = intoleranceReason;
   entry.AssertInvariant();
-  mTLSIntoleranceInfo.Put(key, entry);
+  mTLSIntoleranceInfo.InsertOrUpdate(key, entry);
 
   return true;
 }
@@ -1876,9 +1909,6 @@ SECStatus nsNSS_SSLGetClientAuthData(void* arg, PRFileDesc* socket,
   *pRetCert = nullptr;
   *pRetKey = nullptr;
 
-  Telemetry::ScalarAdd(Telemetry::ScalarID::SECURITY_CLIENT_CERT,
-                       u"requested"_ns, 1);
-
   RefPtr<nsNSSSocketInfo> info(
       BitwiseCast<nsNSSSocketInfo*, PRFilePrivate*>(socket->higher->secret));
 
@@ -1937,8 +1967,6 @@ SECStatus nsNSS_SSLGetClientAuthData(void* arg, PRFileDesc* socket,
     *pRetKey = selectedKey.release();
     // Make joinConnection prohibit joining after we've sent a client cert
     info->SetSentClientCert();
-    Telemetry::ScalarAdd(Telemetry::ScalarID::SECURITY_CLIENT_CERT, u"sent"_ns,
-                         1);
     if (info->GetSSLVersionUsed() == nsISSLSocketControl::TLS_VERSION_1_3) {
       Telemetry::Accumulate(Telemetry::TLS_1_3_CLIENT_AUTH_USES_PHA,
                             info->IsHandshakeCompleted());
@@ -2362,9 +2390,9 @@ void ClientAuthDataRunnable::RunOnTargetThread() {
   if (cars) {
     nsCString rememberedDBKey;
     bool found;
-    nsresult rv =
-        cars->HasRememberedDecision(hostname, mInfo.OriginAttributesRef(),
-                                    mServerCert, rememberedDBKey, &found);
+    nsCOMPtr<nsIX509Cert> cert(nsNSSCertificate::Create(mServerCert));
+    nsresult rv = cars->HasRememberedDecision(
+        hostname, mInfo.OriginAttributesRef(), cert, rememberedDBKey, &found);
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return;
     }
@@ -2462,9 +2490,13 @@ void ClientAuthDataRunnable::RunOnTargetThread() {
   }
 
   if (cars && wantRemember) {
-    rv = cars->RememberDecision(
-        hostname, mInfo.OriginAttributesRef(), mServerCert,
-        certChosen ? mSelectedCertificate.get() : nullptr);
+    nsCOMPtr<nsIX509Cert> serverCert(nsNSSCertificate::Create(mServerCert));
+    nsCOMPtr<nsIX509Cert> clientCert;
+    if (certChosen) {
+      clientCert = nsNSSCertificate::Create(mSelectedCertificate.get());
+    }
+    rv = cars->RememberDecision(hostname, mInfo.OriginAttributesRef(),
+                                serverCert, clientCert);
     Unused << NS_WARN_IF(NS_FAILED(rv));
   }
 }
@@ -2548,7 +2580,8 @@ static PRFileDesc* nsSSLIOLayerImportFD(PRFileDesc* fd,
   uint32_t flags = 0;
   infoObject->GetProviderFlags(&flags);
   // Provide the client cert to HTTPS proxy no matter if it is anonymous.
-  if (flags & nsISocketProvider::ANONYMOUS_CONNECT && !haveHTTPSProxy) {
+  if (flags & nsISocketProvider::ANONYMOUS_CONNECT && !haveHTTPSProxy &&
+      !(flags & nsISocketProvider::ANONYMOUS_CONNECT_ALLOW_CLIENT_CERT)) {
     SSL_GetClientAuthDataHook(sslSock, nullptr, infoObject);
   } else {
     SSL_GetClientAuthDataHook(
@@ -2720,7 +2753,7 @@ static nsresult nsSSLIOLayerSetOptions(PRFileDesc* fd, bool forSTARTTLS,
     return NS_ERROR_FAILURE;
   }
 
-#ifdef __arm__
+#if defined(__arm__) && not defined(__ARM_FEATURE_CRYPTO)
   unsigned int enabledCiphers = 0;
   std::vector<uint16_t> ciphers(SSL_GetNumImplementedCiphers());
 
@@ -2732,10 +2765,11 @@ static nsresult nsSSLIOLayerSetOptions(PRFileDesc* fd, bool forSTARTTLS,
     return NS_ERROR_FAILURE;
   }
 
-  // On ARM, prefer (TLS_CHACHA20_POLY1305_SHA256) over AES. However,
-  // it may be disabled. If enabled, it will either be element [0] or [1]*.
-  // If [0], we're done. If [1], swap it with [0] (TLS_AES_128_GCM_SHA256).
-  // * (assuming the compile-time order remains unchanged)
+  // On ARM, prefer (TLS_CHACHA20_POLY1305_SHA256) over AES when hardware
+  // support for AES isn't available. However, it may be disabled. If enabled,
+  // it will either be element [0] or [1]*. If [0], we're done. If [1], swap it
+  // with [0] (TLS_AES_128_GCM_SHA256).
+  // *(assuming the compile-time order remains unchanged)
   if (enabledCiphers > 1) {
     if (ciphers[0] != TLS_CHACHA20_POLY1305_SHA256 &&
         ciphers[1] == TLS_CHACHA20_POLY1305_SHA256) {

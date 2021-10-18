@@ -588,6 +588,7 @@ class PendingDBLookup;
 // This class is private to ApplicationReputationService.
 class PendingLookup final : public nsIStreamListener,
                             public nsITimerCallback,
+                            public nsINamed,
                             public nsIObserver,
                             public nsSupportsWeakReference {
  public:
@@ -595,6 +596,7 @@ class PendingLookup final : public nsIStreamListener,
   NS_DECL_NSIREQUESTOBSERVER
   NS_DECL_NSISTREAMLISTENER
   NS_DECL_NSITIMERCALLBACK
+  NS_DECL_NSINAMED
   NS_DECL_NSIOBSERVER
 
   // Constructor and destructor.
@@ -876,7 +878,8 @@ PendingDBLookup::HandleEvent(const nsACString& tables) {
 }
 
 NS_IMPL_ISUPPORTS(PendingLookup, nsIStreamListener, nsIRequestObserver,
-                  nsIObserver, nsISupportsWeakReference)
+                  nsIObserver, nsISupportsWeakReference, nsITimerCallback,
+                  nsINamed)
 
 PendingLookup::PendingLookup(nsIApplicationReputationQuery* aQuery,
                              nsIApplicationReputationCallback* aCallback)
@@ -1631,38 +1634,6 @@ nsresult PendingLookup::SendRemoteQueryInternal(Reason& aReason) {
          this));
   }
 
-  // Look for truncated hashes (see bug 1190020)
-  const auto originalHashLength = sha256Hash.Length();
-  if (originalHashLength == 0) {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            OriginalHashEmpty);
-  } else if (originalHashLength < 32) {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            OriginalHashTooShort);
-  } else if (originalHashLength > 32) {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            OriginalHashTooLong);
-  } else if (!mRequest.has_digests()) {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            MissingDigest);
-  } else if (!mRequest.digests().has_sha256()) {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            MissingSha256);
-  } else if (mRequest.digests().sha256().size() != originalHashLength) {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            InvalidSha256);
-  } else {
-    AccumulateCategorical(
-        mozilla::Telemetry::LABELS_APPLICATION_REPUTATION_HASH_LENGTH::
-            ValidHash);
-  }
-
   // Serialize the protocol buffer to a string. This can only fail if we are
   // out of memory, or if the protocol buffer req is missing required fields
   // (only the URL for now).
@@ -1736,8 +1707,14 @@ PendingLookup::Notify(nsITimer* aTimer) {
   MOZ_ASSERT(aTimer == mTimeoutTimer);
   Accumulate(mozilla::Telemetry::APPLICATION_REPUTATION_REMOTE_LOOKUP_TIMEOUT,
              true);
-  mChannel->Cancel(NS_ERROR_NET_TIMEOUT);
+  mChannel->Cancel(NS_ERROR_NET_TIMEOUT_EXTERNAL);
   mTimeoutTimer->Cancel();
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+PendingLookup::GetName(nsACString& aName) {
+  aName.AssignLiteral("PendingLookup");
   return NS_OK;
 }
 
@@ -1784,7 +1761,7 @@ NS_IMETHODIMP
 PendingLookup::OnStopRequest(nsIRequest* aRequest, nsresult aResult) {
   NS_ENSURE_STATE(mCallback);
 
-  if (aResult != NS_ERROR_NET_TIMEOUT) {
+  if (aResult != NS_ERROR_NET_TIMEOUT_EXTERNAL) {
     Accumulate(mozilla::Telemetry::APPLICATION_REPUTATION_REMOTE_LOOKUP_TIMEOUT,
                false);
 
@@ -1977,7 +1954,6 @@ nsresult ApplicationReputationService::QueryReputationInternal(
 
   // Create a new pending lookup and start the call chain.
   RefPtr<PendingLookup> lookup(new PendingLookup(aQuery, aCallback));
-  NS_ENSURE_STATE(lookup);
 
   // Add an observer for shutdown
   nsCOMPtr<nsIObserverService> observerService =

@@ -18,6 +18,7 @@
 #include "WebGLVertexArray.h"
 
 #include "mozilla/Casting.h"
+#include "mozilla/ResultVariant.h"
 
 namespace mozilla {
 
@@ -196,12 +197,6 @@ CheckVertexAttribPointer(const bool isWebgl2,
     case LOCAL_GL_HALF_FLOAT:
       isTypeValid = isWebgl2;
       bytesPerType = 2;
-      calc.baseType = webgl::AttribBaseType::Float;
-      break;
-
-    case LOCAL_GL_FIXED:
-      isTypeValid = isWebgl2;
-      bytesPerType = 4;
       calc.baseType = webgl::AttribBaseType::Float;
       break;
 

@@ -41,9 +41,9 @@ class TRRServiceBase {
 
   nsCString mPrivateURI;
   // Pref caches should only be used on the main thread.
-  bool mURIPrefHasUserValue = false;
   nsCString mURIPref;
   nsCString mRolloutURIPref;
+  nsCString mDefaultURIPref;
 
   Atomic<nsIDNSService::ResolverMode, Relaxed> mMode;
   Atomic<bool, Relaxed> mURISetByDetection;

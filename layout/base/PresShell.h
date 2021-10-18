@@ -19,6 +19,7 @@
 #include "mozilla/ArenaObjectID.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/FlushType.h"
+#include "mozilla/Logging.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/ScrollTypes.h"
 #include "mozilla/StaticPtr.h"
@@ -44,9 +45,12 @@
 #include "nsRefreshObservers.h"
 #include "nsStringFwd.h"
 #include "nsStubDocumentObserver.h"
-#include "nsTHashtable.h"
+#include "nsTHashSet.h"
 #include "nsThreadUtils.h"
 #include "nsWeakReference.h"
+#ifdef ACCESSIBILITY
+#  include "nsAccessibilityService.h"
+#endif
 
 class AutoPointerEventTargetUpdater;
 class AutoWeakFrame;
@@ -59,8 +63,6 @@ class nsAutoCauseReflowNotifier;
 class nsCanvasFrame;
 class nsCaret;
 class nsCSSFrameConstructor;
-class nsDisplayList;
-class nsDisplayListBuilder;
 class nsDocShell;
 class nsFrameSelection;
 class nsIDocShell;
@@ -89,15 +91,17 @@ class ZoomConstraintsClient;
 struct nsCallbackEventRequest;
 
 namespace mozilla {
+class nsDisplayList;
+class nsDisplayListBuilder;
+class FallbackRenderer;
+
 class AccessibleCaretEventHub;
 class EventStates;
 class GeckoMVMContext;
 class OverflowChangedTracker;
 class StyleSheet;
 
-#ifdef MOZ_GECKO_PROFILER
 class ProfileChunkedBuffer;
-#endif
 
 #ifdef ACCESSIBILITY
 namespace a11y {
@@ -159,7 +163,7 @@ class PresShell final : public nsStubDocumentObserver,
 
   // A set type for tracking visible frames, for use by the visibility code in
   // PresShell. The set contains nsIFrame* pointers.
-  typedef nsTHashtable<nsPtrHashKey<nsIFrame>> VisibleFrames;
+  typedef nsTHashSet<nsIFrame*> VisibleFrames;
 
  public:
   explicit PresShell(Document* aDocument);
@@ -205,6 +209,9 @@ class PresShell final : public nsStubDocumentObserver,
   // If a frame in the subtree rooted at aFrame is capturing the mouse then
   // clears that capture.
   static void ClearMouseCapture(nsIFrame* aFrame);
+
+  // Clear the capture content if it exists in this process.
+  static void ClearMouseCapture();
 
 #ifdef ACCESSIBILITY
   /**
@@ -354,6 +361,13 @@ class PresShell final : public nsStubDocumentObserver,
    * Responsive Design Mode browsing context.
    */
   bool InRDMPane();
+
+#if defined(MOZ_WIDGET_ANDROID)
+  /**
+   * If the dynamic toolbar is not expanded, notify the app to do so.
+   */
+  void MaybeNotifyShowDynamicToolbar();
+#endif  // defined(MOZ_WIDGET_ANDROID)
 
  private:
   /**
@@ -577,7 +591,8 @@ class PresShell final : public nsStubDocumentObserver,
    */
   MOZ_CAN_RUN_SCRIPT
   bool ScrollFrameRectIntoView(nsIFrame* aFrame, const nsRect& aRect,
-                               ScrollAxis aVertical, ScrollAxis aHorizontal,
+                               const nsMargin& aMargin, ScrollAxis aVertical,
+                               ScrollAxis aHorizontal,
                                ScrollFlags aScrollFlags);
 
   /**
@@ -681,24 +696,11 @@ class PresShell final : public nsStubDocumentObserver,
    */
   bool IsPaintingSuppressed() const { return mPaintingSuppressed; }
 
-  /**
-   * Pause painting by freezing the refresh driver of this and all parent
-   * presentations. This may not have the desired effect if this pres shell
-   * has its own refresh driver.
-   */
-  void PausePainting();
+  void TryUnsuppressPaintingSoon();
 
-  /**
-   * Resume painting by thawing the refresh driver of this and all parent
-   * presentations. This may not have the desired effect if this pres shell
-   * has its own refresh driver.
-   */
-  void ResumePainting();
-
-  /**
-   * Unsuppress painting.
-   */
   void UnsuppressPainting();
+  void InitPaintSuppressionTimer();
+  void CancelPaintSuppressionTimer();
 
   /**
    * Reconstruct frames for all elements in the document
@@ -743,7 +745,7 @@ class PresShell final : public nsStubDocumentObserver,
    * state.
    * XXX this should include image animations
    */
-  void Freeze();
+  void Freeze(bool aIncludeSubDocuments = true);
   bool IsFrozen() { return mFrozen; }
 
   /**
@@ -751,7 +753,7 @@ class PresShell final : public nsStubDocumentObserver,
    * presentations of subdocuments, then do a full invalidate of the content
    * area.
    */
-  void Thaw();
+  void Thaw(bool aIncludeSubDocuments = true);
 
   void FireOrClearDelayedEvents(bool aFireEvents);
 
@@ -779,6 +781,9 @@ class PresShell final : public nsStubDocumentObserver,
    * might choose not to paint themes.
    *   set RenderDocumentFlags::IgnoreViewportScrolling to ignore clipping and
    *  scrollbar painting due to scrolling in the viewport
+   *   set RenderDocumentFlags::ResetViewportScrolling to temporarily set the
+   * viewport scroll position to 0 so that position:fixed elements are drawn
+   * at their initial position.
    *   set RenderDocumentFlags::DrawCaret to draw the caret if one would be
    *  visible (by default the caret is never drawn)
    *   set RenderDocumentFlags::UseWidgetLayers to force rendering to go
@@ -894,9 +899,8 @@ class PresShell final : public nsStubDocumentObserver,
     return mObservesMutationsForPrint;
   }
 
-  nsresult SetIsActive(bool aIsActive);
-
-  bool IsActive() { return mIsActive; }
+  void ActivenessMaybeChanged();
+  bool IsActive() const { return mIsActive; }
 
   /**
    * Keep track of how many times this presshell has been rendered to
@@ -922,10 +926,10 @@ class PresShell final : public nsStubDocumentObserver,
   already_AddRefed<nsIContent> GetFocusedContentInOurWindow() const;
 
   /**
-   * Get the layer manager for the widget of the root view, if it has
+   * Get the window renderer for the widget of the root view, if it has
    * one.
    */
-  LayerManager* GetLayerManager();
+  WindowRenderer* GetWindowRenderer();
 
   /**
    * Return true iff there is a widget rendering this presShell and that
@@ -1145,12 +1149,10 @@ class PresShell final : public nsStubDocumentObserver,
   bool RemoveRefreshObserver(nsARefreshObserver* aObserver,
                              FlushType aFlushType);
 
-  bool AddPostRefreshObserver(nsAPostRefreshObserver* aObserver);
-  bool AddPostRefreshObserver(mozilla::OneShotPostRefreshObserver* aObserver) =
-      delete;
-  bool RemovePostRefreshObserver(nsAPostRefreshObserver* aObserver);
-  bool RemovePostRefreshObserver(
-      mozilla::OneShotPostRefreshObserver* aObserver) = delete;
+  bool AddPostRefreshObserver(nsAPostRefreshObserver*);
+  bool AddPostRefreshObserver(mozilla::ManagedPostRefreshObserver*) = delete;
+  bool RemovePostRefreshObserver(nsAPostRefreshObserver*);
+  bool RemovePostRefreshObserver(mozilla::ManagedPostRefreshObserver*) = delete;
 
   // Represents an update to the visual scroll offset that will be sent to APZ.
   // The update type is used to determine priority compared to other scroll
@@ -1256,6 +1258,10 @@ class PresShell final : public nsStubDocumentObserver,
   nsresult SetResolutionAndScaleTo(float aResolution,
                                    ResolutionChangeOrigin aOrigin);
 
+  ResolutionChangeOrigin GetLastResolutionChangeOrigin() {
+    return mLastResolutionChangeOrigin;
+  }
+
   // Widget notificiations
   void WindowSizeMoveDone();
 
@@ -1265,9 +1271,21 @@ class PresShell final : public nsStubDocumentObserver,
 
   void BackingScaleFactorChanged() { mPresContext->UIResolutionChangedSync(); }
 
+  /**
+   * Does any painting work required to update retained paint state, and pushes
+   * it the compositor (if any). Requests a composite, either by scheduling a
+   * remote composite, or invalidating the widget so that we get a call to
+   * SyncPaintFallback from the widget paint event.
+   */
   MOZ_CAN_RUN_SCRIPT
-  void Paint(nsView* aViewToPaint, const nsRegion& aDirtyRegion,
-             PaintFlags aFlags);
+  void PaintAndRequestComposite(nsView* aView, PaintFlags aFlags);
+
+  /**
+   * Does an immediate paint+composite using the FallbackRenderer (which must
+   * be the current WindowRenderer for the root frame's widget).
+   */
+  MOZ_CAN_RUN_SCRIPT
+  void SyncPaintFallback(nsView* aView);
 
   /**
    * Notify that we're going to call Paint with PaintFlags::PaintLayers
@@ -1281,12 +1299,8 @@ class PresShell final : public nsStubDocumentObserver,
   /**
    * Ensures that the refresh driver is running, and schedules a view
    * manager flush on the next tick.
-   *
-   * @param aType PaintType::DelayedCompress : Schedule a paint to be executed
-   * after a delay, and put FrameLayerBuilder in 'compressed' mode that avoids
-   * short cut optimizations.
    */
-  void ScheduleViewManagerFlush(PaintType aType = PaintType::Default);
+  void ScheduleViewManagerFlush();
 
   // caret handling
   NS_IMETHOD SetCaretEnabled(bool aInEnable) override;
@@ -1539,8 +1553,6 @@ class PresShell final : public nsStubDocumentObserver,
 
   size_t SizeOfTextRuns(MallocSizeOf aMallocSizeOf) const;
 
-  void SetNextPaintCompressed() { mNextPaintCompressed = true; }
-
   static PresShell* GetShellForEventTarget(nsIFrame* aFrame,
                                            nsIContent* aContent);
   static PresShell* GetShellForTouchEvent(WidgetGUIEvent* aEvent);
@@ -1703,6 +1715,12 @@ class PresShell final : public nsStubDocumentObserver,
  private:
   ~PresShell();
 
+  void SetIsActive(bool aIsActive);
+  bool ShouldBeActive() const;
+
+  MOZ_CAN_RUN_SCRIPT
+  void PaintInternal(nsView* aViewToPaint, PaintInternalFlags aFlags);
+
   /**
    * Refresh observer management.
    */
@@ -1718,14 +1736,14 @@ class PresShell final : public nsStubDocumentObserver,
   void RecordAlloc(void* aPtr) {
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
     MOZ_DIAGNOSTIC_ASSERT(!mAllocatedPointers.Contains(aPtr));
-    mAllocatedPointers.PutEntry(aPtr);
+    mAllocatedPointers.Insert(aPtr);
 #endif
   }
 
   void RecordFree(void* aPtr) {
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
     MOZ_DIAGNOSTIC_ASSERT(mAllocatedPointers.Contains(aPtr));
-    mAllocatedPointers.RemoveEntry(aPtr);
+    mAllocatedPointers.Remove(aPtr);
 #endif
   }
 
@@ -1836,6 +1854,13 @@ class PresShell final : public nsStubDocumentObserver,
     ~AutoSaveRestoreRenderingState() {
       mPresShell->mRenderingStateFlags = mOldState.mRenderingStateFlags;
       mPresShell->mResolution = mOldState.mResolution;
+#ifdef ACCESSIBILITY
+      if (nsAccessibilityService* accService =
+              PresShell::GetAccessibilityService()) {
+        accService->NotifyOfResolutionChange(mPresShell,
+                                             mPresShell->GetResolution());
+      }
+#endif
     }
 
     PresShell* mPresShell;
@@ -1947,8 +1972,7 @@ class PresShell final : public nsStubDocumentObserver,
   };
   MOZ_CAN_RUN_SCRIPT void ProcessSynthMouseMoveEvent(bool aFromScroll);
 
-  void QueryIsActive();
-  nsresult UpdateImageLockingState();
+  void UpdateImageLockingState();
 
   already_AddRefed<PresShell> GetParentPresShellForEventHandling();
 
@@ -2733,9 +2757,6 @@ class PresShell final : public nsStubDocumentObserver,
 
   nscolor GetDefaultBackgroundColorToDraw();
 
-  // The callback for the mPaintSuppressionTimer timer.
-  static void sPaintSuppressionCallback(nsITimer* aTimer, void* aPresShell);
-
   //////////////////////////////////////////////////////////////////////////////
   // Approximate frame visibility tracking implementation.
   //////////////////////////////////////////////////////////////////////////////
@@ -2823,7 +2844,7 @@ class PresShell final : public nsStubDocumentObserver,
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
   // We track allocated pointers in a debug-only hashtable to assert against
   // missing/double frees.
-  nsTHashtable<nsPtrHashKey<void>> mAllocatedPointers;
+  nsTHashSet<void*> mAllocatedPointers;
 #endif
 
   // A list of stack weak frames. This is a pointer to the last item in the
@@ -2831,7 +2852,7 @@ class PresShell final : public nsStubDocumentObserver,
   AutoWeakFrame* mAutoWeakFrames;
 
   // A hash table of heap allocated weak frames.
-  nsTHashtable<nsPtrHashKey<WeakFrame>> mWeakFrames;
+  nsTHashSet<WeakFrame*> mWeakFrames;
 
   class DirtyRootsList {
    public:
@@ -2878,13 +2899,11 @@ class PresShell final : public nsStubDocumentObserver,
   // Reflow roots that need to be reflowed.
   DirtyRootsList mDirtyRoots;
 
-#ifdef MOZ_GECKO_PROFILER
   // These two fields capture call stacks of any changes that require a restyle
   // or a reflow. Only the first change per restyle / reflow is recorded (the
   // one that caused a call to SetNeedStyleFlush() / SetNeedLayoutFlush()).
   UniquePtr<ProfileChunkedBuffer> mStyleCause;
   UniquePtr<ProfileChunkedBuffer> mReflowCause;
-#endif
 
   nsTArray<UniquePtr<DelayedEvent>> mDelayedEvents;
 
@@ -2927,9 +2946,9 @@ class PresShell final : public nsStubDocumentObserver,
   nsCOMArray<nsIContent> mCurrentEventContentStack;
   // Set of frames that we should mark with NS_FRAME_HAS_DIRTY_CHILDREN after
   // we finish reflowing mCurrentReflowRoot.
-  nsTHashtable<nsPtrHashKey<nsIFrame>> mFramesToDirty;
-  nsTHashtable<nsPtrHashKey<nsIScrollableFrame>> mPendingScrollAnchorSelection;
-  nsTHashtable<nsPtrHashKey<nsIScrollableFrame>> mPendingScrollAnchorAdjustment;
+  nsTHashSet<nsIFrame*> mFramesToDirty;
+  nsTHashSet<nsIScrollableFrame*> mPendingScrollAnchorSelection;
+  nsTHashSet<nsIScrollableFrame*> mPendingScrollAnchorAdjustment;
 
   nsCallbackEventRequest* mFirstCallbackEventRequest = nullptr;
   nsCallbackEventRequest* mLastCallbackEventRequest = nullptr;
@@ -2948,6 +2967,7 @@ class PresShell final : public nsStubDocumentObserver,
   // needed for the synthetic mouse events.
   layers::ScrollableLayerGuid mMouseEventTargetGuid;
 
+  // Only populated on root content documents.
   nsSize mVisualViewportSize;
 
   // The focus information needed for async keyboard scrolling
@@ -2966,6 +2986,7 @@ class PresShell final : public nsStubDocumentObserver,
   // Used to force allocation and rendering of proportionally more or
   // less pixels in both dimensions.
   Maybe<float> mResolution;
+  ResolutionChangeOrigin mLastResolutionChangeOrigin;
 
   TimeStamp mLoadBegin;  // used to time loads
 
@@ -3077,8 +3098,6 @@ class PresShell final : public nsStubDocumentObserver,
   bool mFontSizeInflationDisabledInMasterProcess : 1;
   bool mFontSizeInflationEnabled : 1;
 
-  bool mPaintingIsFrozen : 1;
-
   // If a document belongs to an invisible DocShell, this flag must be set
   // to true, so we can avoid any paint calls for widget related to this
   // presshell.
@@ -3100,8 +3119,6 @@ class PresShell final : public nsStubDocumentObserver,
   bool mNoDelayedKeyEvents : 1;
 
   bool mApproximateFrameVisibilityVisited : 1;
-
-  bool mNextPaintCompressed : 1;
 
   bool mHasCSSBackgroundColor : 1;
 
@@ -3136,6 +3153,8 @@ class PresShell final : public nsStubDocumentObserver,
   // Set to true if mMouseLocation is set by a mouse event which is synthesized
   // for tests.
   bool mMouseLocationWasSetBySynthesizedMouseEventForTests : 1;
+
+  bool mHasTriedFastUnsuppress : 1;
 
   struct CapturingContentInfo final {
     CapturingContentInfo()

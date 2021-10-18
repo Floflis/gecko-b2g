@@ -33,9 +33,12 @@ class LineBreaker {
 
   static already_AddRefed<LineBreaker> Create();
 
+  // Find the next line break opportunity starting from aPos + 1. It can return
+  // aLen if there's no break opportunity between [aPos + 1, aLen - 1].
+  //
+  // If aPos is already at the end of aText or beyond, i.e. aPos >= aLen, return
+  // NS_LINEBREAKER_NEED_MORE_TEXT.
   int32_t Next(const char16_t* aText, uint32_t aLen, uint32_t aPos);
-
-  int32_t Prev(const char16_t* aText, uint32_t aLen, uint32_t aPos);
 
   // Call this on a word with whitespace at either end. We will apply JISx4051
   // rules to find breaks inside the word. aBreakBefore is set to the break-

@@ -33,11 +33,11 @@
 #include "nsEnumeratorUtils.h"
 #include "nsReadableUtils.h"
 
-#include "GeckoProfiler.h"
 #include "SpecialSystemDirectory.h"
 
 #include "mozilla/dom/ScriptSettings.h"
 
+#include "mozilla/AppShutdown.h"
 #include "mozilla/AutoRestore.h"
 #ifdef MOZ_BACKGROUNDTASKS
 #  include "mozilla/BackgroundTasks.h"
@@ -46,9 +46,15 @@
 #include "mozilla/Services.h"
 #include "mozilla/Omnijar.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/XREAppData.h"
 #include "nsPrintfCString.h"
+
+#ifdef MOZ_THUNDERBIRD
+#  include "nsIPK11TokenDB.h"
+#  include "nsIPK11Token.h"
+#endif
 
 #include <stdlib.h>
 
@@ -164,10 +170,11 @@ nsresult nsXREDirProvider::Initialize(
     NS_WARNING("Failed to resolve XUL App Dir.");
   }
 #endif
-  mGREDir->Clone(getter_AddRefs(mGREBinDir));
-#ifdef XP_MACOSX
-  mGREBinDir->SetNativeLeafName("MacOS"_ns);
-#endif
+  nsCOMPtr<nsIFile> binaryPath;
+  nsresult rv = XRE_GetBinaryPath(getter_AddRefs(binaryPath));
+  if (NS_FAILED(rv)) return rv;
+  rv = binaryPath->GetParent(getter_AddRefs(mGREBinDir));
+  if (NS_FAILED(rv)) return rv;
 
   if (!mProfileDir) {
     nsCOMPtr<nsIDirectoryServiceProvider> app(mAppProvider);
@@ -360,19 +367,14 @@ nsXREDirProvider::GetFile(const char* aProperty, bool* aPersistent,
 
   if (!strcmp(aProperty, NS_GRE_DIR)) {
 #if defined(MOZ_WIDGET_ANDROID)
-    // On Android, libraries and other internal files are inside the APK, a zip
-    // file, so this folder doesn't really make sense.
+    // On Android, internal files are inside the APK, a zip file, so this
+    // folder doesn't really make sense.
     return NS_ERROR_FAILURE;
 #else
     return mGREDir->Clone(aFile);
 #endif
   } else if (!strcmp(aProperty, NS_GRE_BIN_DIR)) {
-#if defined(MOZ_WIDGET_ANDROID)
-    // Same as NS_GRE_DIR
-    return NS_ERROR_FAILURE;
-#else
     return mGREBinDir->Clone(aFile);
-#endif
   } else if (!strcmp(aProperty, NS_OS_CURRENT_PROCESS_DIR) ||
              !strcmp(aProperty, NS_APP_INSTALL_CLEANUP_DIR)) {
     return GetAppDir()->Clone(aFile);
@@ -479,8 +481,6 @@ nsXREDirProvider::GetFile(const char* aProperty, bool* aPersistent,
 #else
     return NS_ERROR_FAILURE;
 #endif
-  } else if (!strcmp(aProperty, XRE_USER_SYS_EXTENSION_DEV_DIR)) {
-    return GetSysUserExtensionsDevDirectory(aFile);
   } else if (!strcmp(aProperty, XRE_USER_RUNTIME_DIR)) {
 #if defined(XP_UNIX)
     nsPrintfCString path("/run/user/%d/%s/", getuid(), GetAppName());
@@ -509,14 +509,6 @@ nsXREDirProvider::GetFile(const char* aProperty, bool* aPersistent,
       return rv;
     }
     rv = mContentTempDir->Clone(getter_AddRefs(file));
-  }
-#endif  // defined(MOZ_SANDBOX)
-#if defined(MOZ_SANDBOX)
-  else if (0 == strcmp(aProperty, NS_APP_PLUGIN_PROCESS_TEMP_DIR)) {
-    if (!mPluginTempDir && NS_FAILED((rv = LoadPluginProcessTempDir()))) {
-      return rv;
-    }
-    rv = mPluginTempDir->Clone(getter_AddRefs(file));
   }
 #endif  // defined(MOZ_SANDBOX)
   else if (NS_SUCCEEDED(GetProfileStartupDir(getter_AddRefs(file)))) {
@@ -671,43 +663,6 @@ nsresult nsXREDirProvider::LoadContentProcessTempDir() {
   return NS_OK;
 }
 
-//
-// Sets mPluginTempDir so that it refers to the appropriate temp dir.
-// If NS_APP_PLUGIN_PROCESS_TEMP_DIR fails for any reason, NS_OS_TEMP_DIR
-// is used.
-//
-nsresult nsXREDirProvider::LoadPluginProcessTempDir() {
-  // The parent is responsible for creating the sandbox temp dir.
-  if (XRE_IsParentProcess()) {
-    mPluginProcessSandboxTempDir =
-        CreateProcessSandboxTempDir(GeckoProcessType_Plugin);
-    mPluginTempDir = mPluginProcessSandboxTempDir;
-  } else {
-    MOZ_ASSERT(XRE_IsPluginProcess());
-    mPluginTempDir = GetProcessSandboxTempDir(GeckoProcessType_Plugin);
-  }
-
-  if (!mPluginTempDir) {
-    nsresult rv =
-        NS_GetSpecialDirectory(NS_OS_TEMP_DIR, getter_AddRefs(mPluginTempDir));
-    if (NS_WARN_IF(NS_FAILED(rv))) {
-      return rv;
-    }
-  }
-
-#  if defined(XP_WIN)
-  // The temp dir is used in sandbox rules, so we need to make sure
-  // it doesn't contain any junction points or symlinks or the sandbox will
-  // reject those rules.
-  if (!mozilla::widget::WinUtils::ResolveJunctionPointsAndSymLinks(
-          mPluginTempDir)) {
-    NS_WARNING("Failed to resolve plugin temp dir.");
-  }
-#  endif
-
-  return NS_OK;
-}
-
 static bool IsContentSandboxDisabled() {
   return !mozilla::BrowserTabsRemoteAutostart() ||
          (!mozilla::IsContentSandboxEnabled());
@@ -727,13 +682,9 @@ static already_AddRefed<nsIFile> GetProcessSandboxTempDir(
     return nullptr;
   }
 
-  MOZ_ASSERT((type == GeckoProcessType_Content) ||
-             (type == GeckoProcessType_Plugin));
+  MOZ_ASSERT(type == GeckoProcessType_Content);
 
-  const char* prefKey = (type == GeckoProcessType_Content)
-                            ? "security.sandbox.content.tempDirSuffix"
-                            : "security.sandbox.plugin.tempDirSuffix";
-
+  const char* prefKey = "security.sandbox.content.tempDirSuffix";
   nsAutoString tempDirSuffix;
   rv = mozilla::Preferences::GetString(prefKey, tempDirSuffix);
   if (NS_WARN_IF(NS_FAILED(rv)) || tempDirSuffix.IsEmpty()) {
@@ -751,7 +702,7 @@ static already_AddRefed<nsIFile> GetProcessSandboxTempDir(
 //
 // Create a temporary directory for use from sandboxed processes.
 // Only called in the parent. The path is derived from a UUID stored in a
-// pref which is available to content and plugin processes. Returns null
+// pref which is available to content processes. Returns null
 // if the content sandbox is disabled or if an error occurs.
 //
 static already_AddRefed<nsIFile> CreateProcessSandboxTempDir(
@@ -760,13 +711,10 @@ static already_AddRefed<nsIFile> CreateProcessSandboxTempDir(
     return nullptr;
   }
 
-  MOZ_ASSERT((procType == GeckoProcessType_Content) ||
-             (procType == GeckoProcessType_Plugin));
+  MOZ_ASSERT(procType == GeckoProcessType_Content);
 
   // Get (and create if blank) temp directory suffix pref.
-  const char* pref = (procType == GeckoProcessType_Content)
-                         ? "security.sandbox.content.tempDirSuffix"
-                         : "security.sandbox.plugin.tempDirSuffix";
+  const char* pref = "security.sandbox.content.tempDirSuffix";
 
   nsresult rv;
   nsAutoString tempDirSuffix;
@@ -979,6 +927,31 @@ nsXREDirProvider::DoStartup() {
     mozilla::SandboxBroker::GeckoDependentInitialize();
 #endif
 
+#ifdef MOZ_THUNDERBIRD
+    bool bgtaskMode = false;
+#  ifdef MOZ_BACKGROUNDTASKS
+    bgtaskMode = mozilla::BackgroundTasks::IsBackgroundTaskMode();
+#  endif
+    if (!bgtaskMode &&
+        mozilla::Preferences::GetBool(
+            "security.prompt_for_master_password_on_startup", false)) {
+      // Prompt for the master password prior to opening application windows,
+      // to avoid the race that triggers multiple prompts (see bug 177175).
+      // We use this code until we have a better solution, possibly as
+      // described in bug 177175 comment 384.
+      nsCOMPtr<nsIPK11TokenDB> db =
+          do_GetService("@mozilla.org/security/pk11tokendb;1");
+      if (db) {
+        nsCOMPtr<nsIPK11Token> token;
+        if (NS_SUCCEEDED(db->GetInternalKeyToken(getter_AddRefs(token)))) {
+          mozilla::Unused << token->Login(false);
+        }
+      } else {
+        NS_WARNING("Failed to get nsIPK11TokenDB service.");
+      }
+    }
+#endif
+
     bool initExtensionManager =
 #ifdef MOZ_BACKGROUNDTASKS
         !mozilla::BackgroundTasks::IsBackgroundTaskMode();
@@ -1019,20 +992,6 @@ nsXREDirProvider::DoStartup() {
     }
     mozilla::Telemetry::Accumulate(mozilla::Telemetry::SAFE_MODE_USAGE, mode);
 
-    // Telemetry about number of profiles.
-    nsCOMPtr<nsIToolkitProfileService> profileService =
-        do_GetService("@mozilla.org/toolkit/profile-service;1");
-    if (profileService) {
-      uint32_t count = 0;
-      rv = profileService->GetProfileCount(&count);
-      if (NS_WARN_IF(NS_FAILED(rv))) {
-        return rv;
-      }
-
-      mozilla::Telemetry::Accumulate(mozilla::Telemetry::NUMBER_OF_PROFILES,
-                                     count);
-    }
-
     obsSvc->NotifyObservers(nullptr, "profile-initial-state", nullptr);
 
 #if defined(MOZ_SANDBOX)
@@ -1043,11 +1002,6 @@ nsXREDirProvider::DoStartup() {
       mozilla::Unused << NS_WARN_IF(NS_FAILED(LoadContentProcessTempDir()));
     }
 #endif
-#if defined(MOZ_SANDBOX)
-    if (!mPluginTempDir) {
-      mozilla::Unused << NS_WARN_IF(NS_FAILED(LoadPluginProcessTempDir()));
-    }
-#endif
   }
   return NS_OK;
 }
@@ -1056,30 +1010,24 @@ void nsXREDirProvider::DoShutdown() {
   AUTO_PROFILER_LABEL("nsXREDirProvider::DoShutdown", OTHER);
 
   if (mProfileNotified) {
-    nsCOMPtr<nsIObserverService> obsSvc =
-        mozilla::services::GetObserverService();
-    NS_ASSERTION(obsSvc, "No observer service?");
-    if (obsSvc) {
-      static const char16_t kShutdownPersist[] = u"shutdown-persist";
-      obsSvc->NotifyObservers(nullptr, "profile-change-net-teardown",
-                              kShutdownPersist);
-      obsSvc->NotifyObservers(nullptr, "profile-change-teardown",
-                              kShutdownPersist);
+    mozilla::AppShutdown::AdvanceShutdownPhase(
+        mozilla::ShutdownPhase::AppShutdownNetTeardown, nullptr);
+    mozilla::AppShutdown::AdvanceShutdownPhase(
+        mozilla::ShutdownPhase::AppShutdownTeardown, nullptr);
 
 #ifdef DEBUG
-      // Not having this causes large intermittent leaks. See bug 1340425.
-      if (JSContext* cx = mozilla::dom::danger::GetJSContext()) {
-        JS_GC(cx);
-      }
+    // Not having this causes large intermittent leaks. See bug 1340425.
+    if (JSContext* cx = mozilla::dom::danger::GetJSContext()) {
+      JS_GC(cx);
+    }
 #endif
 
-      obsSvc->NotifyObservers(nullptr, "profile-before-change",
-                              kShutdownPersist);
-      obsSvc->NotifyObservers(nullptr, "profile-before-change-qm",
-                              kShutdownPersist);
-      obsSvc->NotifyObservers(nullptr, "profile-before-change-telemetry",
-                              kShutdownPersist);
-    }
+    mozilla::AppShutdown::AdvanceShutdownPhase(
+        mozilla::ShutdownPhase::AppShutdown, nullptr);
+    mozilla::AppShutdown::AdvanceShutdownPhase(
+        mozilla::ShutdownPhase::AppShutdownQM, nullptr);
+    mozilla::AppShutdown::AdvanceShutdownPhase(
+        mozilla::ShutdownPhase::AppShutdownTelemetry, nullptr);
     mProfileNotified = false;
   }
 
@@ -1089,7 +1037,6 @@ void nsXREDirProvider::DoShutdown() {
   if (XRE_IsParentProcess()) {
 #if defined(MOZ_SANDBOX)
     mozilla::Unused << DeleteDirIfExists(mContentProcessSandboxTempDir);
-    mozilla::Unused << DeleteDirIfExists(mPluginProcessSandboxTempDir);
 #endif
   }
 }
@@ -1189,40 +1136,58 @@ static nsresult HashInstallPath(nsAString& aInstallPath, nsAString& aPathHash) {
  * Gets a hash of the installation directory.
  */
 nsresult nsXREDirProvider::GetInstallHash(nsAString& aPathHash) {
-  nsCOMPtr<nsIFile> installDir;
-  nsCOMPtr<nsIFile> appFile;
-  bool per = false;
-  nsresult rv = GetFile(XRE_EXECUTABLE_FILE, &per, getter_AddRefs(appFile));
-  NS_ENSURE_SUCCESS(rv, rv);
-  rv = appFile->GetParent(getter_AddRefs(installDir));
-  NS_ENSURE_SUCCESS(rv, rv);
+  nsAutoString stringToHash;
 
-  // It is possible that the path we have is on a case insensitive
-  // filesystem in which case the path may vary depending on how the
-  // application is called. We want to normalize the case somehow.
 #ifdef XP_WIN
-  // Windows provides a way to get the correct case.
-  if (!mozilla::widget::WinUtils::ResolveJunctionPointsAndSymLinks(
-          installDir)) {
-    NS_WARNING("Failed to resolve install directory.");
-  }
-#elif defined(MOZ_WIDGET_COCOA)
-  // On OSX roundtripping through an FSRef fixes the case.
-  FSRef ref;
-  nsCOMPtr<nsILocalFileMac> macFile = do_QueryInterface(installDir);
-  rv = macFile->GetFSRef(&ref);
-  NS_ENSURE_SUCCESS(rv, rv);
-  rv = NS_NewLocalFileWithFSRef(&ref, true, getter_AddRefs(macFile));
-  NS_ENSURE_SUCCESS(rv, rv);
-  installDir = static_cast<nsIFile*>(macFile);
+  if (mozilla::widget::WinUtils::HasPackageIdentity()) {
+    // For packages, the install path includes the version number, so it isn't
+    // a stable or consistent identifier for the installation. The package
+    // family name is though, so use that instead of the path.
+    stringToHash = mozilla::widget::WinUtils::GetPackageFamilyName();
+  } else
 #endif
-  // On linux XRE_EXECUTABLE_FILE already seems to be set to the correct path.
+  {
+    nsCOMPtr<nsIFile> installDir;
+    nsCOMPtr<nsIFile> appFile;
+    bool per = false;
+    nsresult rv = GetFile(XRE_EXECUTABLE_FILE, &per, getter_AddRefs(appFile));
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = appFile->GetParent(getter_AddRefs(installDir));
+    NS_ENSURE_SUCCESS(rv, rv);
 
-  nsAutoString installPath;
-  rv = installDir->GetPath(installPath);
-  NS_ENSURE_SUCCESS(rv, rv);
+    // It is possible that the path we have is on a case insensitive
+    // filesystem in which case the path may vary depending on how the
+    // application is called. We want to normalize the case somehow.
+#ifdef XP_WIN
+    // Windows provides a way to get the correct case.
+    if (!mozilla::widget::WinUtils::ResolveJunctionPointsAndSymLinks(
+            installDir)) {
+      NS_WARNING("Failed to resolve install directory.");
+    }
+#elif defined(MOZ_WIDGET_COCOA)
+    // On OSX roundtripping through an FSRef fixes the case.
+    FSRef ref;
+    nsCOMPtr<nsILocalFileMac> macFile = do_QueryInterface(installDir);
+    rv = macFile->GetFSRef(&ref);
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = NS_NewLocalFileWithFSRef(&ref, true, getter_AddRefs(macFile));
+    NS_ENSURE_SUCCESS(rv, rv);
+    installDir = static_cast<nsIFile*>(macFile);
+#endif
+    // On linux XRE_EXECUTABLE_FILE already seems to be set to the correct path.
 
-  return HashInstallPath(installPath, aPathHash);
+    rv = installDir->GetPath(stringToHash);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  // If we somehow failed to get an actual value, hashing an empty string could
+  // potentially cause some serious problems given all the things this hash is
+  // used for. So we don't allow that.
+  if (stringToHash.IsEmpty()) {
+    return NS_ERROR_FAILURE;
+  }
+
+  return HashInstallPath(stringToHash, aPathHash);
 }
 
 /**
@@ -1540,29 +1505,6 @@ nsresult nsXREDirProvider::GetSysUserExtensionsDirectory(nsIFile** aFile) {
   return NS_OK;
 }
 
-nsresult nsXREDirProvider::GetSysUserExtensionsDevDirectory(nsIFile** aFile) {
-  nsCOMPtr<nsIFile> localDir;
-  nsresult rv = GetUserDataDirectoryHome(getter_AddRefs(localDir), false);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  rv = AppendSysUserExtensionsDevPath(localDir);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  rv = EnsureDirectoryExists(localDir);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-#if defined(XP_WIN) && defined(MOZ_SANDBOX)
-  // This is used in sandbox rules, so we need to make sure it doesn't contain
-  // any junction points or symlinks or the sandbox will reject those rules.
-  if (!mozilla::widget::WinUtils::ResolveJunctionPointsAndSymLinks(localDir)) {
-    NS_WARNING("Failed to resolve sys user extensions dev directory.");
-  }
-#endif
-
-  localDir.forget(aFile);
-  return NS_OK;
-}
-
 #if defined(XP_UNIX) || defined(XP_MACOSX)
 nsresult nsXREDirProvider::GetSystemExtensionsDirectory(nsIFile** aFile) {
   nsresult rv;
@@ -1648,37 +1590,6 @@ nsresult nsXREDirProvider::AppendSysUserExtensionPath(nsIFile* aFile) {
 
 #else
 #  error "Don't know how to get XRE user extension path on your platform"
-#endif
-  return NS_OK;
-}
-
-nsresult nsXREDirProvider::AppendSysUserExtensionsDevPath(nsIFile* aFile) {
-  MOZ_ASSERT(aFile);
-
-  nsresult rv;
-
-#if defined(XP_MACOSX) || defined(XP_WIN)
-
-  static const char* const sXR = "Mozilla";
-  rv = aFile->AppendNative(nsDependentCString(sXR));
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  static const char* const sExtensions = "SystemExtensionsDev";
-  rv = aFile->AppendNative(nsDependentCString(sExtensions));
-  NS_ENSURE_SUCCESS(rv, rv);
-
-#elif defined(XP_UNIX)
-
-  static const char* const sXR = ".mozilla";
-  rv = aFile->AppendNative(nsDependentCString(sXR));
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  static const char* const sExtensions = "systemextensionsdev";
-  rv = aFile->AppendNative(nsDependentCString(sExtensions));
-  NS_ENSURE_SUCCESS(rv, rv);
-
-#else
-#  error "Don't know how to get XRE system extension dev path on your platform"
 #endif
   return NS_OK;
 }

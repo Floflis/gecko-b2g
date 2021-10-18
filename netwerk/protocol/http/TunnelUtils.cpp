@@ -11,7 +11,6 @@
 #include "nsHttp.h"
 #include "nsHttpHandler.h"
 #include "nsHttpRequestHead.h"
-#include "TCPFastOpen.h"
 #include "nsISocketProvider.h"
 #include "nsSocketProviderService.h"
 #include "nsISSLSocketControl.h"
@@ -164,15 +163,7 @@ void TLSFilterTransaction::Close(nsresult aReason) {
   mTransaction->Close(aReason);
   mTransaction = nullptr;
 
-  if (gHttpHandler->Bug1563538()) {
-    if (NS_FAILED(aReason)) {
-      mCloseReason = aReason;
-    } else {
-      mCloseReason = NS_BASE_STREAM_CLOSED;
-    }
-  } else {
-    MOZ_ASSERT(NS_ERROR_UNEXPECTED == mCloseReason);
-  }
+  mCloseReason = NS_FAILED(aReason) ? aReason : NS_BASE_STREAM_CLOSED;
 }
 
 nsresult TLSFilterTransaction::OnReadSegment(const char* aData, uint32_t aCount,
@@ -884,7 +875,7 @@ class SocketOutWrapper : public nsIAsyncOutputStream,
   NS_IMETHOD Write(const char* aBuf, uint32_t aCount,
                    uint32_t* _retval) override;
   virtual nsresult OnReadSegment(const char* segment, uint32_t count,
-                                 uint32_t* countRead) override;
+                                 uint32_t* countWritten) override;
 
  private:
   virtual ~SocketOutWrapper() = default;
@@ -1183,8 +1174,9 @@ bool SpdyConnectTransaction::MapStreamToHttpConnection(
   TimeDuration rtt = TimeStamp::Now() - mTimestampSyn;
   DebugOnly<nsresult> rv = mTunneledConn->Init(
       aConnInfo, gHttpHandler->ConnMgr()->MaxRequestDelay(), mTunnelTransport,
-      mTunnelStreamIn, mTunnelStreamOut, true, callbacks,
-      PR_MillisecondsToInterval(static_cast<uint32_t>(rtt.ToMilliseconds())));
+      mTunnelStreamIn, mTunnelStreamOut, true, NS_OK, callbacks,
+      PR_MillisecondsToInterval(static_cast<uint32_t>(rtt.ToMilliseconds())),
+      false);
   MOZ_ASSERT(NS_SUCCEEDED(rv));
   if (mForcePlainText) {
     mTunneledConn->ForcePlainText();
@@ -1989,33 +1981,30 @@ SocketTransportShim::Close(nsresult aReason) {
     LOG(("SocketTransportShim::Close %p", this));
   }
 
-  if (gHttpHandler->Bug1563538()) {
-    // Must always post, because mSession->CloseTransaction releases the
-    // Http2Stream which is still on stack.
-    RefPtr<SocketTransportShim> self(this);
+  // Must always post, because mSession->CloseTransaction releases the
+  // Http2Stream which is still on stack.
+  RefPtr<SocketTransportShim> self(this);
 
-    nsCOMPtr<nsIEventTarget> sts =
-        do_GetService("@mozilla.org/network/socket-transport-service;1");
-    Unused << sts->Dispatch(NS_NewRunnableFunction(
-        "SocketTransportShim::Close", [self = std::move(self), aReason]() {
-          RefPtr<NullHttpTransaction> baseTrans =
-              self->mWeakTrans->QueryTransaction();
-          if (!baseTrans) {
-            return;
-          }
-          SpdyConnectTransaction* trans =
-              baseTrans->QuerySpdyConnectTransaction();
-          MOZ_ASSERT(trans);
-          if (!trans) {
-            return;
-          }
+  nsCOMPtr<nsIEventTarget> sts =
+      do_GetService("@mozilla.org/network/socket-transport-service;1");
+  Unused << sts->Dispatch(NS_NewRunnableFunction(
+      "SocketTransportShim::Close", [self = std::move(self), aReason]() {
+        RefPtr<NullHttpTransaction> baseTrans =
+            self->mWeakTrans->QueryTransaction();
+        if (!baseTrans) {
+          return;
+        }
+        SpdyConnectTransaction* trans =
+            baseTrans->QuerySpdyConnectTransaction();
+        MOZ_ASSERT(trans);
+        if (!trans) {
+          return;
+        }
 
-          trans->mSession->CloseTransaction(trans, aReason);
-        }));
-    return NS_OK;
-  }
+        trans->mSession->CloseTransaction(trans, aReason);
+      }));
 
-  return NS_ERROR_NOT_IMPLEMENTED;
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -2032,14 +2021,6 @@ NS_IMETHODIMP
 SocketTransportShim::Bind(NetAddr* aLocalAddr) {
   if (mIsWebsocket) {
     LOG3(("WARNING: SocketTransportShim::Bind %p", this));
-  }
-  return NS_ERROR_NOT_IMPLEMENTED;
-}
-
-NS_IMETHODIMP
-SocketTransportShim::GetFirstRetryError(nsresult* aFirstRetryError) {
-  if (mIsWebsocket) {
-    LOG3(("WARNING: SocketTransportShim::GetFirstRetryError %p", this));
   }
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -2157,8 +2138,13 @@ SocketTransportShim::SetQoSBits(uint8_t aQoSBits) {
 }
 
 NS_IMETHODIMP
-SocketTransportShim::SetFastOpenCallback(TCPFastOpen* aFastOpen) {
-  return mWrapped->SetFastOpenCallback(aFastOpen);
+SocketTransportShim::GetRetryDnsIfPossible(bool* aRetry) {
+  return mWrapped->GetRetryDnsIfPossible(aRetry);
+}
+
+NS_IMETHODIMP
+SocketTransportShim::GetStatus(nsresult* aStatus) {
+  return mWrapped->GetStatus(aStatus);
 }
 
 NS_IMPL_ISUPPORTS(TLSFilterTransaction, nsITimerCallback, nsINamed)

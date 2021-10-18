@@ -18,8 +18,6 @@
  **************************************************************/
 
 #include "mozilla/dom/ContentParent.h"
-#include "mozilla/plugins/PluginInstanceParent.h"
-using mozilla::plugins::PluginInstanceParent;
 
 #include "nsWindowGfx.h"
 #include "nsAppRunner.h"
@@ -38,6 +36,7 @@ using mozilla::plugins::PluginInstanceParent;
 #include "nsGfxCIID.h"
 #include "gfxContext.h"
 #include "WinUtils.h"
+#include "WinWindowOcclusionTracker.h"
 #include "nsIWidgetListener.h"
 #include "mozilla/Unused.h"
 #include "nsDebug.h"
@@ -45,7 +44,6 @@ using mozilla::plugins::PluginInstanceParent;
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/layers/CompositorBridgeParent.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
-#include "ClientLayerManager.h"
 #include "InProcessWinCompositorWidget.h"
 
 #include "nsUXThemeData.h"
@@ -56,6 +54,7 @@ using namespace mozilla::gfx;
 using namespace mozilla::layers;
 using namespace mozilla::widget;
 using namespace mozilla::plugins;
+extern mozilla::LazyLogModule gWindowsLog;
 
 /**************************************************************
  **************************************************************
@@ -130,19 +129,12 @@ nsIWidgetListener* nsWindow::GetPaintListener() {
 void nsWindow::ForcePresent() {
   if (mResizeState != RESIZING) {
     if (CompositorBridgeChild* remoteRenderer = GetRemoteRenderer()) {
-      remoteRenderer->SendForcePresent();
+      remoteRenderer->SendForcePresent(wr::RenderReasons::WIDGET);
     }
   }
 }
 
 bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
-  // We never have reentrant paint events, except when we're running our RPC
-  // windows event spin loop. If we don't trap for this, we'll try to paint,
-  // but view manager will refuse to paint the surface, resulting is black
-  // flashes on the plugin rendering surface.
-  if (mozilla::ipc::MessageChannel::IsSpinLoopActive() && mPainting)
-    return false;
-
   DeviceResetReason resetReason = DeviceResetReason::OK;
   if (gfxWindowsPlatform::GetPlatform()->DidRenderingDeviceReset(
           &resetReason)) {
@@ -168,43 +160,6 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
     return false;
   }
 
-  // After we CallUpdateWindow to the child, occasionally a WM_PAINT message
-  // is posted to the parent event loop with an empty update rect. Do a
-  // dummy paint so that Windows stops dispatching WM_PAINT in an inifinite
-  // loop. See bug 543788.
-  if (IsPlugin()) {
-    RECT updateRect;
-    if (!GetUpdateRect(mWnd, &updateRect, FALSE) ||
-        (updateRect.left == updateRect.right &&
-         updateRect.top == updateRect.bottom)) {
-      PAINTSTRUCT ps;
-      BeginPaint(mWnd, &ps);
-      EndPaint(mWnd, &ps);
-      return true;
-    }
-
-    if (mWindowType == eWindowType_plugin_ipc_chrome) {
-      // Fire off an async request to the plugin to paint its window
-      mozilla::dom::ContentParent::SendAsyncUpdate(this);
-      ValidateRect(mWnd, nullptr);
-      return true;
-    }
-
-    PluginInstanceParent* instance = reinterpret_cast<PluginInstanceParent*>(
-        ::GetPropW(mWnd, L"PluginInstanceParentProperty"));
-    if (instance) {
-      Unused << instance->CallUpdateWindow();
-    } else {
-      // We should never get here since in-process plugins should have
-      // subclassed our HWND and handled WM_PAINT, but in some cases that
-      // could fail. Return without asserting since it's not our fault.
-      NS_WARNING("Plugin failed to subclass our window");
-    }
-
-    ValidateRect(mWnd, nullptr);
-    return true;
-  }
-
   PAINTSTRUCT ps;
 
   // Avoid starting the GPU process for the initial navigator:blank window.
@@ -215,11 +170,14 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
     return true;
   }
 
+  WindowRenderer* renderer = GetWindowRenderer();
+  KnowsCompositor* knowsCompositor = renderer->AsKnowsCompositor();
+  WebRenderLayerManager* layerManager = renderer->AsWebRender();
+
   // Clear window by transparent black when compositor window is used in GPU
   // process and non-client area rendering by DWM is enabled.
   // It is for showing non-client area rendering. See nsWindow::UpdateGlass().
-  if (HasGlass() && GetLayerManager()->AsKnowsCompositor() &&
-      GetLayerManager()->AsKnowsCompositor()->GetUseCompositorWnd()) {
+  if (HasGlass() && knowsCompositor && knowsCompositor->GetUseCompositorWnd()) {
     HDC hdc;
     RECT rect;
     hdc = ::GetWindowDC(mWnd);
@@ -230,17 +188,18 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
     ReleaseDC(mWnd, hdc);
   }
 
-  if (GetLayerManager()->AsKnowsCompositor() &&
+  if (knowsCompositor && layerManager &&
       !mBounds.IsEqualEdges(mLastPaintBounds)) {
     // Do an early async composite so that we at least have something on the
     // screen in the right place, even if the content is out of date.
-    GetLayerManager()->ScheduleComposite();
+    layerManager->ScheduleComposite(wr::RenderReasons::WIDGET);
   }
   mLastPaintBounds = mBounds;
 
 #ifdef MOZ_XUL
   if (!aDC &&
-      (GetLayerManager()->GetBackendType() == LayersBackend::LAYERS_BASIC) &&
+      (renderer->GetBackendType() == LayersBackend::LAYERS_NONE ||
+       renderer->GetBackendType() == LayersBackend::LAYERS_BASIC) &&
       (eTransparencyTransparent == mTransparencyMode)) {
     // For layered translucent windows all drawing should go to memory DC and no
     // WM_PAINT messages are normally generated. To support asynchronous
@@ -257,8 +216,6 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
     aDC = mBasicLayersSurface->GetTransparentDC();
   }
 #endif
-
-  mPainting = true;
 
 #ifdef WIDGET_DEBUG_OUTPUT
   HRGN debugPaintFlashRegion = nullptr;
@@ -281,11 +238,11 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
 #endif
   LayoutDeviceIntRegion region = GetRegionToPaint(forceRepaint, ps, hDC);
 
-  if (GetLayerManager()->AsKnowsCompositor()) {
+  if (knowsCompositor && layerManager) {
     // We need to paint to the screen even if nothing changed, since if we
     // don't have a compositing window manager, our pixels could be stale.
-    GetLayerManager()->SetNeedsComposite(true);
-    GetLayerManager()->SendInvalidRegion(region.ToUnknownRegion());
+    layerManager->SetNeedsComposite(true);
+    layerManager->SendInvalidRegion(region.ToUnknownRegion());
   }
 
   RefPtr<nsWindow> strongThis(this);
@@ -300,10 +257,9 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
     return false;
   }
 
-  if (GetLayerManager()->AsKnowsCompositor() &&
-      GetLayerManager()->NeedsComposite()) {
-    GetLayerManager()->ScheduleComposite();
-    GetLayerManager()->SetNeedsComposite(false);
+  if (knowsCompositor && layerManager && layerManager->NeedsComposite()) {
+    layerManager->ScheduleComposite(wr::RenderReasons::WIDGET);
+    layerManager->SetNeedsComposite(false);
   }
 
   bool result = true;
@@ -316,7 +272,8 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
                          (int32_t)mWnd);
 #endif  // WIDGET_DEBUG_OUTPUT
 
-    switch (GetLayerManager()->GetBackendType()) {
+    switch (renderer->GetBackendType()) {
+      case LayersBackend::LAYERS_NONE:
       case LayersBackend::LAYERS_BASIC: {
         RefPtr<gfxASurface> targetSurface;
 
@@ -433,8 +390,6 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
   }
 #endif  // WIDGET_DEBUG_OUTPUT
 
-  mPainting = false;
-
   // Re-get the listener since painting may have killed it.
   listener = GetPaintListener();
   if (listener) listener->DidPaintWindow();
@@ -446,15 +401,65 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel) {
   return result;
 }
 
+bool nsWindow::NeedsToTrackWindowOcclusionState() {
+  if (!WinWindowOcclusionTracker::Get()) {
+    return false;
+  }
+
+  if (mCompositorSession && mWindowType == eWindowType_toplevel) {
+    return true;
+  }
+
+  return false;
+}
+
+void nsWindow::NotifyOcclusionState(mozilla::widget::OcclusionState aState) {
+  MOZ_ASSERT(NeedsToTrackWindowOcclusionState());
+
+  bool isFullyOccluded = aState == mozilla::widget::OcclusionState::OCCLUDED;
+  // When window is minimized, it is not set as fully occluded.
+  if (mSizeMode == nsSizeMode_Minimized) {
+    isFullyOccluded = false;
+  }
+
+  // Don't dispatch if the new occlustion state is the same as the current
+  // state.
+  if (mIsFullyOccluded == isFullyOccluded) {
+    return;
+  }
+
+  mIsFullyOccluded = isFullyOccluded;
+
+  MOZ_LOG(gWindowsLog, LogLevel::Info,
+          ("nsWindow::NotifyOcclusionState() mIsFullyOccluded %d mSizeMode %d",
+           mIsFullyOccluded, mSizeMode));
+
+  if (mWidgetListener) {
+    mWidgetListener->OcclusionStateChanged(mIsFullyOccluded);
+  }
+}
+
 // This override of CreateCompositor is to add support for sending the IPC
 // call for RequesetFxrOutput as soon as the compositor for this widget is
 // available.
 void nsWindow::CreateCompositor() {
   nsWindowBase::CreateCompositor();
 
+  if (NeedsToTrackWindowOcclusionState()) {
+    WinWindowOcclusionTracker::Get()->Enable(this, mWnd);
+  }
+
   if (mRequestFxrOutputPending) {
     GetRemoteRenderer()->SendRequestFxrOutput();
   }
+}
+
+void nsWindow::DestroyCompositor() {
+  if (NeedsToTrackWindowOcclusionState()) {
+    WinWindowOcclusionTracker::Get()->Disable(this, mWnd);
+  }
+
+  nsWindowBase::DestroyCompositor();
 }
 
 void nsWindow::RequestFxrOutput() {

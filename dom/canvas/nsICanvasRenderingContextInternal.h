@@ -27,18 +27,18 @@
     }                                                \
   }
 
-class nsDisplayListBuilder;
 class nsIDocShell;
 class nsRefreshDriver;
 
 namespace mozilla {
+class nsDisplayListBuilder;
 class ClientWebGLContext;
 class PresShell;
 namespace layers {
-class CanvasLayer;
 class CanvasRenderer;
 class CompositableHandle;
 class Layer;
+class Image;
 class LayerManager;
 class LayerTransactionChild;
 class PersistentBufferProvider;
@@ -52,13 +52,12 @@ class SourceSurface;
 class nsICanvasRenderingContextInternal : public nsISupports,
                                           public nsAPostRefreshObserver {
  public:
-  typedef mozilla::layers::CanvasLayer CanvasLayer;
-  typedef mozilla::layers::CanvasRenderer CanvasRenderer;
-  typedef mozilla::layers::Layer Layer;
-  typedef mozilla::layers::LayerManager LayerManager;
-  typedef mozilla::layers::WebRenderCanvasData WebRenderCanvasData;
-  typedef mozilla::layers::CompositableHandle CompositableHandle;
-  typedef mozilla::layers::LayerTransactionChild LayerTransactionChild;
+  using CanvasRenderer = mozilla::layers::CanvasRenderer;
+  using Layer = mozilla::layers::Layer;
+  using LayerManager = mozilla::layers::LayerManager;
+  using WebRenderCanvasData = mozilla::layers::WebRenderCanvasData;
+  using CompositableHandle = mozilla::layers::CompositableHandle;
+  using LayerTransactionChild = mozilla::layers::LayerTransactionChild;
 
   NS_DECLARE_STATIC_IID_ACCESSOR(NS_ICANVASRENDERINGCONTEXTINTERNAL_IID)
 
@@ -141,24 +140,18 @@ class nsICanvasRenderingContextInternal : public nsISupports,
   // for possibly reinitializing with SetDimensions/InitializeWithSurface.
   NS_IMETHOD Reset() = 0;
 
-  // Return the CanvasLayer for this context, creating
-  // one for the given layer manager if not available.
-  virtual already_AddRefed<Layer> GetCanvasLayer(nsDisplayListBuilder* builder,
-                                                 Layer* oldLayer,
-                                                 LayerManager* manager) = 0;
-  virtual bool UpdateWebRenderCanvasData(nsDisplayListBuilder* aBuilder,
-                                         WebRenderCanvasData* aCanvasData) {
+  virtual already_AddRefed<mozilla::layers::Image> GetAsImage() {
+    return nullptr;
+  }
+  virtual bool UpdateWebRenderCanvasData(
+      mozilla::nsDisplayListBuilder* aBuilder,
+      WebRenderCanvasData* aCanvasData) {
     return false;
   }
-  virtual bool InitializeCanvasRenderer(nsDisplayListBuilder* aBuilder,
+  virtual bool InitializeCanvasRenderer(mozilla::nsDisplayListBuilder* aBuilder,
                                         CanvasRenderer* aRenderer) {
-    return true;
+    return false;
   }
-
-  // Return true if the canvas should be forced to be "inactive" to ensure
-  // it can be drawn to the screen even if it's too large to be blitted by
-  // an accelerated CanvasLayer.
-  virtual bool ShouldForceInactiveLayer(LayerManager* manager) { return false; }
 
   virtual void MarkContextClean() = 0;
 

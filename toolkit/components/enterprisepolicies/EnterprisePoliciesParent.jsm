@@ -456,11 +456,11 @@ function areEnterpriseOnlyPoliciesAllowed() {
     return true;
   }
 
-  if (AppConstants.MOZ_UPDATE_CHANNEL != "release") {
-    return true;
-  }
-
-  return false;
+  return (
+    AppConstants.IS_ESR ||
+    AppConstants.MOZ_DEV_EDITION ||
+    AppConstants.NIGHTLY_BUILD
+  );
 }
 
 /*
@@ -575,10 +575,10 @@ class JSONPoliciesProvider {
       ) {
         // Do nothing, _policies will remain null
       } else if (ex instanceof SyntaxError) {
-        log.error("Error parsing JSON file");
+        log.error(`Error parsing JSON file: ${ex}`);
         this._failed = true;
       } else {
-        log.error("Error reading file");
+        log.error(`Error reading JSON file: ${ex}`);
         this._failed = true;
       }
     }

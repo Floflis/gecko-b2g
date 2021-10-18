@@ -37,9 +37,10 @@
 
 namespace mozilla {
 
-typedef ContentEventHandler::NodePosition NodePosition;
-typedef ContentEventHandler::NodePositionBefore NodePositionBefore;
+using NodePosition = ContentEventHandler::NodePosition;
+using NodePositionBefore = ContentEventHandler::NodePositionBefore;
 
+using namespace dom;
 using namespace widget;
 
 LazyLogModule sIMECOLog("IMEContentObserver");
@@ -163,6 +164,10 @@ void IMEContentObserver::Init(nsIWidget& aWidget, nsPresContext& aPresContext,
   mIMENotificationRequests = &mWidget->IMENotificationRequestsRef();
 
   if (!InitWithEditor(aPresContext, aContent, aEditorBase)) {
+    MOZ_LOG(sIMECOLog, LogLevel::Debug,
+            ("0x%p IMEContentObserver::Init() FAILED, due to InitWithEditor() "
+             "failure",
+             this));
     Clear();
     return;
   }
@@ -199,6 +204,10 @@ void IMEContentObserver::OnIMEReceivedFocus() {
   // call of Init() with the latest content may occur.  In such case, we
   // shouldn't keep first initialization which notified IME of focus.
   if (GetState() != eState_Initializing) {
+    MOZ_LOG(sIMECOLog, LogLevel::Debug,
+            ("0x%p IMEContentObserver::OnIMEReceivedFocus(), "
+             "but the state is not \"initializing\", so does nothing",
+             this));
     return;
   }
 
@@ -206,6 +215,10 @@ void IMEContentObserver::OnIMEReceivedFocus() {
   // instance via IMEStateManager::UpdateIMEState().  So, this
   // instance might already have been destroyed, check it.
   if (!mRootContent) {
+    MOZ_LOG(sIMECOLog, LogLevel::Debug,
+            ("0x%p IMEContentObserver::OnIMEReceivedFocus(), "
+             "but mRootContent has already been cleared, so does nothing",
+             this));
     return;
   }
 
@@ -326,7 +339,7 @@ void IMEContentObserver::ObserveEditableNode() {
   mRootContent->AddMutationObserver(this);
   // If it's in a document (should be so), we can use document observer to
   // reduce redundant computation of text change offsets.
-  dom::Document* doc = mRootContent->GetComposedDoc();
+  Document* doc = mRootContent->GetComposedDoc();
   if (doc) {
     RefPtr<DocumentObserver> documentObserver = mDocumentObserver;
     documentObserver->Observe(doc);
@@ -455,6 +468,12 @@ bool IMEContentObserver::IsManaging(nsPresContext* aPresContext,
          IsObservingContent(aPresContext, aContent);
 }
 
+bool IMEContentObserver::IsBeingInitializedFor(nsPresContext* aPresContext,
+                                               nsIContent* aContent) const {
+  return GetState() == eState_Initializing &&
+         IsObservingContent(aPresContext, aContent);
+}
+
 bool IMEContentObserver::IsManaging(const TextComposition* aComposition) const {
   if (GetState() != eState_Observing) {
     return false;
@@ -513,7 +532,7 @@ bool IMEContentObserver::IsEditorComposing() const {
 }
 
 nsresult IMEContentObserver::GetSelectionAndRoot(
-    dom::Selection** aSelection, nsIContent** aRootContent) const {
+    Selection** aSelection, nsIContent** aRootContent) const {
   if (!mEditableNode || !mSelection) {
     return NS_ERROR_NOT_AVAILABLE;
   }
@@ -524,7 +543,7 @@ nsresult IMEContentObserver::GetSelectionAndRoot(
   return NS_OK;
 }
 
-void IMEContentObserver::OnSelectionChange(dom::Selection& aSelection) {
+void IMEContentObserver::OnSelectionChange(Selection& aSelection) {
   if (!mIsObserving) {
     return;
   }
@@ -713,10 +732,10 @@ bool IMEContentObserver::OnMouseButtonEvent(nsPresContext* aPresContext,
   notification.mMouseButtonEventData.mEventMessage = aMouseEvent->mMessage;
   notification.mMouseButtonEventData.mOffset =
       queryCharAtPointEvent.mReply->StartOffset();
-  notification.mMouseButtonEventData.mCursorPos.Set(
-      queryCharAtPointEvent.mRefPoint.ToUnknownPoint());
-  notification.mMouseButtonEventData.mCharRect.Set(
-      queryCharAtPointEvent.mReply->mRect.ToUnknownRect());
+  notification.mMouseButtonEventData.mCursorPos =
+      queryCharAtPointEvent.mRefPoint;
+  notification.mMouseButtonEventData.mCharRect =
+      queryCharAtPointEvent.mReply->mRect;
   notification.mMouseButtonEventData.mButton = aMouseEvent->mButton;
   notification.mMouseButtonEventData.mButtons = aMouseEvent->mButtons;
   notification.mMouseButtonEventData.mModifiers = aMouseEvent->mModifiers;
@@ -735,7 +754,10 @@ bool IMEContentObserver::OnMouseButtonEvent(nsPresContext* aPresContext,
 
 void IMEContentObserver::CharacterDataWillChange(
     nsIContent* aContent, const CharacterDataChangeInfo& aInfo) {
-  NS_ASSERTION(aContent->IsText(), "character data changed for non-text node");
+  if (!aContent->IsText()) {
+    return;  // Ignore if it's a comment node or something other invisible data
+             // node.
+  }
   MOZ_ASSERT(mPreCharacterDataChangeLength < 0,
              "CharacterDataChanged() should've reset "
              "mPreCharacterDataChangeLength");
@@ -755,7 +777,7 @@ void IMEContentObserver::CharacterDataWillChange(
   MaybeNotifyIMEOfAddedTextDuringDocumentChange();
 
   mPreCharacterDataChangeLength = ContentEventHandler::GetNativeTextLength(
-      aContent, aInfo.mChangeStart, aInfo.mChangeEnd);
+      *aContent->AsText(), aInfo.mChangeStart, aInfo.mChangeEnd);
   MOZ_ASSERT(
       mPreCharacterDataChangeLength >= aInfo.mChangeEnd - aInfo.mChangeStart,
       "The computed length must be same as or larger than XP length");
@@ -763,7 +785,10 @@ void IMEContentObserver::CharacterDataWillChange(
 
 void IMEContentObserver::CharacterDataChanged(
     nsIContent* aContent, const CharacterDataChangeInfo& aInfo) {
-  NS_ASSERTION(aContent->IsText(), "character data changed for non-text node");
+  if (!aContent->IsText()) {
+    return;  // Ignore if it's a comment node or something other invisible data
+             // node.
+  }
 
   if (!NeedsTextChangeNotification() ||
       !nsContentUtils::IsInSameAnonymousTree(mRootContent, aContent)) {
@@ -793,7 +818,8 @@ void IMEContentObserver::CharacterDataChanged(
   }
 
   uint32_t newLength = ContentEventHandler::GetNativeTextLength(
-      aContent, aInfo.mChangeStart, aInfo.mChangeStart + aInfo.mReplaceLength);
+      *aContent->AsText(), aInfo.mChangeStart,
+      aInfo.mChangeStart + aInfo.mReplaceLength);
 
   uint32_t oldEnd = offset + static_cast<uint32_t>(removedLength);
   uint32_t newEnd = offset + newLength;
@@ -944,8 +970,8 @@ void IMEContentObserver::ContentRemoved(nsIContent* aChild,
 
   // get offset at the end of the deleted node
   uint32_t textLength = 0;
-  if (aChild->IsText()) {
-    textLength = ContentEventHandler::GetNativeTextLength(aChild);
+  if (const Text* textNode = Text::FromNode(aChild)) {
+    textLength = ContentEventHandler::GetNativeTextLength(*textNode);
   } else {
     uint32_t nodeLength = static_cast<int32_t>(aChild->GetChildCount());
     rv = ContentEventHandler::GetFlatTextLengthInRange(
@@ -1400,9 +1426,30 @@ void IMEContentObserver::FlushMergeableNotifications() {
 }
 
 void IMEContentObserver::TryToFlushPendingNotifications(bool aAllowAsync) {
-  if (!mQueuedSender || mSendingNotification != NOTIFY_IME_OF_NOTHING ||
-      (XRE_IsContentProcess() && aAllowAsync)) {
+  // If a sender instance is sending notifications, we shouldn't try to create
+  // a new sender again because the sender will recreate by itself if there are
+  // new pending notifications.
+  if (mSendingNotification != NOTIFY_IME_OF_NOTHING) {
     return;
+  }
+
+  // When the caller allows to put off notifying IME, we can wait the next
+  // call of this method or to run the queued sender.
+  if (mQueuedSender && XRE_IsContentProcess() && aAllowAsync) {
+    return;
+  }
+
+  if (!mQueuedSender) {
+    // If it was not safe to dispatch notifications when the pending
+    // notifications are posted, this may not have IMENotificationSender
+    // instance because it couldn't dispatch it, e.g., when an edit sub-action
+    // is being handled in the editor, we shouldn't do it even if it's safe to
+    // run script.  Therefore, we need to create the sender instance here in the
+    // case.
+    if (!NeedsToNotifyIMEOfSomething()) {
+      return;
+    }
+    mQueuedSender = new IMENotificationSender(this);
   }
 
   MOZ_LOG(sIMECOLog, LogLevel::Debug,
@@ -1953,12 +2000,12 @@ NS_INTERFACE_MAP_END
 NS_IMPL_CYCLE_COLLECTING_ADDREF(IMEContentObserver::DocumentObserver)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(IMEContentObserver::DocumentObserver)
 
-void IMEContentObserver::DocumentObserver::Observe(dom::Document* aDocument) {
+void IMEContentObserver::DocumentObserver::Observe(Document* aDocument) {
   MOZ_ASSERT(aDocument);
 
   // Guarantee that aDocument won't be destroyed during a call of
   // StopObserving().
-  RefPtr<dom::Document> newDocument = aDocument;
+  RefPtr<Document> newDocument = aDocument;
 
   StopObserving();
 
@@ -1975,7 +2022,7 @@ void IMEContentObserver::DocumentObserver::StopObserving() {
   RefPtr<IMEContentObserver> observer = std::move(mIMEContentObserver);
 
   // Stop observing the document first.
-  RefPtr<dom::Document> document = std::move(mDocument);
+  RefPtr<Document> document = std::move(mDocument);
   document->RemoveObserver(this);
 
   // Notify IMEContentObserver of ending of document updates if this already
@@ -1994,8 +2041,7 @@ void IMEContentObserver::DocumentObserver::Destroy() {
   mIMEContentObserver = nullptr;
 }
 
-void IMEContentObserver::DocumentObserver::BeginUpdate(
-    dom::Document* aDocument) {
+void IMEContentObserver::DocumentObserver::BeginUpdate(Document* aDocument) {
   if (NS_WARN_IF(Destroyed()) || NS_WARN_IF(!IsObserving())) {
     return;
   }
@@ -2003,7 +2049,7 @@ void IMEContentObserver::DocumentObserver::BeginUpdate(
   mIMEContentObserver->BeginDocumentUpdate();
 }
 
-void IMEContentObserver::DocumentObserver::EndUpdate(dom::Document* aDocument) {
+void IMEContentObserver::DocumentObserver::EndUpdate(Document* aDocument) {
   if (NS_WARN_IF(Destroyed()) || NS_WARN_IF(!IsObserving()) ||
       NS_WARN_IF(!IsUpdating())) {
     return;

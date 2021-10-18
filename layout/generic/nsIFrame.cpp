@@ -17,6 +17,8 @@
 #include "mozilla/ComputedStyle.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/DisplayPortUtils.h"
+#include "mozilla/dom/DocumentInlines.h"
+#include "mozilla/dom/AncestorIterator.h"
 #include "mozilla/dom/ElementInlines.h"
 #include "mozilla/dom/ImageTracker.h"
 #include "mozilla/dom/Selection.h"
@@ -29,6 +31,7 @@
 #include "mozilla/Sprintf.h"
 #include "mozilla/StaticAnalysisFunctions.h"
 #include "mozilla/StaticPrefs_layout.h"
+#include "mozilla/StaticPrefs_print.h"
 #include "mozilla/SVGMaskFrame.h"
 #include "mozilla/SVGObserverUtils.h"
 #include "mozilla/SVGTextFrame.h"
@@ -38,6 +41,7 @@
 #include "mozilla/ViewportUtils.h"
 
 #include "nsCOMPtr.h"
+#include "nsFieldSetFrame.h"
 #include "nsFlexContainerFrame.h"
 #include "nsFrameList.h"
 #include "nsPlaceholderFrame.h"
@@ -67,6 +71,7 @@
 #include "nsInlineFrame.h"
 #include "nsFrameSelection.h"
 #include "nsGkAtoms.h"
+#include "nsGridContainerFrame.h"
 #include "nsCSSAnonBoxes.h"
 #include "nsCanvasFrame.h"
 
@@ -77,8 +82,6 @@
 #include "nsNameSpaceManager.h"
 #include "nsIPercentBSizeObserver.h"
 #include "nsStyleStructInlines.h"
-#include "FrameLayerBuilder.h"
-#include "ImageLayers.h"
 
 #include "nsBidiPresUtils.h"
 #include "RubyUtils.h"
@@ -105,6 +108,10 @@
 #include "nsIFrameInlines.h"
 #include "nsStyleChangeList.h"
 #include "nsWindowSizes.h"
+
+#ifdef ACCESSIBILITY
+#  include "nsAccessibilityService.h"
+#endif
 
 #include "mozilla/AsyncEventDispatcher.h"
 #include "mozilla/CSSClipPathInstance.h"
@@ -408,7 +415,7 @@ bool nsIFrame::IsVisibleConsideringAncestors(uint32_t aFlags) const {
     if (parent) {
       frame = parent;
     } else {
-      parent = nsLayoutUtils::GetCrossDocParentFrame(frame);
+      parent = nsLayoutUtils::GetCrossDocParentFrameInProcess(frame);
       if (!parent) break;
 
       if ((aFlags & nsIFrame::VISIBILITY_CROSS_CHROME_CONTENT_BOUNDARY) == 0 &&
@@ -565,16 +572,17 @@ static bool IsFontSizeInflationContainer(nsIFrame* aFrame,
   bool isInline =
       (nsStyleDisplay::IsInlineFlow(aFrame->GetDisplay()) ||
        RubyUtils::IsRubyBox(frameType) ||
-       (aFrame->IsFloating() && frameType == LayoutFrameType::Letter) ||
+       (aStyleDisplay->IsFloatingStyle() &&
+        frameType == LayoutFrameType::Letter) ||
        // Given multiple frames for the same node, only the
        // outer one should be considered a container.
        // (Important, e.g., for nsSelectsAreaFrame.)
        (aFrame->GetParent()->GetContent() == content) ||
        (content &&
         // Form controls shouldn't become inflation containers.
-        (content->IsAnyOfHTMLElements(nsGkAtoms::option, nsGkAtoms::optgroup,
-                                      nsGkAtoms::select, nsGkAtoms::input,
-                                      nsGkAtoms::button)))) &&
+        (content->IsAnyOfHTMLElements(
+            nsGkAtoms::option, nsGkAtoms::optgroup, nsGkAtoms::select,
+            nsGkAtoms::input, nsGkAtoms::button, nsGkAtoms::textarea)))) &&
       !(aFrame->IsXULBoxFrame() && aFrame->GetParent()->IsXULBoxFrame());
   NS_ASSERTION(!aFrame->IsFrameOfType(nsIFrame::eLineParticipant) || isInline ||
                    // br frames and mathml frames report being line
@@ -583,8 +591,6 @@ static bool IsFontSizeInflationContainer(nsIFrame* aFrame,
                    aFrame->IsBrFrame() ||
                    aFrame->IsFrameOfType(nsIFrame::eMathML),
                "line participants must not be containers");
-  NS_ASSERTION(!aFrame->IsBulletFrame() || isInline,
-               "bullets should not be containers");
   return !isInline;
 }
 
@@ -627,6 +633,13 @@ bool nsIFrame::IsPrimaryFrameOfRootOrBodyElement() const {
   Document* document = content->OwnerDoc();
   return content == document->GetRootElement() ||
          content == document->GetBodyElement();
+}
+
+bool nsIFrame::IsRenderedLegend() const {
+  if (auto* parent = GetParent(); parent && parent->IsFieldSetFrame()) {
+    return static_cast<nsFieldSetFrame*>(parent)->GetLegend() == this;
+  }
+  return false;
 }
 
 void nsIFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
@@ -929,10 +942,8 @@ void nsIFrame::DestroyFrom(nsIFrame* aDestructRoot,
   presShell->FreeFrame(id, this);
 }
 
-nsresult nsIFrame::GetOffsets(int32_t& aStart, int32_t& aEnd) const {
-  aStart = 0;
-  aEnd = 0;
-  return NS_OK;
+std::pair<int32_t, int32_t> nsIFrame::GetOffsets() const {
+  return std::make_pair(0, 0);
 }
 
 static void CompareLayers(
@@ -981,48 +992,23 @@ static void AddAndRemoveImageAssociations(
   });
 }
 
-void nsIFrame::AddDisplayItem(nsDisplayItemBase* aItem) {
-  DisplayItemArray* items = GetProperty(DisplayItems());
-  if (!items) {
-    items = new DisplayItemArray();
-    AddProperty(DisplayItems(), items);
-  }
-  MOZ_DIAGNOSTIC_ASSERT(!items->Contains(aItem));
-  items->AppendElement(aItem);
+void nsIFrame::AddDisplayItem(nsDisplayItem* aItem) {
+  MOZ_DIAGNOSTIC_ASSERT(!mDisplayItems.Contains(aItem));
+  mDisplayItems.AppendElement(aItem);
 }
 
-bool nsIFrame::RemoveDisplayItem(nsDisplayItemBase* aItem) {
-  DisplayItemArray* items = GetProperty(DisplayItems());
-  if (!items) {
-    return false;
-  }
-  bool result = items->RemoveElement(aItem);
-  if (items->IsEmpty()) {
-    RemoveProperty(DisplayItems());
-  }
-  return result;
+bool nsIFrame::RemoveDisplayItem(nsDisplayItem* aItem) {
+  return mDisplayItems.RemoveElement(aItem);
 }
 
-bool nsIFrame::HasDisplayItems() {
-  DisplayItemArray* items = GetProperty(DisplayItems());
-  return items != nullptr;
-}
+bool nsIFrame::HasDisplayItems() { return !mDisplayItems.IsEmpty(); }
 
-bool nsIFrame::HasDisplayItem(nsDisplayItemBase* aItem) {
-  DisplayItemArray* items = GetProperty(DisplayItems());
-  if (!items) {
-    return false;
-  }
-  return items->Contains(aItem);
+bool nsIFrame::HasDisplayItem(nsDisplayItem* aItem) {
+  return mDisplayItems.Contains(aItem);
 }
 
 bool nsIFrame::HasDisplayItem(uint32_t aKey) {
-  DisplayItemArray* items = GetProperty(DisplayItems());
-  if (!items) {
-    return false;
-  }
-
-  for (nsDisplayItemBase* i : *items) {
+  for (nsDisplayItem* i : mDisplayItems) {
     if (i->GetPerFrameKey() == aKey) {
       return true;
     }
@@ -1032,12 +1018,7 @@ bool nsIFrame::HasDisplayItem(uint32_t aKey) {
 
 template <typename Condition>
 static void DiscardDisplayItems(nsIFrame* aFrame, Condition aCondition) {
-  auto* items = aFrame->GetProperty(nsIFrame::DisplayItems());
-  if (!items) {
-    return;
-  }
-
-  for (nsDisplayItemBase* i : *items) {
+  for (nsDisplayItem* i : aFrame->DisplayItems()) {
     // Only discard items that are invalidated by this frame, as we're only
     // guaranteed to rebuild those items. Table background items are created by
     // the relevant table part, but have the cell frame as the primary frame,
@@ -1049,8 +1030,8 @@ static void DiscardDisplayItems(nsIFrame* aFrame, Condition aCondition) {
 }
 
 static void DiscardOldItems(nsIFrame* aFrame) {
-  DiscardDisplayItems(
-      aFrame, [](nsDisplayItemBase* aItem) { return aItem->IsOldItem(); });
+  DiscardDisplayItems(aFrame,
+                      [](nsDisplayItem* aItem) { return aItem->IsOldItem(); });
 }
 
 void nsIFrame::RemoveDisplayItemDataForDeletion() {
@@ -1064,25 +1045,32 @@ void nsIFrame::RemoveDisplayItemDataForDeletion() {
   WebRenderUserDataTable* userDataTable =
       TakeProperty(WebRenderUserDataProperty::Key());
   if (userDataTable) {
-    for (auto iter = userDataTable->Iter(); !iter.Done(); iter.Next()) {
-      iter.UserData()->RemoveFromTable();
+    for (const auto& data : userDataTable->Values()) {
+      data->RemoveFromTable();
     }
     delete userDataTable;
   }
 
-  FrameLayerBuilder::RemoveFrameFromLayerManager(this, DisplayItemData());
-  DisplayItemData().Clear();
-
-  DisplayItemArray* items = TakeProperty(DisplayItems());
-  if (items) {
-    for (nsDisplayItemBase* i : *items) {
-      if (i->GetDependentFrame() == this && !i->HasDeletedFrame()) {
-        i->Frame()->MarkNeedsDisplayItemRebuild();
-      }
-      i->RemoveFrame(this);
+  if (IsSubDocumentFrame()) {
+    const nsSubDocumentFrame* subdoc =
+        static_cast<const nsSubDocumentFrame*>(this);
+    nsFrameLoader* frameLoader = subdoc->FrameLoader();
+    if (frameLoader && frameLoader->GetRemoteBrowser()) {
+      // This is a remote browser that is going away, notify it that it is now
+      // hidden
+      frameLoader->GetRemoteBrowser()->UpdateEffects(
+          mozilla::dom::EffectsInfo::FullyHidden());
     }
-    delete items;
   }
+
+  for (nsDisplayItem* i : DisplayItems()) {
+    if (i->GetDependentFrame() == this && !i->HasDeletedFrame()) {
+      i->Frame()->MarkNeedsDisplayItemRebuild();
+    }
+    i->RemoveFrame(this);
+  }
+
+  DisplayItems().Clear();
 
   if (!nsLayoutUtils::AreRetainedDisplayListsEnabled()) {
     // Retained display lists are disabled, no need to update
@@ -1163,20 +1151,17 @@ void nsIFrame::MarkNeedsDisplayItemRebuild() {
 
   // Hopefully this is cheap, but we could use a frame state bit to note
   // the presence of dependencies to speed it up.
-  DisplayItemArray* items = GetProperty(DisplayItems());
-  if (items) {
-    for (nsDisplayItemBase* i : *items) {
-      if (i->HasDeletedFrame() || i->Frame() == this) {
-        // Ignore the items with deleted frames, and the items with |this| as
-        // the primary frame.
-        continue;
-      }
+  for (nsDisplayItem* i : DisplayItems()) {
+    if (i->HasDeletedFrame() || i->Frame() == this) {
+      // Ignore the items with deleted frames, and the items with |this| as
+      // the primary frame.
+      continue;
+    }
 
-      if (i->GetDependentFrame() == this) {
-        // For items with |this| as a dependent frame, mark the primary frame
-        // for rebuild.
-        i->Frame()->MarkNeedsDisplayItemRebuild();
-      }
+    if (i->GetDependentFrame() == this) {
+      // For items with |this| as a dependent frame, mark the primary frame
+      // for rebuild.
+      i->Frame()->MarkNeedsDisplayItemRebuild();
     }
   }
 }
@@ -1719,6 +1704,10 @@ WritingMode nsIFrame::WritingModeForLine(WritingMode aSelfWM,
   return writingMode;
 }
 
+nsRect nsIFrame::GetMarginRect() const {
+  return GetMarginRectRelativeToSelf() + GetPosition();
+}
+
 nsRect nsIFrame::GetMarginRectRelativeToSelf() const {
   nsMargin m = GetUsedMargin().ApplySkipSides(GetSkipSides());
   nsRect r(0, 0, mRect.width, mRect.height);
@@ -1726,14 +1715,18 @@ nsRect nsIFrame::GetMarginRectRelativeToSelf() const {
   return r;
 }
 
-bool nsIFrame::IsTransformed(const nsStyleDisplay* aStyleDisplay) const {
-  return IsCSSTransformed(aStyleDisplay) || IsSVGTransformed();
+bool nsIFrame::IsTransformed() const {
+  if (!HasAnyStateBits(NS_FRAME_MAY_BE_TRANSFORMED)) {
+    MOZ_ASSERT(!IsCSSTransformed());
+    MOZ_ASSERT(!IsSVGTransformed());
+    return false;
+  }
+  return IsCSSTransformed() || IsSVGTransformed();
 }
 
-bool nsIFrame::IsCSSTransformed(const nsStyleDisplay* aStyleDisplay) const {
-  MOZ_ASSERT(aStyleDisplay == StyleDisplay());
-  return ((mState & NS_FRAME_MAY_BE_TRANSFORMED) &&
-          (aStyleDisplay->HasTransform(this) || HasAnimationOfTransform()));
+bool nsIFrame::IsCSSTransformed() const {
+  return HasAnyStateBits(NS_FRAME_MAY_BE_TRANSFORMED) &&
+         (StyleDisplay()->HasTransform(this) || HasAnimationOfTransform());
 }
 
 bool nsIFrame::HasAnimationOfTransform() const {
@@ -1808,34 +1801,30 @@ bool nsIFrame::Extend3DContext(const nsStyleDisplay* aStyleDisplay,
          disp->mIsolation != StyleIsolation::Isolate;
 }
 
-bool nsIFrame::Combines3DTransformWithAncestors(
-    const nsStyleDisplay* aStyleDisplay) const {
-  MOZ_ASSERT(aStyleDisplay == StyleDisplay());
+bool nsIFrame::Combines3DTransformWithAncestors() const {
   nsIFrame* parent = GetClosestFlattenedTreeAncestorPrimaryFrame();
   if (!parent || !parent->Extend3DContext()) {
     return false;
   }
-  return IsCSSTransformed(aStyleDisplay) || BackfaceIsHidden(aStyleDisplay);
+  return IsCSSTransformed() || BackfaceIsHidden();
 }
 
 bool nsIFrame::In3DContextAndBackfaceIsHidden() const {
   // While both tests fail most of the time, test BackfaceIsHidden()
   // first since it's likely to fail faster.
-  const nsStyleDisplay* disp = StyleDisplay();
-  return BackfaceIsHidden(disp) && Combines3DTransformWithAncestors(disp);
+  return BackfaceIsHidden() && Combines3DTransformWithAncestors();
 }
 
 bool nsIFrame::HasPerspective(const nsStyleDisplay* aStyleDisplay) const {
   MOZ_ASSERT(aStyleDisplay == StyleDisplay());
-  if (!IsTransformed(aStyleDisplay)) {
+  if (!IsTransformed()) {
     return false;
   }
-  nsIFrame* containingBlock =
-      GetContainingBlock(SKIP_SCROLLED_FRAME, aStyleDisplay);
-  if (!containingBlock) {
+  nsIFrame* parent = GetClosestFlattenedTreeAncestorPrimaryFrame();
+  if (!parent) {
     return false;
   }
-  return containingBlock->ChildrenHavePerspective();
+  return parent->ChildrenHavePerspective();
 }
 
 nsRect nsIFrame::GetContentRectRelativeToSelf() const {
@@ -2174,7 +2163,7 @@ void nsIFrame::UpdateVisibilitySynchronously() {
     }
     nsIFrame* parent = f->GetParent();
     if (!parent) {
-      parent = nsLayoutUtils::GetCrossDocParentFrame(f);
+      parent = nsLayoutUtils::GetCrossDocParentFrameInProcess(f);
       if (parent && parent->PresContext()->IsChrome()) {
         break;
       }
@@ -2351,12 +2340,9 @@ already_AddRefed<ComputedStyle> nsIFrame::ComputeSelectionStyle(
 
 template <typename SizeOrMaxSize>
 static inline bool IsIntrinsicKeyword(const SizeOrMaxSize& aSize) {
-  if (!aSize.IsExtremumLength()) {
-    return false;
-  }
-
-  // All of the keywords except for '-moz-available' depend on intrinsic sizes.
-  return aSize.AsExtremumLength() != StyleExtremumLength::MozAvailable;
+  // All keywords other than auto/none/-moz-available depend on intrinsic sizes.
+  return aSize.IsMaxContent() || aSize.IsMinContent() || aSize.IsFitContent() ||
+         aSize.IsFitContentFunction();
 }
 
 bool nsIFrame::CanBeDynamicReflowRoot() const {
@@ -2576,19 +2562,31 @@ bool nsIFrame::DisplayBackgroundUnconditional(nsDisplayListBuilder* aBuilder,
     return false;
   }
 
+  AppendedBackgroundType result = AppendedBackgroundType::None;
+
   // Here we don't try to detect background propagation. Frames that might
   // receive a propagated background should just set aForceBackground to
   // true.
   if (hitTesting || aForceBackground ||
       !StyleBackground()->IsTransparent(this) ||
-      StyleDisplay()->HasAppearance()) {
-    return nsDisplayBackgroundImage::AppendBackgroundItemsToTop(
+      StyleDisplay()->HasAppearance() ||
+      // We do forcibly create a display item for background color animations
+      // even if the current background-color is transparent so that we can
+      // run the animations on the compositor.
+      EffectCompositor::HasAnimationsForCompositor(
+          this, DisplayItemType::TYPE_BACKGROUND_COLOR)) {
+    result = nsDisplayBackgroundImage::AppendBackgroundItemsToTop(
         aBuilder, this,
         GetRectRelativeToSelf() + aBuilder->ToReferenceFrame(this),
         aLists.BorderBackground());
   }
 
-  return false;
+  if (result == AppendedBackgroundType::None) {
+    aBuilder->BuildCompositorHitTestInfoIfNeeded(this,
+                                                 aLists.BorderBackground());
+  }
+
+  return result == AppendedBackgroundType::ThemedBackground;
 }
 
 void nsIFrame::DisplayBorderBackgroundOutline(nsDisplayListBuilder* aBuilder,
@@ -2790,11 +2788,6 @@ static void DisplayDebugBorders(nsDisplayListBuilder* aBuilder,
 }
 #endif
 
-static bool IsScrollFrameActive(nsDisplayListBuilder* aBuilder,
-                                nsIScrollableFrame* aScrollableFrame) {
-  return aScrollableFrame && aScrollableFrame->IsScrollingActive(aBuilder);
-}
-
 /**
  * Returns whether a display item that gets created with the builder's current
  * state will have a scrolled clip, i.e. a clip that is scrolled by a scroll
@@ -2865,6 +2858,19 @@ static void CheckForApzAwareEventHandlers(nsDisplayListBuilder* aBuilder,
   if (content->IsNodeApzAware()) {
     aBuilder->SetAncestorHasApzAwareEventHandler(true);
   }
+}
+
+static void UpdateCurrentHitTestInfo(nsDisplayListBuilder* aBuilder,
+                                     nsIFrame* aFrame) {
+  if (!aBuilder->BuildCompositorHitTestInfo()) {
+    // Compositor hit test info is not used.
+    return;
+  }
+
+  CheckForApzAwareEventHandlers(aBuilder, aFrame);
+
+  const CompositorHitTestInfo info = aFrame->GetCompositorHitTestInfo(aBuilder);
+  aBuilder->SetCompositorHitTestInfo(info);
 }
 
 /**
@@ -3075,28 +3081,6 @@ struct ContainerTracker {
   bool mCreatedContainer = false;
 };
 
-/**
- * Adds hit test information |aHitTestInfo| on the container item |aContainer|,
- * or if the container item is null, creates a separate hit test item that is
- * added to the bottom of the display list |aList|.
- */
-static void AddHitTestInfo(nsDisplayListBuilder* aBuilder, nsDisplayList* aList,
-                           nsDisplayItem* aContainer, nsIFrame* aFrame,
-                           mozilla::UniquePtr<HitTestInfo>&& aHitTestInfo) {
-  nsDisplayHitTestInfoBase* hitTestItem;
-
-  if (aContainer) {
-    MOZ_ASSERT(aContainer->IsHitTestItem());
-    hitTestItem = static_cast<nsDisplayHitTestInfoBase*>(aContainer);
-    hitTestItem->SetHitTestInfo(std::move(aHitTestInfo));
-  } else {
-    // No container item was created for this frame. Create a separate
-    // nsDisplayCompositorHitTestInfo item instead.
-    aList->AppendNewToBottom<nsDisplayCompositorHitTestInfo>(
-        aBuilder, aFrame, std::move(aHitTestInfo));
-  }
-}
-
 void nsIFrame::BuildDisplayListForStackingContext(
     nsDisplayListBuilder* aBuilder, nsDisplayList* aList,
     bool* aCreatedContainerItem) {
@@ -3113,9 +3097,8 @@ void nsIFrame::BuildDisplayListForStackingContext(
       this, nsCSSPropertyIDSet::OpacityProperties());
   // We can stop right away if this is a zero-opacity stacking context and
   // we're painting, and we're not animating opacity.
-  bool needHitTestInfo =
-      aBuilder->BuildCompositorHitTestInfo() &&
-      StyleUI()->GetEffectivePointerEvents(this) != StylePointerEvents::None;
+  bool needHitTestInfo = aBuilder->BuildCompositorHitTestInfo() &&
+                         Style()->PointerEvents() != StylePointerEvents::None;
   bool opacityItemForEventsOnly = false;
   if (effects->mOpacity == 0.0 && aBuilder->IsForPainting() &&
       !(disp->mWillChange.bits & StyleWillChangeBits::OPACITY) &&
@@ -3151,13 +3134,12 @@ void nsIFrame::BuildDisplayListForStackingContext(
       HasVisualOpacity(disp, effects, effectSetForOpacity) &&
       !SVGUtils::CanOptimizeOpacity(this);
 
-  const bool isTransformed = IsTransformed(disp);
+  const bool isTransformed = IsTransformed();
   const bool hasPerspective = isTransformed && HasPerspective(disp);
   const bool extend3DContext =
       Extend3DContext(disp, effects, effectSetForOpacity);
   const bool combines3DTransformWithAncestors =
-      (extend3DContext || isTransformed) &&
-      Combines3DTransformWithAncestors(disp);
+      (extend3DContext || isTransformed) && Combines3DTransformWithAncestors();
 
   Maybe<nsDisplayListBuilder::AutoPreserves3DContext> autoPreserves3DContext;
   if (extend3DContext && !combines3DTransformWithAncestors) {
@@ -3259,8 +3241,12 @@ void nsIFrame::BuildDisplayListForStackingContext(
   // containing block), then we should assume we have one.
   // Either we have an explicit one, or nothing in our subtree changed and
   // we have an implicit empty rect.
+  //
+  // These conditions should match |CanStoreDisplayListBuildingRect()| in
+  // RetainedDisplayListBuilder.cpp
   if (aBuilder->IsPartialUpdate() && !aBuilder->InInvalidSubtree() &&
-      !IsFrameModified() && IsFixedPosContainingBlock()) {
+      !IsFrameModified() && IsFixedPosContainingBlock() &&
+      !GetPrevContinuation() && !GetNextContinuation()) {
     dirtyRect = nsRect();
     if (HasOverrideDirtyRegion()) {
       nsDisplayListBuilder::DisplayListBuildingData* data =
@@ -3286,13 +3272,16 @@ void nsIFrame::BuildDisplayListForStackingContext(
     aBuilder->EnterSVGEffectsContents(this, &hoistedScrollInfoItemsStorage);
   }
 
-  bool useStickyPosition =
-      disp->mPosition == StylePositionProperty::Sticky &&
-      IsScrollFrameActive(
-          aBuilder,
-          nsLayoutUtils::GetNearestScrollableFrame(
-              GetParent(), nsLayoutUtils::SCROLLABLE_SAME_DOC |
-                               nsLayoutUtils::SCROLLABLE_INCLUDE_HIDDEN));
+  bool useStickyPosition = false;
+  if (disp->mPosition == StylePositionProperty::Sticky) {
+    StickyScrollContainer* stickyScrollContainer =
+        StickyScrollContainer::GetStickyScrollContainerForFrame(this);
+    if (stickyScrollContainer &&
+        stickyScrollContainer->ScrollFrame()->IsMaybeAsynchronouslyScrolled()) {
+      useStickyPosition = true;
+    }
+  }
+
   bool useFixedPosition =
       disp->mPosition == StylePositionProperty::Fixed &&
       (DisplayPortUtils::IsFixedPosFrameInDisplayPort(this) ||
@@ -3300,6 +3289,8 @@ void nsIFrame::BuildDisplayListForStackingContext(
 
   nsDisplayListBuilder::AutoBuildingDisplayList buildingDisplayList(
       aBuilder, this, visibleRect, dirtyRect, isTransformed);
+
+  UpdateCurrentHitTestInfo(aBuilder, this);
 
   // Depending on the effects that are applied to this frame, we can create
   // multiple container display items and wrap them around our contents.
@@ -3390,8 +3381,6 @@ void nsIFrame::BuildDisplayListForStackingContext(
     ApplyClipProp(transformedCssClip);
   }
 
-  mozilla::UniquePtr<HitTestInfo> hitTestInfo;
-
   nsDisplayListCollection set(aBuilder);
   Maybe<nsRect> clipForMask;
   bool insertBackdropRoot;
@@ -3403,8 +3392,6 @@ void nsIFrame::BuildDisplayListForStackingContext(
                                                           usingFilter);
     nsDisplayListBuilder::AutoInEventsOnly inEventsSetter(
         aBuilder, opacityItemForEventsOnly);
-
-    CheckForApzAwareEventHandlers(aBuilder, this);
 
     // If we have a mask, compute a clip to bound the masked content.
     // This is necessary in case the content moves with an ancestor
@@ -3434,24 +3421,6 @@ void nsIFrame::BuildDisplayListForStackingContext(
     }
 
     aBuilder->AdjustWindowDraggingRegion(this);
-
-    if (gfxVars::UseWebRender()) {
-      aBuilder->BuildCompositorHitTestInfoIfNeeded(this, set.BorderBackground(),
-                                                   true);
-    } else {
-      CompositorHitTestInfo info = aBuilder->BuildCompositorHitTestInfo()
-                                       ? GetCompositorHitTestInfo(aBuilder)
-                                       : CompositorHitTestInvisibleToHit;
-
-      if (info != CompositorHitTestInvisibleToHit) {
-        // Frame has hit test flags set, initialize the hit test info structure.
-        hitTestInfo = mozilla::MakeUnique<HitTestInfo>(aBuilder, this, info);
-
-        // Let child frames know the current hit test area and hit test flags.
-        aBuilder->SetCompositorHitTestInfo(hitTestInfo->mArea,
-                                           hitTestInfo->mFlags);
-      }
-    }
 
     MarkAbsoluteFramesForDisplayList(aBuilder);
     aBuilder->Check();
@@ -3700,6 +3669,7 @@ void nsIFrame::BuildDisplayListForStackingContext(
       nsPoint toOuterReferenceFrame;
       const nsIFrame* outerReferenceFrame =
           aBuilder->FindReferenceFrameFor(GetParent(), &toOuterReferenceFrame);
+      toOuterReferenceFrame += GetPosition();
 
       buildingDisplayList.SetReferenceFrameAndCurrentOffset(
           outerReferenceFrame, toOuterReferenceFrame);
@@ -3826,13 +3796,6 @@ void nsIFrame::BuildDisplayListForStackingContext(
     *aCreatedContainerItem = ct.mCreatedContainer;
   }
 
-  if (hitTestInfo) {
-    // WebRender support is not yet implemented.
-    MOZ_ASSERT(!gfxVars::UseWebRender());
-    AddHitTestInfo(aBuilder, &resultList, ct.mContainer, this,
-                   std::move(hitTestInfo));
-  }
-
   aList->AppendToTop(&resultList);
 }
 
@@ -3850,7 +3813,7 @@ static nsDisplayItem* WrapInWrapList(nsDisplayListBuilder* aBuilder,
   // on which items we build, so we need to ensure that we don't transition
   // to/from a wrap list without invalidating correctly.
   bool needsWrapList =
-      item->GetAbove() || item->Frame() != aFrame || item->GetChildren();
+      aList->Count() > 1 || item->Frame() != aFrame || item->GetChildren();
 
   // If we have an explicit container item (that can't change without an
   // invalidation) or we're doing a full build and don't need a wrap list, then
@@ -3987,11 +3950,7 @@ void nsIFrame::BuildDisplayListForSimpleChild(nsDisplayListBuilder* aBuilder,
   nsDisplayListBuilder::AutoBuildingDisplayList buildingForChild(
       aBuilder, aChild, visible, dirty, false);
 
-  CheckForApzAwareEventHandlers(aBuilder, aChild);
-
-  aBuilder->BuildCompositorHitTestInfoIfNeeded(
-      aChild, aLists.BorderBackground(),
-      buildingForChild.IsAnimatedGeometryRoot());
+  UpdateCurrentHitTestInfo(aBuilder, aChild);
 
   aChild->MarkAbsoluteFramesForDisplayList(aBuilder);
   aBuilder->AdjustWindowDraggingRegion(aChild);
@@ -4043,6 +4002,21 @@ void nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder* aBuilder,
 
   if (ShouldSkipFrame(aBuilder, aChild)) {
     return;
+  }
+
+  // If we're generating a display list for printing, include Link items for
+  // frames that correspond to HTML link elements so that we can have active
+  // links in saved PDF output. Note that the state of "within a link" is
+  // set on the display-list builder, such that all descendants of the link
+  // element will generate display-list links.
+  // TODO: we should be able to optimize this so as to avoid creating links
+  // for the same destination that entirely overlap each other, which adds
+  // nothing useful to the final PDF.
+  Maybe<nsDisplayListBuilder::Linkifier> linkifier;
+  if (StaticPrefs::print_save_as_pdf_links_enabled() &&
+      aBuilder->IsForPrinting()) {
+    linkifier.emplace(aBuilder, aChild, aLists.Content());
+    linkifier->MaybeAppendLink(aBuilder, aChild);
   }
 
   nsIFrame* child = aChild;
@@ -4205,9 +4179,11 @@ void nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder* aBuilder,
 
   nsDisplayListBuilder::AutoBuildingDisplayList buildingForChild(
       aBuilder, child, visible, dirty);
+
+  UpdateCurrentHitTestInfo(aBuilder, child);
+
   DisplayListClipState::AutoClipMultiple clipState(aBuilder);
   nsDisplayListBuilder::AutoCurrentActiveScrolledRootSetter asrSetter(aBuilder);
-  CheckForApzAwareEventHandlers(aBuilder, child);
 
   if (savedOutOfFlowData) {
     aBuilder->SetBuildingInvisibleItems(false);
@@ -4278,8 +4254,6 @@ void nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder* aBuilder,
 
     child->MarkAbsoluteFramesForDisplayList(aBuilder);
 
-    const bool differentAGR = buildingForChild.IsAnimatedGeometryRoot();
-
     if (!awayFromCommonPath &&
         // Some SVG frames might change opacity without invalidating the frame,
         // so exclude them from the fast-path.
@@ -4292,10 +4266,6 @@ void nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder* aBuilder,
       // THIS IS THE COMMON CASE.
       // Not a pseudo or real stacking context. Do the simple thing and
       // return early.
-
-      aBuilder->BuildCompositorHitTestInfoIfNeeded(
-          child, aLists.BorderBackground(), differentAGR);
-
       aBuilder->AdjustWindowDraggingRegion(child);
       aBuilder->Check();
       child->BuildDisplayList(aBuilder, aLists);
@@ -4313,16 +4283,6 @@ void nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder* aBuilder,
     // z-index:non-auto
     nsDisplayListCollection pseudoStack(aBuilder);
 
-    // If this frame has z-index != 0, then the display item might get sorted
-    // into a different place in the list, and we can't rely on the previous
-    // hit test info to still be behind us. Force a new hit test info for this
-    // item, and for the item after it, so that we always have the right hit
-    // test info.
-    const bool mayBeSorted = ZIndex().valueOr(0) != 0;
-
-    aBuilder->BuildCompositorHitTestInfoIfNeeded(
-        child, pseudoStack.BorderBackground(), differentAGR || mayBeSorted);
-
     aBuilder->AdjustWindowDraggingRegion(child);
     nsDisplayListBuilder::AutoContainerASRTracker contASRTracker(aBuilder);
     aBuilder->Check();
@@ -4331,16 +4291,6 @@ void nsIFrame::BuildDisplayListForChild(nsDisplayListBuilder* aBuilder,
     if (aBuilder->DisplayCaret(child, pseudoStack.Outlines())) {
       builtContainerItem = false;
     }
-
-    // If we forced a new hit-test info because this frame is going to be
-    // sorted, then clear the 'previous' data on the builder so that the next
-    // item also gets a new hit test info. That way we're guaranteeing hit-test
-    // info before and after each item that might get moved to a different spot.
-    if (mayBeSorted) {
-      aBuilder->SetCompositorHitTestInfo(
-          nsRect(), CompositorHitTestFlags::eVisibleToHitTest);
-    }
-
     wrapListASR = contASRTracker.GetContainerASR();
 
     list.AppendToTop(pseudoStack.BorderBackground());
@@ -4429,7 +4379,23 @@ nsresult nsIFrame::HandleEvent(nsPresContext* aPresContext,
     } else if (aEvent->mMessage == eMouseUp || aEvent->mMessage == eTouchEnd) {
       HandleRelease(aPresContext, aEvent, aEventStatus);
     }
+    return NS_OK;
   }
+
+  // When middle button is down, we need to just move selection and focus at
+  // the clicked point.  Note that even if middle click paste is not enabled,
+  // Chrome moves selection at middle mouse button down.  So, we should follow
+  // the behavior for the compatibility.
+  if (aEvent->mMessage == eMouseDown) {
+    WidgetMouseEvent* mouseEvent = aEvent->AsMouseEvent();
+    if (mouseEvent && mouseEvent->mButton == MouseButton::eMiddle) {
+      if (*aEventStatus == nsEventStatus_eConsumeNoDefault) {
+        return NS_OK;
+      }
+      return MoveCaretToEventPoint(aPresContext, mouseEvent, aEventStatus);
+    }
+  }
+
   return NS_OK;
 }
 
@@ -4557,8 +4523,14 @@ static bool IsEditingHost(const nsIFrame* aFrame) {
   return element && element->IsEditableRoot();
 }
 
+static bool IsTopmostModalDialog(const nsIFrame* aFrame) {
+  auto* element = Element::FromNodeOrNull(aFrame->GetContent());
+  return element &&
+         element->State().HasState(NS_EVENT_STATE_TOPMOST_MODAL_DIALOG);
+}
+
 static StyleUserSelect UsedUserSelect(const nsIFrame* aFrame) {
-  if (aFrame->HasAnyStateBits(NS_FRAME_GENERATED_CONTENT)) {
+  if (aFrame->IsGeneratedContentFrame()) {
     return StyleUserSelect::None;
   }
 
@@ -4576,15 +4548,19 @@ static StyleUserSelect UsedUserSelect(const nsIFrame* aFrame) {
   //
   // Also, we check for auto first to allow explicitly overriding the value for
   // the editing host.
-  auto style = aFrame->StyleUIReset()->mUserSelect;
+  auto style = aFrame->Style()->UserSelect();
   if (style != StyleUserSelect::Auto) {
     return style;
   }
 
-  if (aFrame->IsTextInputFrame() || IsEditingHost(aFrame)) {
+  if (aFrame->IsTextInputFrame() || IsEditingHost(aFrame) ||
+      IsTopmostModalDialog(aFrame)) {
     // We don't implement 'contain' itself, but we make 'text' behave as
     // 'contain' for contenteditable and <input> / <textarea> elements anyway so
     // this is ok.
+    //
+    // Topmost modal dialogs need to behave like `text` too, because they're
+    // supposed to be selectable even if their ancestors are inert.
     return StyleUserSelect::Text;
   }
 
@@ -4624,27 +4600,34 @@ nsIFrame::HandlePress(nsPresContext* aPresContext, WidgetGUIEvent* aEvent,
     return NS_OK;
   }
 
-  // We often get out of sync state issues with mousedown events that
-  // get interrupted by alerts/dialogs.
-  // Check with the ESM to see if we should process this one
-  if (!aPresContext->EventStateManager()->EventStatusOK(aEvent)) return NS_OK;
+  return MoveCaretToEventPoint(aPresContext, aEvent->AsMouseEvent(),
+                               aEventStatus);
+}
+
+nsresult nsIFrame::MoveCaretToEventPoint(nsPresContext* aPresContext,
+                                         WidgetMouseEvent* aMouseEvent,
+                                         nsEventStatus* aEventStatus) {
+  MOZ_ASSERT(aPresContext);
+  MOZ_ASSERT(aMouseEvent);
+  MOZ_ASSERT(aMouseEvent->mMessage == eMouseDown);
+  MOZ_ASSERT(aMouseEvent->mButton == MouseButton::ePrimary ||
+             aMouseEvent->mButton == MouseButton::eMiddle);
+  MOZ_ASSERT(aEventStatus);
+  MOZ_ASSERT(nsEventStatus_eConsumeNoDefault != *aEventStatus);
 
   mozilla::PresShell* presShell = aPresContext->GetPresShell();
   if (!presShell) {
     return NS_ERROR_FAILURE;
   }
 
-  // if we are in Navigator and the click is in a draggable node, we don't want
-  // to start selection because we don't want to interfere with a potential
-  // drag of said node and steal all its glory.
-  int16_t isEditor = presShell->GetSelectionFlags();
-  // weaaak. only the editor can display frame selection not just text and
-  // images
-  isEditor = isEditor == nsISelectionDisplay::DISPLAY_ALL;
+  // We often get out of sync state issues with mousedown events that
+  // get interrupted by alerts/dialogs.
+  // Check with the ESM to see if we should process this one
+  if (!aPresContext->EventStateManager()->EventStatusOK(aMouseEvent)) {
+    return NS_OK;
+  }
 
-  WidgetMouseEvent* mouseEvent = aEvent->AsMouseEvent();
-
-  if (!mouseEvent->IsAlt()) {
+  if (!aMouseEvent->IsAlt()) {
     for (nsIContent* content = mContent; content;
          content = content->GetFlattenedTreeParent()) {
       if (nsContentUtils::ContentIsDraggable(content) &&
@@ -4652,12 +4635,22 @@ nsIFrame::HandlePress(nsPresContext* aPresContext, WidgetGUIEvent* aEvent,
         // coordinate stuff is the fix for bug #55921
         if ((mRect - GetPosition())
                 .Contains(nsLayoutUtils::GetEventCoordinatesRelativeTo(
-                    mouseEvent, RelativeTo{this}))) {
+                    aMouseEvent, RelativeTo{this}))) {
           return NS_OK;
         }
       }
     }
   }
+
+  // If we are in Navigator and the click is in a draggable node, we don't want
+  // to start selection because we don't want to interfere with a potential
+  // drag of said node and steal all its glory.
+  const bool isEditor =
+      presShell->GetSelectionFlags() == nsISelectionDisplay::DISPLAY_ALL;
+
+  // Don't do something if it's middle button down event.
+  const bool isPrimaryButtonDown =
+      aMouseEvent->mButton == MouseButton::ePrimary;
 
   // check whether style allows selection
   // if not, don't tell selection the mouse event even occurred.
@@ -4667,151 +4660,193 @@ nsIFrame::HandlePress(nsPresContext* aPresContext, WidgetGUIEvent* aEvent,
     return NS_OK;
   }
 
-  bool useFrameSelection = (selectStyle == StyleUserSelect::Text);
-
-  // If the mouse is dragged outside the nearest enclosing scrollable area
-  // while making a selection, the area will be scrolled. To do this, capture
-  // the mouse on the nearest scrollable frame. If there isn't a scrollable
-  // frame, or something else is already capturing the mouse, there's no
-  // reason to capture.
-  if (!PresShell::GetCapturingContent()) {
-    nsIScrollableFrame* scrollFrame = nsLayoutUtils::GetNearestScrollableFrame(
-        this, nsLayoutUtils::SCROLLABLE_SAME_DOC |
-                  nsLayoutUtils::SCROLLABLE_INCLUDE_HIDDEN);
-    if (scrollFrame) {
-      nsIFrame* capturingFrame = do_QueryFrame(scrollFrame);
-      PresShell::SetCapturingContent(capturingFrame->GetContent(),
-                                     CaptureFlags::IgnoreAllowedState);
+  if (isPrimaryButtonDown) {
+    // If the mouse is dragged outside the nearest enclosing scrollable area
+    // while making a selection, the area will be scrolled. To do this, capture
+    // the mouse on the nearest scrollable frame. If there isn't a scrollable
+    // frame, or something else is already capturing the mouse, there's no
+    // reason to capture.
+    if (!PresShell::GetCapturingContent()) {
+      nsIScrollableFrame* scrollFrame =
+          nsLayoutUtils::GetNearestScrollableFrame(
+              this, nsLayoutUtils::SCROLLABLE_SAME_DOC |
+                        nsLayoutUtils::SCROLLABLE_INCLUDE_HIDDEN);
+      if (scrollFrame) {
+        nsIFrame* capturingFrame = do_QueryFrame(scrollFrame);
+        PresShell::SetCapturingContent(capturingFrame->GetContent(),
+                                       CaptureFlags::IgnoreAllowedState);
+      }
     }
   }
 
   // XXX This is screwy; it really should use the selection frame, not the
   // event frame
-  const nsFrameSelection* frameselection = nullptr;
-  if (useFrameSelection)
-    frameselection = GetConstFrameSelection();
-  else
-    frameselection = presShell->ConstFrameSelection();
+  const nsFrameSelection* frameselection =
+      selectStyle == StyleUserSelect::Text ? GetConstFrameSelection()
+                                           : presShell->ConstFrameSelection();
 
   if (!frameselection || frameselection->GetDisplaySelection() ==
-                             nsISelectionController::SELECTION_OFF)
+                             nsISelectionController::SELECTION_OFF) {
     return NS_OK;  // nothing to do we cannot affect selection from here
+  }
 
 #ifdef XP_MACOSX
-  if (mouseEvent->IsControl())
-    return NS_OK;  // short circuit. hard coded for mac due to time restraints.
-  bool control = mouseEvent->IsMeta();
+  // If Control key is pressed on macOS, it should be treated as right click.
+  // So, don't change selection.
+  if (aMouseEvent->IsControl()) {
+    return NS_OK;
+  }
+  bool control = aMouseEvent->IsMeta();
 #else
-  bool control = mouseEvent->IsControl();
+  bool control = aMouseEvent->IsControl();
 #endif
 
   RefPtr<nsFrameSelection> fc = const_cast<nsFrameSelection*>(frameselection);
-  if (mouseEvent->mClickCount > 1) {
+  if (isPrimaryButtonDown && aMouseEvent->mClickCount > 1) {
     // These methods aren't const but can't actually delete anything,
     // so no need for AutoWeakFrame.
     fc->SetDragState(true);
-    return HandleMultiplePress(aPresContext, mouseEvent, aEventStatus, control);
+    return HandleMultiplePress(aPresContext, aMouseEvent, aEventStatus,
+                               control);
   }
 
-  nsPoint pt = nsLayoutUtils::GetEventCoordinatesRelativeTo(mouseEvent,
+  nsPoint pt = nsLayoutUtils::GetEventCoordinatesRelativeTo(aMouseEvent,
                                                             RelativeTo{this});
   ContentOffsets offsets = GetContentOffsetsFromPoint(pt, SKIP_HIDDEN);
 
-  if (!offsets.content) return NS_ERROR_FAILURE;
-
-  // Let Ctrl/Cmd+mouse down do table selection instead of drag initiation
-  nsCOMPtr<nsIContent> parentContent;
-  int32_t contentOffset;
-  TableSelectionMode target;
-  nsresult rv;
-  rv = GetDataForTableSelection(frameselection, presShell, mouseEvent,
-                                getter_AddRefs(parentContent), &contentOffset,
-                                &target);
-  if (NS_SUCCEEDED(rv) && parentContent) {
-    fc->SetDragState(true);
-    return fc->HandleTableSelection(parentContent, contentOffset, target,
-                                    mouseEvent);
+  if (!offsets.content) {
+    return NS_ERROR_FAILURE;
   }
 
-  fc->SetDelayedCaretData(0);
-
-  // Check if any part of this frame is selected, and if the
-  // user clicked inside the selected region. If so, we delay
-  // starting a new selection since the user may be trying to
-  // drag the selected region to some other app.
-
-  if (GetContent() && GetContent()->IsMaybeSelected()) {
-    bool inSelection = false;
-    UniquePtr<SelectionDetails> details = frameselection->LookUpSelection(
-        offsets.content, 0, offsets.EndOffset(), false);
-
-    //
-    // If there are any details, check to see if the user clicked
-    // within any selected region of the frame.
-    //
-
-    for (SelectionDetails* curDetail = details.get(); curDetail;
-         curDetail = curDetail->mNext.get()) {
-      //
-      // If the user clicked inside a selection, then just
-      // return without doing anything. We will handle placing
-      // the caret later on when the mouse is released. We ignore
-      // the spellcheck, find and url formatting selections.
-      //
-      if (curDetail->mSelectionType != SelectionType::eSpellCheck &&
-          curDetail->mSelectionType != SelectionType::eFind &&
-          curDetail->mSelectionType != SelectionType::eURLSecondary &&
-          curDetail->mSelectionType != SelectionType::eURLStrikeout &&
-          curDetail->mStart <= offsets.StartOffset() &&
-          offsets.EndOffset() <= curDetail->mEnd) {
-        inSelection = true;
-      }
-    }
-
-    if (inSelection) {
-      fc->SetDragState(false);
-      fc->SetDelayedCaretData(mouseEvent);
+  if (aMouseEvent->mMessage == eMouseDown &&
+      aMouseEvent->mButton == MouseButton::eMiddle &&
+      !offsets.content->IsEditable()) {
+    // However, some users don't like the Chrome compatible behavior of
+    // middle mouse click.  They want to keep selection after starting
+    // autoscroll.  However, the selection change is important for middle
+    // mouse past.  Therefore, we should allow users to take the traditional
+    // behavior back by themselves unless middle click paste is enabled or
+    // autoscrolling is disabled.
+    if (!Preferences::GetBool("middlemouse.paste", false) &&
+        Preferences::GetBool("general.autoScroll", false) &&
+        Preferences::GetBool("general.autoscroll.prevent_to_collapse_selection_"
+                             "by_middle_mouse_down",
+                             false)) {
       return NS_OK;
     }
   }
 
-  fc->SetDragState(true);
+  if (isPrimaryButtonDown) {
+    // Let Ctrl/Cmd + left mouse down do table selection instead of drag
+    // initiation.
+    nsCOMPtr<nsIContent> parentContent;
+    int32_t contentOffset;
+    TableSelectionMode target;
+    nsresult rv = GetDataForTableSelection(
+        frameselection, presShell, aMouseEvent, getter_AddRefs(parentContent),
+        &contentOffset, &target);
+    if (NS_SUCCEEDED(rv) && parentContent) {
+      fc->SetDragState(true);
+      return fc->HandleTableSelection(parentContent, contentOffset, target,
+                                      aMouseEvent);
+    }
+  }
+
+  fc->SetDelayedCaretData(0);
+
+  if (isPrimaryButtonDown) {
+    // Check if any part of this frame is selected, and if the user clicked
+    // inside the selected region, and if it's the left button. If so, we delay
+    // starting a new selection since the user may be trying to drag the
+    // selected region to some other app.
+
+    if (GetContent() && GetContent()->IsMaybeSelected()) {
+      bool inSelection = false;
+      UniquePtr<SelectionDetails> details = frameselection->LookUpSelection(
+          offsets.content, 0, offsets.EndOffset(), false);
+
+      //
+      // If there are any details, check to see if the user clicked
+      // within any selected region of the frame.
+      //
+
+      for (SelectionDetails* curDetail = details.get(); curDetail;
+           curDetail = curDetail->mNext.get()) {
+        //
+        // If the user clicked inside a selection, then just
+        // return without doing anything. We will handle placing
+        // the caret later on when the mouse is released. We ignore
+        // the spellcheck, find and url formatting selections.
+        //
+        if (curDetail->mSelectionType != SelectionType::eSpellCheck &&
+            curDetail->mSelectionType != SelectionType::eFind &&
+            curDetail->mSelectionType != SelectionType::eURLSecondary &&
+            curDetail->mSelectionType != SelectionType::eURLStrikeout &&
+            curDetail->mStart <= offsets.StartOffset() &&
+            offsets.EndOffset() <= curDetail->mEnd) {
+          inSelection = true;
+        }
+      }
+
+      if (inSelection) {
+        fc->SetDragState(false);
+        fc->SetDelayedCaretData(aMouseEvent);
+        return NS_OK;
+      }
+    }
+
+    fc->SetDragState(true);
+  }
 
   // Do not touch any nsFrame members after this point without adding
   // weakFrame checks.
   const nsFrameSelection::FocusMode focusMode = [&]() {
     // If "Shift" and "Ctrl" are both pressed, "Shift" is given precedence. This
     // mimics the old behaviour.
-    if (mouseEvent->IsShift()) {
+    if (aMouseEvent->IsShift()) {
+      // If clicked in a link when focused content is editable, we should
+      // collapse selection in the link for compatibility with Blink.
+      if (isEditor) {
+        nsCOMPtr<nsIURI> uri;
+        for (Element* element : mContent->InclusiveAncestorsOfType<Element>()) {
+          if (element->IsLink(getter_AddRefs(uri))) {
+            return nsFrameSelection::FocusMode::kCollapseToNewPoint;
+          }
+        }
+      }
       return nsFrameSelection::FocusMode::kExtendSelection;
     }
 
-    if (control) {
+    if (isPrimaryButtonDown && control) {
       return nsFrameSelection::FocusMode::kMultiRangeSelection;
     }
 
     return nsFrameSelection::FocusMode::kCollapseToNewPoint;
   }();
 
-  rv = fc->HandleClick(MOZ_KnownLive(offsets.content) /* bug 1636889 */,
-                       offsets.StartOffset(), offsets.EndOffset(), focusMode,
-                       offsets.associate);
+  nsresult rv = fc->HandleClick(
+      MOZ_KnownLive(offsets.content) /* bug 1636889 */, offsets.StartOffset(),
+      offsets.EndOffset(), focusMode, offsets.associate);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
-  if (NS_FAILED(rv)) return rv;
+  // We don't handle mouse button up if it's middle button.
+  if (isPrimaryButtonDown && offsets.offset != offsets.secondaryOffset) {
+    fc->MaintainSelection();
+  }
 
-  if (offsets.offset != offsets.secondaryOffset) fc->MaintainSelection();
-
-  if (isEditor && !mouseEvent->IsShift() &&
+  if (isPrimaryButtonDown && isEditor && !aMouseEvent->IsShift() &&
       (offsets.EndOffset() - offsets.StartOffset()) == 1) {
     // A single node is selected and we aren't extending an existing
     // selection, which means the user clicked directly on an object (either
-    // -moz-user-select: all or a non-text node without children).
+    // user-select: all or a non-text node without children).
     // Therefore, disable selection extension during mouse moves.
     // XXX This is a bit hacky; shouldn't editor be able to deal with this?
     fc->SetDragState(false);
   }
 
-  return rv;
+  return NS_OK;
 }
 
 nsresult nsIFrame::SelectByTypeAtPoint(nsPresContext* aPresContext,
@@ -4827,7 +4862,9 @@ nsresult nsIFrame::SelectByTypeAtPoint(nsPresContext* aPresContext,
   }
 
   ContentOffsets offsets = GetContentOffsetsFromPoint(aPoint, SKIP_HIDDEN);
-  if (!offsets.content) return NS_ERROR_FAILURE;
+  if (!offsets.content) {
+    return NS_ERROR_FAILURE;
+  }
 
   int32_t offset;
   nsIFrame* frame = nsFrameSelection::GetFrameForNodeOffset(
@@ -4910,20 +4947,34 @@ nsresult nsIFrame::PeekBackwardAndForward(nsSelectionAmount aAmountBack,
     }
   }
 
-  // Use peek offset one way then the other:
+  // Search backward for a boundary.
   nsPeekOffsetStruct startpos(aAmountBack, eDirPrevious, baseOffset,
                               nsPoint(0, 0), aJumpLines,
                               true,  // limit on scrolled views
                               false, false, false);
   rv = baseFrame->PeekOffset(&startpos);
-  if (NS_FAILED(rv)) return rv;
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
-  nsPeekOffsetStruct endpos(aAmountForward, eDirNext, aStartPos, nsPoint(0, 0),
+  // If the backward search stayed within the same frame, search forward from
+  // that position for the end boundary; but if it crossed out to a sibling or
+  // ancestor, start from the original position.
+  if (startpos.mResultFrame == baseFrame) {
+    baseOffset = startpos.mContentOffset;
+  } else {
+    baseFrame = this;
+    baseOffset = aStartPos;
+  }
+
+  nsPeekOffsetStruct endpos(aAmountForward, eDirNext, baseOffset, nsPoint(0, 0),
                             aJumpLines,
                             true,  // limit on scrolled views
                             false, false, false);
-  rv = PeekOffset(&endpos);
-  if (NS_FAILED(rv)) return rv;
+  rv = baseFrame->PeekOffset(&endpos);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
   // Keep frameSelection alive.
   RefPtr<nsFrameSelection> frameSelection = GetFrameSelection();
@@ -4936,13 +4987,17 @@ nsresult nsIFrame::PeekBackwardAndForward(nsSelectionAmount aAmountBack,
       MOZ_KnownLive(startpos.mResultContent) /* bug 1636889 */,
       startpos.mContentOffset, startpos.mContentOffset, focusMode,
       CARET_ASSOCIATE_AFTER);
-  if (NS_FAILED(rv)) return rv;
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
   rv = frameSelection->HandleClick(
       MOZ_KnownLive(endpos.mResultContent) /* bug 1636889 */,
       endpos.mContentOffset, endpos.mContentOffset,
       nsFrameSelection::FocusMode::kExtendSelection, CARET_ASSOCIATE_BEFORE);
-  if (NS_FAILED(rv)) return rv;
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
   // maintain selection
   return frameSelection->MaintainSelection(aAmountBack);
@@ -4953,6 +5008,8 @@ NS_IMETHODIMP nsIFrame::HandleDrag(nsPresContext* aPresContext,
                                    nsEventStatus* aEventStatus) {
   MOZ_ASSERT(aEvent->mClass == eMouseEventClass,
              "HandleDrag can only handle mouse event");
+
+  NS_ENSURE_ARG_POINTER(aEventStatus);
 
   RefPtr<nsFrameSelection> frameselection = GetFrameSelection();
   if (!frameselection) {
@@ -5196,8 +5253,7 @@ static FrameContentRange GetRangeForFrame(const nsIFrame* aFrame) {
 
   LayoutFrameType type = aFrame->Type();
   if (type == LayoutFrameType::Text) {
-    int32_t offset, offsetEnd;
-    aFrame->GetOffsets(offset, offsetEnd);
+    auto [offset, offsetEnd] = aFrame->GetOffsets();
     return FrameContentRange(content, offset, offsetEnd);
   }
 
@@ -5212,7 +5268,7 @@ static FrameContentRange GetRangeForFrame(const nsIFrame* aFrame) {
   }
 
   nsIContent* parent = content->GetParent();
-  if (aFrame->IsBlockFrameOrSubclass() || !parent) {
+  if (aFrame->IsBlockOutside() || !parent) {
     return FrameContentRange(content, 0, content->GetChildCount());
   }
 
@@ -5251,24 +5307,36 @@ static bool SelfIsSelectable(nsIFrame* aFrame, uint32_t aFlags) {
     return false;
   }
   return !aFrame->IsGeneratedContentFrame() &&
-         aFrame->StyleUIReset()->mUserSelect != StyleUserSelect::None;
+         aFrame->Style()->UserSelect() != StyleUserSelect::None;
 }
 
 static bool SelectionDescendToKids(nsIFrame* aFrame) {
-  StyleUserSelect style = aFrame->StyleUIReset()->mUserSelect;
-  nsIFrame* parent = aFrame->GetParent();
   // If we are only near (not directly over) then don't traverse
-  // frames with independent selection (e.g. text and list controls)
-  // unless we're already inside such a frame (see bug 268497).  Note that this
-  // prevents any of the users of this method from entering form controls.
+  // frames with independent selection (e.g. text and list controls, see bug
+  // 268497).  Note that this prevents any of the users of this method from
+  // entering form controls.
   // XXX We might want some way to allow using the up-arrow to go into a form
   // control, but the focus didn't work right anyway; it'd probably be enough
   // if the left and right arrows could enter textboxes (which I don't believe
   // they can at the moment)
-  return !aFrame->IsGeneratedContentFrame() && style != StyleUserSelect::All &&
-         style != StyleUserSelect::None &&
-         (parent->HasAnyStateBits(NS_FRAME_INDEPENDENT_SELECTION) ||
-          !aFrame->HasAnyStateBits(NS_FRAME_INDEPENDENT_SELECTION));
+  if (aFrame->IsTextInputFrame() || aFrame->IsListControlFrame()) {
+    MOZ_ASSERT(aFrame->HasAnyStateBits(NS_FRAME_INDEPENDENT_SELECTION));
+    return false;
+  }
+
+  // Failure in this assertion means a new type of frame forms the root of an
+  // NS_FRAME_INDEPENDENT_SELECTION subtree. In such case, the condition above
+  // should be changed to handle it.
+  MOZ_ASSERT_IF(
+      aFrame->HasAnyStateBits(NS_FRAME_INDEPENDENT_SELECTION),
+      aFrame->GetParent()->HasAnyStateBits(NS_FRAME_INDEPENDENT_SELECTION));
+
+  if (aFrame->IsGeneratedContentFrame()) {
+    return false;
+  }
+
+  auto style = aFrame->Style()->UserSelect();
+  return style != StyleUserSelect::All && style != StyleUserSelect::None;
 }
 
 static FrameTarget GetSelectionClosestFrameForChild(nsIFrame* aChild,
@@ -5531,7 +5599,7 @@ static nsIFrame* AdjustFrameForSelectionStyles(nsIFrame* aFrame) {
   for (nsIFrame* frame = aFrame; frame; frame = frame->GetParent()) {
     // These are the conditions that make all children not able to handle
     // a cursor.
-    StyleUserSelect userSelect = frame->StyleUIReset()->mUserSelect;
+    auto userSelect = frame->Style()->UserSelect();
     if (userSelect != StyleUserSelect::Auto &&
         userSelect != StyleUserSelect::All) {
       break;
@@ -5558,9 +5626,9 @@ nsIFrame::ContentOffsets nsIFrame::GetContentOffsetsFromPoint(
 
     adjustedFrame = AdjustFrameForSelectionStyles(this);
 
-    // -moz-user-select: all needs special handling, because clicking on it
+    // user-select: all needs special handling, because clicking on it
     // should lead to the whole frame being selected
-    if (adjustedFrame->StyleUIReset()->mUserSelect == StyleUserSelect::All) {
+    if (adjustedFrame->Style()->UserSelect() == StyleUserSelect::All) {
       nsPoint adjustedPoint = aPoint + this->GetOffsetTo(adjustedFrame);
       return OffsetsForSingleFrame(adjustedFrame, adjustedPoint);
     }
@@ -5640,8 +5708,18 @@ void nsIFrame::DisassociateImage(const StyleImage& aImage) {
   loader->DisassociateRequestFromFrame(req, this);
 }
 
+StyleImageRendering nsIFrame::UsedImageRendering() const {
+  ComputedStyle* style;
+  if (nsCSSRendering::IsCanvasFrame(this)) {
+    nsCSSRendering::FindBackground(this, &style);
+  } else {
+    style = Style();
+  }
+  return style->StyleVisibility()->mImageRendering;
+}
+
 Maybe<nsIFrame::Cursor> nsIFrame::GetCursor(const nsPoint&) {
-  StyleCursorKind kind = StyleUI()->mCursor.keyword;
+  StyleCursorKind kind = StyleUI()->Cursor().keyword;
   if (kind == StyleCursorKind::Auto) {
     // If this is editable, I-beam cursor is better for most elements.
     kind = (mContent && mContent->IsEditable()) ? StyleCursorKind::Text
@@ -5682,6 +5760,10 @@ void nsIFrame::MarkIntrinsicISizesDirty() {
 
   if (HasAnyStateBits(NS_FRAME_FONT_INFLATION_FLOW_ROOT)) {
     nsFontInflationData::MarkFontInflationDataTextDirty(this);
+  }
+
+  if (StaticPrefs::layout_css_grid_item_baxis_measurement_enabled()) {
+    RemoveProperty(nsGridContainerFrame::CachedBAxisMeasurement::Prop());
   }
 }
 
@@ -5984,10 +6066,11 @@ AspectRatio nsIFrame::GetAspectRatio() const {
   // Per spec, 'aspect-ratio' property applies to all elements except inline
   // boxes and internal ruby or table boxes.
   // https://drafts.csswg.org/css-sizing-4/#aspect-ratio
-  //
-  // Bug 1667501: If any caller is used for the elements supporting and not
-  // supporting 'aspect-ratio', we may need to add explicit exclusion to early
-  // return here.
+  // For those frame types that don't support aspect-ratio, they must not have
+  // the natural ratio, so this early return is fine.
+  if (!IsFrameOfType(eSupportsAspectRatio)) {
+    return AspectRatio();
+  }
 
   const StyleAspectRatio& aspectRatio = StylePosition()->mAspectRatio;
   // If aspect-ratio is zero or infinite, it's a degenerate ratio and behaves
@@ -6101,6 +6184,9 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
   const auto& styleBSize = aSizeOverrides.mStyleBSize
                                ? *aSizeOverrides.mStyleBSize
                                : stylePos->BSize(aWM);
+  const auto& aspectRatio = aSizeOverrides.mAspectRatio
+                                ? *aSizeOverrides.mAspectRatio
+                                : GetAspectRatio();
 
   auto parentFrame = GetParent();
   auto alignCB = parentFrame;
@@ -6133,29 +6219,23 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
                        : eLogicalAxisBlock;
   }
 
-  const auto aspectRatio = GetAspectRatio();
   const bool isOrthogonal = aWM.IsOrthogonalTo(alignCB->GetWritingMode());
-  const bool isAutoISize =
-      styleISize.IsAuto() || aFlags.contains(ComputeSizeFlag::UseAutoISize);
+  const bool isAutoISize = styleISize.IsAuto();
+  const bool isAutoBSize =
+      nsLayoutUtils::IsAutoBSize(styleBSize, aCBSize.BSize(aWM)) ||
+      aFlags.contains(ComputeSizeFlag::UseAutoBSize);
   // Compute inline-axis size
   if (!isAutoISize) {
-    auto iSizeResult =
-        ComputeISizeValue(aRenderingContext, aWM, aCBSize, boxSizingAdjust,
-                          boxSizingToMarginEdgeISize, styleISize, aFlags);
+    auto iSizeResult = ComputeISizeValue(
+        aRenderingContext, aWM, aCBSize, boxSizingAdjust,
+        boxSizingToMarginEdgeISize, styleISize, aSizeOverrides, aFlags);
     result.ISize(aWM) = iSizeResult.mISize;
     aspectRatioUsage = iSizeResult.mAspectRatioUsage;
-  } else if (aspectRatio &&
-             !nsLayoutUtils::IsAutoBSize(styleBSize, aCBSize.BSize(aWM))) {
-    auto bSize = nsLayoutUtils::ComputeBSizeValue(
-        aCBSize.BSize(aWM), boxSizingAdjust.BSize(aWM),
-        styleBSize.AsLengthPercentage());
-    result.ISize(aWM) = aspectRatio.ComputeRatioDependentSize(
-        LogicalAxis::eLogicalAxisInline, aWM, bSize, boxSizingAdjust);
-    aspectRatioUsage = AspectRatioUsage::ToComputeISize;
   } else if (MOZ_UNLIKELY(isGridItem) && !IsTrueOverflowContainer()) {
     // 'auto' inline-size for grid-level box - fill the CB for 'stretch' /
     // 'normal' and clamp it to the CB if requested:
     bool stretch = false;
+    bool mayUseAspectRatio = aspectRatio && !isAutoBSize;
     if (!aFlags.contains(ComputeSizeFlag::ShrinkWrap) &&
         !StyleMargin()->HasInlineAxisAuto(aWM) &&
         !alignCB->IsMasonry(isOrthogonal ? eLogicalAxisBlock
@@ -6163,9 +6243,30 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
       auto inlineAxisAlignment =
           isOrthogonal ? StylePosition()->UsedAlignSelf(alignCB->Style())._0
                        : StylePosition()->UsedJustifySelf(alignCB->Style())._0;
-      stretch = inlineAxisAlignment == StyleAlignFlags::NORMAL ||
-                inlineAxisAlignment == StyleAlignFlags::STRETCH;
+      stretch = inlineAxisAlignment == StyleAlignFlags::STRETCH ||
+                (inlineAxisAlignment == StyleAlignFlags::NORMAL &&
+                 !mayUseAspectRatio);
     }
+
+    // Apply the preferred aspect ratio for alignments other than *stretch* and
+    // *normal without aspect ratio*.
+    // The spec says all other values should size the items as fit-content, and
+    // the intrinsic size should respect the preferred aspect ratio, so we also
+    // apply aspect ratio for all other values.
+    // https://drafts.csswg.org/css-grid/#grid-item-sizing
+    if (!stretch && mayUseAspectRatio) {
+      // Note: we don't need to handle aspect ratio for inline axis if both
+      // width/height are auto. The default ratio-dependent axis is block axis
+      // in this case, so we can simply get the block size from the non-auto
+      // |styleBSize|.
+      auto bSize = nsLayoutUtils::ComputeBSizeValue(
+          aCBSize.BSize(aWM), boxSizingAdjust.BSize(aWM),
+          styleBSize.AsLengthPercentage());
+      result.ISize(aWM) = aspectRatio.ComputeRatioDependentSize(
+          LogicalAxis::eLogicalAxisInline, aWM, bSize, boxSizingAdjust);
+      aspectRatioUsage = AspectRatioUsage::ToComputeISize;
+    }
+
     if (stretch || aFlags.contains(ComputeSizeFlag::IClampMarginBoxMinSize)) {
       auto iSizeToFillCB =
           std::max(nscoord(0), aCBSize.ISize(aWM) - aBorderPadding.ISize(aWM) -
@@ -6174,20 +6275,23 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
         result.ISize(aWM) = iSizeToFillCB;
       }
     }
+  } else if (aspectRatio && !isAutoBSize) {
+    auto bSize = nsLayoutUtils::ComputeBSizeValue(
+        aCBSize.BSize(aWM), boxSizingAdjust.BSize(aWM),
+        styleBSize.AsLengthPercentage());
+    result.ISize(aWM) = aspectRatio.ComputeRatioDependentSize(
+        LogicalAxis::eLogicalAxisInline, aWM, bSize, boxSizingAdjust);
+    aspectRatioUsage = AspectRatioUsage::ToComputeISize;
   }
 
-  // Calculate and apply min max transferred size contraint.
-  // https://github.com/w3c/csswg-drafts/issues/5257
-  // If we have definite preferred size, the transferred minimum and maximum
-  // are clampled by it. This means transferred minimum and maximum don't have
-  // effects with definite preferred size.
+  // Calculate and apply transferred min & max size contraints.
+  // https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers
   //
-  // Note: The axis in which the preferred size calculation depends on this
-  // aspect ratio is called the ratio-dependent axis, and the resulting size
-  // is definite if its input sizes are also definite.
-  const bool isDefiniteISize =
-      styleISize.IsLengthPercentage() ||
-      aspectRatioUsage == AspectRatioUsage::ToComputeISize;
+  // Note: The basic principle is that sizing constraints transfer through the
+  // aspect-ratio to the other side to preserve the aspect ratio to the extent
+  // that they can without violating any sizes specified explicitly on that
+  // affected axis.
+  const bool isDefiniteISize = styleISize.IsLengthPercentage();
   const bool isFlexItemInlineAxisMainAxis =
       isFlexItem && flexMainAxis == eLogicalAxisInline;
   const auto& minBSizeCoord = stylePos->MinBSize(aWM);
@@ -6219,20 +6323,20 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
   const auto& maxISizeCoord = stylePos->MaxISize(aWM);
   nscoord maxISize = NS_UNCONSTRAINEDSIZE;
   if (!maxISizeCoord.IsNone() && !isFlexItemInlineAxisMainAxis) {
-    maxISize =
-        ComputeISizeValue(aRenderingContext, aWM, aCBSize, boxSizingAdjust,
-                          boxSizingToMarginEdgeISize, maxISizeCoord, aFlags)
-            .mISize;
+    maxISize = ComputeISizeValue(aRenderingContext, aWM, aCBSize,
+                                 boxSizingAdjust, boxSizingToMarginEdgeISize,
+                                 maxISizeCoord, aSizeOverrides, aFlags)
+                   .mISize;
     result.ISize(aWM) = std::min(maxISize, result.ISize(aWM));
   }
 
   const auto& minISizeCoord = stylePos->MinISize(aWM);
   nscoord minISize;
   if (!minISizeCoord.IsAuto() && !isFlexItemInlineAxisMainAxis) {
-    minISize =
-        ComputeISizeValue(aRenderingContext, aWM, aCBSize, boxSizingAdjust,
-                          boxSizingToMarginEdgeISize, minISizeCoord, aFlags)
-            .mISize;
+    minISize = ComputeISizeValue(aRenderingContext, aWM, aCBSize,
+                                 boxSizingAdjust, boxSizingToMarginEdgeISize,
+                                 minISizeCoord, aSizeOverrides, aFlags)
+                   .mISize;
   } else if (MOZ_UNLIKELY(
                  aFlags.contains(ComputeSizeFlag::IApplyAutoMinSize))) {
     // This implements "Implied Minimum Size of Grid Items".
@@ -6256,7 +6360,7 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
     // This means we successfully applied aspect-ratio and now need to check
     // if we need to apply the implied minimum size:
     // https://drafts.csswg.org/css-sizing-4/#aspect-ratio-minimum
-    MOZ_ASSERT(!IsFrameOfType(eReplaced),
+    MOZ_ASSERT(!IsFrameOfType(eReplacedSizing),
                "aspect-ratio minimums should not apply to replaced elements");
     // The inline size computed by aspect-ratio shouldn't less than the content
     // size.
@@ -6274,47 +6378,71 @@ nsIFrame::SizeComputationResult nsIFrame::ComputeSize(
   // Compute block-axis size
   // (but not if we have auto bsize or if we received the "UseAutoBSize"
   // flag -- then, we'll just stick with the bsize that we already calculated
-  // in the initial ComputeAutoSize() call.)
-  if (!aFlags.contains(ComputeSizeFlag::UseAutoBSize)) {
-    if (!nsLayoutUtils::IsAutoBSize(styleBSize, aCBSize.BSize(aWM))) {
-      result.BSize(aWM) = nsLayoutUtils::ComputeBSizeValue(
-          aCBSize.BSize(aWM), boxSizingAdjust.BSize(aWM),
-          styleBSize.AsLengthPercentage());
-    } else if (aspectRatio && result.ISize(aWM) != NS_UNCONSTRAINEDSIZE) {
-      result.BSize(aWM) = aspectRatio.ComputeRatioDependentSize(
-          LogicalAxis::eLogicalAxisBlock, aWM, result.ISize(aWM),
-          boxSizingAdjust);
-      MOZ_ASSERT(aspectRatioUsage == AspectRatioUsage::None);
-      aspectRatioUsage = AspectRatioUsage::ToComputeBSize;
-    } else if (MOZ_UNLIKELY(isGridItem) && styleBSize.IsAuto() &&
-               !IsTrueOverflowContainer() &&
-               !alignCB->IsMasonry(isOrthogonal ? eLogicalAxisInline
-                                                : eLogicalAxisBlock)) {
-      auto cbSize = aCBSize.BSize(aWM);
-      if (cbSize != NS_UNCONSTRAINEDSIZE) {
-        // 'auto' block-size for grid-level box - fill the CB for 'stretch' /
-        // 'normal' and clamp it to the CB if requested:
-        bool stretch = false;
-        if (!StyleMargin()->HasBlockAxisAuto(aWM)) {
-          auto blockAxisAlignment =
-              isOrthogonal
-                  ? StylePosition()->UsedJustifySelf(alignCB->Style())._0
-                  : StylePosition()->UsedAlignSelf(alignCB->Style())._0;
-          stretch = blockAxisAlignment == StyleAlignFlags::NORMAL ||
-                    blockAxisAlignment == StyleAlignFlags::STRETCH;
-        }
-        if (stretch ||
-            aFlags.contains(ComputeSizeFlag::BClampMarginBoxMinSize)) {
-          auto bSizeToFillCB =
-              std::max(nscoord(0),
-                       cbSize - aBorderPadding.BSize(aWM) - aMargin.BSize(aWM));
-          if (stretch || (result.BSize(aWM) != NS_UNCONSTRAINEDSIZE &&
-                          result.BSize(aWM) > bSizeToFillCB)) {
-            result.BSize(aWM) = bSizeToFillCB;
-          }
+  // in the initial ComputeAutoSize() call. However, if we have a valid
+  // preferred aspect ratio, we still have to compute the block size because
+  // aspect ratio affects the intrinsic content size.)
+  if (!isAutoBSize) {
+    result.BSize(aWM) = nsLayoutUtils::ComputeBSizeValue(
+        aCBSize.BSize(aWM), boxSizingAdjust.BSize(aWM),
+        styleBSize.AsLengthPercentage());
+  } else if (MOZ_UNLIKELY(isGridItem) &&
+             // FIXME: Any better way to refine the auto check here?
+             styleBSize.IsAuto() &&
+             !aFlags.contains(ComputeSizeFlag::UseAutoBSize) &&
+             !IsTrueOverflowContainer() &&
+             !alignCB->IsMasonry(isOrthogonal ? eLogicalAxisInline
+                                              : eLogicalAxisBlock)) {
+    auto cbSize = aCBSize.BSize(aWM);
+    if (cbSize != NS_UNCONSTRAINEDSIZE) {
+      // 'auto' block-size for grid-level box - fill the CB for 'stretch' /
+      // 'normal' and clamp it to the CB if requested:
+      bool stretch = false;
+      bool mayUseAspectRatio =
+          aspectRatio && result.ISize(aWM) != NS_UNCONSTRAINEDSIZE;
+      if (!StyleMargin()->HasBlockAxisAuto(aWM)) {
+        auto blockAxisAlignment =
+            isOrthogonal ? StylePosition()->UsedJustifySelf(alignCB->Style())._0
+                         : StylePosition()->UsedAlignSelf(alignCB->Style())._0;
+        stretch = blockAxisAlignment == StyleAlignFlags::STRETCH ||
+                  (blockAxisAlignment == StyleAlignFlags::NORMAL &&
+                   !mayUseAspectRatio);
+      }
+
+      // Apply the preferred aspect ratio for alignments other than *stretch*
+      // and *normal without aspect ratio*.
+      // The spec says all other values should size the items as fit-content,
+      // and the intrinsic size should respect the preferred aspect ratio, so
+      // we also apply aspect ratio for all other values.
+      // https://drafts.csswg.org/css-grid/#grid-item-sizing
+      if (!stretch && mayUseAspectRatio) {
+        result.BSize(aWM) = aspectRatio.ComputeRatioDependentSize(
+            LogicalAxis::eLogicalAxisBlock, aWM, result.ISize(aWM),
+            boxSizingAdjust);
+        MOZ_ASSERT(aspectRatioUsage == AspectRatioUsage::None);
+        aspectRatioUsage = AspectRatioUsage::ToComputeBSize;
+      }
+
+      if (stretch || aFlags.contains(ComputeSizeFlag::BClampMarginBoxMinSize)) {
+        auto bSizeToFillCB =
+            std::max(nscoord(0),
+                     cbSize - aBorderPadding.BSize(aWM) - aMargin.BSize(aWM));
+        if (stretch || (result.BSize(aWM) != NS_UNCONSTRAINEDSIZE &&
+                        result.BSize(aWM) > bSizeToFillCB)) {
+          result.BSize(aWM) = bSizeToFillCB;
         }
       }
     }
+  } else if (aspectRatio) {
+    // If both inline and block dimensions are auto, the block axis is the
+    // ratio-dependent axis by default.
+    // If we have a super large inline size, aspect-ratio should still be
+    // applied (so aspectRatioUsage flag is set as expected). That's why we
+    // apply aspect-ratio unconditionally for auto block size here.
+    result.BSize(aWM) = aspectRatio.ComputeRatioDependentSize(
+        LogicalAxis::eLogicalAxisBlock, aWM, result.ISize(aWM),
+        boxSizingAdjust);
+    MOZ_ASSERT(aspectRatioUsage == AspectRatioUsage::None);
+    aspectRatioUsage = AspectRatioUsage::ToComputeBSize;
   }
 
   if (result.BSize(aWM) != NS_UNCONSTRAINEDSIZE) {
@@ -6388,7 +6516,7 @@ LogicalSize nsIFrame::ComputeAutoSize(
   const auto& styleISize = aSizeOverrides.mStyleISize
                                ? *aSizeOverrides.mStyleISize
                                : StylePosition()->ISize(aWM);
-  if (styleISize.IsAuto() || aFlags.contains(ComputeSizeFlag::UseAutoISize)) {
+  if (styleISize.IsAuto()) {
     nscoord availBased =
         aAvailableISize - aMargin.ISize(aWM) - aBorderPadding.ISize(aWM);
     result.ISize(aWM) = ShrinkWidthToFit(aRenderingContext, availBased, aFlags);
@@ -6421,14 +6549,21 @@ nscoord nsIFrame::ShrinkWidthToFit(gfxContext* aRenderingContext,
 
 Maybe<nscoord> nsIFrame::ComputeInlineSizeFromAspectRatio(
     WritingMode aWM, const LogicalSize& aCBSize,
-    const LogicalSize& aContentEdgeToBoxSizing, ComputeSizeFlags aFlags) const {
-  // FIXME: Bug 1670151: Use GetAspectRatio() to cover replaced elements.
-  const AspectRatio aspectRatio = StylePosition()->mAspectRatio.ToLayoutRatio();
-  if (aFlags.contains(ComputeSizeFlag::SkipAspectRatio) || !aspectRatio) {
+    const LogicalSize& aContentEdgeToBoxSizing,
+    const StyleSizeOverrides& aSizeOverrides, ComputeSizeFlags aFlags) const {
+  // FIXME: Bug 1670151: Use GetAspectRatio() to cover replaced elements (and
+  // then we can drop the check of eSupportsAspectRatio).
+  const AspectRatio aspectRatio =
+      aSizeOverrides.mAspectRatio
+          ? *aSizeOverrides.mAspectRatio
+          : StylePosition()->mAspectRatio.ToLayoutRatio();
+  if (!IsFrameOfType(eSupportsAspectRatio) || !aspectRatio) {
     return Nothing();
   }
 
-  const StyleSize& styleBSize = StylePosition()->BSize(aWM);
+  const StyleSize& styleBSize = aSizeOverrides.mStyleBSize
+                                    ? *aSizeOverrides.mStyleBSize
+                                    : StylePosition()->BSize(aWM);
   if (aFlags.contains(ComputeSizeFlag::UseAutoBSize) ||
       nsLayoutUtils::IsAutoBSize(styleBSize, aCBSize.BSize(aWM))) {
     return Nothing();
@@ -6446,7 +6581,8 @@ nsIFrame::ISizeComputationResult nsIFrame::ComputeISizeValue(
     gfxContext* aRenderingContext, const WritingMode aWM,
     const LogicalSize& aContainingBlockSize,
     const LogicalSize& aContentEdgeToBoxSizing, nscoord aBoxSizingToMarginEdge,
-    StyleExtremumLength aSize, ComputeSizeFlags aFlags) {
+    ExtremumLength aSize, Maybe<nscoord> aAvailableISizeOverride,
+    const StyleSizeOverrides& aSizeOverrides, ComputeSizeFlags aFlags) {
   // If 'this' is a container for font size inflation, then shrink
   // wrapping inside of it should not apply font size inflation.
   AutoMaybeDisableFontInflation an(this);
@@ -6454,20 +6590,21 @@ nsIFrame::ISizeComputationResult nsIFrame::ComputeISizeValue(
   // min-content and max-content size by the aspect-ratio and the block size.
   // https://github.com/w3c/csswg-drafts/issues/5032
   Maybe<nscoord> intrinsicSizeFromAspectRatio =
-      aSize == StyleExtremumLength::MozAvailable
+      aSize == ExtremumLength::MozAvailable
           ? Nothing()
           : ComputeInlineSizeFromAspectRatio(aWM, aContainingBlockSize,
-                                             aContentEdgeToBoxSizing, aFlags);
+                                             aContentEdgeToBoxSizing,
+                                             aSizeOverrides, aFlags);
   nscoord result;
   switch (aSize) {
-    case StyleExtremumLength::MaxContent:
+    case ExtremumLength::MaxContent:
       result = intrinsicSizeFromAspectRatio ? *intrinsicSizeFromAspectRatio
                                             : GetPrefISize(aRenderingContext);
       NS_ASSERTION(result >= 0, "inline-size less than zero");
       return {result, intrinsicSizeFromAspectRatio
                           ? AspectRatioUsage::ToComputeISize
                           : AspectRatioUsage::None};
-    case StyleExtremumLength::MinContent:
+    case ExtremumLength::MinContent:
       result = intrinsicSizeFromAspectRatio ? *intrinsicSizeFromAspectRatio
                                             : GetMinISize(aRenderingContext);
       NS_ASSERTION(result >= 0, "inline-size less than zero");
@@ -6481,7 +6618,8 @@ nsIFrame::ISizeComputationResult nsIFrame::ComputeISizeValue(
       return {result, intrinsicSizeFromAspectRatio
                           ? AspectRatioUsage::ToComputeISize
                           : AspectRatioUsage::None};
-    case StyleExtremumLength::MozFitContent: {
+    case ExtremumLength::FitContentFunction:
+    case ExtremumLength::FitContent: {
       nscoord pref = NS_UNCONSTRAINEDSIZE;
       nscoord min = 0;
       if (intrinsicSizeFromAspectRatio) {
@@ -6492,9 +6630,13 @@ nsIFrame::ISizeComputationResult nsIFrame::ComputeISizeValue(
         pref = GetPrefISize(aRenderingContext);
         min = GetMinISize(aRenderingContext);
       }
-      nscoord fill =
-          aContainingBlockSize.ISize(aWM) -
-          (aBoxSizingToMarginEdge + aContentEdgeToBoxSizing.ISize(aWM));
+
+      nscoord fill = aAvailableISizeOverride
+                         ? *aAvailableISizeOverride
+                         : aContainingBlockSize.ISize(aWM) -
+                               (aBoxSizingToMarginEdge +
+                                aContentEdgeToBoxSizing.ISize(aWM));
+
       if (MOZ_UNLIKELY(
               aFlags.contains(ComputeSizeFlag::IClampMarginBoxMinSize))) {
         min = std::min(min, fill);
@@ -6503,7 +6645,7 @@ nsIFrame::ISizeComputationResult nsIFrame::ComputeISizeValue(
       NS_ASSERTION(result >= 0, "inline-size less than zero");
       return {result};
     }
-    case StyleExtremumLength::MozAvailable:
+    case ExtremumLength::MozAvailable:
       return {aContainingBlockSize.ISize(aWM) -
               (aBoxSizingToMarginEdge + aContentEdgeToBoxSizing.ISize(aWM))};
   }
@@ -6541,9 +6683,10 @@ void nsIFrame::DidReflow(nsPresContext* aPresContext,
   RemoveStateBits(NS_FRAME_IN_REFLOW | NS_FRAME_FIRST_REFLOW |
                   NS_FRAME_IS_DIRTY | NS_FRAME_HAS_DIRTY_CHILDREN);
 
-  // Clear state that was used in ReflowInput::InitResizeFlags (see
+  // Clear bits that were used in ReflowInput::InitResizeFlags (see
   // comment there for why we can't clear it there).
   SetHasBSizeChange(false);
+  SetHasPaddingChange(false);
 
   // Notify the percent bsize observer if there is a percent bsize.
   // The observer may be able to initiate another reflow with a computed
@@ -6558,6 +6701,13 @@ void nsIFrame::DidReflow(nsPresContext* aPresContext,
   }
 
   aPresContext->ReflowedFrame();
+
+#ifdef ACCESSIBILITY
+  if (nsAccessibilityService* accService =
+          PresShell::GetAccessibilityService()) {
+    accService->NotifyOfPossibleBoundsChange(PresShell(), mContent);
+  }
+#endif
 }
 
 void nsIFrame::FinishReflowWithAbsoluteFrames(nsPresContext* aPresContext,
@@ -6624,7 +6774,7 @@ void nsIFrame::Reflow(nsPresContext* aPresContext, ReflowOutput& aDesiredSize,
 bool nsIFrame::IsContentDisabled() const {
   // FIXME(emilio): Doing this via CSS means callers must ensure the style is up
   // to date, and they don't!
-  if (StyleUI()->mUserInput == StyleUserInput::None) {
+  if (StyleUI()->UserInput() == StyleUserInput::None) {
     return true;
   }
 
@@ -6793,7 +6943,7 @@ nsPoint nsIFrame::GetOffsetToCrossDoc(const nsIFrame* aOther,
     } else {
       nsPoint newOffset(0, 0);
       root = f;
-      f = nsLayoutUtils::GetCrossDocParentFrame(f, &newOffset);
+      f = nsLayoutUtils::GetCrossDocParentFrameInProcess(f, &newOffset);
       int32_t newAPD = f ? f->PresContext()->AppUnitsPerDevPixel() : 0;
       if (!f || newAPD != currAPD) {
         // Convert docOffset to the right APD and add it to offset.
@@ -6828,7 +6978,7 @@ nsRect nsIFrame::GetScreenRectInAppUnits() const {
   nsIFrame* rootFrame = presContext->PresShell()->GetRootFrame();
   nsPoint rootScreenPos(0, 0);
   nsPoint rootFrameOffsetInParent(0, 0);
-  nsIFrame* rootFrameParent = nsLayoutUtils::GetCrossDocParentFrame(
+  nsIFrame* rootFrameParent = nsLayoutUtils::GetCrossDocParentFrameInProcess(
       rootFrame, &rootFrameOffsetInParent);
   if (rootFrameParent) {
     nsRect parentScreenRectAppUnits =
@@ -6841,9 +6991,8 @@ nsRect nsIFrame::GetScreenRectInAppUnits() const {
     rootScreenPos.x = NS_round(parentScale * rootPt.x);
     rootScreenPos.y = NS_round(parentScale * rootPt.y);
   } else {
-    nsCOMPtr<nsIWidget> rootWidget;
-    presContext->PresShell()->GetViewManager()->GetRootWidget(
-        getter_AddRefs(rootWidget));
+    nsCOMPtr<nsIWidget> rootWidget =
+        presContext->PresShell()->GetViewManager()->GetRootWidget();
     if (rootWidget) {
       LayoutDeviceIntPoint rootDevPx = rootWidget->WidgetToScreenOffset();
       rootScreenPos.x = presContext->DevPixelsToAppUnits(rootDevPx.x);
@@ -6895,7 +7044,7 @@ Matrix4x4Flagged nsIFrame::GetTransformMatrix(ViewportType aViewportType,
    * transform/translate matrix that will apply our current transform, then
    * shift us to our parent.
    */
-  bool isTransformed = IsTransformed();
+  const bool isTransformed = IsTransformed();
   const nsIFrame* zoomedContentRoot = nullptr;
   if (aStopAtAncestor.mViewportType == ViewportType::Visual) {
     zoomedContentRoot = ViewportUtils::IsZoomedContentRoot(this);
@@ -6914,7 +7063,7 @@ Matrix4x4Flagged nsIFrame::GetTransformMatrix(ViewportType aViewportType,
      * coordinates to our parent.
      */
     if (isTransformed) {
-      NS_ASSERTION(nsLayoutUtils::GetCrossDocParentFrame(this),
+      NS_ASSERTION(nsLayoutUtils::GetCrossDocParentFrameInProcess(this),
                    "Cannot transform the viewport frame!");
 
       result = result * nsDisplayTransform::GetResultingTransformMatrix(
@@ -6926,7 +7075,7 @@ Matrix4x4Flagged nsIFrame::GetTransformMatrix(ViewportType aViewportType,
     // The offset from a zoomed content root to its parent (e.g. from
     // a canvas frame to a scroll frame) is in layout coordinates, so
     // apply it before applying any layout-to-visual transform.
-    *aOutAncestor = nsLayoutUtils::GetCrossDocParentFrame(this);
+    *aOutAncestor = nsLayoutUtils::GetCrossDocParentFrameInProcess(this);
     nsPoint delta = GetOffsetToCrossDoc(*aOutAncestor);
     /* Combine the raw transform with a translation to our parent. */
     result.PostTranslate(NSAppUnitsToFloatPixels(delta.x, scaleFactor),
@@ -6996,7 +7145,7 @@ Matrix4x4Flagged nsIFrame::GetTransformMatrix(ViewportType aViewportType,
     }
   }
 
-  *aOutAncestor = nsLayoutUtils::GetCrossDocParentFrame(this);
+  *aOutAncestor = nsLayoutUtils::GetCrossDocParentFrameInProcess(this);
 
   /* Otherwise, we're not transformed.  In that case, we'll walk up the frame
    * tree until we either hit the root frame or something that may be
@@ -7021,7 +7170,8 @@ Matrix4x4Flagged nsIFrame::GetTransformMatrix(ViewportType aViewportType,
   while (*aOutAncestor != aStopAtAncestor.mFrame &&
          !shouldStopAt(current, *aOutAncestor, aFlags)) {
     /* If no parent, stop iterating.  Otherwise, update the ancestor. */
-    nsIFrame* parent = nsLayoutUtils::GetCrossDocParentFrame(*aOutAncestor);
+    nsIFrame* parent =
+        nsLayoutUtils::GetCrossDocParentFrameInProcess(*aOutAncestor);
     if (!parent) break;
 
     current = *aOutAncestor;
@@ -7049,7 +7199,7 @@ static void InvalidateRenderingObservers(nsIFrame* aDisplayRoot,
   SVGObserverUtils::InvalidateDirectRenderingObservers(aFrame);
   nsIFrame* parent = aFrame;
   while (parent != aDisplayRoot &&
-         (parent = nsLayoutUtils::GetCrossDocParentFrame(parent)) &&
+         (parent = nsLayoutUtils::GetCrossDocParentFrameInProcess(parent)) &&
          !parent->HasAnyStateBits(NS_FRAME_DESCENDANT_NEEDS_PAINT)) {
     SVGObserverUtils::InvalidateDirectRenderingObservers(parent);
   }
@@ -7077,13 +7227,7 @@ static void SchedulePaintInternal(
     return;
   }
 
-  pres->PresShell()->ScheduleViewManagerFlush(
-      aType == nsIFrame::PAINT_DELAYED_COMPRESS ? PaintType::DelayedCompress
-                                                : PaintType::Default);
-
-  if (aType == nsIFrame::PAINT_DELAYED_COMPRESS) {
-    return;
-  }
+  pres->PresShell()->ScheduleViewManagerFlush();
 
   if (aType == nsIFrame::PAINT_DEFAULT) {
     aDisplayRoot->AddStateBits(NS_FRAME_UPDATE_LAYER_TREE);
@@ -7104,7 +7248,7 @@ static void InvalidateFrameInternal(nsIFrame* aFrame, bool aHasDisplayItem,
   if (nsLayoutUtils::IsPopup(aFrame)) {
     needsSchedulePaint = true;
   } else {
-    nsIFrame* parent = nsLayoutUtils::GetCrossDocParentFrame(aFrame);
+    nsIFrame* parent = nsLayoutUtils::GetCrossDocParentFrameInProcess(aFrame);
     while (parent &&
            !parent->HasAnyStateBits(NS_FRAME_DESCENDANT_NEEDS_PAINT)) {
       if (aHasDisplayItem && !parent->HasAnyStateBits(NS_FRAME_IS_NONDISPLAY)) {
@@ -7119,7 +7263,7 @@ static void InvalidateFrameInternal(nsIFrame* aFrame, bool aHasDisplayItem,
         needsSchedulePaint = true;
         break;
       }
-      parent = nsLayoutUtils::GetCrossDocParentFrame(parent);
+      parent = nsLayoutUtils::GetCrossDocParentFrameInProcess(parent);
     }
     if (!parent) {
       needsSchedulePaint = true;
@@ -7170,11 +7314,20 @@ void nsIFrame::ClearInvalidationStateBits() {
                   NS_FRAME_ALL_DESCENDANTS_NEED_PAINT);
 }
 
+bool HasRetainedDataFor(const nsIFrame* aFrame, uint32_t aDisplayItemKey) {
+  if (RefPtr<WebRenderUserData> data =
+          GetWebRenderUserData<WebRenderFallbackData>(aFrame,
+                                                      aDisplayItemKey)) {
+    return true;
+  }
+
+  return false;
+}
+
 void nsIFrame::InvalidateFrame(uint32_t aDisplayItemKey,
                                bool aRebuildDisplayItems /* = true */) {
   bool hasDisplayItem =
-      !aDisplayItemKey ||
-      FrameLayerBuilder::HasRetainedDataFor(this, aDisplayItemKey);
+      !aDisplayItemKey || HasRetainedDataFor(this, aDisplayItemKey);
   InvalidateFrameInternal(this, hasDisplayItem, aRebuildDisplayItems);
 }
 
@@ -7185,8 +7338,7 @@ void nsIFrame::InvalidateFrameWithRect(const nsRect& aRect,
     return;
   }
   bool hasDisplayItem =
-      !aDisplayItemKey ||
-      FrameLayerBuilder::HasRetainedDataFor(this, aDisplayItemKey);
+      !aDisplayItemKey || HasRetainedDataFor(this, aDisplayItemKey);
   bool alreadyInvalid = false;
   if (!HasAnyStateBits(NS_FRAME_NEEDS_PAINT)) {
     InvalidateFrameInternal(this, hasDisplayItem, aRebuildDisplayItems);
@@ -7217,95 +7369,6 @@ void nsIFrame::InvalidateFrameWithRect(const nsRect& aRect,
 /*static*/
 uint8_t nsIFrame::sLayerIsPrerenderedDataKey;
 
-static bool DoesLayerHaveOutOfDateFrameMetrics(Layer* aLayer) {
-  for (uint32_t i = 0; i < aLayer->GetScrollMetadataCount(); i++) {
-    const FrameMetrics& metrics = aLayer->GetFrameMetrics(i);
-    if (!metrics.IsScrollable()) {
-      continue;
-    }
-    nsIScrollableFrame* scrollableFrame =
-        nsLayoutUtils::FindScrollableFrameFor(metrics.GetScrollId());
-    if (!scrollableFrame) {
-      // This shouldn't happen, so let's do the safe thing and trigger a full
-      // paint if it does.
-      return true;
-    }
-    nsPoint scrollPosition = scrollableFrame->GetScrollPosition();
-    if (metrics.GetLayoutScrollOffset() !=
-        CSSPoint::FromAppUnits(scrollPosition)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool DoesLayerOrAncestorsHaveOutOfDateFrameMetrics(Layer* aLayer) {
-  for (Layer* layer = aLayer; layer; layer = layer->GetParent()) {
-    if (DoesLayerHaveOutOfDateFrameMetrics(layer)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool nsIFrame::TryUpdateTransformOnly(Layer** aLayerResult) {
-  // If we move a transformed layer when we have a merged display
-  // list, then it can end up intersecting other items for which
-  // we don't have a defined ordering.
-  // We could allow this if the display list is in the canonical
-  // ordering (correctly sorted for all intersections), but we
-  // don't have a way to check that yet.
-  if (nsLayoutUtils::AreRetainedDisplayListsEnabled()) {
-    return false;
-  }
-
-  Layer* layer = FrameLayerBuilder::GetDedicatedLayer(
-      this, DisplayItemType::TYPE_TRANSFORM);
-  if (!layer || !layer->HasUserData(LayerIsPrerenderedDataKey())) {
-    // If this layer isn't prerendered or we clip composites to our OS
-    // window, then we can't correctly optimize to an empty
-    // transaction in general.
-    return false;
-  }
-
-  if (DoesLayerOrAncestorsHaveOutOfDateFrameMetrics(layer)) {
-    // At least one scroll frame that can affect the position of this layer
-    // has changed its scroll offset since the last paint. Schedule a full
-    // paint to make sure that this layer's transform and all the frame
-    // metrics that affect it are in sync.
-    return false;
-  }
-
-  gfx::Matrix4x4Flagged transform3d;
-  if (!nsLayoutUtils::GetLayerTransformForFrame(this, &transform3d)) {
-    // We're not able to compute a layer transform that we know would
-    // be used at the next layers transaction, so we can't only update
-    // the transform and will need to schedule an invalidating paint.
-    return false;
-  }
-  gfx::Matrix transform;
-  gfx::Matrix previousTransform;
-  // FIXME/bug 796690 and 796705: in general, changes to 3D
-  // transforms, or transform changes to properties other than
-  // translation, may lead us to choose a different rendering
-  // resolution for our layer.  So if the transform is 3D or has a
-  // non-translation change, bail and schedule an invalidating paint.
-  // (We can often do better than this, for example for scale-down
-  // changes.)
-  static const gfx::Float kError = 0.0001f;
-  if (!transform3d.Is2D(&transform) ||
-      !layer->GetBaseTransform().Is2D(&previousTransform) ||
-      !gfx::FuzzyEqual(transform._11, previousTransform._11, kError) ||
-      !gfx::FuzzyEqual(transform._22, previousTransform._22, kError) ||
-      !gfx::FuzzyEqual(transform._21, previousTransform._21, kError) ||
-      !gfx::FuzzyEqual(transform._12, previousTransform._12, kError)) {
-    return false;
-  }
-  layer->SetBaseTransformForNextTransaction(transform3d.GetMatrix());
-  *aLayerResult = layer;
-  return true;
-}
-
 bool nsIFrame::IsInvalid(nsRect& aRect) {
   if (!HasAnyStateBits(NS_FRAME_NEEDS_PAINT)) {
     return false;
@@ -7333,13 +7396,11 @@ void nsIFrame::SchedulePaintWithoutInvalidatingObservers(PaintType aType) {
   SchedulePaintInternal(displayRoot, this, aType);
 }
 
-Layer* nsIFrame::InvalidateLayer(DisplayItemType aDisplayItemKey,
-                                 const nsIntRect* aDamageRect,
-                                 const nsRect* aFrameDamageRect,
-                                 uint32_t aFlags /* = 0 */) {
+void nsIFrame::InvalidateLayer(DisplayItemType aDisplayItemKey,
+                               const nsIntRect* aDamageRect,
+                               const nsRect* aFrameDamageRect,
+                               uint32_t aFlags /* = 0 */) {
   NS_ASSERTION(aDisplayItemKey > DisplayItemType::TYPE_ZERO, "Need a key");
-
-  Layer* layer = FrameLayerBuilder::GetDedicatedLayer(this, aDisplayItemKey);
 
   nsIFrame* displayRoot = nsLayoutUtils::GetDisplayRootFrame(this);
   InvalidateRenderingObservers(displayRoot, this, false);
@@ -7348,51 +7409,28 @@ Layer* nsIFrame::InvalidateLayer(DisplayItemType aDisplayItemKey,
   if ((aFlags & UPDATE_IS_ASYNC) &&
       WebRenderUserData::SupportsAsyncUpdate(this)) {
     // WebRender does not use layer, then return nullptr.
-    return nullptr;
+    return;
   }
 
-  // If the layer is being updated asynchronously, and it's being forwarded
-  // to a compositor, then we don't need to invalidate.
-  if ((aFlags & UPDATE_IS_ASYNC) && layer && layer->SupportsAsyncUpdate()) {
-    return layer;
+  if (aFrameDamageRect && aFrameDamageRect->IsEmpty()) {
+    return;
   }
 
-  if (!layer) {
-    if (aFrameDamageRect && aFrameDamageRect->IsEmpty()) {
-      return nullptr;
-    }
-
-    // In the bug 930056, dialer app startup but not shown on the
-    // screen because sometimes we don't have any retainned data
-    // for remote type displayitem and thus Repaint event is not
-    // triggered. So, always invalidate in this case.
-    DisplayItemType displayItemKey = aDisplayItemKey;
-    if (aDisplayItemKey == DisplayItemType::TYPE_REMOTE) {
-      displayItemKey = DisplayItemType::TYPE_ZERO;
-    }
-
-    if (aFrameDamageRect) {
-      InvalidateFrameWithRect(*aFrameDamageRect,
-                              static_cast<uint32_t>(displayItemKey));
-    } else {
-      InvalidateFrame(static_cast<uint32_t>(displayItemKey));
-    }
-
-    return nullptr;
+  // In the bug 930056, dialer app startup but not shown on the
+  // screen because sometimes we don't have any retainned data
+  // for remote type displayitem and thus Repaint event is not
+  // triggered. So, always invalidate in this case.
+  DisplayItemType displayItemKey = aDisplayItemKey;
+  if (aDisplayItemKey == DisplayItemType::TYPE_REMOTE) {
+    displayItemKey = DisplayItemType::TYPE_ZERO;
   }
 
-  if (aDamageRect && aDamageRect->IsEmpty()) {
-    return layer;
-  }
-
-  if (aDamageRect) {
-    layer->AddInvalidRect(*aDamageRect);
+  if (aFrameDamageRect) {
+    InvalidateFrameWithRect(*aFrameDamageRect,
+                            static_cast<uint32_t>(displayItemKey));
   } else {
-    layer->SetInvalidRectToVisibleRegion();
+    InvalidateFrame(static_cast<uint32_t>(displayItemKey));
   }
-
-  SchedulePaintInternal(displayRoot, this, PAINT_COMPOSITE_ONLY);
-  return layer;
 }
 
 static nsRect ComputeEffectsRect(nsIFrame* aFrame, const nsRect& aOverflowRect,
@@ -7466,11 +7504,18 @@ void nsIFrame::MovePositionBy(const nsPoint& aTranslation) {
 nsRect nsIFrame::GetNormalRect() const {
   // It might be faster to first check
   // StyleDisplay()->IsRelativelyPositionedStyle().
-  nsPoint* normalPosition = GetProperty(NormalPositionProperty());
-  if (normalPosition) {
-    return nsRect(*normalPosition, GetSize());
+  bool hasProperty;
+  nsPoint normalPosition = GetProperty(NormalPositionProperty(), &hasProperty);
+  if (hasProperty) {
+    return nsRect(normalPosition, GetSize());
   }
   return GetRect();
+}
+
+nsRect nsIFrame::GetBoundingClientRect() {
+  return nsLayoutUtils::GetAllInFlowRectsUnion(
+      this, nsLayoutUtils::GetContainingBlockForClientRect(this),
+      nsLayoutUtils::RECTS_ACCOUNT_FOR_TRANSFORMS);
 }
 
 nsPoint nsIFrame::GetPositionIgnoringScrolling() const {
@@ -7485,13 +7530,14 @@ nsRect nsIFrame::GetOverflowRect(OverflowType aType) const {
   // areas will invalidate the appropriate area, so any (mis)uses of
   // this method will be fixed up.
 
-  if (mOverflow.mType == NS_FRAME_OVERFLOW_LARGE) {
+  if (mOverflow.mType == OverflowStorageType::Large) {
     // there is an overflow rect, and it's not stored as deltas but as
     // a separately-allocated rect
     return GetOverflowAreasProperty()->Overflow(aType);
   }
 
-  if (aType == OverflowType::Ink && mOverflow.mType != NS_FRAME_OVERFLOW_NONE) {
+  if (aType == OverflowType::Ink &&
+      mOverflow.mType != OverflowStorageType::None) {
     return InkOverflowFromDeltas();
   }
 
@@ -7499,7 +7545,7 @@ nsRect nsIFrame::GetOverflowRect(OverflowType aType) const {
 }
 
 OverflowAreas nsIFrame::GetOverflowAreas() const {
-  if (mOverflow.mType == NS_FRAME_OVERFLOW_LARGE) {
+  if (mOverflow.mType == OverflowStorageType::Large) {
     // there is an overflow rect, and it's not stored as deltas but as
     // a separately-allocated rect
     return *GetOverflowAreasProperty();
@@ -7519,6 +7565,10 @@ OverflowAreas nsIFrame::GetOverflowAreasRelativeToSelf() const {
     }
   }
   return OverflowAreas(InkOverflowRect(), ScrollableOverflowRect());
+}
+
+OverflowAreas nsIFrame::GetOverflowAreasRelativeToParent() const {
+  return GetOverflowAreas() + mRect.TopLeft();
 }
 
 nsRect nsIFrame::ScrollableOverflowRectRelativeToParent() const {
@@ -7651,6 +7701,33 @@ bool nsIFrame::IsPercentageResolvedAgainstZero(
          (sizeHasPercent && FormControlShrinksForPercentSize(this));
 }
 
+// Summary of the Cyclic-Percentage Intrinsic Size Contribution Rules:
+//
+// Element Type         |       Replaced           |        Non-replaced
+// Contribution Type    | min-content  max-content | min-content  max-content
+// ---------------------------------------------------------------------------
+// min size             | zero         zero        | zero         zero
+// max & preferred size | zero         initial     | initial      initial
+//
+// https://drafts.csswg.org/css-sizing-3/#cyclic-percentage-contribution
+bool nsIFrame::IsPercentageResolvedAgainstZero(const LengthPercentage& aSize,
+                                               SizeProperty aProperty) const {
+  // Early return to avoid calling the virtual function, IsFrameOfType().
+  if (aProperty == SizeProperty::MinSize) {
+    return true;
+  }
+
+  const bool hasPercentOnReplaced =
+      aSize.HasPercent() && IsFrameOfType(nsIFrame::eReplacedSizing);
+  if (aProperty == SizeProperty::MaxSize) {
+    return hasPercentOnReplaced;
+  }
+
+  MOZ_ASSERT(aProperty == SizeProperty::Size);
+  return hasPercentOnReplaced ||
+         (aSize.HasPercent() && FormControlShrinksForPercentSize(this));
+}
+
 bool nsIFrame::IsBlockWrapper() const {
   auto pseudoType = Style()->GetPseudoType();
   return pseudoType == PseudoStyleType::mozBlockInsideInlineWrapper ||
@@ -7696,8 +7773,7 @@ nsIFrame* nsIFrame::GetContainingBlock(
   // still be in-flow.  So we have to check to make sure that the frame
   // is really out-of-flow too.
   nsIFrame* f;
-  if (IsAbsolutelyPositioned(aStyleDisplay) &&
-      HasAnyStateBits(NS_FRAME_OUT_OF_FLOW)) {
+  if (IsAbsolutelyPositioned(aStyleDisplay)) {
     f = GetParent();  // the parent is always the containing block
   } else {
     f = GetNearestBlockContainer(GetParent());
@@ -7880,12 +7956,11 @@ void nsIFrame::List(FILE* out, const char* aPrefix, ListFlags aFlags) const {
 }
 
 void nsIFrame::ListTextRuns(FILE* out) const {
-  nsTHashtable<nsVoidPtrHashKey> seen;
+  nsTHashSet<const void*> seen;
   ListTextRuns(out, seen);
 }
 
-void nsIFrame::ListTextRuns(FILE* out,
-                            nsTHashtable<nsVoidPtrHashKey>& aSeen) const {
+void nsIFrame::ListTextRuns(FILE* out, nsTHashSet<const void*>& aSeen) const {
   for (const auto& childList : ChildLists()) {
     for (const nsIFrame* kid : childList.mList) {
       kid->ListTextRuns(out, aSeen);
@@ -8136,8 +8211,8 @@ nsresult nsIFrame::GetNextPrevLineFromeBlockFrame(nsPresContext* aPresContext,
     lastFrame = firstFrame = line.mFirstFrameOnLine;
     for (int32_t lineFrameCount = line.mNumFramesOnLine; lineFrameCount > 1;
          lineFrameCount--) {
-      result = it->GetNextSiblingOnLine(lastFrame, searchingLine);
-      if (NS_FAILED(result) || !lastFrame) {
+      lastFrame = lastFrame->GetNextSibling();
+      if (!lastFrame) {
         NS_ERROR("GetLine promised more frames than could be found");
         return NS_ERROR_FAILURE;
       }
@@ -8166,8 +8241,7 @@ nsresult nsIFrame::GetNextPrevLineFromeBlockFrame(nsPresContext* aPresContext,
     if (resultFrame) {
       // check to see if this is ANOTHER blockframe inside the other one if so
       // then call into its lines
-      nsAutoLineIterator newIt = resultFrame->GetLineIterator();
-      if (newIt) {
+      if (resultFrame->CanProvideLineIterator()) {
         aPos->mResultFrame = resultFrame;
         return NS_OK;
       }
@@ -8350,8 +8424,7 @@ static nsContentAndOffset FindLineBreakInText(nsIFrame* aFrame,
     return result;
   }
 
-  int32_t startOffset, endOffset;
-  aFrame->GetOffsets(startOffset, endOffset);
+  int32_t endOffset = aFrame->GetOffsets().second;
   result.mContent = aFrame->GetContent();
   result.mOffset = endOffset - (aDirection == eDirPrevious ? 0 : 1);
   return result;
@@ -8568,8 +8641,7 @@ nsresult nsIFrame::PeekOffsetForCharacter(nsPeekOffsetStruct* aPos,
     // selection, this doesn't matter.
     if (peekSearchState == FOUND && current.mMovedOverNonSelectableText &&
         (!aPos->mExtend || current.mHasSelectableFrame)) {
-      int32_t start, end;
-      current.mFrame->GetOffsets(start, end);
+      auto [start, end] = current.mFrame->GetOffsets();
       current.mOffset = aPos->mDirection == eDirNext ? 0 : end - start;
     }
   }
@@ -8581,7 +8653,8 @@ nsresult nsIFrame::PeekOffsetForCharacter(nsPeekOffsetStruct* aPos,
   // we're placed before the linefeed character on the previous line.
   if (current.mOffset < 0 && current.mJumpedLine &&
       aPos->mDirection == eDirPrevious &&
-      current.mFrame->HasSignificantTerminalNewline()) {
+      current.mFrame->HasSignificantTerminalNewline() &&
+      !current.mIgnoredBrFrame) {
     --aPos->mContentOffset;
   }
   return NS_OK;
@@ -8667,16 +8740,19 @@ nsresult nsIFrame::PeekOffsetForWord(nsPeekOffsetStruct* aPos,
 }
 
 nsresult nsIFrame::PeekOffsetForLine(nsPeekOffsetStruct* aPos) {
-  nsAutoLineIterator iter;
   nsIFrame* blockFrame = this;
   nsresult result = NS_ERROR_FAILURE;
 
   while (NS_FAILED(result)) {
-    int32_t thisLine;
-    MOZ_TRY_VAR(thisLine,
-                blockFrame->GetLineNumber(aPos->mScrollViewStop, &blockFrame));
-    iter = blockFrame->GetLineIterator();
-    MOZ_ASSERT(iter, "GetLineNumber() succeeded but no block frame?");
+    auto [newBlock, lineFrame] =
+        blockFrame->GetContainingBlockForLine(aPos->mScrollViewStop);
+    if (!newBlock) {
+      return NS_ERROR_FAILURE;
+    }
+    blockFrame = newBlock;
+    nsAutoLineIterator iter = blockFrame->GetLineIterator();
+    int32_t thisLine = iter->FindLineContaining(lineFrame);
+    MOZ_ASSERT(thisLine >= 0, "Failed to find line!");
 
     int edgeCase = 0;  // no edge case. this should look at thisLine
 
@@ -8723,8 +8799,7 @@ nsresult nsIFrame::PeekOffsetForLine(nsPeekOffsetStruct* aPos) {
           // got the table frame now
           // ok time to drill down to find iterator
           while (frame) {
-            iter = frame->GetLineIterator();
-            if (iter) {
+            if (frame->CanProvideLineIterator()) {
               aPos->mResultFrame = frame;
               searchTableBool = true;
               result = NS_OK;
@@ -8736,12 +8811,13 @@ nsresult nsIFrame::PeekOffsetForLine(nsPeekOffsetStruct* aPos) {
         }
 
         if (!searchTableBool) {
-          iter = aPos->mResultFrame->GetLineIterator();
-          result = iter ? NS_OK : NS_ERROR_FAILURE;
+          result = aPos->mResultFrame->CanProvideLineIterator()
+                       ? NS_OK
+                       : NS_ERROR_FAILURE;
         }
 
         // we've struck another block element!
-        if (NS_SUCCEEDED(result) && iter) {
+        if (NS_SUCCEEDED(result)) {
           doneLooping = false;
           if (aPos->mDirection == eDirPrevious) {
             edgeCase = 1;  // far edge, search from end backwards
@@ -8766,12 +8842,19 @@ nsresult nsIFrame::PeekOffsetForLine(nsPeekOffsetStruct* aPos) {
 
 nsresult nsIFrame::PeekOffsetForLineEdge(nsPeekOffsetStruct* aPos) {
   // Adjusted so that the caret can't get confused when content changes
-  nsIFrame* blockFrame = AdjustFrameForSelectionStyles(this);
-  int32_t thisLine;
-  MOZ_TRY_VAR(thisLine,
-              blockFrame->GetLineNumber(aPos->mScrollViewStop, &blockFrame));
+  nsIFrame* frame = AdjustFrameForSelectionStyles(this);
+  Element* editingHost = frame->GetContent()->GetEditingHost();
+
+  auto [blockFrame, lineFrame] =
+      frame->GetContainingBlockForLine(aPos->mScrollViewStop);
+  if (!blockFrame) {
+    return NS_ERROR_FAILURE;
+  }
   nsAutoLineIterator it = blockFrame->GetLineIterator();
-  MOZ_ASSERT(it, "GetLineNumber() succeeded but no block frame?");
+  int32_t thisLine = it->FindLineContaining(lineFrame);
+  if (thisLine < 0) {
+    return NS_ERROR_FAILURE;
+  }
 
   nsIFrame* baseFrame = nullptr;
   bool endOfLine = (eSelectEndLine == aPos->mAmount);
@@ -8809,6 +8892,18 @@ nsresult nsIFrame::PeekOffsetForLineEdge(nsPeekOffsetStruct* aPos) {
   }
   if (!baseFrame) {
     return NS_ERROR_FAILURE;
+  }
+  // Make sure we are not leaving our inline editing host if exists
+  if (editingHost) {
+    if (nsIFrame* frame = editingHost->GetPrimaryFrame()) {
+      if (frame->IsInlineOutside() &&
+          !editingHost->Contains(baseFrame->GetContent())) {
+        baseFrame = frame;
+        if (endOfLine) {
+          baseFrame = baseFrame->LastContinuation();
+        }
+      }
+    }
   }
   FrameTarget targetFrame = DrillDownToSelectionFrame(baseFrame, endOfLine, 0);
   SetPeekResultFromFrame(*aPos, targetFrame.frame, endOfLine ? -1 : 0,
@@ -8865,7 +8960,6 @@ nsresult nsIFrame::PeekOffset(nsPeekOffsetStruct* aPos) {
       return NS_ERROR_FAILURE;
     }
   }
-  return NS_OK;
 }
 
 nsIFrame::FrameSearchResult nsIFrame::PeekOffsetNoAmount(bool aForward,
@@ -8960,14 +9054,11 @@ nsresult nsIFrame::CheckVisibility(nsPresContext*, int32_t, int32_t, bool,
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
-Result<int32_t, nsresult> nsIFrame::GetLineNumber(bool aLockScroll,
-                                                  nsIFrame** aContainingBlock) {
-  MOZ_ASSERT(aContainingBlock);
-
-  nsIFrame* parentFrame = this;
-  nsIFrame* frame;
-  nsAutoLineIterator it;
-  while (!it && parentFrame) {
+std::pair<nsIFrame*, nsIFrame*> nsIFrame::GetContainingBlockForLine(
+    bool aLockScroll) const {
+  const nsIFrame* parentFrame = this;
+  const nsIFrame* frame;
+  while (parentFrame) {
     frame = parentFrame;
     if (frame->HasAnyStateBits(NS_FRAME_OUT_OF_FLOW)) {
       // if we are searching for a frame that is not in flow we will not find
@@ -8978,27 +9069,21 @@ Result<int32_t, nsresult> nsIFrame::GetLineNumber(bool aLockScroll,
       }
       frame = frame->GetPlaceholderFrame();
       if (!frame) {
-        return Err(NS_ERROR_FAILURE);
+        return std::pair(nullptr, nullptr);
       }
     }
     parentFrame = frame->GetParent();
     if (parentFrame) {
       if (aLockScroll && parentFrame->IsScrollFrame()) {
-        return Err(NS_ERROR_FAILURE);
+        return std::pair(nullptr, nullptr);
       }
-      it = parentFrame->GetLineIterator();
+      if (parentFrame->CanProvideLineIterator()) {
+        return std::pair(const_cast<nsIFrame*>(parentFrame),
+                         const_cast<nsIFrame*>(frame));
+      }
     }
   }
-  if (!parentFrame || !it) {
-    return Err(NS_ERROR_FAILURE);
-  }
-
-  *aContainingBlock = parentFrame;
-  int32_t line = it->FindLineContaining(frame);
-  if (line < 0) {
-    return Err(NS_ERROR_FAILURE);
-  }
-  return line;
+  return std::pair(nullptr, nullptr);
 }
 
 Result<bool, nsresult> nsIFrame::IsVisuallyAtLineEdge(
@@ -9040,7 +9125,7 @@ Result<bool, nsresult> nsIFrame::IsLogicallyAtLineEdge(
   nsIFrame* lastFrame = line.mFirstFrameOnLine;
   for (int32_t lineFrameCount = line.mNumFramesOnLine; lineFrameCount > 1;
        lineFrameCount--) {
-    MOZ_TRY(aLineIterator->GetNextSiblingOnLine(lastFrame, aLine));
+    lastFrame = lastFrame->GetNextSibling();
     if (!lastFrame) {
       NS_ERROR("should not be reached nsIFrame");
       return Err(NS_ERROR_FAILURE);
@@ -9069,13 +9154,17 @@ nsIFrame::SelectablePeekReport nsIFrame::GetFrameFromDirection(
   bool selectable = false;
   nsIFrame* traversedFrame = this;
   while (!selectable) {
-    nsIFrame* blockFrame;
-
-    int32_t thisLine;
-    MOZ_TRY_VAR(thisLine,
-                traversedFrame->GetLineNumber(aScrollViewStop, &blockFrame));
+    auto [blockFrame, lineFrame] =
+        traversedFrame->GetContainingBlockForLine(aScrollViewStop);
+    if (!blockFrame) {
+      return result;
+    }
 
     nsAutoLineIterator it = blockFrame->GetLineIterator();
+    int32_t thisLine = it->FindLineContaining(lineFrame);
+    if (thisLine < 0) {
+      return result;
+    }
 
     bool atLineEdge;
     MOZ_TRY_VAR(
@@ -9108,21 +9197,20 @@ nsIFrame::SelectablePeekReport nsIFrame::GetFrameFromDirection(
       return !aForceEditableRegion || aFrame->GetContent()->IsEditable();
     };
 
-    // Skip brFrames, but only we can select something before hitting the end of
-    // the line or a non-selectable region.
+    // Skip br frames, but only if we can select something before hitting the
+    // end of the line or a non-selectable region.
     if (atLineEdge && aDirection == eDirPrevious &&
         traversedFrame->IsBrFrame()) {
-      bool canSkipBr = false;
       for (nsIFrame* current = traversedFrame->GetPrevSibling(); current;
            current = current->GetPrevSibling()) {
         if (!current->IsBlockOutside() && IsSelectable(current)) {
           if (!current->IsBrFrame()) {
-            canSkipBr = true;
+            result.mIgnoredBrFrame = true;
           }
           break;
         }
       }
-      if (canSkipBr) {
+      if (result.mIgnoredBrFrame) {
         continue;
       }
     }
@@ -9183,21 +9271,18 @@ a11y::AccType nsIFrame::AccessibleType() {
 #endif
 
 bool nsIFrame::ClearOverflowRects() {
-  if (mOverflow.mType == NS_FRAME_OVERFLOW_NONE) {
+  if (mOverflow.mType == OverflowStorageType::None) {
     return false;
   }
-  if (mOverflow.mType == NS_FRAME_OVERFLOW_LARGE) {
+  if (mOverflow.mType == OverflowStorageType::Large) {
     RemoveProperty(OverflowAreasProperty());
   }
-  mOverflow.mType = NS_FRAME_OVERFLOW_NONE;
+  mOverflow.mType = OverflowStorageType::None;
   return true;
 }
 
-/** Set the overflowArea rect, storing it as deltas or a separate rect
- * depending on its size in relation to the primary frame rect.
- */
 bool nsIFrame::SetOverflowAreas(const OverflowAreas& aOverflowAreas) {
-  if (mOverflow.mType == NS_FRAME_OVERFLOW_LARGE) {
+  if (mOverflow.mType == OverflowStorageType::Large) {
     OverflowAreas* overflow = GetOverflowAreasProperty();
     bool changed = *overflow != aOverflowAreas;
     *overflow = aOverflowAreas;
@@ -9214,8 +9299,8 @@ bool nsIFrame::SetOverflowAreas(const OverflowAreas& aOverflowAreas) {
       b = vis.YMost() - mRect.height;  // bottom: positive is downwards
   if (aOverflowAreas.ScrollableOverflow().IsEqualEdges(
           nsRect(nsPoint(0, 0), GetSize())) &&
-      l <= NS_FRAME_OVERFLOW_DELTA_MAX && t <= NS_FRAME_OVERFLOW_DELTA_MAX &&
-      r <= NS_FRAME_OVERFLOW_DELTA_MAX && b <= NS_FRAME_OVERFLOW_DELTA_MAX &&
+      l <= InkOverflowDeltas::kMax && t <= InkOverflowDeltas::kMax &&
+      r <= InkOverflowDeltas::kMax && b <= InkOverflowDeltas::kMax &&
       // we have to check these against zero because we *never* want to
       // set a frame as having no overflow in this function.  This is
       // because FinishAndStoreOverflow calls this function prior to
@@ -9225,17 +9310,17 @@ bool nsIFrame::SetOverflowAreas(const OverflowAreas& aOverflowAreas) {
       // so that our eventual SetRect/SetSize will know that it has to
       // reset our overflow areas.
       (l | t | r | b) != 0) {
-    VisualDeltas oldDeltas = mOverflow.mVisualDeltas;
+    InkOverflowDeltas oldDeltas = mOverflow.mInkOverflowDeltas;
     // It's a "small" overflow area so we store the deltas for each edge
     // directly in the frame, rather than allocating a separate rect.
     // If they're all zero, that's fine; we're setting things to
     // no-overflow.
-    mOverflow.mVisualDeltas.mLeft = l;
-    mOverflow.mVisualDeltas.mTop = t;
-    mOverflow.mVisualDeltas.mRight = r;
-    mOverflow.mVisualDeltas.mBottom = b;
+    mOverflow.mInkOverflowDeltas.mLeft = l;
+    mOverflow.mInkOverflowDeltas.mTop = t;
+    mOverflow.mInkOverflowDeltas.mRight = r;
+    mOverflow.mInkOverflowDeltas.mBottom = b;
     // There was no scrollable overflow before, and there isn't now.
-    return oldDeltas != mOverflow.mVisualDeltas;
+    return oldDeltas != mOverflow.mInkOverflowDeltas;
   } else {
     bool changed =
         !aOverflowAreas.ScrollableOverflow().IsEqualEdges(
@@ -9243,7 +9328,7 @@ bool nsIFrame::SetOverflowAreas(const OverflowAreas& aOverflowAreas) {
         !aOverflowAreas.InkOverflow().IsEqualEdges(InkOverflowFromDeltas());
 
     // it's a large overflow area that we need to store as a property
-    mOverflow.mType = NS_FRAME_OVERFLOW_LARGE;
+    mOverflow.mType = OverflowStorageType::Large;
     AddProperty(OverflowAreasProperty(), new OverflowAreas(aOverflowAreas));
     return changed;
   }
@@ -9369,7 +9454,7 @@ static nsRect UnionBorderBoxes(
         u = childRect;
         aOutValid = true;
       } else {
-        u.UnionRectEdges(u, childRect);
+        u = u.UnionEdges(childRect);
       }
     }
   }
@@ -9443,7 +9528,7 @@ static void ComputeAndIncludeOutlineArea(nsIFrame* aFrame,
     }
   }
 
-  // Keep this code in sync with GetOutlineInnerRect in nsCSSRendering.cpp.
+  // Keep this code in sync with nsDisplayOutline::GetInnerRect.
   SetOrUpdateRectValuedProperty(aFrame, nsIFrame::OutlineInnerRectProperty(),
                                 innerRect);
   const nscoord offset = outline->mOutlineOffset.ToAppUnits();
@@ -9470,7 +9555,7 @@ static void ComputeAndIncludeOutlineArea(nsIFrame* aFrame,
   }
 
   nsRect& vo = aOverflowAreas.InkOverflow();
-  vo.UnionRectEdges(vo, innerRect.Union(outerRect));
+  vo = vo.UnionEdges(innerRect.Union(outerRect));
 }
 
 bool nsIFrame::FinishAndStoreOverflow(OverflowAreas& aOverflowAreas,
@@ -9480,12 +9565,12 @@ bool nsIFrame::FinishAndStoreOverflow(OverflowAreas& aOverflowAreas,
              "Don't call - overflow rects not maintained on these SVG frames");
 
   const nsStyleDisplay* disp = StyleDisplayWithOptionalParam(aStyleDisplay);
-  bool hasTransform = IsTransformed(disp);
+  bool hasTransform = IsTransformed();
 
   nsRect bounds(nsPoint(0, 0), aNewSize);
   // Store the passed in overflow area if we are a preserve-3d frame or we have
   // a transform, and it's not just the frame bounds.
-  if (hasTransform || Combines3DTransformWithAncestors(disp)) {
+  if (hasTransform || Combines3DTransformWithAncestors()) {
     if (!aOverflowAreas.InkOverflow().IsEqualEdges(bounds) ||
         !aOverflowAreas.ScrollableOverflow().IsEqualEdges(bounds)) {
       OverflowAreas* initial = GetProperty(nsIFrame::InitialOverflowProperty());
@@ -9592,7 +9677,7 @@ bool nsIFrame::FinishAndStoreOverflow(OverflowAreas& aOverflowAreas,
       !HasAnyStateBits(NS_FRAME_SVG_LAYOUT)) {
     for (const auto otype : AllOverflowTypes()) {
       nsRect& o = aOverflowAreas.Overflow(otype);
-      o.UnionRectEdges(o, bounds);
+      o = o.UnionEdges(bounds);
     }
   }
 
@@ -9605,7 +9690,7 @@ bool nsIFrame::FinishAndStoreOverflow(OverflowAreas& aOverflowAreas,
             presContext->DeviceContext(), this, disp->EffectiveAppearance(),
             &r)) {
       nsRect& vo = aOverflowAreas.InkOverflow();
-      vo.UnionRectEdges(vo, r);
+      vo = vo.UnionEdges(r);
     }
   }
 
@@ -9631,7 +9716,7 @@ bool nsIFrame::FinishAndStoreOverflow(OverflowAreas& aOverflowAreas,
     SetProperty(nsIFrame::PreTransformOverflowAreasProperty(),
                 new OverflowAreas(aOverflowAreas));
 
-    if (Combines3DTransformWithAncestors(disp)) {
+    if (Combines3DTransformWithAncestors()) {
       /* If we're a preserve-3d leaf frame, then our pre-transform overflow
        * should be correct. Our post-transform overflow is empty though, because
        * we only contribute to the overflow area of the preserve-3d root frame.
@@ -9674,7 +9759,7 @@ bool nsIFrame::FinishAndStoreOverflow(OverflowAreas& aOverflowAreas,
     SVGObserverUtils::InvalidateDirectRenderingObservers(this);
     if (IsBlockFrameOrSubclass() &&
         TextOverflow::CanHaveOverflowMarkers(this)) {
-      DiscardDisplayItems(this, [](nsDisplayItemBase* aItem) {
+      DiscardDisplayItems(this, [](nsDisplayItem* aItem) {
         return aItem->GetType() == DisplayItemType::TYPE_TEXT_OVERFLOW;
       });
       SchedulePaint(PAINT_DEFAULT);
@@ -9702,8 +9787,9 @@ void nsIFrame::RecomputePerspectiveChildrenOverflow(
           boundsOverflow.SetAllTo(bounds);
           child->FinishAndStoreOverflow(boundsOverflow, bounds.Size());
         }
-      } else if (child->GetContainingBlock(SKIP_SCROLLED_FRAME) ==
-                 aStartFrame) {
+      } else if (child->GetContent() == aStartFrame->GetContent() ||
+                 child->GetClosestFlattenedTreeAncestorPrimaryFrame() ==
+                     aStartFrame) {
         // If a frame is using perspective, then the size used to compute
         // perspective-origin is the size of the frame belonging to its parent
         // style. We must find any descendant frames using our size
@@ -9730,8 +9816,7 @@ void nsIFrame::ComputePreserve3DChildrenOverflow(
       // pre-transform region (which contains all descendants that aren't
       // participating in the 3d context) and transform it into the 3d context
       // root coordinate space.
-      const nsStyleDisplay* childDisp = child->StyleDisplay();
-      if (child->Combines3DTransformWithAncestors(childDisp)) {
+      if (child->Combines3DTransformWithAncestors()) {
         OverflowAreas childOverflow = child->GetOverflowAreasRelativeToSelf();
         TransformReferenceBox refBox(child);
         for (const auto otype : AllOverflowTypes()) {
@@ -9743,7 +9828,7 @@ void nsIFrame::ComputePreserve3DChildrenOverflow(
 
         // If this child also extends the 3d context, then recurse into it
         // looking for more participants.
-        if (child->Extend3DContext(childDisp, child->StyleEffects())) {
+        if (child->Extend3DContext()) {
           child->ComputePreserve3DChildrenOverflow(aOverflowAreas);
         }
       }
@@ -9751,9 +9836,13 @@ void nsIFrame::ComputePreserve3DChildrenOverflow(
   }
 }
 
+bool nsIFrame::ZIndexApplies() const {
+  return StyleDisplay()->IsPositionedStyle() || IsFlexOrGridItem();
+}
+
 Maybe<int32_t> nsIFrame::ZIndex() const {
-  if (!StyleDisplay()->IsPositionedStyle() && !IsFlexOrGridItem()) {
-    return Nothing();  // z-index doesn't apply.
+  if (!ZIndexApplies()) {
+    return Nothing();
   }
   const auto& zIndex = StylePosition()->mZIndex;
   if (zIndex.IsAuto()) {
@@ -10125,8 +10214,8 @@ nsIFrame::Focusable nsIFrame::IsFocusable(bool aWithMouse) {
     return {};
   }
 
-  const nsStyleUI* ui = StyleUI();
-  if (ui->mInert == StyleInert::Inert) {
+  const nsStyleUI& ui = *StyleUI();
+  if (ui.IsInert()) {
     return {};
   }
 
@@ -10137,8 +10226,8 @@ nsIFrame::Focusable nsIFrame::IsFocusable(bool aWithMouse) {
   }
 
   int32_t tabIndex = -1;
-  if (ui->mUserFocus != StyleUserFocus::Ignore &&
-      ui->mUserFocus != StyleUserFocus::None) {
+  if (ui.UserFocus() != StyleUserFocus::Ignore &&
+      ui.UserFocus() != StyleUserFocus::None) {
     // Pass in default tabindex of -1 for nonfocusable and 0 for focusable
     tabIndex = 0;
   }
@@ -10888,7 +10977,7 @@ void nsIFrame::SetParent(nsContainerFrame* aParent) {
     for (nsIFrame* f = aParent;
          f && !f->HasAnyStateBits(NS_FRAME_DESCENDANT_NEEDS_PAINT |
                                   NS_FRAME_IS_NONDISPLAY);
-         f = nsLayoutUtils::GetCrossDocParentFrame(f)) {
+         f = nsLayoutUtils::GetCrossDocParentFrameInProcess(f)) {
       f->AddStateBits(NS_FRAME_DESCENDANT_NEEDS_PAINT);
     }
   }
@@ -10926,22 +11015,40 @@ void nsIFrame::CreateOwnLayerIfNeeded(nsDisplayListBuilder* aBuilder,
 
 bool nsIFrame::IsStackingContext(const nsStyleDisplay* aStyleDisplay,
                                  const nsStyleEffects* aStyleEffects) {
-  return HasOpacity(aStyleDisplay, aStyleEffects, nullptr) ||
-         IsTransformed(aStyleDisplay) ||
-         ((aStyleDisplay->IsContainPaint() ||
-           aStyleDisplay->IsContainLayout()) &&
-          IsFrameOfType(eSupportsContainLayoutAndPaint)) ||
-         // strictly speaking, 'perspective' doesn't require visual atomicity,
-         // but the spec says it acts like the rest of these
-         ChildrenHavePerspective(aStyleDisplay) ||
-         aStyleEffects->mMixBlendMode != StyleBlend::Normal ||
+  // Properties that influence the output of this function should be handled in
+  // change_bits_for_longhand as well.
+  if (HasOpacity(aStyleDisplay, aStyleEffects, nullptr)) {
+    return true;
+  }
+  if (IsTransformed()) {
+    return true;
+  }
+  auto willChange = aStyleDisplay->mWillChange.bits;
+  if (aStyleDisplay->IsContainPaint() || aStyleDisplay->IsContainLayout() ||
+      willChange & StyleWillChangeBits::CONTAIN) {
+    if (IsFrameOfType(eSupportsContainLayoutAndPaint)) {
+      return true;
+    }
+  }
+  // strictly speaking, 'perspective' doesn't require visual atomicity,
+  // but the spec says it acts like the rest of these
+  if (aStyleDisplay->HasPerspectiveStyle() ||
+      willChange & StyleWillChangeBits::PERSPECTIVE) {
+    if (IsFrameOfType(eSupportsCSSTransforms)) {
+      return true;
+    }
+  }
+  if (!StylePosition()->mZIndex.IsAuto() ||
+      willChange & StyleWillChangeBits::Z_INDEX) {
+    if (ZIndexApplies()) {
+      return true;
+    }
+  }
+  return aStyleEffects->mMixBlendMode != StyleBlend::Normal ||
          SVGIntegrationUtils::UsingEffectsForFrame(this) ||
          aStyleDisplay->IsPositionForcingStackingContext() ||
-         ZIndex().isSome() ||
-         (aStyleDisplay->mWillChange.bits &
-          StyleWillChangeBits::STACKING_CONTEXT) ||
          aStyleDisplay->mIsolation != StyleIsolation::Auto ||
-         aStyleEffects->HasBackdropFilters();
+         willChange & StyleWillChangeBits::STACKING_CONTEXT_UNCONDITIONAL;
 }
 
 bool nsIFrame::IsStackingContext() {
@@ -10958,7 +11065,7 @@ static bool IsFrameScrolledOutOfView(const nsIFrame* aTarget,
   // find the first scrollable frame or root frame if we are in a fixed pos
   // subtree
   for (nsIFrame* f = const_cast<nsIFrame*>(aParent); f;
-       f = nsLayoutUtils::GetCrossDocParentFrame(f)) {
+       f = nsLayoutUtils::GetCrossDocParentFrameInProcess(f)) {
     nsIScrollableFrame* scrollableFrame = do_QueryFrame(f);
     if (scrollableFrame) {
       clipParent = f;
@@ -11184,8 +11291,7 @@ CompositorHitTestInfo nsIFrame::GetCompositorHitTestInfo(
     return result;
   }
   bool hitTestDispatchToContent = false;
-  const StylePointerEvents pointerEvents =
-      StyleUI()->GetEffectivePointerEvents(this);
+  const StylePointerEvents pointerEvents = Style()->PointerEvents();
   if (pointerEvents == StylePointerEvents::None) {
     if (nsSubDocumentFrame* subdocumentFrame = do_QueryFrame(this)) {
       // For SubDocumentFrame, it may still request for pointer events.
@@ -11240,7 +11346,7 @@ CompositorHitTestInfo nsIFrame::GetCompositorHitTestInfo(
     // that code, but woven into the top-down recursive display list building
     // process.
     CompositorHitTestInfo inheritedTouchAction =
-        aBuilder->GetHitTestInfo() & CompositorHitTestTouchActionMask;
+        aBuilder->GetCompositorHitTestInfo() & CompositorHitTestTouchActionMask;
 
     nsIFrame* touchActionFrame = this;
     if (nsIScrollableFrame* scrollFrame =
@@ -11966,7 +12072,6 @@ DR_FrameTypeInfo* DR_State::GetFrameTypeInfo(char* aFrameName) {
 void DR_State::InitFrameTypeTable() {
   AddFrameTypeInfo(LayoutFrameType::Block, "block", "block");
   AddFrameTypeInfo(LayoutFrameType::Br, "br", "br");
-  AddFrameTypeInfo(LayoutFrameType::Bullet, "bullet", "bullet");
   AddFrameTypeInfo(LayoutFrameType::ColorControl, "color", "colorControl");
   AddFrameTypeInfo(LayoutFrameType::GfxButtonControl, "button",
                    "gfxButtonControl");
@@ -11995,7 +12100,6 @@ void DR_State::InitFrameTypeTable() {
   AddFrameTypeInfo(LayoutFrameType::Text, "text", "text");
   AddFrameTypeInfo(LayoutFrameType::Viewport, "VP", "viewport");
 #  ifdef MOZ_XUL
-  AddFrameTypeInfo(LayoutFrameType::XULLabel, "XULLabel", "XULLabel");
   AddFrameTypeInfo(LayoutFrameType::Box, "Box", "Box");
   AddFrameTypeInfo(LayoutFrameType::Slider, "Slider", "Slider");
   AddFrameTypeInfo(LayoutFrameType::PopupSet, "PopupSet", "PopupSet");

@@ -1,4 +1,3 @@
-/* vim: set ts=8 sw=8 noexpandtab: */
 //  qcms
 //  Copyright (C) 2009 Mozilla Foundation
 //  Copyright (C) 1998-2007 Marti Maria
@@ -21,10 +20,9 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct Matrix {
     pub m: [[f32; 3]; 3],
-    pub invalid: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -55,11 +53,8 @@ impl Matrix {
     /* lcms uses gauss-jordan elimination with partial pivoting which is
      * less efficient and not as numerically stable. See Mathematics for
      * Game Programmers. */
-    pub fn invert(&self) -> Matrix {
-        let mut dest_mat: Matrix = Matrix {
-            m: [[0.; 3]; 3],
-            invalid: false,
-        };
+    pub fn invert(&self) -> Option<Matrix> {
+        let mut dest_mat: Matrix = Matrix { m: [[0.; 3]; 3] };
         let mut i: i32;
 
         const a: [i32; 3] = [2, 2, 1];
@@ -67,10 +62,8 @@ impl Matrix {
         /* inv  (A) = 1/det (A) * adj (A) */
         let mut det: f32 = self.det();
         if det == 0. {
-            dest_mat.invalid = true;
-            return dest_mat;
+            return None;
         }
-        dest_mat.invalid = false;
         det = 1. / det;
         let mut j: i32 = 0;
         while j < 3 {
@@ -92,13 +85,10 @@ impl Matrix {
             }
             j += 1
         }
-        dest_mat
+        Some(dest_mat)
     }
     pub fn identity() -> Matrix {
-        let mut i: Matrix = Matrix {
-            m: [[0.; 3]; 3],
-            invalid: false,
-        };
+        let mut i: Matrix = Matrix { m: [[0.; 3]; 3] };
         i.m[0][0] = 1.;
         i.m[0][1] = 0.;
         i.m[0][2] = 0.;
@@ -108,21 +98,15 @@ impl Matrix {
         i.m[2][0] = 0.;
         i.m[2][1] = 0.;
         i.m[2][2] = 1.;
-        i.invalid = false;
         i
     }
-    pub fn invalid() -> Matrix {
-        let mut inv: Matrix = Self::identity();
-        inv.invalid = true;
-        inv
+    pub fn invalid() -> Option<Matrix> {
+        None
     }
     /* from pixman */
     /* MAT3per... */
     pub fn multiply(a: Matrix, b: Matrix) -> Matrix {
-        let mut result: Matrix = Matrix {
-            m: [[0.; 3]; 3],
-            invalid: false,
-        };
+        let mut result: Matrix = Matrix { m: [[0.; 3]; 3] };
         let mut dx: i32;
 
         let mut o: i32;
@@ -141,7 +125,6 @@ impl Matrix {
             }
             dy += 1
         }
-        result.invalid = a.invalid as i32 != 0 || b.invalid as i32 != 0;
         result
     }
 }

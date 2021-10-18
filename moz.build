@@ -198,4 +198,10 @@ SPHINX_TREES["setup"] = "docs/setup"
 
 SPHINX_TREES["crash-reporting"] = "docs/crash-reporting"
 
+SPHINX_TREES["performance"] = "docs/performance"
+
+SPHINX_TREES["metrics"] = "docs/metrics"
+
+SPHINX_TREES["gtest"] = "docs/gtest"
+
 include("build/templates.mozbuild")

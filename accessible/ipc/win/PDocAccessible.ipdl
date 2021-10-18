@@ -7,11 +7,17 @@
 include protocol PFileDescriptorSet;
 include protocol PBrowser;
 
+include DocAccessibleTypes;
+
 include "mozilla/GfxMessageUtils.h";
 
 using mozilla::a11y::role from "mozilla/a11y/IPCTypes.h";
 using mozilla::a11y::IAccessibleHolder from "mozilla/a11y/IPCTypes.h";
 using mozilla::a11y::IDispatchHolder from "mozilla/a11y/IPCTypes.h";
+using mozilla::a11y::AccType from "mozilla/a11y/IPCTypes.h";
+using mozilla::a11y::AccGenericType from "mozilla/a11y/IPCTypes.h";
+using mozilla::a11y::CacheUpdateType from "mozilla/a11y/IPCTypes.h";
+[RefCounted] using mozilla::a11y::AccAttributes from "mozilla/a11y/IPCTypes.h";
 using mozilla::WindowsHandle from "mozilla/ipc/IPCTypes.h";
 using mozilla::LayoutDeviceIntRect from "Units.h";
 
@@ -24,7 +30,9 @@ struct AccessibleData
   int32_t MsaaID;
   role Role;
   uint32_t ChildrenCount;
-  uint32_t Interfaces;
+  AccType Type;
+  AccGenericType GenericTypes;
+  uint8_t RoleMapEntryIndex;
 };
 
 struct ShowEventData
@@ -33,12 +41,6 @@ struct ShowEventData
   uint32_t Idx;
   AccessibleData[] NewTree;
   bool EventSuppressed;
-};
-
-struct Attribute
-{
-  nsCString Name;
-  nsString Value;
 };
 
 sync protocol PDocAccessible
@@ -82,8 +84,12 @@ parent:
    */
   async BindChildDoc(PDocAccessible aChildDoc, uint64_t aID);
 
-  sync GetWindowedPluginIAccessible(WindowsHandle aHwnd)
-    returns (IAccessibleHolder aPluginCOMProxy);
+  /*
+   * Cache The World
+   * aFinal is false when paginating cache into several pushes,
+   * and then true on the final push.
+   */
+  async Cache(CacheUpdateType aUpdateType, CacheData[] aData, bool aFinal);
 
 child:
   /**
@@ -104,6 +110,11 @@ child:
    * elements through keyboard navigation.
    */
   async RestoreFocus();
+
+  /*
+   * Verify the cache. Used for testing purposes.
+   */
+  async VerifyCache(uint64_t aID, uint64_t aCacheDomain, AccAttributes aFields);
 
   async __delete__();
 };

@@ -32,15 +32,36 @@ def Libxul(name, output_category=None):
         SHARED_LIBRARY_NAME = "xul"
 
     DELAYLOAD_DLLS += [
+        "avrt.dll",
         "comdlg32.dll",
         "credui.dll",
+        "d3d11.dll",
+        "D3DCompiler_47.dll",
+        "dhcpcsvc.dll",
+        "dnsapi.dll",
+        "dwmapi.dll",
+        "dxgi.dll",
+        "gdi32.dll",
         "hid.dll",
+        "imm32.dll",
+        "iphlpapi.dll",
+        "msi.dll",
         "msimg32.dll",
         "netapi32.dll",
+        "ole32.dll",
+        "oleaut32.dll",
         "secur32.dll",
+        "setupapi.dll",
+        "shell32.dll",
+        "shlwapi.dll",
         "urlmon.dll",
+        "user32.dll",
+        "userenv.dll",
+        "usp10.dll",
+        "uxtheme.dll",
         "wininet.dll",
         "winspool.drv",
+        "wtsapi32.dll",
     ]
 
     if CONFIG["ACCESSIBILITY"]:
@@ -100,15 +121,6 @@ def Libxul(name, output_category=None):
         )
         SYMBOLS_FILE = "!symverscript"
 
-    # Generate GDB pretty printer-autoload files only on Linux. OSX's GDB is
-    # too old to support Python pretty-printers; if this changes, we could
-    # make this 'ifdef __GNUC__'.
-    if CONFIG["OS_ARCH"] == "Linux":
-        # Create a GDB Python auto-load file alongside the libxul shared library
-        # in the build directory.
-        DEFINES["topsrcdir"] = TOPSRCDIR
-        OBJDIR_FILES.toolkit.library.build += ["../libxul.so-gdb.py"]
-
     if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gonk":
         OS_LIBS += [
             "android",
@@ -126,8 +138,10 @@ def Libxul(name, output_category=None):
             "hidltransport",
             "hwbinder",
             "log",
+            "media_helper",
             "mtp",
             "nativewindow",
+            "netdbpf",
             "stdc++",
             "suspend",
             "sync",
@@ -144,7 +158,9 @@ def Libxul(name, output_category=None):
             "android.hardware.graphics.composer@2.3",
             "android.hardware.power@1.0",
             "android.hardware.radio@1.0",
+            "android.hardware.radio@1.1",
             "android.hardware.sensors@1.0",
+            "android.hardware.sensors@2.0",
             "android.hardware.vibrator@1.0",
             "android.hardware.wifi@1.0",
             "android.hardware.wifi@1.1",
@@ -157,6 +173,8 @@ def Libxul(name, output_category=None):
             "android.hardware.wifi.supplicant@1.2",
             "android.system.wifi.keystore@1.0",
             "binder_b2g_connectivity_interface-cpp",
+            "binder_b2g_stub",
+            "binder_b2g_system_interface-cpp",
             "binder_b2g_telephony_interface-cpp",
             "binder_b2g_remotesimunlock_interface-cpp",
             "dnsresolver_aidl_interface-V2-cpp",
@@ -170,6 +188,10 @@ def Libxul(name, output_category=None):
                 "android.hardware.gnss.visibility_control@1.0",
             )
 
+        if CONFIG["B2G_OEMHOOK"]:
+            AOSPSharedObjects(
+                "vendor.qti.hardware.radio.qcrilhook@1.0",
+            )
 
 # The real libxul definition is in ./build/moz.build, but we define a
 # xul library here such that # FINAL_LIBRARY = 'xul' refers to here, which
@@ -222,9 +244,22 @@ USE_LIBS += [
 ]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+    # The mozgtk library is a workaround that makes Gtk+ use libwayland-client
+    # instead of mozwayland. The reason it works is that by being a dependency
+    # of libxul, mozgtk appears in dependentlibs.list, preceding mozwayland
+    # (which is important and guaranteed by the USE_LIBS order in this file).
+    # That, in turn, makes firefox dlopen() mozgtk before mozwayland, which
+    # will trigger the loading of the Gtk+ libraries (mozgtk depending on them).
+    # Those libraries, if they depend on libwayland-client, will use the symbols
+    # from libwayland-client because mozwayland is not loaded yet.
+    # When eventually libxul is loaded after both mozgtk and mozwayland, it will
+    # get symbols from libwayland-client too.
+    # In the case where Gtk+ doesn't have wayland support, libwayland-client is
+    # not loaded, and libxul ends up using the mozwayland symbols.
     USE_LIBS += [
-        "mozgtk_stub",
+        "mozgtk",
     ]
+    OS_LIBS += CONFIG["MOZ_GTK3_LIBS"]
 
 if CONFIG["MOZ_WAYLAND"]:
     USE_LIBS += [
@@ -309,9 +344,6 @@ if CONFIG["MOZ_ANDROID_GOOGLE_VR"]:
         "-lgvr",
     ]
 
-OS_LIBS += CONFIG["MOZ_CAIRO_OSLIBS"]
-OS_LIBS += CONFIG["MOZ_WEBRTC_X11_LIBS"]
-
 if CONFIG["MOZ_SYSTEM_JPEG"]:
     OS_LIBS += CONFIG["MOZ_JPEG_LIBS"]
 
@@ -348,14 +380,8 @@ if CONFIG["MOZ_ENABLE_DBUS"]:
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     OS_LIBS += [l for l in CONFIG["TK_LIBS"] if l not in ("-lgtk-3", "-lgdk-3")]
-    OS_LIBS += CONFIG["XLDFLAGS"]
-    OS_LIBS += CONFIG["XLIBS"]
-    OS_LIBS += CONFIG["XEXT_LIBS"]
+    OS_LIBS += CONFIG["MOZ_X11_LIBS"]
     OS_LIBS += CONFIG["MOZ_PANGO_LIBS"]
-    OS_LIBS += CONFIG["XT_LIBS"]
-    OS_LIBS += [
-        "gthread-2.0",
-    ]
 
 if CONFIG["MOZ_ENABLE_LIBPROXY"]:
     OS_LIBS += CONFIG["MOZ_LIBPROXY_LIBS"]
@@ -394,7 +420,6 @@ if CONFIG["OS_ARCH"] == "WINNT":
         "sensorsapi",
         "portabledeviceguids",
         "wininet",
-        "wbemuuid",
         "wintrust",
         "wtsapi32",
         "locationapi",

@@ -49,7 +49,8 @@ void OutputStreamDriver::SetImage(RefPtr<layers::Image>&& aImage,
                                   const TimeStamp& aTime) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  TRACE_COMMENT("SourceMediaTrack %p", mSourceStream.get());
+  TRACE_COMMENT("OutputStreamDriverSetImage", "SourceMediaTrack %p",
+                mSourceStream.get());
 
   VideoSegment segment;
   const auto size = aImage->GetSize();
@@ -167,7 +168,7 @@ void CanvasCaptureMediaStream::RequestFrame() {
 nsresult CanvasCaptureMediaStream::Init(const dom::Optional<double>& aFPS,
                                         nsIPrincipal* aPrincipal) {
   MediaTrackGraph* graph = MediaTrackGraph::GetInstance(
-      MediaTrackGraph::SYSTEM_THREAD_DRIVER, AudioChannel::Normal, mWindow,
+      MediaTrackGraph::SYSTEM_THREAD_DRIVER, AudioChannel::Normal, GetOwner(),
       MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE,
       MediaTrackGraph::DEFAULT_OUTPUT_DEVICE);
   SourceMediaTrack* source = graph->CreateSourceTrack(MediaSegment::VIDEO);

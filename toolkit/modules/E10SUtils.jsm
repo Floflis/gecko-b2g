@@ -19,12 +19,6 @@ XPCOMUtils.defineLazyPreferenceGetter(
 );
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
-  "useSeparateDataUriProcess",
-  "browser.tabs.remote.dataUriInDefaultWebProcess",
-  false
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
   "useSeparatePrivilegedAboutContentProcess",
   "browser.tabs.remote.separatePrivilegedContentProcess",
   false
@@ -39,7 +33,7 @@ XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "separatedMozillaDomains",
   "browser.tabs.remote.separatedMozillaDomains",
-  false,
+  "",
   false,
   val => val.split(",")
 );
@@ -48,12 +42,6 @@ XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "useCrossOriginOpenerPolicy",
   "browser.tabs.remote.useCrossOriginOpenerPolicy",
-  false
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
-  "useOriginAttributesInRemoteType",
-  "browser.tabs.remote.useOriginAttributesInRemoteType",
   false
 );
 XPCOMUtils.defineLazyServiceGetter(
@@ -82,6 +70,16 @@ function getAboutModule(aURL) {
   }
 }
 
+function getOriginalReaderModeURI(aURI) {
+  try {
+    let searchParams = new URLSearchParams(aURI.query);
+    if (searchParams.has("url")) {
+      return Services.io.newURI(searchParams.get("url"));
+    }
+  } catch (e) {}
+  return null;
+}
+
 const NOT_REMOTE = null;
 
 // These must match any similar ones in ContentParent.h and ProcInfo.h
@@ -107,6 +105,7 @@ const kSafeSchemes = [
   "ircs",
   "magnet",
   "mailto",
+  "matrix",
   "mms",
   "news",
   "nntp",
@@ -215,19 +214,17 @@ function validatedWebRemoteType(
   // question, and use it to generate an isolated origin.
   if (aRemoteSubframes) {
     let originAttributes = {};
-    if (useOriginAttributesInRemoteType) {
-      // Only use specific properties of OriginAttributes in our remoteType
-      let {
-        userContextId,
-        privateBrowsingId,
-        geckoViewSessionContextId,
-      } = aOriginAttributes;
-      originAttributes = {
-        userContextId,
-        privateBrowsingId,
-        geckoViewSessionContextId,
-      };
-    }
+    // Only use specific properties of OriginAttributes in our remoteType
+    let {
+      userContextId,
+      privateBrowsingId,
+      geckoViewSessionContextId,
+    } = aOriginAttributes;
+    originAttributes = {
+      userContextId,
+      privateBrowsingId,
+      geckoViewSessionContextId,
+    };
 
     // Get a principal to use for isolation.
     let targetPrincipal;
@@ -473,6 +470,32 @@ var E10SUtils = {
           ) {
             return PRIVILEGEDABOUT_REMOTE_TYPE;
           }
+
+          // When loading about:reader, try to display the document in the same
+          // web remote type as the document it's loading.
+          if (aURI.filePath == "reader") {
+            let readerModeURI = getOriginalReaderModeURI(aURI);
+            if (readerModeURI) {
+              let innerRemoteType = this.getRemoteTypeForURIObject(
+                readerModeURI,
+                aMultiProcess,
+                aRemoteSubframes,
+                aPreferredRemoteType,
+                aCurrentUri,
+                null, // aResultPrincipal
+                aIsSubframe,
+                aIsWorker,
+                aOriginAttributes
+              );
+              if (
+                innerRemoteType &&
+                innerRemoteType.startsWith(WEB_REMOTE_TYPE)
+              ) {
+                return innerRemoteType;
+              }
+            }
+          }
+
           return DEFAULT_REMOTE_TYPE;
         }
 
@@ -591,74 +614,6 @@ var E10SUtils = {
         log.debug(`  validatedWebRemoteType() returning: ${remoteType}`);
         return remoteType;
     }
-  },
-
-  getRemoteTypeForPrincipal(
-    aPrincipal,
-    aOriginalURI,
-    aMultiProcess,
-    aRemoteSubframes,
-    aPreferredRemoteType = DEFAULT_REMOTE_TYPE,
-    aCurrentPrincipal,
-    aIsSubframe
-  ) {
-    if (!aMultiProcess) {
-      return NOT_REMOTE;
-    }
-
-    // We want to use the original URI for "about:" (except for "about:srcdoc"
-    // and "about:blank") and "chrome://" scheme, so that we can properly
-    // determine the remote type.
-    let useOriginalURI;
-    if (aOriginalURI.scheme == "about") {
-      useOriginalURI = !["about:srcdoc", "about:blank"].includes(
-        aOriginalURI.spec
-      );
-    } else {
-      useOriginalURI = aOriginalURI.scheme == "chrome";
-    }
-
-    if (!useOriginalURI) {
-      // We can't pick a process based on a system principal or expanded
-      // principal.
-      if (aPrincipal.isSystemPrincipal || aPrincipal.isExpandedPrincipal) {
-        throw Components.Exception("", Cr.NS_ERROR_UNEXPECTED);
-      }
-
-      // Null principals can be loaded in any remote process, but when
-      // using fission we add the option to force them into the default
-      // web process for better test coverage.
-      if (aPrincipal.isNullPrincipal) {
-        if (aOriginalURI.spec == "about:blank") {
-          useOriginalURI = true;
-        } else if (
-          (aRemoteSubframes && useSeparateDataUriProcess) ||
-          aPreferredRemoteType == NOT_REMOTE
-        ) {
-          return WEB_REMOTE_TYPE;
-        }
-        return aPreferredRemoteType;
-      }
-    }
-    // We might care about the currently loaded URI. Pull it out of our current
-    // principal. We never care about the current URI when working with a
-    // non-content principal.
-    let currentURI =
-      aCurrentPrincipal && aCurrentPrincipal.isContentPrincipal
-        ? Services.io.newURI(aCurrentPrincipal.spec)
-        : null;
-
-    return E10SUtils.getRemoteTypeForURIObject(
-      useOriginalURI ? aOriginalURI : Services.io.newURI(aPrincipal.spec),
-      aMultiProcess,
-      aRemoteSubframes,
-      aPreferredRemoteType,
-      currentURI,
-      aPrincipal,
-      aIsSubframe,
-      false, //aIsWorker
-      aPrincipal.originAttributes
-    );
   },
 
   getRemoteTypeForWorkerPrincipal(

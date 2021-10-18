@@ -15,6 +15,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.geckoview.*
+import org.mozilla.geckoview.GeckoSession.NavigationDelegate
+import org.mozilla.geckoview.GeckoSession.ProgressDelegate
 import org.mozilla.geckoview.WebExtension.*
 import org.mozilla.geckoview.WebExtension.BrowsingDataDelegate.Type.*
 import org.mozilla.geckoview.WebExtensionController.EnableSource
@@ -22,7 +24,6 @@ import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.Setting
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.RejectedPromiseException
-import org.mozilla.geckoview.test.util.Callbacks
 import org.mozilla.geckoview.test.util.RuntimeCreator
 import org.mozilla.geckoview.test.util.UiThreadUtils
 import java.nio.charset.Charset
@@ -63,12 +64,6 @@ class WebExtensionTest : BaseSessionTest() {
 
     @Before
     fun setup() {
-        sessionRule.addExternalDelegateUntilTestEnd(
-                WebExtensionController.PromptDelegate::class,
-                controller::setPromptDelegate,
-                { controller.promptDelegate = null },
-                object : WebExtensionController.PromptDelegate {}
-        )
         sessionRule.setPrefsUntilTestEnd(mapOf("extensions.isembedded" to true))
         sessionRule.runtime.webExtensionController.setTabActive(mainSession, true)
     }
@@ -184,7 +179,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -245,7 +240,7 @@ class WebExtensionTest : BaseSessionTest() {
                 assertEquals(extension.metaData.blocklistState,
                         WebExtension.BlocklistStateFlags.NOT_BLOCKED)
 
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -289,7 +284,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled(count=1)
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -339,7 +334,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled(count=1)
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -369,7 +364,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled(count=2)
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -410,7 +405,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled(count = 0)
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -441,7 +436,7 @@ class WebExtensionTest : BaseSessionTest() {
 
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -491,7 +486,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled(count = 1)
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.DENY)
+                return GeckoResult.deny()
             }
         })
 
@@ -514,16 +509,11 @@ class WebExtensionTest : BaseSessionTest() {
 
     @Test
     fun createNotification() {
-        sessionRule.addExternalDelegateUntilTestEnd(
-                WebNotificationDelegate::class,
-                { delegate ->
-                    sessionRule.runtime.webNotificationDelegate = delegate },
-                { sessionRule.runtime.webNotificationDelegate = null },
-                object : WebNotificationDelegate {
-                    @GeckoSessionTestRule.AssertCalled
-                    override fun onShowNotification(notification: WebNotification) {
-                    }
-                })
+        sessionRule.delegateUntilTestEnd(object : WebNotificationDelegate {
+            @AssertCalled
+            override fun onShowNotification(notification: WebNotification) {
+            }
+        })
 
         val extension = sessionRule.waitForResult(
                 controller.installBuiltIn("resource://android/assets/web_extensions/notification-test/"))
@@ -623,6 +613,7 @@ class WebExtensionTest : BaseSessionTest() {
     // - Verify that request came from right extension
     @Test
     fun testBrowserTabsCreateWithCookieStoreId() {
+        sessionRule.setPrefsUntilTestEnd(mapOf("privacy.userContext.enabled" to true));
         val tabsCreateResult = GeckoResult<Void>()
         var tabsExtension: WebExtension? = null
         val tabDelegate = object : WebExtension.TabDelegate {
@@ -668,7 +659,7 @@ class WebExtensionTest : BaseSessionTest() {
                         assertNotEquals(null, extensionCreatedSession)
                         assertEquals(extensionCreatedSession, session)
                         onCloseRequestResult.complete(null)
-                        return GeckoResult.ALLOW
+                        return GeckoResult.allow()
                     }
                 })
 
@@ -709,7 +700,7 @@ class WebExtensionTest : BaseSessionTest() {
                 assertEquals(tabsExtension, source)
                 assertEquals(newTabSession, session)
                 onCloseRequestResult.complete(null)
-                return GeckoResult.ALLOW
+                return GeckoResult.allow()
             }
         })
 
@@ -975,7 +966,7 @@ class WebExtensionTest : BaseSessionTest() {
 
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -1041,7 +1032,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
         val tabsExtension = sessionRule.waitForResult(
@@ -1050,7 +1041,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
         var tabsExtensionPB = sessionRule.waitForResult(
@@ -1075,7 +1066,7 @@ class WebExtensionTest : BaseSessionTest() {
                 assertEquals(extension.id, source!!.id)
                 assertEquals(expectedSession, session)
                 result.complete(null)
-                return GeckoResult.ALLOW
+                return GeckoResult.allow()
             }
         }
 
@@ -1097,7 +1088,7 @@ class WebExtensionTest : BaseSessionTest() {
                                     session: GeckoSession): GeckoResult<AllowOrDeny> {
                 privateBrowsingPrivateSession.completeExceptionally(
                         RuntimeException("Should never happen"))
-                return GeckoResult.ALLOW
+                return GeckoResult.allow()
             }
         })
 
@@ -1189,7 +1180,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.waitForPageStop()
 
         var savedState : GeckoSession.SessionState? = null
-        sessionRule.waitUntilCalled(object : Callbacks.ProgressDelegate {
+        sessionRule.waitUntilCalled(object : ProgressDelegate {
             @AssertCalled(count=1)
             override fun onSessionStateChange(session: GeckoSession, state: GeckoSession.SessionState) {
                 savedState = state
@@ -1236,7 +1227,7 @@ class WebExtensionTest : BaseSessionTest() {
             override fun onCloseTab(source: WebExtension?, session: GeckoSession): GeckoResult<AllowOrDeny> {
                 assertEquals(existingSession, session)
                 onCloseRequestResult.complete(null)
-                return GeckoResult.ALLOW
+                return GeckoResult.allow()
             }
         })
 
@@ -1627,13 +1618,13 @@ class WebExtensionTest : BaseSessionTest() {
             override fun onUpdateTab(extension: WebExtension,
                                      session: GeckoSession,
                                      details: WebExtension.UpdateTabDetails): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
         mainSession.loadUri("http://example.com")
 
-        mainSession.waitUntilCalled(object : Callbacks.NavigationDelegate, Callbacks.ProgressDelegate {
+        mainSession.waitUntilCalled(object : NavigationDelegate, ProgressDelegate {
             @GeckoSessionTestRule.AssertCalled(count = 1)
             override fun onLocationChange(session: GeckoSession, url: String?) {
                 assertThat("Url should load example.com first",
@@ -1651,7 +1642,7 @@ class WebExtensionTest : BaseSessionTest() {
         var page: String? = null
         val pageStop = GeckoResult<Boolean>()
 
-        mainSession.delegateUntilTestEnd(object : Callbacks.NavigationDelegate, Callbacks.ProgressDelegate {
+        mainSession.delegateUntilTestEnd(object : NavigationDelegate, ProgressDelegate {
             override fun onLocationChange(session: GeckoSession, url: String?) {
                 page = url
             }
@@ -1696,7 +1687,7 @@ class WebExtensionTest : BaseSessionTest() {
                                     session: GeckoSession): GeckoResult<AllowOrDeny> {
                 assertEquals(extension.id, source!!.id)
                 assertEquals(mainSession, session)
-                return GeckoResult.ALLOW
+                return GeckoResult.allow()
             }
         })
 
@@ -1769,7 +1760,7 @@ class WebExtensionTest : BaseSessionTest() {
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
                 assertEquals(extension.metaData.version, "1.0")
 
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -1821,7 +1812,7 @@ class WebExtensionTest : BaseSessionTest() {
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
                 assertEquals(extension.metaData.version, "1.0")
 
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -1844,7 +1835,7 @@ class WebExtensionTest : BaseSessionTest() {
                 assertEquals(updatedExtension.metaData.version, "2.0")
                 assertEquals(newPermissions.size, 1)
                 assertEquals(newPermissions[0], "tabs")
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+                return GeckoResult.allow()
             }
         })
 
@@ -1887,7 +1878,7 @@ class WebExtensionTest : BaseSessionTest() {
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
                 assertEquals(extension.metaData.version, "2.0")
 
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -1933,7 +1924,7 @@ class WebExtensionTest : BaseSessionTest() {
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
                 assertEquals(extension.metaData.version, "1.0")
 
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -1954,7 +1945,7 @@ class WebExtensionTest : BaseSessionTest() {
                                         newOrigins: Array<String>): GeckoResult<AllowOrDeny> {
                 assertEquals(currentlyInstalled.metaData.version, "1.0")
                 assertEquals(updatedExtension.metaData.version, "2.0")
-                return GeckoResult.fromValue(AllowOrDeny.DENY);
+                return GeckoResult.deny()
             }
         })
 
@@ -1998,7 +1989,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -2030,7 +2021,7 @@ class WebExtensionTest : BaseSessionTest() {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
                 assertEquals(extension.metaData.version, "1.0")
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -2078,7 +2069,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -2190,7 +2181,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -2199,7 +2190,7 @@ class WebExtensionTest : BaseSessionTest() {
 
         val assertOnDownloadCalled = GeckoResult<WebExtension.Download>()
         val downloadDelegate = object : DownloadDelegate {
-            override fun onDownload(source: WebExtension, request: DownloadRequest): GeckoResult<WebExtension.Download>? {
+            override fun onDownload(source: WebExtension, request: DownloadRequest): GeckoResult<DownloadInitData>? {
                 assertEquals(webExtension!!.id, source.id)
                 assertEquals(uri, request.request.uri)
                 assertEquals("POST", request.request.method)
@@ -2217,7 +2208,11 @@ class WebExtensionTest : BaseSessionTest() {
 
                 val download = controller.createDownload(1)
                 assertOnDownloadCalled.complete(download)
-                return GeckoResult.fromValue(download)
+
+                val downloadInfo = object: Download.Info {}
+
+                val initialData = DownloadInitData(download, downloadInfo);
+                return GeckoResult.fromValue(initialData)
             }
         }
 
@@ -2255,7 +2250,7 @@ class WebExtensionTest : BaseSessionTest() {
         sessionRule.delegateDuringNextWait(object : WebExtensionController.PromptDelegate {
             @AssertCalled
             override fun onInstallPrompt(extension: WebExtension): GeckoResult<AllowOrDeny> {
-                return GeckoResult.fromValue(AllowOrDeny.ALLOW)
+                return GeckoResult.allow()
             }
         })
 
@@ -2264,7 +2259,7 @@ class WebExtensionTest : BaseSessionTest() {
 
         val assertOnDownloadCalled = GeckoResult<WebExtension.Download>()
         val downloadDelegate = object : DownloadDelegate {
-            override fun onDownload(source: WebExtension, request: DownloadRequest): GeckoResult<WebExtension.Download>? {
+            override fun onDownload(source: WebExtension, request: DownloadRequest): GeckoResult<DownloadInitData>? {
                 assertEquals(webExtension!!.id, source.id)
                 assertEquals(uri, request.request.uri)
                 assertEquals("GET", request.request.method)
@@ -2278,7 +2273,11 @@ class WebExtensionTest : BaseSessionTest() {
 
                 val download = controller.createDownload(2)
                 assertOnDownloadCalled.complete(download)
-                return GeckoResult.fromValue(download)
+
+                val downloadInfo = object: Download.Info {}
+
+                val initialData = DownloadInitData(download, downloadInfo)
+                return GeckoResult.fromValue(initialData)
             }
         }
 
@@ -2291,4 +2290,202 @@ class WebExtensionTest : BaseSessionTest() {
         assertNotNull(downloadCreated.id)
         sessionRule.waitForResult(controller.uninstall(webExtension))
     }
+
+    @Test
+    fun testOnChanged() {
+        val uri = createTestUrl("/assets/www/images/test.gif")
+        val downloadId = 4
+        val unfinishedDownloadSize = 5L
+        val finishedDownloadSize = 25L
+        val expectedFilename = "test.gif"
+        val expectedMime = "image/gif"
+        val expectedEndTime = Date().time
+        val expectedFilesize = 48L
+
+        // first and second update
+        val downloadData = object : Download.Info {
+            var endTime : Long? = null
+            val startTime = Date().time - 50000
+            var fileExists = false
+            var totalBytes: Long = -1
+            var mime = ""
+            var fileSize: Long = -1
+            var filename = ""
+            var state = Download.STATE_IN_PROGRESS
+
+            override fun state(): Int {
+                return state
+            }
+
+            override fun endTime(): Long? {
+                return endTime
+            }
+
+            override fun startTime(): Long {
+                return startTime
+            }
+
+            override fun fileExists(): Boolean {
+                return fileExists;
+            }
+
+            override fun totalBytes(): Long {
+                return totalBytes
+            }
+
+            override fun mime(): String {
+                return mime
+            }
+
+            override fun fileSize(): Long {
+                return fileSize
+            }
+
+            override fun filename(): String {
+                return filename
+            }
+        }
+
+        val webExtension = sessionRule.waitForResult(
+                controller.installBuiltIn("resource://android/assets/web_extensions/download-onChanged/"))
+
+        val assertOnDownloadCalled = GeckoResult<Download>()
+        val downloadDelegate = object : DownloadDelegate {
+            override fun onDownload(source: WebExtension, request: DownloadRequest): GeckoResult<WebExtension.DownloadInitData>? {
+                assertEquals(webExtension!!.id, source.id)
+                assertEquals(uri, request.request.uri)
+
+                val download = controller.createDownload(downloadId)
+                assertOnDownloadCalled.complete(download)
+                return GeckoResult.fromValue(DownloadInitData(download, downloadData))
+            }
+        }
+
+        val updates = mutableListOf<JSONObject>()
+
+        val thirdUpdateReceived = GeckoResult<JSONObject>()
+        val messageDelegate = object : MessageDelegate {
+            override fun onMessage(nativeApp: String, message: Any, sender: MessageSender): GeckoResult<Any>? {
+                val current = (message as JSONObject).getJSONObject("current")
+
+                updates.add(message)
+
+                // Once we get the size finished download, that means we got the last update
+                if (current.getLong("totalBytes") == finishedDownloadSize) {
+                    thirdUpdateReceived.complete(message)
+                }
+
+                return GeckoResult.fromValue(message)
+            }
+        }
+
+        webExtension.setDownloadDelegate(downloadDelegate)
+        webExtension.setMessageDelegate(messageDelegate, "browser")
+
+        mainSession.reload()
+        sessionRule.waitForPageStop()
+
+        val downloadCreated = sessionRule.waitForResult(assertOnDownloadCalled)
+        assertEquals(downloadId, downloadCreated.id)
+
+        // first and second update (they are identical)
+        downloadData.filename = expectedFilename
+        downloadData.mime = expectedMime
+        downloadData.totalBytes = unfinishedDownloadSize
+
+        downloadCreated.update(downloadData)
+        downloadCreated.update(downloadData)
+
+        downloadData.fileSize = expectedFilesize
+        downloadData.endTime = expectedEndTime
+        downloadData.totalBytes = finishedDownloadSize
+        downloadData.state = Download.STATE_COMPLETE
+        downloadCreated.update(downloadData)
+
+        sessionRule.waitForResult(thirdUpdateReceived)
+
+        // The second update should not be there because the data was identical
+        assertEquals(2, updates.size)
+
+        val firstUpdateCurrent = updates[0].getJSONObject("current")
+        val firstUpdatePrevious = updates[0].getJSONObject("previous")
+        assertEquals(3, firstUpdateCurrent.length())
+        assertEquals(3, firstUpdatePrevious.length())
+        assertEquals(expectedMime, firstUpdateCurrent.getString("mime"))
+        assertEquals("", firstUpdatePrevious.getString("mime"))
+        assertEquals(expectedFilename, firstUpdateCurrent.getString("filename"))
+        assertEquals("", firstUpdatePrevious.getString("filename"))
+        assertEquals(unfinishedDownloadSize, firstUpdateCurrent.getLong("totalBytes"))
+        assertEquals(-1, firstUpdatePrevious.getLong("totalBytes"))
+
+        val secondUpdateCurrent = updates[1].getJSONObject("current")
+        val secondUpdatePrevious = updates[1].getJSONObject("previous")
+        assertEquals(4, secondUpdateCurrent.length())
+        assertEquals(4, secondUpdatePrevious.length())
+        assertEquals(finishedDownloadSize, secondUpdateCurrent.getLong("totalBytes"))
+        assertEquals(firstUpdateCurrent.getLong("totalBytes"), secondUpdatePrevious.getLong("totalBytes"))
+        assertEquals("complete", secondUpdateCurrent.get("state").toString())
+        assertEquals("in_progress", secondUpdatePrevious.get("state").toString())
+        assertEquals(expectedEndTime.toString(), secondUpdateCurrent.getString("endTime"))
+        assertEquals("null", secondUpdatePrevious.getString("endTime"))
+        assertEquals(expectedFilesize, secondUpdateCurrent.getLong("fileSize"))
+        assertEquals(-1, secondUpdatePrevious.getLong("fileSize"))
+
+        sessionRule.waitForResult(controller.uninstall(webExtension))
+    }
+
+    @Test
+    fun testOnChangedWrongId() {
+        val uri = createTestUrl("/assets/www/images/test.gif")
+        val downloadId = 5
+
+        val webExtension = sessionRule.waitForResult(
+                controller.installBuiltIn("resource://android/assets/web_extensions/download-onChanged/"))
+
+        val assertOnDownloadCalled = GeckoResult<WebExtension.Download>()
+        val downloadDelegate = object : DownloadDelegate {
+            override fun onDownload(source: WebExtension, request: DownloadRequest): GeckoResult<WebExtension.DownloadInitData>? {
+                assertEquals(webExtension!!.id, source.id)
+                assertEquals(uri, request.request.uri)
+
+                val download = controller.createDownload(downloadId)
+                assertOnDownloadCalled.complete(download)
+                return GeckoResult.fromValue(DownloadInitData(download, object : Download.Info {}))
+            }
+        }
+
+        val onMessageCalled = GeckoResult<String>()
+        val messageDelegate = object : MessageDelegate {
+            override fun onMessage(nativeApp: String, message: Any, sender: MessageSender): GeckoResult<Any>? {
+                onMessageCalled.complete(message as String)
+                return GeckoResult.fromValue(message)
+            }
+        }
+
+        webExtension.setDownloadDelegate(downloadDelegate)
+        webExtension.setMessageDelegate(messageDelegate, "browser")
+
+        mainSession.reload()
+        sessionRule.waitForPageStop()
+
+        val updateData = object : WebExtension.Download.Info {
+            override fun state(): Int {
+                return WebExtension.Download.STATE_COMPLETE
+            }
+        }
+
+        val randomDownload = controller.createDownload(25)
+
+        val r = randomDownload!!.update(updateData)
+
+        try {
+            sessionRule.waitForResult(r!!)
+        } catch (ex: Exception) {
+            val a = ex.message!!
+            assertEquals("Error: Trying to update unknown download", a)
+            sessionRule.waitForResult(controller.uninstall(webExtension))
+            return
+        }
+    }
+
 }

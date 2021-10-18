@@ -6,7 +6,6 @@
 
 UNIFIED_SOURCES += [
     "FuzzingStreamListener.cpp",
-    "TestFtpFuzzing.cpp",
     "TestHttpFuzzing.cpp",
     "TestURIFuzzing.cpp",
     "TestWebsocketFuzzing.cpp",
@@ -15,7 +14,6 @@ UNIFIED_SOURCES += [
 LOCAL_INCLUDES += [
     "/caps",
     "/netwerk/base",
-    "/netwerk/protocol/ftp",
     "/netwerk/protocol/http",
     "/xpcom/tests/gtest",
 ]
@@ -27,3 +25,5 @@ FINAL_LIBRARY = "xul-gtest"
 LOCAL_INCLUDES += ["!/xpcom", "/xpcom/components"]
 
 include("/tools/fuzzing/libfuzzer-config.mozbuild")
+
+REQUIRES_UNIFIED_BUILD = True

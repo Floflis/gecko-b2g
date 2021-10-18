@@ -465,7 +465,7 @@ sftk_ike_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
     SFTKObject *newKeyObj = NULL;
     unsigned char outKeyData[HASH_LENGTH_MAX];
     unsigned char *newInKey = NULL;
-    unsigned int newInKeySize;
+    unsigned int newInKeySize = 0;
     unsigned int macSize;
     CK_RV crv = CKR_OK;
     prfContext context;
@@ -545,7 +545,7 @@ sftk_ike_prf(CK_SESSION_HANDLE hSession, const SFTKAttribute *inKey,
     crv = sftk_forceAttribute(outKey, CKA_VALUE, outKeyData, macSize);
 fail:
     if (newInKey) {
-        PORT_Free(newInKey);
+        PORT_ZFree(newInKey, newInKeySize);
     }
     if (newKeyValue) {
         sftk_FreeAttribute(newKeyValue);
@@ -1411,7 +1411,6 @@ sftk_fips_IKE_PowerUpSelfTests(void)
         (outKeySize != sizeof(ike_known_sha256_prf_plus)) ||
         (PORT_Memcmp(outKeyData, ike_known_sha256_prf_plus,
                      sizeof(ike_known_sha256_prf_plus)) != 0)) {
-        PORT_ZFree(outKeyData, outKeySize);
         PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
         return SECFailure;
     }

@@ -11,6 +11,7 @@
 
 #include "js/Array.h"  // JS::NewArrayObject
 #include "js/Debug.h"
+#include "js/PropertyAndElement.h"  // JS_DefineProperty
 #include "js/TypeDecls.h"
 #include "js/UbiNodeBreadthFirst.h"
 #include "js/UbiNodeCensus.h"
@@ -34,6 +35,7 @@
 
 #include "jsapi.h"
 #include "jsfriendapi.h"
+#include "js/MapAndSet.h"
 #include "js/Object.h"  // JS::GetCompartment
 #include "nsCycleCollectionParticipant.h"
 #include "nsCRTGlue.h"

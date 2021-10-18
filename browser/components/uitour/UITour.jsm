@@ -36,11 +36,6 @@ ChromeUtils.defineModuleGetter(
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "PageActions",
-  "resource:///modules/PageActions.jsm"
-);
-ChromeUtils.defineModuleGetter(
-  this,
   "ProfileAge",
   "resource://gre/modules/ProfileAge.jsm"
 );
@@ -114,22 +109,23 @@ var UITour = {
 
   _annotationPanelMutationObservers: new WeakMap(),
 
-  highlightEffects: ["random", "wobble", "zoom", "color"],
+  highlightEffects: ["random", "wobble", "zoom", "color", "focus-outline"],
   targets: new Map([
     [
       "accountStatus",
       {
-        query: aDocument => {
-          // Use the sync setup icon.
-          let statusButton = aDocument.getElementById("appMenu-fxa-label");
-          return statusButton.icon;
-        },
+        query: "#appMenu-fxa-label2",
         // This is a fake widgetName starting with the "appMenu-" prefix so we know
         // to automatically open the appMenu when annotating this target.
-        widgetName: "appMenu-fxa-label",
+        widgetName: "appMenu-fxa-label2",
       },
     ],
-    ["addons", { query: "#appMenu-addons-button" }],
+    [
+      "addons",
+      {
+        query: "#appMenu-extensions-themes-button",
+      },
+    ],
     [
       "appMenu",
       {
@@ -147,20 +143,6 @@ var UITour = {
     ["backForward", { query: "#back-button" }],
     ["bookmarks", { query: "#bookmarks-menu-button" }],
     [
-      "customize",
-      {
-        query: "#appMenu-customize-button",
-        widgetName: "appMenu-customize-button",
-      },
-    ],
-    [
-      "devtools",
-      {
-        query: "#appMenu-developer-button",
-        widgetName: "appMenu-developer-button",
-      },
-    ],
-    [
       "forget",
       {
         allowAdd: true,
@@ -168,29 +150,43 @@ var UITour = {
         widgetName: "panic-button",
       },
     ],
-    ["help", { query: "#appMenu-help-button" }],
+    ["help", { query: "#appMenu-help-button2" }],
+    [
+      "history",
+      {
+        query: "#appMenu-history-button",
+        subItem: "restorePreviousSession",
+        level: "top",
+      },
+    ],
     ["home", { query: "#home-button" }],
-    ["library", { query: "#appMenu-library-button" }],
-    ["logins", { query: "#appMenu-logins-button" }],
+    [
+      "logins",
+      {
+        query: "#appMenu-passwords-button",
+      },
+    ],
     [
       "pocket",
       {
         allowAdd: true,
-        query: aDocument => {
-          // The pocket's urlbar page action button is pre-defined in the DOM.
-          // It would be hidden if toggled off from the urlbar.
-          let node = aDocument.getElementById("pocket-button");
-          if (node && !node.hidden) {
-            return node;
-          }
-          aDocument.ownerGlobal.BrowserPageActions.placeLazyActionsInPanel();
-          return aDocument.getElementById("pageAction-panel-pocket");
-        },
+        query: "#save-to-pocket-button",
       },
     ],
-    ["privateWindow", { query: "#appMenu-private-window-button" }],
-    ["quit", { query: "#appMenu-quit-button" }],
+    [
+      "privateWindow",
+      {
+        query: "#appMenu-new-private-window-button2",
+      },
+    ],
+    [
+      "quit",
+      {
+        query: "#appMenu-quit-button2",
+      },
+    ],
     ["readerMode-urlBar", { query: "#reader-mode-button" }],
+    ["restorePreviousSession", { query: "#appMenu-restoreSession" }],
     [
       "search",
       {
@@ -231,71 +227,13 @@ var UITour = {
       },
     ],
     [
-      "pageActionButton",
-      {
-        query: "#pageActionButton",
-      },
-    ],
-    [
       "pageAction-bookmark",
       {
         query: aDocument => {
           // The bookmark's urlbar page action button is pre-defined in the DOM.
           // It would be hidden if toggled off from the urlbar.
           let node = aDocument.getElementById("star-button-box");
-          if (node && !node.hidden) {
-            return node;
-          }
-          aDocument.ownerGlobal.BrowserPageActions.placeLazyActionsInPanel();
-          return aDocument.getElementById("pageAction-panel-bookmark");
-        },
-      },
-    ],
-    [
-      "pageAction-copyURL",
-      {
-        query: aDocument => {
-          aDocument.ownerGlobal.BrowserPageActions.placeLazyActionsInPanel();
-          return (
-            aDocument.getElementById("pageAction-urlbar-copyURL") ||
-            aDocument.getElementById("pageAction-panel-copyURL")
-          );
-        },
-      },
-    ],
-    [
-      "pageAction-emailLink",
-      {
-        query: aDocument => {
-          aDocument.ownerGlobal.BrowserPageActions.placeLazyActionsInPanel();
-          return (
-            aDocument.getElementById("pageAction-urlbar-emailLink") ||
-            aDocument.getElementById("pageAction-panel-emailLink")
-          );
-        },
-      },
-    ],
-    [
-      "pageAction-sendToDevice",
-      {
-        query: aDocument => {
-          aDocument.ownerGlobal.BrowserPageActions.placeLazyActionsInPanel();
-          return (
-            aDocument.getElementById("pageAction-urlbar-sendToDevice") ||
-            aDocument.getElementById("pageAction-panel-sendToDevice")
-          );
-        },
-      },
-    ],
-    [
-      "screenshots",
-      {
-        query: aDocument => {
-          aDocument.ownerGlobal.BrowserPageActions.placeLazyActionsInPanel();
-          return (
-            aDocument.getElementById("pageAction-urlbar-screenshots") ||
-            aDocument.getElementById("pageAction-panel-screenshots_mozilla_org")
-          );
+          return node && !node.hidden ? node : null;
         },
       },
     ],
@@ -323,6 +261,14 @@ var UITour = {
         listener[method] = () => this.clearAvailableTargetsCache();
         return listener;
       }, {})
+    );
+  },
+
+  getNodeFromDocument(aDocument, aQuery) {
+    let viewCacheTemplate = aDocument.getElementById("appMenu-viewCache");
+    return (
+      aDocument.querySelector(aQuery) ||
+      viewCacheTemplate.content.querySelector(aQuery)
     );
   },
 
@@ -362,7 +308,11 @@ var UITour = {
         aEvent.pageVisibilityState == "unloaded") &&
       !BACKGROUND_PAGE_ACTIONS_ALLOWED.has(action)
     ) {
-      log.warn("Ignoring disallowed action from a hidden page:", action);
+      log.warn(
+        "Ignoring disallowed action from a hidden page:",
+        action,
+        aEvent.pageVisibilityState
+      );
       return false;
     }
 
@@ -372,12 +322,6 @@ var UITour = {
       }
 
       case "showHighlight": {
-        if (data.target.startsWith("pageAction-")) {
-          // The page action panel is lazily loaded, so we will need to initialize it
-          // and place actions in the panel before showing the highlight for a panel
-          // node.
-          window.BrowserPageActions.initializePanel();
-        }
         let targetPromise = this.getTarget(window, data.target);
         targetPromise
           .then(target => {
@@ -892,6 +836,20 @@ var UITour = {
     this.hideHighlight(aWindow);
     this.hideInfo(aWindow);
 
+    await this.removePanelListeners(aWindow, true);
+
+    this.noautohideMenus.clear();
+
+    // If there are no more tour tabs left in the window, teardown the tour for the whole window.
+    if (!openTourBrowsers || openTourBrowsers.size == 0) {
+      this.teardownTourForWindow(aWindow);
+    }
+  },
+
+  /**
+   * Remove the listeners to a panel when tearing the tour down.
+   */
+  async removePanelListeners(aWindow, aHidePanels = false) {
     let panels = [
       {
         name: "appMenu",
@@ -900,21 +858,14 @@ var UITour = {
           ["popuphidden", this.onPanelHidden],
           ["popuphiding", this.onAppMenuHiding],
           ["ViewShowing", this.onAppMenuSubviewShowing],
-        ],
-      },
-      {
-        name: "pageActionPanel",
-        node: aWindow.BrowserPageActions.panelNode,
-        events: [
-          ["popuphidden", this.onPanelHidden],
-          ["popuphiding", this.onPageActionPanelHiding],
-          ["ViewShowing", this.onPageActionPanelSubviewShowing],
+          ["ViewShown", this.onAppMenuSubviewShown],
+          ["ViewHiding", this.onAppMenuSubviewHiding],
         ],
       },
     ];
     for (let panel of panels) {
       // Ensure the menu panel is hidden and clean up panel listeners after calling hideMenu.
-      if (panel.node.state != "closed") {
+      if (aHidePanels && panel.node.state != "closed") {
         await new Promise(resolve => {
           panel.node.addEventListener("popuphidden", resolve, { once: true });
           this.hideMenu(aWindow, panel.name);
@@ -923,13 +874,6 @@ var UITour = {
       for (let [name, listener] of panel.events) {
         panel.node.removeEventListener(name, listener);
       }
-    }
-
-    this.noautohideMenus.clear();
-
-    // If there are no more tour tabs left in the window, teardown the tour for the whole window.
-    if (!openTourBrowsers || openTourBrowsers.size == 0) {
-      this.teardownTourForWindow(aWindow);
     }
   },
 
@@ -1021,12 +965,7 @@ var UITour = {
               node = null;
             }
           } else {
-            let viewCacheTemplate = aWindow.document.getElementById(
-              "appMenu-viewCache"
-            );
-            node =
-              aWindow.document.querySelector(targetQuery) ||
-              viewCacheTemplate.content.querySelector(targetQuery);
+            node = this.getNodeFromDocument(aWindow.document, targetQuery);
           }
 
           resolve({
@@ -1039,6 +978,8 @@ var UITour = {
             targetName: aTargetName,
             widgetName: targetObject.widgetName,
             allowAdd: targetObject.allowAdd,
+            level: targetObject.level,
+            subItem: targetObject.subItem,
           });
         })
         .catch(log.error);
@@ -1058,29 +999,20 @@ var UITour = {
     return targetElement.id.startsWith("appMenu-");
   },
 
-  targetIsInPageActionPanel(aTarget) {
-    return aTarget.node.id.startsWith("pageAction-panel-");
-  },
-
   /**
    * Called before opening or after closing a highlight or an info tooltip to see if
    * we need to open or close the menu to see the annotation's anchor.
    *
    * @param {ChromeWindow} aWindow the chrome window
    * @param {bool} aShouldOpen true means we should open the menu, otherwise false
-   * @param {String} aMenuName "appMenu" or "pageActionPanel"
    * @param {Object} aOptions Extra config arguments, example `autohide: true`.
    */
-  _setMenuStateForAnnotation(aWindow, aShouldOpen, aMenuName, aOptions = {}) {
-    log.debug("_setMenuStateForAnnotation: Menu is ", aMenuName);
+  _setMenuStateForAnnotation(aWindow, aShouldOpen, aOptions = {}) {
     log.debug(
       "_setMenuStateForAnnotation: Menu is expected to be:",
       aShouldOpen ? "open" : "closed"
     );
-    let menu =
-      aMenuName == "appMenu"
-        ? aWindow.PanelUI.panel
-        : aWindow.BrowserPageActions.panelNode;
+    let menu = aWindow.PanelUI.panel;
 
     // If the panel is in the desired state, we're done.
     let panelIsOpen = menu.state != "closed";
@@ -1094,16 +1026,16 @@ var UITour = {
     if (aShouldOpen) {
       log.debug("_setMenuStateForAnnotation: Opening the menu");
       promise = new Promise(resolve => {
-        this.showMenu(aWindow, aMenuName, resolve, aOptions);
+        this.showMenu(aWindow, "appMenu", resolve, aOptions);
       });
-    } else if (!this.noautohideMenus.has(aMenuName)) {
+    } else if (!this.noautohideMenus.has("appMenu")) {
       // If the menu was opened explictly by api user through `Mozilla.UITour.showMenu`,
       // it should be closed explictly by api user through `Mozilla.UITour.hideMenu`.
       // So we shouldn't get to here to close it for the highlight/info annotation.
       log.debug("_setMenuStateForAnnotation: Closing the menu");
       promise = new Promise(resolve => {
         menu.addEventListener("popuphidden", resolve, { once: true });
-        this.hideMenu(aWindow, aMenuName);
+        this.hideMenu(aWindow, "appMenu");
       });
     }
     return promise;
@@ -1118,15 +1050,8 @@ var UITour = {
    */
   async _ensureTarget(aChromeWindow, aTarget, aOptions = {}) {
     let shouldOpenAppMenu = false;
-    let shouldOpenPageActionPanel = false;
     if (this.targetIsInAppMenu(aTarget)) {
       shouldOpenAppMenu = true;
-    } else if (this.targetIsInPageActionPanel(aTarget)) {
-      shouldOpenPageActionPanel = true;
-      // Ensure the panel visibility so as to ensure the visibility of the target
-      // element inside the panel otherwise we would be rejected in the below
-      // `isElementVisible` checking.
-      aChromeWindow.BrowserPageActions.panelNode.hidden = false;
     }
 
     // Prevent showing a panel at an undefined position, but when it's tucked
@@ -1141,36 +1066,17 @@ var UITour = {
       );
     }
 
-    let menuToOpen = null;
     let menuClosePromises = [];
-    if (shouldOpenAppMenu) {
-      menuToOpen = "appMenu";
+    if (!shouldOpenAppMenu) {
       menuClosePromises.push(
-        this._setMenuStateForAnnotation(aChromeWindow, false, "pageActionPanel")
-      );
-    } else if (shouldOpenPageActionPanel) {
-      menuToOpen = "pageActionPanel";
-      menuClosePromises.push(
-        this._setMenuStateForAnnotation(aChromeWindow, false, "appMenu")
-      );
-    } else {
-      menuClosePromises.push(
-        this._setMenuStateForAnnotation(aChromeWindow, false, "appMenu")
-      );
-      menuClosePromises.push(
-        this._setMenuStateForAnnotation(aChromeWindow, false, "pageActionPanel")
+        this._setMenuStateForAnnotation(aChromeWindow, false)
       );
     }
 
     let promise = Promise.all(menuClosePromises);
     await promise;
-    if (menuToOpen) {
-      promise = this._setMenuStateForAnnotation(
-        aChromeWindow,
-        true,
-        menuToOpen,
-        aOptions
-      );
+    if (shouldOpenAppMenu) {
+      promise = this._setMenuStateForAnnotation(aChromeWindow, true, aOptions);
     }
     return promise;
   },
@@ -1231,15 +1137,22 @@ var UITour = {
       highlighter.parentElement.setAttribute("targetName", aTarget.targetName);
       highlighter.parentElement.hidden = false;
 
+      if (aTarget.subItem) {
+        // This is a subitem in the app menu, so mark it as one not to hide.
+        this.noautohideMenus.add("appMenu");
+        highlighter.parentElement.setAttribute("subitem", aTarget.subItem);
+      }
+
+      if (aTarget.level) {
+        highlighter.parentElement.setAttribute("level", aTarget.level);
+      }
+
       let highlightAnchor = aAnchorEl;
       let targetRect = highlightAnchor.getBoundingClientRect();
       let highlightHeight = targetRect.height;
       let highlightWidth = targetRect.width;
 
-      if (
-        this.targetIsInAppMenu(aTarget) ||
-        this.targetIsInPageActionPanel(aTarget)
-      ) {
+      if (this.targetIsInAppMenu(aTarget)) {
         highlighter.classList.remove("rounded-highlight");
       } else {
         highlighter.classList.add("rounded-highlight");
@@ -1307,8 +1220,7 @@ var UITour = {
 
   hideHighlight(aWindow) {
     this._hideHighlightElement(aWindow);
-    this._setMenuStateForAnnotation(aWindow, false, "appMenu");
-    this._setMenuStateForAnnotation(aWindow, false, "pageActionPanel");
+    this._setMenuStateForAnnotation(aWindow, false);
   },
 
   /**
@@ -1505,8 +1417,7 @@ var UITour = {
 
   hideInfo(aWindow) {
     this._hideInfoElement(aWindow);
-    this._setMenuStateForAnnotation(aWindow, false, "appMenu");
-    this._setMenuStateForAnnotation(aWindow, false, "pageActionPanel");
+    this._setMenuStateForAnnotation(aWindow, false);
   },
 
   showMenu(aWindow, aMenuName, aOpenCallback = null, aOptions = {}) {
@@ -1524,21 +1435,16 @@ var UITour = {
       aMenuBtn.openMenu(true);
     }
 
-    if (aMenuName == "appMenu" || aMenuName == "pageActionPanel") {
+    if (aMenuName == "appMenu") {
       let menu = {
         onPanelHidden: this.onPanelHidden,
       };
-      if (aMenuName == "appMenu") {
-        menu.node = aWindow.PanelUI.panel;
-        menu.onPopupHiding = this.onAppMenuHiding;
-        menu.onViewShowing = this.onAppMenuSubviewShowing;
-        menu.show = () => aWindow.PanelUI.show();
-      } else {
-        menu.node = aWindow.BrowserPageActions.panelNode;
-        menu.onPopupHiding = this.onPageActionPanelHiding;
-        menu.onViewShowing = this.onPageActionPanelSubviewShowing;
-        menu.show = () => aWindow.BrowserPageActions.showPanel();
-      }
+      menu.node = aWindow.PanelUI.panel;
+      menu.onPopupHiding = this.onAppMenuHiding;
+      menu.onViewShowing = this.onAppMenuSubviewShowing;
+      menu.onViewShown = this.onAppMenuSubviewShown;
+      menu.onViewHiding = this.onAppMenuSubviewHiding;
+      menu.show = () => aWindow.PanelUI.show();
 
       if (!aOptions.autohide) {
         menu.node.setAttribute("noautohide", "true");
@@ -1553,17 +1459,22 @@ var UITour = {
       menu.node.addEventListener("popuphidden", menu.onPanelHidden);
       menu.node.addEventListener("popuphiding", menu.onPopupHiding);
       menu.node.addEventListener("ViewShowing", menu.onViewShowing);
+      menu.node.addEventListener("ViewShown", menu.onViewShown);
+      menu.node.addEventListener("ViewHiding", menu.onViewHiding);
       menu.show();
     } else if (aMenuName == "bookmarks") {
       let menuBtn = aWindow.document.getElementById("bookmarks-menu-button");
       openMenuButton(menuBtn);
     } else if (aMenuName == "pocket") {
-      let pageAction = PageActions.actionForID("pocket");
-      if (!pageAction) {
-        log.error("Can't open the pocket menu without a page action");
+      let button = aWindow.document.getElementById("save-to-pocket-button");
+      if (!button) {
+        log.error("Can't open the pocket menu without a button");
         return;
       }
-      pageAction.doCommand(aWindow);
+      aWindow.document.addEventListener("ViewShown", aOpenCallback, {
+        once: true,
+      });
+      button.click();
     } else if (aMenuName == "urlbar") {
       let urlbar = aWindow.gURLBar;
       if (aOpenCallback) {
@@ -1602,8 +1513,6 @@ var UITour = {
       closeMenuButton(menuBtn);
     } else if (aMenuName == "urlbar") {
       aWindow.gURLBar.view.close();
-    } else if (aMenuName == "pageActionPanel") {
-      aWindow.BrowserPageActions.panelNode.hidePopup();
     }
   },
 
@@ -1680,26 +1589,78 @@ var UITour = {
     UITour._hideAnnotationsForPanel(aEvent, false, UITour.targetIsInAppMenu);
   },
 
-  onPageActionPanelHiding(aEvent) {
-    UITour._hideAnnotationsForPanel(
-      aEvent,
-      true,
-      UITour.targetIsInPageActionPanel
-    );
+  onAppMenuSubviewShown(aEvent) {
+    let win = aEvent.target.ownerGlobal;
+    let subItemName = UITour.getSubItem(win);
+    if (
+      subItemName &&
+      UITour.isSubItemToHighlight(win, subItemName, aEvent.target.id)
+    ) {
+      let highlighter = UITour.getHighlightAndMaybeCreate(win.document);
+      UITour.recreatePopup(highlighter.parentElement);
+
+      UITour.getTarget(win, subItemName).then(subItem => {
+        if (!subItem.node.hidden) {
+          UITour.showHighlight(win, subItem, "focus-outline", {
+            autohide: true,
+          });
+        }
+      });
+    } else if (subItemName && aEvent.target.id != "appMenu-protonMainView") {
+      UITour.stopSubViewHandling(win);
+    }
   },
 
-  onPageActionPanelSubviewShowing(aEvent) {
-    UITour._hideAnnotationsForPanel(
-      aEvent,
-      false,
-      UITour.targetIsInPageActionPanel
-    );
+  onAppMenuSubviewHiding(aEvent) {
+    let win = aEvent.target.ownerGlobal;
+
+    let subItem = UITour.getSubItem(win);
+    if (subItem) {
+      if (UITour.isSubItemToHighlight(win, subItem, aEvent.target.id)) {
+        UITour.hideHighlight(win);
+        UITour.stopSubViewHandling(win);
+      }
+    }
   },
 
   onPanelHidden(aEvent) {
+    if (UITour.getSubItem(aEvent.target.ownerGlobal)) {
+      UITour.stopSubViewHandling(aEvent.target.ownerGlobal);
+    }
+
     aEvent.target.removeAttribute("noautohide");
     UITour.recreatePopup(aEvent.target);
     UITour.clearAvailableTargetsCache();
+  },
+
+  getSubItem(aWindow) {
+    // Get the subitem that should be highlighted in the app menu's subview.
+    let highlighter = UITour.getHighlightContainerAndMaybeCreate(
+      aWindow.document
+    );
+    return highlighter.getAttribute("subitem");
+  },
+
+  isSubItemToHighlight(aWindow, aSubItem, aExpectedId) {
+    let targetObject = UITour.targets.get(aSubItem);
+    if (targetObject) {
+      let node = UITour.getNodeFromDocument(
+        aWindow.document,
+        targetObject.query
+      );
+      return aExpectedId == node?.closest("panelview")?.id;
+    }
+
+    return false;
+  },
+
+  stopSubViewHandling(aWindow) {
+    UITour.removePanelListeners(aWindow);
+    UITour.noautohideMenus.delete("appMenu");
+
+    let highlighter = UITour.getHighlightAndMaybeCreate(aWindow.document);
+    highlighter.parentElement.removeAttribute("level");
+    highlighter.parentElement.removeAttribute("subitem");
   },
 
   recreatePopup(aPanel) {

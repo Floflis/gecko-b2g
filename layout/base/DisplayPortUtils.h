@@ -16,24 +16,15 @@
 
 class nsIContent;
 class nsIFrame;
-class nsDisplayListBuilder;
 class nsPresContext;
 
 namespace mozilla {
 
+class nsDisplayListBuilder;
 class PresShell;
 
 // For GetDisplayPort
 enum class DisplayportRelativeTo { ScrollPort, ScrollFrame };
-
-enum class MaxSizeExceededBehaviour {
-  // Ask GetDisplayPort to assert if the calculated displayport exceeds
-  // the maximum allowed size.
-  Assert,
-  // Ask GetDisplayPort to pretend like there's no displayport at all, if
-  // the calculated displayport exceeds the maximum allowed size.
-  Drop,
-};
 
 // Is the displayport being applied to scrolled content or fixed content?
 enum class ContentGeometryType { Scrolled, Fixed };
@@ -41,20 +32,12 @@ enum class ContentGeometryType { Scrolled, Fixed };
 struct DisplayPortOptions {
   // The default options.
   DisplayportRelativeTo mRelativeTo = DisplayportRelativeTo::ScrollPort;
-  MaxSizeExceededBehaviour mMaxSizeExceededBehaviour =
-      MaxSizeExceededBehaviour::Assert;
   ContentGeometryType mGeometryType = ContentGeometryType::Scrolled;
 
   // Fluent interface for changing the defaults.
   DisplayPortOptions With(DisplayportRelativeTo aRelativeTo) const {
     DisplayPortOptions result = *this;
     result.mRelativeTo = aRelativeTo;
-    return result;
-  }
-  DisplayPortOptions With(
-      MaxSizeExceededBehaviour aMaxSizeExceededBehaviour) const {
-    DisplayPortOptions result = *this;
-    result.mMaxSizeExceededBehaviour = aMaxSizeExceededBehaviour;
     return result;
   }
   DisplayPortOptions With(ContentGeometryType aGeometryType) const {
@@ -181,19 +164,21 @@ class DisplayPortUtils {
                                   const nsIFrame* aScrolledFrame = nullptr);
 
   /**
+   * Check whether the given element has a non-minimal displayport.
+   */
+  static bool HasNonMinimalDisplayPort(nsIContent* aContent);
+
+  /**
+   * Check whether the given element has a non-minimal displayport that also has
+   * non-zero margins. A display port rect is considered non-minimal non-zero.
+   */
+  static bool HasNonMinimalNonZeroDisplayPort(nsIContent* aContent);
+
+  /**
    * Check if the given element has a margins based displayport but is missing a
    * displayport base rect that it needs to properly compute a displayport rect.
    */
   static bool IsMissingDisplayPortBaseRect(nsIContent* aContent);
-
-  /**
-   * Go through the IPC Channel and update displayport margins for content
-   * elements based on UpdateFrame messages. The messages are left in the
-   * queue and will be fully processed when dequeued. The aim is to paint
-   * the most up-to-date displayport without waiting for these message to
-   * go through the message queue.
-   */
-  static void UpdateDisplayPortMarginsFromPendingMessages();
 
   /**
    * @return the display port for the given element which should be used for
@@ -230,10 +215,13 @@ class DisplayPortUtils {
    * @param aRepaintMode whether to schedule a paint after setting the margins
    * @return true if the new margins were applied.
    */
+  enum class ClearMinimalDisplayPortProperty { No, Yes };
+
   static bool SetDisplayPortMargins(
       nsIContent* aContent, PresShell* aPresShell,
-      const DisplayPortMargins& aMargins, uint32_t aPriority = 0,
-      RepaintMode aRepaintMode = RepaintMode::Repaint);
+      const DisplayPortMargins& aMargins,
+      ClearMinimalDisplayPortProperty aClearMinimalDisplayPortProperty,
+      uint32_t aPriority = 0, RepaintMode aRepaintMode = RepaintMode::Repaint);
 
   /**
    * Set the display port base rect for given element to be used with display
@@ -256,14 +244,6 @@ class DisplayPortUtils {
    * Check whether the given element has a critical display port.
    */
   static bool HasCriticalDisplayPort(nsIContent* aContent);
-
-  /**
-   * If low-precision painting is turned on, delegates to
-   * GetCriticalDisplayPort. Otherwise, delegates to GetDisplayPort.
-   */
-  static bool GetHighResolutionDisplayPort(
-      nsIContent* aContent, nsRect* aResult,
-      const DisplayPortOptions& aOptions = DisplayPortOptions());
 
   /**
    * Remove the displayport for the given element.
@@ -325,6 +305,16 @@ class DisplayPortUtils {
    * ancestor.
    */
   static void ExpireDisplayPortOnAsyncScrollableAncestor(nsIFrame* aFrame);
+
+  /**
+   * Returns root displayport base rect for |aPresShell|. In the case where
+   * |aPresShell| is in an out-of-process iframe, this function may return
+   * Nothing() if we haven't received the iframe's visible rect from the parent
+   * content.
+   * |aPresShell| should be top level content or in-process root or root in the
+   * browser process.
+   */
+  static Maybe<nsRect> GetRootDisplayportBase(PresShell* aPresShell);
 };
 
 }  // namespace mozilla

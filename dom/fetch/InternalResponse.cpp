@@ -52,7 +52,8 @@ InternalResponse::InternalResponse(uint16_t aStatus,
       mBodySize(UNKNOWN_BODY_SIZE),
       mPaddingSize(UNKNOWN_PADDING_SIZE),
       mErrorCode(NS_OK),
-      mCredentialsMode(aCredentialsMode) {}
+      mCredentialsMode(aCredentialsMode),
+      mCloned(false) {}
 
 /* static */ RefPtr<InternalResponse> InternalResponse::FromIPC(
     const IPCInternalResponse& aIPCResponse) {
@@ -65,7 +66,8 @@ InternalResponse::InternalResponse(uint16_t aStatus,
 
   response->SetURLList(aIPCResponse.urlList());
   response->mHeaders =
-      new InternalHeaders(aIPCResponse.headers(), aIPCResponse.headersGuard());
+      new InternalHeaders(aIPCResponse.headers(), aIPCResponse.headersGuard(),
+                          aIPCResponse.hasSystemXHRPerm());
 
   if (aIPCResponse.body()) {
     auto bodySize = aIPCResponse.bodySize();
@@ -121,7 +123,8 @@ void InternalResponse::ToIPC(
     UniquePtr<mozilla::ipc::AutoIPCStream>& aAutoAlternativeBodyStream) {
   nsTArray<HeadersEntry> headers;
   HeadersGuardEnum headersGuard;
-  UnfilteredHeaders()->ToIPC(headers, headersGuard);
+  bool hasSystemXHRPerm;
+  UnfilteredHeaders()->ToIPC(headers, headersGuard, hasSystemXHRPerm);
 
   Maybe<mozilla::ipc::PrincipalInfo> principalInfo =
       mPrincipalInfo ? Some(*mPrincipalInfo) : Nothing();
@@ -133,7 +136,7 @@ void InternalResponse::ToIPC(
                           GetUnfilteredStatusText(), headersGuard, headers,
                           Nothing(), static_cast<uint64_t>(UNKNOWN_BODY_SIZE),
                           mErrorCode, GetAlternativeDataType(), Nothing(),
-                          mChannelInfo.AsIPCChannelInfo(), principalInfo);
+                          mChannelInfo.AsIPCChannelInfo(), principalInfo, hasSystemXHRPerm);
 
   nsCOMPtr<nsIInputStream> body;
   int64_t bodySize;
@@ -164,6 +167,7 @@ void InternalResponse::ToIPC(
 already_AddRefed<InternalResponse> InternalResponse::Clone(
     CloneType aCloneType) {
   RefPtr<InternalResponse> clone = CreateIncompleteCopy();
+  clone->mCloned = (mCloned = true);
 
   clone->mHeaders = new InternalHeaders(*mHeaders);
 

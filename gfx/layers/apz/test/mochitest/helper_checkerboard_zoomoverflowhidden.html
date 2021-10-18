@@ -13,14 +13,19 @@
 async function test() {
   var utils = SpecialPowers.getDOMWindowUtils(window);
 
-  var initial_resolution = getResolution();
+  var initial_resolution = await getResolution();
   ok(initial_resolution > 0,
       "The initial_resolution is " + initial_resolution + ", which is some sane value");
 
   var subframe = document.getElementById('bugzilla-body');
 
   // layerize subframe
-  await promiseNativeClickAndClickEvent(subframe, 10, 10);
+  await promiseNativeMouseEventWithAPZAndWaitForEvent({
+    type: "click",
+    target: subframe,
+    offsetX: 10,
+    offsetY: 10,
+  });
 
   // verify layerization
   await promiseAllPaintsDone();
@@ -51,7 +56,7 @@ async function test() {
   await touchEndPromise;
   // Flush state and get the resolution we're at now
   await promiseApzFlushedRepaints();
-  let final_resolution = getResolution();
+  let final_resolution = await getResolution();
   ok(final_resolution > initial_resolution, "The final resolution (" + final_resolution + ") is greater than the initial resolution");
 
   touchEndPromise = promiseTouchEnd(document.documentElement);
@@ -73,7 +78,7 @@ async function test() {
   // pan right to expose the bug
   await promiseNativeTouchDrag(window,
                                100,
-                               1,
+                               20,
                                -180,
                                0,
                                3);

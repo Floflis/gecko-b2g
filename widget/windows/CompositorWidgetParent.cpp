@@ -76,7 +76,8 @@ LayoutDeviceIntSize CompositorWidgetParent::GetClientSize() {
 
 already_AddRefed<gfx::DrawTarget>
 CompositorWidgetParent::StartRemoteDrawingInRegion(
-    LayoutDeviceIntRegion& aInvalidRegion, layers::BufferMode* aBufferMode) {
+    const LayoutDeviceIntRegion& aInvalidRegion,
+    layers::BufferMode* aBufferMode) {
   MOZ_ASSERT(mRemoteBackbufferClient);
   MOZ_ASSERT(aBufferMode);
 
@@ -205,7 +206,7 @@ void CompositorWidgetParent::UpdateCompositorWnd(const HWND aCompositorWnd,
               // Schedule composition after ::SetParent() call in parent
               // process.
               layers::CompositorBridgeParent::ScheduleForcedComposition(
-                  self->mRootLayerTreeID.ref());
+                  self->mRootLayerTreeID.ref(), wr::RenderReasons::WIDGET);
             }
           },
           [self](const mozilla::ipc::ResponseRejectReason&) {});

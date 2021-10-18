@@ -44,9 +44,6 @@ export TINDERBOX_OUTPUT=1
 # extras.locations
 export MOZ_SIMPLE_PACKAGE_NAME=target
 
-# Ensure that in tree libraries can be found
-export LIBRARY_PATH=$LIBRARY_PATH:$WORKSPACE/obj-build:$WORKSPACE/src/gcc/lib64
-
 # test required parameters are supplied
 if [[ -z ${MOZHARNESS_SCRIPT} ]]; then fail "MOZHARNESS_SCRIPT is not set"; fi
 if [[ -z "${MOZHARNESS_CONFIG}" && -z "${EXTRA_MOZHARNESS_CONFIG}" ]]; then fail "MOZHARNESS_CONFIG or EXTRA_MOZHARNESS_CONFIG is not set"; fi
@@ -115,7 +112,7 @@ fi
 cd /builds/worker
 
 $GECKO_PATH/mach python \
-  --requirements $GECKO_PATH/taskcluster/scripts/builder/requirements.txt \
+  --requirements $GECKO_PATH/build/psutil_requirements.txt \
   -- \
   $GECKO_PATH/testing/${MOZHARNESS_SCRIPT} \
   ${config_path_cmds} \

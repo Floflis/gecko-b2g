@@ -25,7 +25,6 @@ XPCOMUtils.defineLazyGlobalGetters(this, ["fetch"]);
 XPCOMUtils.defineLazyModuleGetters(this, {
   AppConstants: "resource://gre/modules/AppConstants.jsm",
   ConsoleAPI: "resource://gre/modules/Console.jsm",
-  MessageChannel: "resource://gre/modules/MessageChannel.jsm",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.jsm",
   Schemas: "resource://gre/modules/Schemas.jsm",
   SchemaRoot: "resource://gre/modules/Schemas.jsm",
@@ -189,6 +188,10 @@ function makeWidgetId(id) {
   id = id.toLowerCase();
   // FIXME: This allows for collisions.
   return id.replace(/[^a-z0-9_-]/g, "_");
+}
+
+function isDeadOrRemote(obj) {
+  return Cu.isDeadWrapper(obj) || Cu.isRemoteProxy(obj);
 }
 
 /**
@@ -399,7 +402,8 @@ class InnerWindowReference {
     // pageshow listener was dispatched) or during the unload event.
     if (
       !this.needWindowIDCheck ||
-      getInnerWindowID(this.contentWindow) === this.innerWindowID
+      (!isDeadOrRemote(this.contentWindow) &&
+        getInnerWindowID(this.contentWindow) === this.innerWindowID)
     ) {
       return this.contentWindow;
     }
@@ -410,7 +414,7 @@ class InnerWindowReference {
     // If invalidate() is called while the inner window is in the bfcache, then
     // we are unable to remove the event listener, and handleEvent will be
     // called once more if the page is revived from the bfcache.
-    if (this.contentWindow && !Cu.isDeadWrapper(this.contentWindow)) {
+    if (this.contentWindow && !isDeadOrRemote(this.contentWindow)) {
       this.contentWindow.removeEventListener("pagehide", this, {
         mozSystemGroup: true,
       });
@@ -453,6 +457,7 @@ class BaseContext {
     this.contextId = getUniqueId();
     this.unloaded = false;
     this.extension = extension;
+    this.manifestVersion = extension.manifestVersion;
     this.jsonSandbox = null;
     this.active = true;
     this.incognito = null;
@@ -484,8 +489,24 @@ class BaseContext {
     return this.extension.privateBrowsingAllowed;
   }
 
+  /**
+   * Whether the extension context is using the WebIDL bindings for the
+   * WebExtensions APIs.
+   * To be overridden in subclasses (e.g. WorkerContextChild) and to be
+   * optionally used in ExtensionAPI classes to customize the behavior of the
+   * API when the calls to the extension API are originated from the WebIDL
+   * bindings.
+   */
+  get useWebIDLBindings() {
+    return false;
+  }
+
   canAccessWindow(window) {
     return this.extension.canAccessWindow(window);
+  }
+
+  canAccessContainer(userContextId) {
+    return this.extension.canAccessContainer(userContextId);
   }
 
   /**
@@ -525,8 +546,6 @@ class BaseContext {
         contentWindow
       );
     }
-
-    MessageChannel.setupMessageManagers([this.messageManager]);
 
     let windowRef = new InnerWindowReference(contentWindow, this.innerWindowID);
     Object.defineProperty(this, "active", {
@@ -661,33 +680,6 @@ class BaseContext {
 
   forgetOnClose(obj) {
     this.onClose.delete(obj);
-  }
-
-  /**
-   * A wrapper around MessageChannel.sendMessage which adds the extension ID
-   * to the recipient object, and ensures replies are not processed after the
-   * context has been unloaded.
-   *
-   * @param {nsIMessageManager} target
-   * @param {string} messageName
-   * @param {object} data
-   * @param {object} [options]
-   * @param {object} [options.sender]
-   * @param {object} [options.recipient]
-   *
-   * @returns {Promise}
-   */
-  sendMessage(target, messageName, data, options = {}) {
-    options.recipient = Object.assign(
-      { extensionId: this.extension.id },
-      options.recipient
-    );
-    options.sender = options.sender || {};
-
-    options.sender.extensionId = this.extension.id;
-    options.sender.contextId = this.contextId;
-
-    return MessageChannel.sendMessage(target, messageName, data, options);
   }
 
   get lastError() {
@@ -902,11 +894,6 @@ class BaseContext {
 
   unload() {
     this.unloaded = true;
-
-    MessageChannel.abortResponses({
-      extensionId: this.extension.id,
-      contextId: this.contextId,
-    });
 
     for (let obj of this.onClose) {
       obj.close();
@@ -1767,7 +1754,9 @@ class SchemaAPIManager extends EventEmitter {
       MatchGlob,
       MatchPattern,
       MatchPatternSet,
+      Services,
       StructuredCloneHolder,
+      WebExtensionPolicy,
       XPCOMUtils,
       extensions: this,
       global,

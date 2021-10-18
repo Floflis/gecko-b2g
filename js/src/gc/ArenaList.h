@@ -287,8 +287,8 @@ class ArenaLists {
 
   // Arena lists which have yet to be swept, but need additional foreground
   // processing before they are swept.
-  ZoneData<Arena*> gcShapeArenasToUpdate;
-  ZoneData<Arena*> gcAccessorShapeArenasToUpdate;
+  ZoneData<Arena*> gcCompactPropMapArenasToUpdate;
+  ZoneData<Arena*> gcNormalPropMapArenasToUpdate;
 
   // The list of empty arenas which are collected during the sweep phase and
   // released at the end of sweeping every sweep group.
@@ -312,8 +312,6 @@ class ArenaLists {
   inline Arena* getArenaAfterCursor(AllocKind thingKind) const;
 
   inline bool arenaListsAreEmpty() const;
-
-  inline void unmarkAll();
 
   inline bool doneBackgroundFinalize(AllocKind kind) const;
   inline bool needBackgroundFinalizeWait(AllocKind kind) const;
@@ -342,10 +340,11 @@ class ArenaLists {
 
   Arena* takeSweptEmptyArenas();
 
-  bool foregroundFinalize(JSFreeOp* fop, AllocKind thingKind,
-                          js::SliceBudget& sliceBudget,
-                          SortedArenaList& sweepList);
-  static void backgroundFinalize(JSFreeOp* fop, Arena* listHead, Arena** empty);
+  void setIncrementalSweptArenas(AllocKind kind, SortedArenaList& arenas);
+  void clearIncrementalSweptArenas();
+
+  void mergeFinalizedArenas(AllocKind thingKind,
+                            SortedArenaList& finalizedArenas);
 
   void setParallelAllocEnabled(bool enabled);
   void setParallelUnmarkEnabled(bool enabled);
@@ -381,12 +380,8 @@ class ArenaLists {
   inline JSRuntime* runtime();
   inline JSRuntime* runtimeFromAnyThread();
 
-  inline void queueForForegroundSweep(JSFreeOp* fop,
-                                      const FinalizePhase& phase);
-  inline void queueForBackgroundSweep(JSFreeOp* fop,
-                                      const FinalizePhase& phase);
-  inline void queueForForegroundSweep(AllocKind thingKind);
-  inline void queueForBackgroundSweep(AllocKind thingKind);
+  void queueForForegroundSweep(AllocKind thingKind);
+  void queueForBackgroundSweep(AllocKind thingKind);
 
   TenuredCell* refillFreeListAndAllocate(FreeLists& freeLists,
                                          AllocKind thingKind,

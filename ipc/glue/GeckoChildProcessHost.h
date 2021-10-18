@@ -12,8 +12,10 @@
 #include "base/waitable_event.h"
 #include "chrome/common/child_process_host.h"
 #include "chrome/common/ipc_message.h"
+#include "mojo/core/ports/port_ref.h"
 
 #include "mozilla/ipc/FileDescriptor.h"
+#include "mozilla/ipc/ScopedPort.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/Buffer.h"
 #include "mozilla/LinkedList.h"
@@ -24,6 +26,7 @@
 #include "mozilla/UniquePtr.h"
 
 #include "nsCOMPtr.h"
+#include "nsExceptionHandler.h"
 #include "nsXULAppAPI.h"  // for GeckoProcessType
 #include "nsString.h"
 
@@ -44,18 +47,6 @@ namespace ipc {
 struct LaunchError {};
 typedef mozilla::MozPromise<base::ProcessHandle, LaunchError, false>
     ProcessHandlePromise;
-
-struct LaunchResults {
-  base::ProcessHandle mHandle = 0;
-#ifdef XP_MACOSX
-  task_t mChildTask = MACH_PORT_NULL;
-#endif
-#if defined(XP_WIN) && defined(MOZ_SANDBOX)
-  RefPtr<AbstractSandboxBroker> mSandboxBroker;
-#endif
-};
-typedef mozilla::MozPromise<LaunchResults, LaunchError, false>
-    ProcessLaunchPromise;
 
 class GeckoChildProcessHost : public ChildProcessHost,
                               public LinkedListElement<GeckoChildProcessHost> {
@@ -80,6 +71,10 @@ class GeckoChildProcessHost : public ChildProcessHost,
   void Destroy();
 
   static uint32_t GetUniqueID();
+
+  // Call this before launching to set an environment variable for the
+  // child process.  The arguments must be UTF-8.
+  void SetEnv(const char* aKey, const char* aValue);
 
   // Does not block.  The IPC channel may not be initialized yet, and
   // the child process may or may not have been created when this
@@ -118,13 +113,15 @@ class GeckoChildProcessHost : public ChildProcessHost,
   // LaunchAndWaitForProcessHandle); use with AsyncLaunch.
   RefPtr<ProcessHandlePromise> WhenProcessHandleReady();
 
-  virtual void InitializeChannel();
+  void InitializeChannel(
+      const std::function<void(IPC::Channel*)>& aChannelReady);
 
   virtual bool CanShutdown() override { return true; }
 
-  using ChildProcessHost::TakeChannel;
   IPC::Channel* GetChannel() { return channelp(); }
   ChannelId GetChannelId() { return channel_id(); }
+
+  ScopedPort TakeInitialPort() { return std::move(mInitialPort); }
 
   // Returns a "borrowed" handle to the child process - the handle returned
   // by this function must not be closed by the caller.
@@ -137,7 +134,6 @@ class GeckoChildProcessHost : public ChildProcessHost,
 #endif
 
 #ifdef XP_WIN
-  static void CacheNtDllThunk();
 
   void AddHandleToShare(HANDLE aHandle) {
     mLaunchOptions->handles_to_inherit.push_back(aHandle);
@@ -201,6 +197,7 @@ class GeckoChildProcessHost : public ChildProcessHost,
   // then used for the actual launch on another thread.  This pointer
   // is set to null to free the options after the child is launched.
   UniquePtr<base::LaunchOptions> mLaunchOptions;
+  ScopedPort mInitialPort;
 
   // This value must be accessed while holding mMonitor.
   enum {
@@ -224,7 +221,7 @@ class GeckoChildProcessHost : public ChildProcessHost,
 #ifdef XP_WIN
   void InitWindowsGroupID();
   nsString mGroupId;
-
+  CrashReporter::WindowsErrorReportingData mWerData;
 #  ifdef MOZ_SANDBOX
   RefPtr<AbstractSandboxBroker> mSandboxBroker;
   std::vector<std::wstring> mAllowedFilesRead;
@@ -285,9 +282,6 @@ class GeckoChildProcessHost : public ChildProcessHost,
   static uint32_t sNextUniqueID;
   static StaticAutoPtr<LinkedList<GeckoChildProcessHost>>
       sGeckoChildProcessHosts;
-#ifdef XP_WIN
-  static StaticAutoPtr<Buffer<IMAGE_THUNK_DATA>> sCachedNtDllThunk;
-#endif
   static StaticMutex sMutex;
 };
 

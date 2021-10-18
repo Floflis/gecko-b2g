@@ -16,8 +16,8 @@ use std::convert::TryFrom;
 use std::fmt::Display;
 
 use crate::error::{Error, ErrorKind};
+use crate::metrics::labeled::{combine_base_identifier_and_label, strip_label};
 use crate::metrics::CounterMetric;
-use crate::metrics::{combine_base_identifier_and_label, strip_label};
 use crate::CommonMetricData;
 use crate::Glean;
 use crate::Lifetime;
@@ -26,7 +26,8 @@ use crate::Lifetime;
 /// Note: the cases in this enum must be kept in sync with the ones
 /// in the platform-specific code (e.g. `ErrorType.kt`) and with the
 /// metrics in the registry files.
-#[derive(Debug, PartialEq)]
+// When adding a new error type ensure it's also added to `ErrorType::iter()` below.
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ErrorType {
     /// For when the value to be recorded does not match the metric-specific restrictions
     InvalidValue,
@@ -47,6 +48,27 @@ impl ErrorType {
             ErrorType::InvalidState => "invalid_state",
             ErrorType::InvalidOverflow => "invalid_overflow",
         }
+    }
+
+    /// Return an iterator over all possible error types.
+    ///
+    /// ```
+    /// # use glean_core::ErrorType;
+    /// let errors = ErrorType::iter();
+    /// let all_errors = errors.collect::<Vec<_>>();
+    /// assert_eq!(4, all_errors.len());
+    /// ```
+    pub fn iter() -> impl Iterator<Item = Self> {
+        // N.B.: This has no compile-time guarantees that it is complete.
+        // New `ErrorType` variants will need to be added manually.
+        [
+            ErrorType::InvalidValue,
+            ErrorType::InvalidLabel,
+            ErrorType::InvalidState,
+            ErrorType::InvalidOverflow,
+        ]
+        .iter()
+        .copied()
     }
 }
 

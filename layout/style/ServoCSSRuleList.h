@@ -11,7 +11,6 @@
 
 #include "mozilla/ServoBindingTypes.h"
 #include "mozilla/dom/CSSRuleList.h"
-#include "nsDataHashtable.h"
 
 namespace mozilla {
 
@@ -49,7 +48,7 @@ class ServoCSSRuleList final : public dom::CSSRuleList {
   nsresult InsertRule(const nsACString& aRule, uint32_t aIndex);
   nsresult DeleteRule(uint32_t aIndex);
 
-  uint16_t GetDOMCSSRuleType(uint32_t aIndex) const;
+  void SetRawAfterClone(RefPtr<ServoCssRules>);
 
  private:
   virtual ~ServoCSSRuleList();

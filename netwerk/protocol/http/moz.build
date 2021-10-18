@@ -20,6 +20,7 @@ XPIDL_SOURCES += [
     "nsIHttpHeaderVisitor.idl",
     "nsIHttpProtocolHandler.idl",
     "nsIRaceCacheWithNetwork.idl",
+    "nsITlsHandshakeListener.idl",
     "nsIWellKnownOpportunisticUtils.idl",
 ]
 
@@ -64,6 +65,7 @@ EXPORTS.mozilla.net += [
     "nsServerTiming.h",
     "NullHttpChannel.h",
     "NullHttpTransaction.h",
+    "OpaqueResponseUtils.h",
     "ParentChannelListener.h",
     "PHttpChannelParams.h",
     "PSpdyPush.h",
@@ -95,8 +97,7 @@ UNIFIED_SOURCES += [
     "ConnectionDiagnostics.cpp",
     "ConnectionEntry.cpp",
     "ConnectionHandle.cpp",
-    "DelayHttpChannelQueue.cpp",
-    "HalfOpenSocket.cpp",
+    "DnsAndConnectSocket.cpp",
     "Http2Compression.cpp",
     "Http2Push.cpp",
     "Http2Session.cpp",
@@ -120,6 +121,7 @@ UNIFIED_SOURCES += [
     "HttpTransactionParent.cpp",
     "InterceptedChannel.cpp",
     "InterceptedHttpChannel.cpp",
+    "NetworkMarker.cpp",
     "nsCORSListenerProxy.cpp",
     "nsHttp.cpp",
     "nsHttpActivityDistributor.cpp",
@@ -140,6 +142,7 @@ UNIFIED_SOURCES += [
     "nsServerTiming.cpp",
     "NullHttpChannel.cpp",
     "NullHttpTransaction.cpp",
+    "OpaqueResponseUtils.cpp",
     "ParentChannelListener.cpp",
     "PendingTransactionInfo.cpp",
     "PendingTransactionQueue.cpp",
@@ -148,6 +151,11 @@ UNIFIED_SOURCES += [
     "TRRServiceChannel.cpp",
     "TunnelUtils.cpp",
 ]
+
+if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+    UNIFIED_SOURCES += [
+        "HttpWinUtils.cpp",
+    ]
 
 # These files cannot be built in unified mode because of OS X headers.
 SOURCES += [
@@ -197,3 +205,6 @@ if CONFIG["OS_TARGET"] == "Darwin":
         DEFINES["HAS_CONNECTX"] = True
 
 include("/tools/fuzzing/libfuzzer-config.mozbuild")
+
+if CONFIG["MOZ_BUILD_APP"] == "browser":
+    DEFINES["MOZ_BUILD_APP_IS_BROWSER"] = True

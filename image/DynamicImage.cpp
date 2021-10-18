@@ -13,13 +13,13 @@
 #include "mozilla/SVGImageContext.h"
 #include "ImageRegion.h"
 #include "Orientation.h"
+#include "mozilla/image/Resolution.h"
 
 #include "mozilla/MemoryReporting.h"
 
 using namespace mozilla;
 using namespace mozilla::gfx;
 using mozilla::layers::ImageContainer;
-using mozilla::layers::LayerManager;
 
 namespace mozilla {
 namespace image {
@@ -113,8 +113,8 @@ Maybe<AspectRatio> DynamicImage::GetIntrinsicRatio() {
 NS_IMETHODIMP_(Orientation)
 DynamicImage::GetOrientation() { return Orientation(); }
 
-NS_IMETHODIMP_(bool)
-DynamicImage::HandledOrientation() { return false; }
+NS_IMETHODIMP_(Resolution)
+DynamicImage::GetResolution() { return {}; }
 
 NS_IMETHODIMP
 DynamicImage::GetType(uint16_t* aType) {
@@ -164,27 +164,16 @@ NS_IMETHODIMP_(bool)
 DynamicImage::WillDrawOpaqueNow() { return false; }
 
 NS_IMETHODIMP_(bool)
-DynamicImage::IsImageContainerAvailable(LayerManager* aManager,
+DynamicImage::IsImageContainerAvailable(WindowRenderer* aRenderer,
                                         uint32_t aFlags) {
   return false;
 }
 
-NS_IMETHODIMP_(already_AddRefed<ImageContainer>)
-DynamicImage::GetImageContainer(LayerManager* aManager, uint32_t aFlags) {
-  return nullptr;
-}
-
-NS_IMETHODIMP_(bool)
-DynamicImage::IsImageContainerAvailableAtSize(LayerManager* aManager,
-                                              const IntSize& aSize,
-                                              uint32_t aFlags) {
-  return false;
-}
-
 NS_IMETHODIMP_(ImgDrawResult)
-DynamicImage::GetImageContainerAtSize(layers::LayerManager* aManager,
+DynamicImage::GetImageContainerAtSize(WindowRenderer* aRenderer,
                                       const gfx::IntSize& aSize,
                                       const Maybe<SVGImageContext>& aSVGContext,
+                                      const Maybe<ImageIntRegion>& aRegion,
                                       uint32_t aFlags,
                                       layers::ImageContainer** aContainer) {
   return ImgDrawResult::NOT_SUPPORTED;

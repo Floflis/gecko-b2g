@@ -170,7 +170,11 @@ class Task {
   virtual PerformanceCounter* GetPerformanceCounter() const { return nullptr; }
 
   // Get a name for this task. This returns false if the task has no name.
+#ifdef MOZ_COLLECTING_RUNNABLE_TELEMETRY
+  virtual bool GetName(nsACString& aName) = 0;
+#else
   virtual bool GetName(nsACString& aName) { return false; }
+#endif
 
  protected:
   Task(bool aMainThreadOnly,
@@ -227,11 +231,9 @@ class Task {
   uint32_t mPriority;
   // Modifier currently being applied to this task by its taskmanager.
   int32_t mPriorityModifier = 0;
-#ifdef MOZ_GECKO_PROFILER
   // Time this task was inserted into the task graph, this is used by the
   // profiler.
   mozilla::TimeStamp mInsertionTime;
-#endif
 };
 
 struct PoolThread {
@@ -277,6 +279,7 @@ class TaskController {
   static bool Initialize();
 
   void SetThreadObserver(nsIThreadObserver* aObserver) {
+    MutexAutoLock lock(mGraphMutex);
     mObserver = aObserver;
   }
   void SetConditionVariable(CondVar* aExternalCondVar) {
@@ -322,6 +325,9 @@ class TaskController {
 
   // Let users know whether the last main thread task runnable did work.
   bool MTTaskRunnableProcessedTask() { return mMTTaskRunnableProcessedTask; }
+
+  static int32_t GetPoolThreadCount();
+  static size_t GetThreadStackSize();
 
  private:
   friend void ThreadFuncPoolThread(void* aIndex);

@@ -12,7 +12,6 @@
 #define js_OffThreadScriptCompilation_h
 
 #include "mozilla/Range.h"   // mozilla::Range
-#include "mozilla/Utf8.h"    // mozilla::Utf8Unit
 #include "mozilla/Vector.h"  // mozilla::Vector
 
 #include <stddef.h>  // size_t
@@ -32,6 +31,10 @@ template <typename UnitT>
 class SourceText;
 
 }  // namespace JS
+
+namespace mozilla {
+union Utf8Unit;
+}
 
 namespace JS {
 
@@ -94,6 +97,9 @@ extern JS_PUBLIC_API JSScript* FinishOffThreadScriptAndStartIncrementalEncoding(
 extern JS_PUBLIC_API void CancelOffThreadScript(JSContext* cx,
                                                 OffThreadToken* token);
 
+extern JS_PUBLIC_API void CancelOffThreadCompileToStencil(
+    JSContext* cx, OffThreadToken* token);
+
 extern JS_PUBLIC_API OffThreadToken* CompileOffThreadModule(
     JSContext* cx, const ReadOnlyCompileOptions& options,
     SourceText<char16_t>& srcBuf, OffThreadCompileCallback callback,
@@ -148,16 +154,6 @@ extern JS_PUBLIC_API JSScript* FinishOffThreadScriptDecoder(
 
 extern JS_PUBLIC_API void CancelOffThreadScriptDecoder(JSContext* cx,
                                                        OffThreadToken* token);
-
-// Decode multiple JSScript from the sources.
-extern JS_PUBLIC_API OffThreadToken* DecodeMultiOffThreadScripts(
-    JSContext* cx, const ReadOnlyCompileOptions& options,
-    mozilla::Vector<TranscodeSource>& sources,
-    OffThreadCompileCallback callback, void* callbackData);
-
-extern JS_PUBLIC_API bool FinishMultiOffThreadScriptsDecoder(
-    JSContext* cx, OffThreadToken* token,
-    MutableHandle<GCVector<JSScript*>> scripts);
 
 extern JS_PUBLIC_API void CancelMultiOffThreadScriptsDecoder(
     JSContext* cx, OffThreadToken* token);

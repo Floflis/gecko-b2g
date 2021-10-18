@@ -41,7 +41,7 @@ class nsDOMMutationRecord final : public nsISupports, public nsWrapperCache {
   virtual ~nsDOMMutationRecord() = default;
 
  public:
-  typedef nsTArray<RefPtr<mozilla::dom::Animation>> AnimationArray;
+  using AnimationArray = nsTArray<RefPtr<mozilla::dom::Animation>>;
 
   nsDOMMutationRecord(nsAtom* aType, nsISupports* aOwner)
       : mType(aType),
@@ -815,7 +815,7 @@ class nsAutoAnimationMutationBatch {
   }
 
   Entry* AddEntry(mozilla::dom::Animation* aAnimation, nsINode* aTarget) {
-    EntryArray* entries = sCurrentBatch->mEntryTable.LookupOrAdd(aTarget);
+    EntryArray* entries = sCurrentBatch->mEntryTable.GetOrInsertNew(aTarget);
     if (entries->IsEmpty()) {
       sCurrentBatch->mBatchTargets.AppendElement(aTarget);
     }
@@ -839,7 +839,7 @@ class nsAutoAnimationMutationBatch {
 
   static nsAutoAnimationMutationBatch* sCurrentBatch;
   AutoTArray<nsDOMMutationObserver*, 2> mObservers;
-  typedef nsTArray<Entry> EntryArray;
+  using EntryArray = nsTArray<Entry>;
   nsClassHashtable<nsPtrHashKey<nsINode>, EntryArray> mEntryTable;
   // List of nodes referred to by mEntryTable so we can sort them
   // For a specific pseudo element, we use its parent element as the

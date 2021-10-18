@@ -41,13 +41,6 @@ fi
 
 export ANDROID_PLATFORM=android-${PLATFORM_VERSION}
 
-if [ -z ${GET_FRAMEBUFFER_FORMAT_FROM_HWC+x} ]; then
-    echo "GET_FRAMEBUFFER_FORMAT_FROM_HWC is not set"
-else
-    HWC_DEFINE="-DGET_FRAMEBUFFER_FORMAT_FROM_HWC"
-    echo "Setting -DGET_FRAMEBUFFER_FORMAT_FROM_HWC"
-fi
-
 # When user build, check if the JS shell is available. If not, download it
 # to make sure we can minify JS code when packaging.
 if [[ "$VARIANT" == "user" ]];then
@@ -134,6 +127,14 @@ if [ -d "koost" ]; then
     export BUILD_KOOST=1
 fi
 
+# Export OEM hook flag since it's used by create-b2g-sysroot.sh for HIDL
+if [ "$PRODUCT_MANUFACTURER" == "QUALCOMM" ]; then
+    export DISABLE_OEMHOOK
+else
+    # OEM hook is only supported on Qualcomm platform
+    export DISABLE_OEMHOOK=1
+fi
+
 if [ -z ${B2G_STANDALONE_BUILD+x} ]; then
   rm -rf "${SYSROOT_DEST}/b2g-sysroot"
   taskcluster/scripts/misc/create-b2g-sysroot.sh "${GONK_PATH}" "${SYSROOT_DEST}"
@@ -143,5 +144,7 @@ rustc --version
 
 export ANDROID_PLATFORM=$ANDROID_PLATFORM
 export PRODUCTION_OS_NAME=$PRODUCTION_OS_NAME
+# force mach to use system python installation
+export MACH_USE_SYSTEM_PYTHON=${MACH_USE_SYSTEM_PYTHON-1}
 
 ./mach build $@

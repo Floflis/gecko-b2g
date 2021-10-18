@@ -178,9 +178,8 @@ already_AddRefed<ChannelMediaDecoder> ChannelMediaDecoder::Create(
     MediaDecoderInit& aInit, DecoderDoctorDiagnostics* aDiagnostics) {
   MOZ_ASSERT(NS_IsMainThread());
   RefPtr<ChannelMediaDecoder> decoder;
-
-  const MediaContainerType& type = aInit.mContainerType;
-  if (DecoderTraits::IsSupportedType(type)) {
+  if (DecoderTraits::CanHandleContainerType(aInit.mContainerType,
+                                            aDiagnostics) != CANPLAY_NO) {
     decoder = new ChannelMediaDecoder(aInit);
     return decoder.forget();
   }
@@ -195,13 +194,11 @@ bool ChannelMediaDecoder::CanClone() {
 
 already_AddRefed<ChannelMediaDecoder> ChannelMediaDecoder::Clone(
     MediaDecoderInit& aInit) {
-  if (!mResource || !DecoderTraits::IsSupportedType(aInit.mContainerType)) {
+  if (!mResource || DecoderTraits::CanHandleContainerType(
+                        aInit.mContainerType, nullptr) == CANPLAY_NO) {
     return nullptr;
   }
   RefPtr<ChannelMediaDecoder> decoder = new ChannelMediaDecoder(aInit);
-  if (!decoder) {
-    return nullptr;
-  }
   nsresult rv = decoder->Load(mResource);
   if (NS_FAILED(rv)) {
     decoder->Shutdown();
@@ -211,56 +208,6 @@ already_AddRefed<ChannelMediaDecoder> ChannelMediaDecoder::Clone(
 }
 
 #ifdef MOZ_WIDGET_GONK
-static bool CheckOffloadAllowlist(const MediaMIMEType& aMimeType) {
-  nsAutoCString allowlist;
-  Preferences::GetCString("media.offloadplayer.mime.allowlist", allowlist);
-  if (allowlist.IsEmpty()) {
-    return true;
-  }
-
-  for (const nsACString& mime : allowlist.Split(',')) {
-    if (mime == aMimeType.AsString()) {
-      return true;
-    }
-    if (mime == "application/*"_ns && aMimeType.HasApplicationMajorType()) {
-      return true;
-    }
-    if (mime == "audio/*"_ns && aMimeType.HasAudioMajorType()) {
-      return true;
-    }
-    if (mime == "video/*"_ns && aMimeType.HasVideoMajorType()) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool CanOffloadMedia(nsIURI* aURI, const MediaMIMEType& aMimeType,
-                            bool aIsVideo) {
-  if (!CheckOffloadAllowlist(aMimeType)) {
-    return false;
-  }
-
-  if (!aIsVideo && !StaticPrefs::media_offloadplayer_audio_enabled()) {
-    return false;
-  }
-
-  if (aIsVideo && !StaticPrefs::media_offloadplayer_video_enabled()) {
-    return false;
-  }
-
-  if ((aURI->SchemeIs("http") || aURI->SchemeIs("https")) &&
-      StaticPrefs::media_offloadplayer_http_enabled()) {
-    return true;
-  }
-
-  if (aURI->SchemeIs("file") || aURI->SchemeIs("blob")) {
-    return true;
-  }
-
-  return false;
-}
-
 MediaDecoderStateMachineProxy* ChannelMediaDecoder::CreateStateMachine() {
   MOZ_ASSERT(NS_IsMainThread());
   MediaFormatReaderInit init;
@@ -275,9 +222,8 @@ MediaDecoderStateMachineProxy* ChannelMediaDecoder::CreateStateMachine() {
   MOZ_ASSERT(uri);
 
   // Offload path uses MediaOffloadPlayer.
-  if (CanOffloadMedia(uri, ContainerType().Type(),
-                      /* aIsVideo = */ GetVideoFrameContainer())) {
-    RefPtr<MediaOffloadPlayer> player = MediaOffloadPlayer::Create(init, uri);
+  if (RefPtr<MediaOffloadPlayer> player =
+          MediaOffloadPlayer::Create(this, init, uri)) {
     mReader = new MediaFormatReaderProxy(player);
     return new MediaDecoderStateMachineProxy(player);
   }

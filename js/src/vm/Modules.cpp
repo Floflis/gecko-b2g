@@ -13,11 +13,11 @@
 
 #include <stdint.h>  // uint32_t
 
-#include "jsapi.h"    // js::AssertHeapIsIdle
 #include "jstypes.h"  // JS_PUBLIC_API
 
 #include "builtin/ModuleObject.h"  // js::FinishDynamicModuleImport, js::{,Requested}ModuleObject
 #include "frontend/BytecodeCompiler.h"  // js::frontend::CompileModule
+#include "js/Context.h"                 // js::AssertHeapIsIdle
 #include "js/RootingAPI.h"              // JS::MutableHandle
 #include "js/Value.h"                   // JS::Value
 #include "vm/JSContext.h"               // CHECK_THREAD, JSContext
@@ -74,26 +74,14 @@ JS_PUBLIC_API void JS::SetModuleDynamicImportHook(
 
 JS_PUBLIC_API bool JS::FinishDynamicModuleImport(
     JSContext* cx, Handle<JSObject*> evaluationPromise,
-    Handle<Value> referencingPrivate, Handle<JSString*> specifier,
+    Handle<Value> referencingPrivate, Handle<JSObject*> moduleRequest,
     Handle<JSObject*> promise) {
   AssertHeapIsIdle();
   CHECK_THREAD(cx);
   cx->check(referencingPrivate, promise);
 
-  return js::FinishDynamicModuleImport(cx, evaluationPromise,
-                                       referencingPrivate, specifier, promise);
-}
-
-JS_PUBLIC_API bool JS::FinishDynamicModuleImport_NoTLA(
-    JSContext* cx, JS::DynamicImportStatus status,
-    Handle<Value> referencingPrivate, Handle<JSString*> specifier,
-    Handle<JSObject*> promise) {
-  AssertHeapIsIdle();
-  CHECK_THREAD(cx);
-  cx->check(referencingPrivate, promise);
-
-  return js::FinishDynamicModuleImport_NoTLA(cx, status, referencingPrivate,
-                                             specifier, promise);
+  return js::FinishDynamicModuleImport(
+      cx, evaluationPromise, referencingPrivate, moduleRequest, promise);
 }
 
 template <typename Unit>
@@ -125,7 +113,7 @@ JS_PUBLIC_API void JS::SetModulePrivate(JSObject* module, const Value& value) {
 }
 
 JS_PUBLIC_API JS::Value JS::GetModulePrivate(JSObject* module) {
-  return module->as<ModuleObject>().scriptSourceObject()->canonicalPrivate();
+  return module->as<ModuleObject>().scriptSourceObject()->getPrivate();
 }
 
 JS_PUBLIC_API bool JS::ModuleInstantiate(JSContext* cx,
@@ -172,7 +160,7 @@ JS_PUBLIC_API JSString* JS::GetRequestedModuleSpecifier(JSContext* cx,
   cx->check(value);
 
   JSObject* obj = &value.toObject();
-  return obj->as<RequestedModuleObject>().moduleSpecifier();
+  return obj->as<RequestedModuleObject>().moduleRequest()->specifier();
 }
 
 JS_PUBLIC_API void JS::GetRequestedModuleSourcePos(JSContext* cx,
@@ -194,4 +182,26 @@ JS_PUBLIC_API JSScript* JS::GetModuleScript(JS::HandleObject moduleRecord) {
   AssertHeapIsIdle();
 
   return moduleRecord->as<ModuleObject>().script();
+}
+
+JS_PUBLIC_API JSObject* JS::CreateModuleRequest(
+    JSContext* cx, Handle<JSString*> specifierArg) {
+  AssertHeapIsIdle();
+  CHECK_THREAD(cx);
+
+  js::RootedAtom specifierAtom(cx, AtomizeString(cx, specifierArg));
+  if (!specifierAtom) {
+    return nullptr;
+  }
+
+  return js::ModuleRequestObject::create(cx, specifierAtom);
+}
+
+JS_PUBLIC_API JSString* JS::GetModuleRequestSpecifier(
+    JSContext* cx, Handle<JSObject*> moduleRequestArg) {
+  AssertHeapIsIdle();
+  CHECK_THREAD(cx);
+  cx->check(moduleRequestArg);
+
+  return moduleRequestArg->as<js::ModuleRequestObject>().specifier();
 }

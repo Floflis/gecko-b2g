@@ -127,7 +127,7 @@ function pickElement(inspector, selector, x, y) {
  */
 async function hoverElement(inspector, selector, x, y) {
   const { waitForHighlighterTypeShown } = getHighlighterTestHelpers(inspector);
-  info("Waiting for element " + selector + " to be hovered");
+  info(`Waiting for element "${selector}" to be hovered`);
   const onHovered = inspector.toolbox.nodePicker.once("picker-node-hovered");
   const onHighlighterShown = waitForHighlighterTypeShown(
     inspector.highlighters.TYPES.BOXMODEL
@@ -162,6 +162,12 @@ async function hoverElement(inspector, selector, x, y) {
       browsingContext
     );
   }
+
+  info("Wait for picker-node-hovered");
+  await onHovered;
+
+  info("Wait for highlighter shown");
+  await onHighlighterShown;
 
   return Promise.all([onHighlighterShown, onHovered]);
 }
@@ -253,21 +259,19 @@ function clearCurrentNodeSelection(inspector) {
 
 /**
  * Right click on a node in the test page and click on the inspect menu item.
- * @param {TestActor}
  * @param {String} selector The selector for the node to click on in the page.
  * @return {Promise} Resolves to the inspector when it has opened and is updated
  */
-var clickOnInspectMenuItem = async function(testActor, selector) {
+var clickOnInspectMenuItem = async function(selector) {
   info("Showing the contextual menu on node " + selector);
   const contentAreaContextMenu = document.querySelector(
     "#contentAreaContextMenu"
   );
   const contextOpened = once(contentAreaContextMenu, "popupshown");
 
-  await testActor.synthesizeMouse({
-    selector: selector,
-    center: true,
-    options: { type: "contextmenu", button: 2 },
+  await safeSynthesizeMouseEventAtCenterInContentPage(selector, {
+    type: "contextmenu",
+    button: 2,
   });
 
   await contextOpened;
@@ -281,66 +285,6 @@ var clickOnInspectMenuItem = async function(testActor, selector) {
   await contextClosed;
 
   return getActiveInspector();
-};
-
-/**
- * Get the NodeFront for a node that matches a given css selector inside a
- * given iframe.
- * @param {String|NodeFront} selector
- * @param {String|NodeFront} frameSelector A selector that matches the iframe
- * the node is in
- * @param {InspectorPanel} inspector The instance of InspectorPanel currently
- * loaded in the toolbox
- * @return {Promise} Resolves when the inspector is updated with the new node
- */
-var getNodeFrontInFrame = async function(selector, frameSelector, inspector) {
-  let walker;
-
-  // If frameSelector is already a NodeFront, we can directly retrieve its walker
-  if (frameSelector._form) {
-    walker = frameSelector.walkerFront;
-  } else {
-    // The iframe could be remote, so we need to retrieve the associated target front.
-    const iframeBrowsingContextId = await SpecialPowers.spawn(
-      gBrowser.selectedTab.linkedBrowser,
-      [frameSelector],
-      function(innerFrameSelector) {
-        const el = content.document.querySelector(innerFrameSelector);
-        if (!el) {
-          return null;
-        }
-
-        return el.browsingContext.id;
-      }
-    );
-
-    if (!iframeBrowsingContextId) {
-      throw new Error(`Couldn't find an iframe matching "${frameSelector}"`);
-    }
-
-    const { descriptorFront } = inspector.inspectorFront.targetFront;
-    const watcherFront = await descriptorFront.getWatcher();
-    const target = await watcherFront.getBrowsingContextTarget(
-      iframeBrowsingContextId
-    );
-    const inspectorFront = await target.getFront("inspector");
-    walker = inspectorFront.walker;
-  }
-
-  let queryNode;
-  if (walker === inspector.inspectorFront.walker) {
-    // If the walker for the iframe is the same as the top-level target in the inspector,
-    // we need to retrieve the element from the iframe first children.
-    const iframe = await getNodeFront(frameSelector, inspector);
-    const { nodes } = await walker.children(iframe);
-    queryNode = nodes[0];
-  } else {
-    // whereas if we have a dedicated target for the iframe, we can directly query from
-    // the walker root node.
-    queryNode = walker.rootNode;
-  }
-
-  return walker.querySelector(queryNode, selector);
 };
 
 /**
@@ -560,7 +504,7 @@ function undoChange(inspector) {
   const canUndo = inspector.markup.undo.canUndo();
   ok(canUndo, "The last change in the markup-view can be undone");
   if (!canUndo) {
-    return promise.reject();
+    return Promise.reject();
   }
 
   const mutated = inspector.once("markupmutation");
@@ -580,7 +524,7 @@ function redoChange(inspector) {
   const canRedo = inspector.markup.undo.canRedo();
   ok(canRedo, "The last change in the markup-view can be redone");
   if (!canRedo) {
-    return promise.reject();
+    return Promise.reject();
   }
 
   const mutated = inspector.once("markupmutation");
@@ -628,16 +572,16 @@ async function poll(check, desc, attempts = 10, timeBetweenAttempts = 200) {
 /**
  * Encapsulate some common operations for highlighter's tests, to have
  * the tests cleaner, without exposing directly `inspector`, `highlighter`, and
- * `testActor` if not needed.
+ * `highlighterTestFront` if not needed.
  *
  * @param  {String}
  *    The highlighter's type
  * @return
- *    A generator function that takes an object with `inspector` and `testActor`
+ *    A generator function that takes an object with `inspector` and `highlighterTestFront`
  *    properties. (see `openInspector`)
  */
 const getHighlighterHelperFor = type =>
-  async function({ inspector, testActor }) {
+  async function({ inspector, highlighterTestFront }) {
     const front = inspector.inspectorFront;
     const highlighter = await front.getHighlighterByType(type);
 
@@ -677,9 +621,8 @@ const getHighlighterHelperFor = type =>
 
       show: async function(selector = ":root", options, frameSelector = null) {
         if (frameSelector) {
-          highlightedNode = await getNodeFrontInFrame(
-            selector,
-            frameSelector,
+          highlightedNode = await getNodeFrontInFrames(
+            [frameSelector, selector],
             inspector
           );
         } else {
@@ -694,7 +637,7 @@ const getHighlighterHelperFor = type =>
 
       isElementHidden: async function(id) {
         return (
-          (await testActor.getHighlighterNodeAttribute(
+          (await highlighterTestFront.getHighlighterNodeAttribute(
             prefix + id,
             "hidden",
             highlighter
@@ -703,14 +646,14 @@ const getHighlighterHelperFor = type =>
       },
 
       getElementTextContent: async function(id) {
-        return testActor.getHighlighterNodeTextContent(
+        return highlighterTestFront.getHighlighterNodeTextContent(
           prefix + id,
           highlighter
         );
       },
 
       getElementAttribute: async function(id, name) {
-        return testActor.getHighlighterNodeAttribute(
+        return highlighterTestFront.getHighlighterNodeAttribute(
           prefix + id,
           name,
           highlighter
@@ -719,7 +662,7 @@ const getHighlighterHelperFor = type =>
 
       waitForElementAttributeSet: async function(id, name) {
         await poll(async function() {
-          const value = await testActor.getHighlighterNodeAttribute(
+          const value = await highlighterTestFront.getHighlighterNodeAttribute(
             prefix + id,
             name,
             highlighter
@@ -730,7 +673,7 @@ const getHighlighterHelperFor = type =>
 
       waitForElementAttributeRemoved: async function(id, name) {
         await poll(async function() {
-          const value = await testActor.getHighlighterNodeAttribute(
+          const value = await highlighterTestFront.getHighlighterNodeAttribute(
             prefix + id,
             name,
             highlighter
@@ -739,13 +682,25 @@ const getHighlighterHelperFor = type =>
         }, `Waiting for element ${id} to have attribute ${name} removed`);
       },
 
-      synthesizeMouse: async function(options) {
-        options = Object.assign({ selector: ":root" }, options);
-        await testActor.synthesizeMouse(options);
+      synthesizeMouse: async function({
+        selector = ":root",
+        center,
+        x,
+        y,
+        options,
+      } = {}) {
+        if (center === true) {
+          await safeSynthesizeMouseEventAtCenterInContentPage(
+            selector,
+            options
+          );
+        } else {
+          await safeSynthesizeMouseEventInContentPage(selector, x, y, options);
+        }
       },
 
       // This object will synthesize any "mouse" prefixed event to the
-      // `testActor`, using the name of method called as suffix for the
+      // `highlighterTestFront`, using the name of method called as suffix for the
       // event's name.
       // If no x, y coords are given, the previous ones are used.
       //
@@ -760,19 +715,12 @@ const getHighlighterHelperFor = type =>
             async function(x = prevX, y = prevY, selector = ":root") {
               prevX = x;
               prevY = y;
-              await testActor.synthesizeMouse({
-                selector,
-                x,
-                y,
-                options: { type: "mouse" + name },
+              await safeSynthesizeMouseEventInContentPage(selector, x, y, {
+                type: "mouse" + name,
               });
             },
         }
       ),
-
-      reflow: async function() {
-        await testActor.reflow();
-      },
 
       finalize: async function() {
         highlightedNode = null;
@@ -1144,7 +1092,7 @@ async function toggleShapesHighlighter(
 
   if (show) {
     const onHighlighterShown = highlighters.once("shapes-highlighter-shown");
-    await EventUtils.sendMouseEvent(
+    EventUtils.sendMouseEvent(
       { type: "click", metaKey, ctrlKey },
       shapesToggle,
       view.styleWindow
@@ -1152,7 +1100,7 @@ async function toggleShapesHighlighter(
     await onHighlighterShown;
   } else {
     const onHighlighterHidden = highlighters.once("shapes-highlighter-hidden");
-    await EventUtils.sendMouseEvent(
+    EventUtils.sendMouseEvent(
       { type: "click", metaKey, ctrlKey },
       shapesToggle,
       view.styleWindow
@@ -1386,4 +1334,156 @@ function waitForNMutations(inspector, type, count) {
       }
     });
   });
+}
+
+/**
+ * Move the mouse on the content page at the x,y position and check the color displayed
+ * in the eyedropper label.
+ *
+ * @param {HighlighterTestFront} highlighterTestFront
+ * @param {Number} x
+ * @param {Number} y
+ * @param {String} expectedColor: Hexa string of the expected color
+ * @param {String} assertionDescription
+ */
+async function checkEyeDropperColorAt(
+  highlighterTestFront,
+  x,
+  y,
+  expectedColor,
+  assertionDescription
+) {
+  info(`Move mouse to ${x},${y}`);
+  await safeSynthesizeMouseEventInContentPage(":root", x, y, {
+    type: "mousemove",
+  });
+
+  const colorValue = await highlighterTestFront.getEyeDropperColorValue();
+  is(colorValue, expectedColor, assertionDescription);
+}
+
+/**
+ * Delete the provided node front using the context menu in the markup view.
+ * Will resolve after the inspector UI was fully updated.
+ *
+ * @param {NodeFront} node
+ *        The node front to delete.
+ * @param {Inspector} inspector
+ *        The current inspector panel instance.
+ */
+async function deleteNodeWithContextMenu(node, inspector) {
+  const container = inspector.markup.getContainer(node);
+
+  const allMenuItems = openContextMenuAndGetAllItems(inspector, {
+    target: container.tagLine,
+  });
+  const menuItem = allMenuItems.find(item => item.id === "node-menu-delete");
+  const onInspectorUpdated = inspector.once("inspector-updated");
+
+  info("Clicking 'Delete Node' in the context menu.");
+  is(menuItem.disabled, false, "delete menu item is enabled");
+  menuItem.click();
+
+  // close the open context menu
+  EventUtils.synthesizeKey("KEY_Escape");
+
+  info("Waiting for inspector to update.");
+  await onInspectorUpdated;
+
+  // Since the mutations are sent asynchronously from the server, the
+  // inspector-updated event triggered by the deletion might happen before
+  // the mutation is received and the element is removed from the
+  // breadcrumbs. See bug 1284125.
+  if (inspector.breadcrumbs.indexOf(node) > -1) {
+    info("Crumbs haven't seen deletion. Waiting for breadcrumbs-updated.");
+    await inspector.once("breadcrumbs-updated");
+  }
+}
+
+/**
+ * Forces the content page to reflow and waits for the next repaint.
+ */
+function reflowContentPage() {
+  return SpecialPowers.spawn(gBrowser.selectedBrowser, [], async function() {
+    return new Promise(resolve => {
+      content.document.documentElement.offsetWidth;
+      content.requestAnimationFrame(resolve);
+    });
+  });
+}
+
+/**
+ * Get all box-model regions' adjusted boxquads for the given element
+ * @param {String|Array} selector The node selector to target a given element
+ * @return {Promise<Object>} A promise that resolves with an object with each property of
+ *         a box-model region, each of them being an object with the p1/p2/p3/p4 properties.
+ */
+async function getAllAdjustedQuadsForContentPageElement(
+  selector,
+  useTopWindowAsBoundary = true
+) {
+  const selectors = Array.isArray(selector) ? selector : [selector];
+
+  const browsingContext =
+    selectors.length == 1
+      ? gBrowser.selectedBrowser.browsingContext
+      : await getBrowsingContextInFrames(
+          gBrowser.selectedBrowser.browsingContext,
+          selectors.slice(0, -1)
+        );
+
+  const inBrowsingContextSelector = selectors.at(-1);
+  return SpecialPowers.spawn(
+    browsingContext,
+    [inBrowsingContextSelector, useTopWindowAsBoundary],
+    (_selector, _useTopWindowAsBoundary) => {
+      const { require } = ChromeUtils.import(
+        "resource://devtools/shared/Loader.jsm"
+      );
+      const { getAdjustedQuads } = require("devtools/shared/layout/utils");
+
+      const node = content.document.querySelector(_selector);
+
+      const boundaryWindow = _useTopWindowAsBoundary ? content.top : content;
+      const regions = {};
+      for (const boxType of ["content", "padding", "border", "margin"]) {
+        regions[boxType] = getAdjustedQuads(boundaryWindow, node, boxType);
+      }
+
+      return regions;
+    }
+  );
+}
+
+/**
+ * Assert that the box-model highlighter's current position corresponds to the
+ * given node boxquads.
+ *
+ * @param {HighlighterTestFront} highlighterTestFront
+ * @param {String} selector The node selector to get the boxQuads from
+ */
+async function isNodeCorrectlyHighlighted(highlighterTestFront, selector) {
+  const boxModel = await highlighterTestFront.getBoxModelStatus();
+
+  const useTopWindowAsBoundary = !!highlighterTestFront.parentFront.isTopLevel;
+  const regions = await getAllAdjustedQuadsForContentPageElement(
+    selector,
+    useTopWindowAsBoundary
+  );
+
+  for (const boxType of ["content", "padding", "border", "margin"]) {
+    const [quad] = regions[boxType];
+    for (const point in boxModel[boxType].points) {
+      is(
+        boxModel[boxType].points[point].x,
+        quad[point].x,
+        `${selector} ${boxType} point ${point} x coordinate is correct`
+      );
+      is(
+        boxModel[boxType].points[point].y,
+        quad[point].y,
+        `${selector} ${boxType} point ${point} y coordinate is correct`
+      );
+    }
+  }
 }

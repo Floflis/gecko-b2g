@@ -1262,43 +1262,50 @@ nsresult VerifyCertAtTime(nsIX509Cert* aCert,
   RefPtr<SharedCertVerifier> certVerifier(GetDefaultCertVerifier());
   NS_ENSURE_TRUE(certVerifier, NS_ERROR_FAILURE);
 
-  UniqueCERTCertList resultChain;
-  SECOidTag evOidPolicy;
+  nsTArray<nsTArray<uint8_t>> resultChain;
+  EVStatus evStatus;
   mozilla::pkix::Result result;
+
+  nsTArray<uint8_t> certBytes;
+  nsresult nsrv = aCert->GetRawDER(certBytes);
+  if (NS_FAILED(nsrv)) {
+    return nsrv;
+  }
 
   if (!aHostname.IsVoid() && aUsage == certificateUsageSSLServer) {
     result =
-        certVerifier->VerifySSLServerCert(nssCert, aTime,
+        certVerifier->VerifySSLServerCert(certBytes, aTime,
                                           nullptr,  // Assume no context
                                           aHostname, resultChain, aFlags,
                                           Nothing(),  // extraCertificates
                                           Nothing(),  // stapledOCSPResponse
                                           Nothing(),  // sctsFromTLSExtension
                                           Nothing(),  // dcInfo
-                                          OriginAttributes(),
-                                          false,  // don't save intermediates
-                                          &evOidPolicy);
+                                          OriginAttributes(), &evStatus);
   } else {
     const nsCString& flatHostname = PromiseFlatCString(aHostname);
     result = certVerifier->VerifyCert(
-        nssCert.get(), aUsage, aTime,
+        certBytes, aUsage, aTime,
         nullptr,  // Assume no context
         aHostname.IsVoid() ? nullptr : flatHostname.get(), resultChain, aFlags,
         Nothing(),  // extraCertificates
         Nothing(),  // stapledOCSPResponse
         Nothing(),  // sctsFromTLSExtension
-        OriginAttributes(), &evOidPolicy);
+        OriginAttributes(), &evStatus);
   }
 
   if (result == mozilla::pkix::Success) {
-    nsresult rv = nsNSSCertificateDB::ConstructCertArrayFromUniqueCertList(
-        resultChain, aVerifiedChain);
-
-    if (NS_FAILED(rv)) {
-      return rv;
+    for (const auto& certDER : resultChain) {
+      RefPtr<nsIX509Cert> cert = nsNSSCertificate::ConstructFromDER(
+          const_cast<char*>(reinterpret_cast<const char*>(certDER.Elements())),
+          static_cast<int>(certDER.Length()));
+      if (!cert) {
+        return NS_ERROR_FAILURE;
+      }
+      aVerifiedChain.AppendElement(cert);
     }
 
-    if (evOidPolicy != SEC_OID_UNKNOWN) {
+    if (evStatus == EVStatus::EV) {
       *aHasEVPolicy = true;
     }
   }

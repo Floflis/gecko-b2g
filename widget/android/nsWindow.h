@@ -55,7 +55,7 @@ class nsWindow final : public nsBaseWidget {
   virtual ~nsWindow();
 
  public:
-  using nsBaseWidget::GetLayerManager;
+  using nsBaseWidget::GetWindowRenderer;
 
   nsWindow();
 
@@ -125,6 +125,8 @@ class nsWindow final : public nsBaseWidget {
 
   void NotifyDisablingWebRender();
 
+  void ShowDynamicToolbar();
+
   void DetachNatives();
 
   //
@@ -165,8 +167,7 @@ class nsWindow final : public nsBaseWidget {
   virtual already_AddRefed<nsIScreen> GetWidgetScreen() override;
   virtual nsresult MakeFullScreen(bool aFullScreen,
                                   nsIScreen* aTargetScreen = nullptr) override;
-  void SetCursor(nsCursor aDefaultCursor, imgIContainer* aImageCursor,
-                 uint32_t aHotspotX, uint32_t aHotspotY) override {}
+  void SetCursor(const Cursor& aDefaultCursor) override;
   void* GetNativeData(uint32_t aDataType) override;
   void SetNativeData(uint32_t aDataType, uintptr_t aVal) override;
   virtual nsresult SetTitle(const nsAString& aTitle) override { return NS_OK; }
@@ -179,10 +180,7 @@ class nsWindow final : public nsBaseWidget {
                                const InputContextAction& aAction) override;
   virtual InputContext GetInputContext() override;
 
-  LayerManager* GetLayerManager(
-      PLayerTransactionChild* aShadowManager = nullptr,
-      LayersBackend aBackendHint = mozilla::layers::LayersBackend::LAYERS_NONE,
-      LayerManagerPersistence aPersistence = LAYER_MANAGER_CURRENT) override;
+  WindowRenderer* GetWindowRenderer() override;
 
   virtual bool NeedsPaint() override;
 
@@ -201,8 +199,9 @@ class nsWindow final : public nsBaseWidget {
                                       uint32_t aPointerOrientation,
                                       nsIObserver* aObserver) override;
   nsresult SynthesizeNativeMouseEvent(LayoutDeviceIntPoint aPoint,
-                                      uint32_t aNativeMessage,
-                                      uint32_t aModifierFlags,
+                                      NativeMouseMessage aNativeMessage,
+                                      mozilla::MouseButton aButton,
+                                      nsIWidget::Modifiers aModifierFlags,
                                       nsIObserver* aObserver) override;
   nsresult SynthesizeNativeMouseMove(LayoutDeviceIntPoint aPoint,
                                      nsIObserver* aObserver) override;

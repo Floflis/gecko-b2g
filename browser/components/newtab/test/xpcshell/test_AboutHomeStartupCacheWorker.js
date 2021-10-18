@@ -12,10 +12,14 @@ http://creativecommons.org/publicdomain/zero/1.0/ */
 const { AddonTestUtils } = ChromeUtils.import(
   "resource://testing-common/AddonTestUtils.jsm"
 );
+const { SearchTestUtils } = ChromeUtils.import(
+  "resource://testing-common/SearchTestUtils.jsm"
+);
 const { TestUtils } = ChromeUtils.import(
   "resource://testing-common/TestUtils.jsm"
 );
 
+SearchTestUtils.init(this);
 AddonTestUtils.init(this);
 AddonTestUtils.createAppInfo(
   "xpcshell@tests.mozilla.org",
@@ -106,11 +110,14 @@ add_task(async function setup() {
   Services.prefs.setBoolPref("browser.ping-centre.telemetry", false);
 
   // We need a default search engine set up for rendering the search input.
-  let engine = await Services.search.addEngineWithDetails("Test engine", {
-    template: "http://example.com/?s=%S",
-    alias: "@testengine",
+  await SearchTestUtils.installSearchExtension({
+    name: "Test engine",
+    keyword: "@testengine",
+    search_url_get_params: "s={searchTerms}",
   });
-  Services.search.defaultEngine = engine;
+  Services.search.defaultEngine = Services.search.getEngineByName(
+    "Test engine"
+  );
 
   // Initialize Activity Stream, and pretend that a new window has been loaded
   // to kick off initializing all of the feeds.
@@ -124,7 +131,7 @@ add_task(async function setup() {
     let feed = AboutNewTab.activityStream.store.feeds.get(
       "feeds.discoverystreamfeed"
     );
-    return feed.loaded;
+    return feed?.loaded;
   });
 });
 
@@ -134,6 +141,14 @@ add_task(async function setup() {
  * and script makes sense.
  */
 add_task(async function test_cache_worker() {
+  Services.prefs.setBoolPref(
+    "security.allow_parent_unrestricted_js_loads",
+    true
+  );
+  registerCleanupFunction(() => {
+    Services.prefs.clearUserPref("security.allow_parent_unrestricted_js_loads");
+  });
+
   let state = AboutNewTab.activityStream.store.getState();
 
   let cacheWorker = new BasePromiseWorker(CACHE_WORKER_URL);

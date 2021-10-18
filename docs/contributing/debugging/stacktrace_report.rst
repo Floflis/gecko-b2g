@@ -39,7 +39,7 @@ How to get a crash ID with the Mozilla Crash Reporter
 
 1 - Crash and submit a report to the system.
 
-.. image:: img/reporter.jpg
+.. image:: img/crashreporter.png
 
 The Mozilla Crash Reporter window should automatically come up after Firefox crashes.
 If you have any additional information about the crash, such as additional detail on
@@ -94,6 +94,7 @@ Each file in this folder contains one submitted crash report ID. You can
 check the modified or creation time for each file to discern which crash
 reports are relevant to your bug report.
 
+.. _Alternative ways to get a stacktrace:
 
 Alternative ways to get a stacktrace
 ------------------------------------
@@ -105,7 +106,7 @@ will need to obtain a stacktrace manually:
 Windows
 ~~~~~~~
 
-See the article :ref:`Create a stacktrace with Windbg` for information
+See the article :ref:`Create a stacktrace with Windbg <How to get a stacktrace with WinDbg>` for information
 on how to do this.
 
 For a full process dump, see :ref:`How to get a process dump with Windows

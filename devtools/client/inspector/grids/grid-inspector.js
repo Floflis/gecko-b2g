@@ -92,6 +92,9 @@ class GridInspector {
     );
     this.onToggleShowInfiniteLines = this.onToggleShowInfiniteLines.bind(this);
     this.updateGridPanel = this.updateGridPanel.bind(this);
+    this.listenForGridHighlighterEvents = this.listenForGridHighlighterEvents.bind(
+      this
+    );
 
     this.init();
   }
@@ -113,33 +116,16 @@ class GridInspector {
       return;
     }
 
-    try {
-      // TODO: Call this again whenever targets are added or removed.
-      this.layoutFronts = await this.getLayoutFronts();
-    } catch (e) {
-      // This call might fail if called asynchrously after the toolbox is finished
-      // closing.
-      return;
-    }
-
     if (flags.testing) {
       // In tests, we start listening immediately to avoid having to simulate a mousemove.
-      this.highlighters.on("grid-highlighter-hidden", this.onHighlighterHidden);
-      this.highlighters.on("grid-highlighter-shown", this.onHighlighterShown);
+      this.listenForGridHighlighterEvents();
     } else {
       this.document.addEventListener(
         "mousemove",
-        () => {
-          this.highlighters.on(
-            "grid-highlighter-hidden",
-            this.onHighlighterHidden
-          );
-          this.highlighters.on(
-            "grid-highlighter-shown",
-            this.onHighlighterShown
-          );
-        },
-        { once: true }
+        this.listenForGridHighlighterEvents,
+        {
+          once: true,
+        }
       );
     }
 
@@ -149,6 +135,11 @@ class GridInspector {
     this.onSidebarSelect();
   }
 
+  listenForGridHighlighterEvents() {
+    this.highlighters.on("grid-highlighter-hidden", this.onHighlighterHidden);
+    this.highlighters.on("grid-highlighter-shown", this.onHighlighterShown);
+  }
+
   /**
    * Get the LayoutActor fronts for all interesting targets where we have inspectors.
    *
@@ -156,14 +147,10 @@ class GridInspector {
    */
   async getLayoutFronts() {
     const inspectorFronts = await this.inspector.getAllInspectorFronts();
-
-    const layoutFronts = [];
-    for (const { walker } of inspectorFronts) {
-      const layoutFront = await walker.getLayoutInspector();
-      layoutFronts.push(layoutFront);
-    }
-
-    return layoutFronts;
+    const layoutFronts = await Promise.all(
+      inspectorFronts.map(({ walker }) => walker.getLayoutInspector())
+    );
+    return layoutFronts.filter(front => !front.isDestroyed());
   }
 
   /**
@@ -178,6 +165,10 @@ class GridInspector {
       );
       this.highlighters.off("grid-highlighter-shown", this.onHighlighterShown);
     }
+    this.document.removeEventListener(
+      "mousemove",
+      this.listenForGridHighlighterEvents
+    );
 
     this.inspector.sidebar.off("select", this.onSidebarSelect);
     this.inspector.off("new-root", this.onNavigate);
@@ -187,7 +178,6 @@ class GridInspector {
     this._highlighters = null;
     this.document = null;
     this.inspector = null;
-    this.layoutFronts = null;
     this.store = null;
   }
 
@@ -452,16 +442,17 @@ class GridInspector {
    * @return {Array} The list of GridFronts
    */
   async getGrids() {
-    let gridFronts = [];
-
+    const promises = [];
     try {
-      for (const layoutFront of this.layoutFronts) {
-        gridFronts = gridFronts.concat(await layoutFront.getAllGrids());
+      const layoutFronts = await this.getLayoutFronts();
+      for (const layoutFront of layoutFronts) {
+        promises.push(layoutFront.getAllGrids());
       }
     } catch (e) {
       // This call might fail if called asynchrously after the toolbox is finished closing
     }
 
+    const gridFronts = (await Promise.all(promises)).flat();
     return gridFronts;
   }
 

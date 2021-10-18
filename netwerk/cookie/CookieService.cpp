@@ -7,9 +7,11 @@
 #include "CookieCommons.h"
 #include "CookieLogging.h"
 #include "mozilla/ClearOnShutdown.h"
+#include "mozilla/ContentBlockingNotifier.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/nsMixedContentBlocker.h"
 #include "mozilla/dom/Promise.h"
+#include "mozilla/net/CookieJarSettings.h"
 #include "mozilla/net/CookiePersistentStorage.h"
 #include "mozilla/net/CookiePrivateStorage.h"
 #include "mozilla/net/CookieService.h"
@@ -20,6 +22,7 @@
 #include "mozilla/StoragePrincipalHelper.h"
 #include "mozilla/Telemetry.h"
 #include "mozIThirdPartyUtil.h"
+#include "nsICookiePermission.h"
 #include "nsIConsoleReportCollector.h"
 #include "nsIEffectiveTLDService.h"
 #include "nsIIDNService.h"
@@ -29,21 +32,53 @@
 #include "nsIWebProgressListener.h"
 #include "nsNetUtil.h"
 #include "prprf.h"
+#include "ThirdPartyUtil.h"
 
 using namespace mozilla::dom;
 
-// static
-uint32_t nsICookieManager::GetCookieBehavior() {
+namespace {
+
+uint32_t MakeCookieBehavior(uint32_t aCookieBehavior) {
   bool isFirstPartyIsolated = OriginAttributes::IsFirstPartyEnabled();
-  uint32_t cookieBehavior =
-      mozilla::StaticPrefs::network_cookie_cookieBehavior();
 
   if (isFirstPartyIsolated &&
-      cookieBehavior ==
+      aCookieBehavior ==
           nsICookieService::BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN) {
-    cookieBehavior = nsICookieService::BEHAVIOR_REJECT_TRACKER;
+    return nsICookieService::BEHAVIOR_REJECT_TRACKER;
   }
-  return cookieBehavior;
+  return aCookieBehavior;
+}
+
+}  // anonymous namespace
+
+// static
+uint32_t nsICookieManager::GetCookieBehavior(bool aIsPrivate) {
+  if (aIsPrivate) {
+    // To sync the cookieBehavior pref between regular and private mode in ETP
+    // custom mode, we will return the regular cookieBehavior pref for private
+    // mode when
+    //   1. The regular cookieBehavior pref has a non-default value.
+    //   2. And the private cookieBehavior pref has a default value.
+    // Also, this can cover the migration case where the user has a non-default
+    // cookieBehavior before the private cookieBehavior was introduced. The
+    // getter here will directly return the regular cookieBehavior, so that the
+    // cookieBehavior for private mode is consistent.
+    if (mozilla::Preferences::HasUserValue(
+            "network.cookie.cookieBehavior.pbmode")) {
+      return MakeCookieBehavior(
+          mozilla::StaticPrefs::network_cookie_cookieBehavior_pbmode());
+    }
+
+    if (mozilla::Preferences::HasUserValue("network.cookie.cookieBehavior")) {
+      return MakeCookieBehavior(
+          mozilla::StaticPrefs::network_cookie_cookieBehavior());
+    }
+
+    return MakeCookieBehavior(
+        mozilla::StaticPrefs::network_cookie_cookieBehavior_pbmode());
+  }
+  return MakeCookieBehavior(
+      mozilla::StaticPrefs::network_cookie_cookieBehavior());
 }
 
 namespace mozilla {
@@ -265,9 +300,9 @@ CookieService::Observe(nsISupports* /*aSubject*/, const char* aTopic,
 }
 
 NS_IMETHODIMP
-CookieService::GetCookieBehavior(uint32_t* aCookieBehavior) {
+CookieService::GetCookieBehavior(bool aIsPrivate, uint32_t* aCookieBehavior) {
   NS_ENSURE_ARG_POINTER(aCookieBehavior);
-  *aCookieBehavior = nsICookieManager::GetCookieBehavior();
+  *aCookieBehavior = nsICookieManager::GetCookieBehavior(aIsPrivate);
   return NS_OK;
 }
 
@@ -331,8 +366,12 @@ CookieService::GetCookieStringFromDocument(Document* aDocument,
   // in gtests we don't have a window, let's consider those requests as 3rd
   // party.
   if (innerWindow) {
-    thirdParty = nsContentUtils::IsThirdPartyWindowOrChannel(innerWindow,
-                                                             nullptr, nullptr);
+    ThirdPartyUtil* thirdPartyUtil = ThirdPartyUtil::GetInstance();
+
+    if (thirdPartyUtil) {
+      Unused << thirdPartyUtil->IsThirdPartyWindow(
+          innerWindow->GetOuterWindow(), nullptr, &thirdParty);
+    }
   }
 
   bool stale = false;
@@ -478,8 +517,12 @@ CookieService::SetCookieStringFromDocument(Document* aDocument,
   // in gtests we don't have a window, let's consider those requests as 3rd
   // party.
   if (innerWindow) {
-    thirdParty = nsContentUtils::IsThirdPartyWindowOrChannel(innerWindow,
-                                                             nullptr, nullptr);
+    ThirdPartyUtil* thirdPartyUtil = ThirdPartyUtil::GetInstance();
+
+    if (thirdPartyUtil) {
+      Unused << thirdPartyUtil->IsThirdPartyWindow(
+          innerWindow->GetOuterWindow(), nullptr, &thirdParty);
+    }
   }
 
   if (thirdParty &&
@@ -1290,7 +1333,6 @@ bool CookieService::GetTokenValue(nsACString::const_char_iterator& aIter,
   lastSpace = aIter;
   if (lastSpace != start) {
     while (--lastSpace != start && iswhitespace(*lastSpace)) {
-      continue;
     }
     ++lastSpace;
   }
@@ -1300,7 +1342,6 @@ bool CookieService::GetTokenValue(nsACString::const_char_iterator& aIter,
   if (aEqualsFound) {
     // find <value>
     while (++aIter != aEndIter && iswhitespace(*aIter)) {
-      continue;
     }
 
     start = aIter;
@@ -1315,7 +1356,6 @@ bool CookieService::GetTokenValue(nsACString::const_char_iterator& aIter,
     if (aIter != start) {
       lastSpace = aIter;
       while (--lastSpace != start && iswhitespace(*lastSpace)) {
-        continue;
       }
 
       aTokenValue.Rebind(start, ++lastSpace);
@@ -1555,8 +1595,7 @@ CookieStatus CookieService::CheckPrefs(
   // don't let unsupported scheme sites get/set cookies (could be a security
   // issue)
   if (!CookieCommons::IsSchemeSupported(aHostURI)) {
-    COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                      aHostURI, aCookieHeader,
+    COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
                       "non http/https sites cannot read cookies");
     return STATUS_REJECTED_WITH_ERROR;
   }
@@ -1565,8 +1604,7 @@ CookieStatus CookieService::CheckPrefs(
       BasePrincipal::CreateContentPrincipal(aHostURI, aOriginAttrs);
 
   if (!principal) {
-    COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                      aHostURI, aCookieHeader,
+    COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
                       "non-content principals cannot get/set cookies");
     return STATUS_REJECTED_WITH_ERROR;
   }
@@ -1578,8 +1616,7 @@ CookieStatus CookieService::CheckPrefs(
   if (NS_SUCCEEDED(rv)) {
     switch (cookiePermission) {
       case nsICookiePermission::ACCESS_DENY:
-        COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                          aHostURI, aCookieHeader,
+        COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
                           "cookies are blocked for this site");
         CookieLogging::LogMessageToConsole(
             aCRC, aHostURI, nsIScriptError::warningFlag,
@@ -1619,8 +1656,7 @@ CookieStatus CookieService::CheckPrefs(
       return STATUS_ACCEPTED;
     }
 
-    COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                      aHostURI, aCookieHeader,
+    COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
                       "cookies are disabled in trackers");
     if (aIsThirdPartySocialTrackingResource) {
       *aRejectedReason =
@@ -1640,8 +1676,8 @@ CookieStatus CookieService::CheckPrefs(
   if (aCookieJarSettings->GetCookieBehavior() ==
           nsICookieService::BEHAVIOR_REJECT &&
       !aStorageAccessPermissionGranted) {
-    COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                      aHostURI, aCookieHeader, "cookies are disabled");
+    COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
+                      "cookies are disabled");
     *aRejectedReason = nsIWebProgressListener::STATE_COOKIES_BLOCKED_ALL;
     return STATUS_REJECTED;
   }
@@ -1651,8 +1687,8 @@ CookieStatus CookieService::CheckPrefs(
     if (aCookieJarSettings->GetCookieBehavior() ==
             nsICookieService::BEHAVIOR_REJECT_FOREIGN &&
         !aStorageAccessPermissionGranted) {
-      COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                        aHostURI, aCookieHeader, "context is third party");
+      COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
+                        "context is third party");
       CookieLogging::LogMessageToConsole(
           aCRC, aHostURI, nsIScriptError::warningFlag,
           CONSOLE_REJECTION_CATEGORY, "CookieRejectedThirdParty"_ns,
@@ -1665,8 +1701,8 @@ CookieStatus CookieService::CheckPrefs(
 
     if (aCookieJarSettings->GetLimitForeignContexts() &&
         !aStorageAccessPermissionGranted && aNumOfCookies == 0) {
-      COOKIE_LOGFAILURE(aCookieHeader.IsVoid() ? GET_COOKIE : SET_COOKIE,
-                        aHostURI, aCookieHeader, "context is third party");
+      COOKIE_LOGFAILURE(!aCookieHeader.IsVoid(), aHostURI, aCookieHeader,
+                        "context is third party");
       CookieLogging::LogMessageToConsole(
           aCRC, aHostURI, nsIScriptError::warningFlag,
           CONSOLE_REJECTION_CATEGORY, "CookieRejectedThirdParty"_ns,
@@ -1819,11 +1855,7 @@ bool CookieService::CheckPath(CookieStruct& aCookieData,
     return false;
   }
 
-  if (aCookieData.path().Contains('\t')) {
-    return false;
-  }
-
-  return true;
+  return !aCookieData.path().Contains('\t');
 }
 
 // CheckPrefixes
@@ -1979,7 +2011,7 @@ CookieService::CookieExistsNative(const nsACString& aHost,
       CookieCommons::GetBaseDomainFromHost(mTLDService, aHost, baseDomain);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  CookieListIter iter;
+  CookieListIter iter{};
   CookieStorage* storage = PickStorage(*aOriginAttributes);
   *aFoundCookie = storage->FindCookie(baseDomain, *aOriginAttributes, aHost,
                                       aName, aPath, iter);

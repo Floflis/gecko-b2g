@@ -14,6 +14,8 @@
 #include "gfxQuad.h"
 #include "imgIEncoder.h"
 #include "mozilla/Base64.h"
+#include "mozilla/StyleColorInlines.h"
+#include "mozilla/Components.h"
 #include "mozilla/dom/ImageEncoder.h"
 #include "mozilla/dom/WorkerPrivate.h"
 #include "mozilla/dom/WorkerRunnable.h"
@@ -31,6 +33,7 @@
 #include "mozilla/layers/SynchronousTask.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/ServoStyleConsts.h"
 #include "mozilla/StaticPrefs_gfx.h"
@@ -48,7 +51,6 @@
 #include "nsPresContext.h"
 #include "nsRegion.h"
 #include "nsServiceManagerUtils.h"
-#include "GeckoProfiler.h"
 #include "ImageContainer.h"
 #include "ImageRegion.h"
 #include "gfx2DGlue.h"
@@ -797,6 +799,157 @@ gfxQuad gfxUtils::TransformToQuad(const gfxRect& aRect,
   return gfxQuad(points[0], points[1], points[2], points[3]);
 }
 
+Matrix4x4 gfxUtils::SnapTransformTranslation(const Matrix4x4& aTransform,
+                                             Matrix* aResidualTransform) {
+  if (aResidualTransform) {
+    *aResidualTransform = Matrix();
+  }
+
+  Matrix matrix2D;
+  if (aTransform.CanDraw2D(&matrix2D) && !matrix2D.HasNonTranslation() &&
+      matrix2D.HasNonIntegerTranslation()) {
+    return Matrix4x4::From2D(
+        SnapTransformTranslation(matrix2D, aResidualTransform));
+  }
+
+  return SnapTransformTranslation3D(aTransform, aResidualTransform);
+}
+
+Matrix gfxUtils::SnapTransformTranslation(const Matrix& aTransform,
+                                          Matrix* aResidualTransform) {
+  if (aResidualTransform) {
+    *aResidualTransform = Matrix();
+  }
+
+  if (!aTransform.HasNonTranslation() &&
+      aTransform.HasNonIntegerTranslation()) {
+    auto snappedTranslation = IntPoint::Round(aTransform.GetTranslation());
+    Matrix snappedMatrix =
+        Matrix::Translation(snappedTranslation.x, snappedTranslation.y);
+    if (aResidualTransform) {
+      // set aResidualTransform so that aResidual * snappedMatrix == matrix2D.
+      // (I.e., appying snappedMatrix after aResidualTransform gives the
+      // ideal transform.)
+      *aResidualTransform =
+          Matrix::Translation(aTransform._31 - snappedTranslation.x,
+                              aTransform._32 - snappedTranslation.y);
+    }
+    return snappedMatrix;
+  }
+
+  return aTransform;
+}
+
+Matrix4x4 gfxUtils::SnapTransformTranslation3D(const Matrix4x4& aTransform,
+                                               Matrix* aResidualTransform) {
+  if (aTransform.IsSingular() || aTransform.HasPerspectiveComponent() ||
+      aTransform.HasNonTranslation() ||
+      !aTransform.HasNonIntegerTranslation()) {
+    // For a singular transform, there is no reversed matrix, so we
+    // don't snap it.
+    // For a perspective transform, the content is transformed in
+    // non-linear, so we don't snap it too.
+    return aTransform;
+  }
+
+  // Snap for 3D Transforms
+
+  Point3D transformedOrigin = aTransform.TransformPoint(Point3D());
+
+  // Compute the transformed snap by rounding the values of
+  // transformed origin.
+  auto transformedSnapXY =
+      IntPoint::Round(transformedOrigin.x, transformedOrigin.y);
+  Matrix4x4 inverse = aTransform;
+  inverse.Invert();
+  // see Matrix4x4::ProjectPoint()
+  Float transformedSnapZ =
+      inverse._33 == 0 ? 0
+                       : (-(transformedSnapXY.x * inverse._13 +
+                            transformedSnapXY.y * inverse._23 + inverse._43) /
+                          inverse._33);
+  Point3D transformedSnap =
+      Point3D(transformedSnapXY.x, transformedSnapXY.y, transformedSnapZ);
+  if (transformedOrigin == transformedSnap) {
+    return aTransform;
+  }
+
+  // Compute the snap from the transformed snap.
+  Point3D snap = inverse.TransformPoint(transformedSnap);
+  if (snap.z > 0.001 || snap.z < -0.001) {
+    // Allow some level of accumulated computation error.
+    MOZ_ASSERT(inverse._33 == 0.0);
+    return aTransform;
+  }
+
+  // The difference between the origin and snap is the residual transform.
+  if (aResidualTransform) {
+    // The residual transform is to translate the snap to the origin
+    // of the content buffer.
+    *aResidualTransform = Matrix::Translation(-snap.x, -snap.y);
+  }
+
+  // Translate transformed origin to transformed snap since the
+  // residual transform would trnslate the snap to the origin.
+  Point3D transformedShift = transformedSnap - transformedOrigin;
+  Matrix4x4 result = aTransform;
+  result.PostTranslate(transformedShift.x, transformedShift.y,
+                       transformedShift.z);
+
+  // For non-2d transform, residual translation could be more than
+  // 0.5 pixels for every axis.
+
+  return result;
+}
+
+Matrix4x4 gfxUtils::SnapTransform(const Matrix4x4& aTransform,
+                                  const gfxRect& aSnapRect,
+                                  Matrix* aResidualTransform) {
+  if (aResidualTransform) {
+    *aResidualTransform = Matrix();
+  }
+
+  Matrix matrix2D;
+  if (aTransform.Is2D(&matrix2D)) {
+    return Matrix4x4::From2D(
+        SnapTransform(matrix2D, aSnapRect, aResidualTransform));
+  }
+  return aTransform;
+}
+
+Matrix gfxUtils::SnapTransform(const Matrix& aTransform,
+                               const gfxRect& aSnapRect,
+                               Matrix* aResidualTransform) {
+  if (aResidualTransform) {
+    *aResidualTransform = Matrix();
+  }
+
+  if (gfxSize(1.0, 1.0) <= aSnapRect.Size() &&
+      aTransform.PreservesAxisAlignedRectangles()) {
+    auto transformedTopLeft = IntPoint::Round(
+        aTransform.TransformPoint(ToPoint(aSnapRect.TopLeft())));
+    auto transformedTopRight = IntPoint::Round(
+        aTransform.TransformPoint(ToPoint(aSnapRect.TopRight())));
+    auto transformedBottomRight = IntPoint::Round(
+        aTransform.TransformPoint(ToPoint(aSnapRect.BottomRight())));
+
+    Matrix snappedMatrix = gfxUtils::TransformRectToRect(
+        aSnapRect, transformedTopLeft, transformedTopRight,
+        transformedBottomRight);
+
+    if (aResidualTransform && !snappedMatrix.IsSingular()) {
+      // set aResidualTransform so that aResidual * snappedMatrix == matrix2D.
+      // (i.e., appying snappedMatrix after aResidualTransform gives the
+      // ideal transform.
+      Matrix snappedMatrixInverse = snappedMatrix;
+      snappedMatrixInverse.Invert();
+      *aResidualTransform = aTransform * snappedMatrixInverse;
+    }
+    return snappedMatrix;
+  }
+  return aTransform;
+}
+
 /* static */
 void gfxUtils::ClearThebesSurface(gfxASurface* aSurface) {
   if (aSurface->CairoStatus()) {
@@ -1127,9 +1280,8 @@ const float kIdentityNarrowYCbCrToRGB_RowMajor[16] = {
       return rec2020;
     case gfx::YUVColorSpace::Identity:
       return identity;
-    default:  // YUVColorSpace::UNKNOWN
-      MOZ_ASSERT(false, "unknown aYUVColorSpace");
-      return rec601;
+    default:
+      MOZ_CRASH("Bad YUVColorSpace");
   }
 }
 
@@ -1154,9 +1306,8 @@ const float kIdentityNarrowYCbCrToRGB_RowMajor[16] = {
       return rec2020;
     case YUVColorSpace::Identity:
       return identity;
-    default:  // YUVColorSpace::UNKNOWN
-      MOZ_ASSERT(false, "unknown aYUVColorSpace");
-      return rec601;
+    default:
+      MOZ_CRASH("Bad YUVColorSpace");
   }
 }
 
@@ -1184,9 +1335,49 @@ const float kIdentityNarrowYCbCrToRGB_RowMajor[16] = {
       return rec2020;
     case YUVColorSpace::Identity:
       return identity;
-    default:  // YUVColorSpace::UNKNOWN
-      MOZ_ASSERT(false, "unknown aYUVColorSpace");
-      return rec601;
+    default:
+      MOZ_CRASH("Bad YUVColorSpace");
+  }
+}
+
+// Translate from CICP values to the color spaces we support, or return
+// Nothing() if there is no appropriate match to let the caller choose
+// a default or generate an error.
+//
+// See Rec. ITU-T H.273 (12/2016) for details on CICP
+/* static */ Maybe<gfx::YUVColorSpace> gfxUtils::CicpToColorSpace(
+    const CICP::MatrixCoefficients aMatrixCoefficients,
+    const CICP::ColourPrimaries aColourPrimaries, LazyLogModule& aLogger) {
+  switch (aMatrixCoefficients) {
+    case CICP::MatrixCoefficients::MC_BT2020_NCL:
+    case CICP::MatrixCoefficients::MC_BT2020_CL:
+      return Some(gfx::YUVColorSpace::BT2020);
+    case CICP::MatrixCoefficients::MC_BT601:
+      return Some(gfx::YUVColorSpace::BT601);
+    case CICP::MatrixCoefficients::MC_BT709:
+      return Some(gfx::YUVColorSpace::BT709);
+    case CICP::MatrixCoefficients::MC_IDENTITY:
+      return Some(gfx::YUVColorSpace::Identity);
+    case CICP::MatrixCoefficients::MC_CHROMAT_NCL:
+    case CICP::MatrixCoefficients::MC_CHROMAT_CL:
+    case CICP::MatrixCoefficients::MC_UNSPECIFIED:
+      switch (aColourPrimaries) {
+        case CICP::ColourPrimaries::CP_BT601:
+          return Some(gfx::YUVColorSpace::BT601);
+        case CICP::ColourPrimaries::CP_BT709:
+          return Some(gfx::YUVColorSpace::BT709);
+        case CICP::ColourPrimaries::CP_BT2020:
+          return Some(gfx::YUVColorSpace::BT2020);
+        default:
+          MOZ_LOG(aLogger, LogLevel::Debug,
+                  ("Couldn't infer color matrix from primaries: %hhu",
+                   aColourPrimaries));
+          return {};
+      }
+    default:
+      MOZ_LOG(aLogger, LogLevel::Debug,
+              ("Unsupported color matrix value: %hhu", aMatrixCoefficients));
+      return {};
   }
 }
 
@@ -1401,6 +1592,7 @@ class GetFeatureStatusWorkerRunnable final
 };
 
 #define GFX_SHADER_CHECK_BUILD_VERSION_PREF "gfx-shader-check.build-version"
+#define GFX_SHADER_CHECK_PTR_SIZE_PREF "gfx-shader-check.ptr-size"
 #define GFX_SHADER_CHECK_DEVICE_ID_PREF "gfx-shader-check.device-id"
 #define GFX_SHADER_CHECK_DRIVER_VERSION_PREF "gfx-shader-check.driver-version"
 
@@ -1410,10 +1602,11 @@ void gfxUtils::RemoveShaderCacheFromDiskIfNecessary() {
     return;
   }
 
-  nsCOMPtr<nsIGfxInfo> gfxInfo = services::GetGfxInfo();
+  nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
 
   // Get current values
   nsCString buildID(mozilla::PlatformBuildID());
+  int ptrSize = sizeof(void*);
   nsString deviceID, driverVersion;
   gfxInfo->GetAdapterDeviceID(deviceID);
   gfxInfo->GetAdapterDriverVersion(driverVersion);
@@ -1421,13 +1614,14 @@ void gfxUtils::RemoveShaderCacheFromDiskIfNecessary() {
   // Get pref stored values
   nsAutoCString buildIDChecked;
   Preferences::GetCString(GFX_SHADER_CHECK_BUILD_VERSION_PREF, buildIDChecked);
+  int ptrSizeChecked = Preferences::GetInt(GFX_SHADER_CHECK_PTR_SIZE_PREF, 0);
   nsAutoString deviceIDChecked, driverVersionChecked;
   Preferences::GetString(GFX_SHADER_CHECK_DEVICE_ID_PREF, deviceIDChecked);
   Preferences::GetString(GFX_SHADER_CHECK_DRIVER_VERSION_PREF,
                          driverVersionChecked);
 
-  if (buildID == buildIDChecked && deviceID == deviceIDChecked &&
-      driverVersion == driverVersionChecked) {
+  if (buildID == buildIDChecked && ptrSize == ptrSizeChecked &&
+      deviceID == deviceIDChecked && driverVersion == driverVersionChecked) {
     return;
   }
 
@@ -1441,6 +1635,7 @@ void gfxUtils::RemoveShaderCacheFromDiskIfNecessary() {
   }
 
   Preferences::SetCString(GFX_SHADER_CHECK_BUILD_VERSION_PREF, buildID);
+  Preferences::SetInt(GFX_SHADER_CHECK_PTR_SIZE_PREF, ptrSize);
   Preferences::SetString(GFX_SHADER_CHECK_DEVICE_ID_PREF, deviceID);
   Preferences::SetString(GFX_SHADER_CHECK_DRIVER_VERSION_PREF, driverVersion);
 }
@@ -1464,7 +1659,7 @@ DeviceColor ToDeviceColor(const sRGBColor& aColor) {
   // need to return the same object from all return points in this function. We
   // could declare a local Color variable and use that, but we might as well
   // just use aColor.
-  if (gfxPlatform::GetCMSMode() == eCMSMode_All) {
+  if (gfxPlatform::GetCMSMode() == CMSMode::All) {
     qcms_transform* transform = gfxPlatform::GetCMSRGBTransform();
     if (transform) {
       return gfxPlatform::TransformPixel(aColor, transform);

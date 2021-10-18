@@ -11,7 +11,7 @@
 #import "RotorRules.h"
 
 #include "AccIterator.h"
-#include "Accessible.h"
+#include "LocalAccessible.h"
 #include "TableAccessible.h"
 #include "TableCellAccessible.h"
 #include "XULTreeAccessible.h"
@@ -20,6 +20,8 @@
 
 using namespace mozilla;
 using namespace mozilla::a11y;
+
+enum CachedBool { eCachedBoolMiss, eCachedTrue, eCachedFalse };
 
 @implementation mozColumnContainer
 
@@ -47,13 +49,13 @@ using namespace mozilla::a11y;
 
   mChildren = [[NSMutableArray alloc] init];
 
-  if (Accessible* acc = [mParent geckoAccessible].AsAccessible()) {
+  if (LocalAccessible* acc = [mParent geckoAccessible]->AsLocal()) {
     TableAccessible* table = acc->AsTable();
     MOZ_ASSERT(table, "Got null table when fetching column children!");
     uint32_t numRows = table->RowCount();
 
     for (uint32_t j = 0; j < numRows; j++) {
-      Accessible* cell = table->CellAt(j, mIndex);
+      LocalAccessible* cell = table->CellAt(j, mIndex);
       mozAccessible* nativeCell =
           cell ? GetNativeFromGeckoAccessible(cell) : nil;
       if ([nativeCell isAccessibilityElement]) {
@@ -61,11 +63,11 @@ using namespace mozilla::a11y;
       }
     }
 
-  } else if (ProxyAccessible* proxy = [mParent geckoAccessible].AsProxy()) {
+  } else if (RemoteAccessible* proxy = [mParent geckoAccessible]->AsRemote()) {
     uint32_t numRows = proxy->TableRowCount();
 
     for (uint32_t j = 0; j < numRows; j++) {
-      ProxyAccessible* cell = proxy->TableCellAt(j, mIndex);
+      RemoteAccessible* cell = proxy->TableCellAt(j, mIndex);
       mozAccessible* nativeCell =
           cell ? GetNativeFromGeckoAccessible(cell) : nil;
       if ([nativeCell isAccessibilityElement]) {
@@ -78,16 +80,16 @@ using namespace mozilla::a11y;
 }
 
 - (void)dealloc {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
   [self invalidateChildren];
   [super dealloc];
 
-  NS_OBJC_END_TRY_ABORT_BLOCK;
+  NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 - (void)expire {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
   [self invalidateChildren];
 
@@ -95,7 +97,7 @@ using namespace mozilla::a11y;
 
   [super expire];
 
-  NS_OBJC_END_TRY_ABORT_BLOCK;
+  NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 - (BOOL)isExpired {
@@ -105,7 +107,7 @@ using namespace mozilla::a11y;
 }
 
 - (void)invalidateChildren {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
   // make room for new children
   if (mChildren) {
@@ -113,7 +115,7 @@ using namespace mozilla::a11y;
     mChildren = nil;
   }
 
-  NS_OBJC_END_TRY_ABORT_BLOCK;
+  NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 @end
@@ -128,41 +130,88 @@ using namespace mozilla::a11y;
   return [self isLayoutTablePart] ? NSAccessibilityGroupRole : [super moxRole];
 }
 
-- (BOOL)isLayoutTablePart {
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
-    while (acc) {
-      if (acc->Role() == roles::TREE_TABLE) {
-        return false;
-      }
-      if (acc->IsTable()) {
-        return acc->AsTable()->IsProbablyLayoutTable();
-      }
-      acc = acc->Parent();
-    }
-    return false;
-  }
-
-  if (ProxyAccessible* proxy = mGeckoAccessible.AsProxy()) {
-    while (proxy) {
-      if (proxy->Role() == roles::TREE_TABLE) {
-        return false;
-      }
-      if (proxy->IsTable()) {
-        return proxy->TableIsProbablyForLayout();
-      }
-      proxy = proxy->Parent();
+- (void)handleAccessibleEvent:(uint32_t)eventType {
+  if (![self isKindOfClass:[mozTableAccessible class]]) {
+    // If we are not a table, we are a cell or a row.
+    // Check to see if the event we're handling should
+    // invalidate the mIsLayoutTable cache on our parent
+    // table.
+    if (eventType == nsIAccessibleEvent::EVENT_REORDER ||
+        eventType == nsIAccessibleEvent::EVENT_OBJECT_ATTRIBUTE_CHANGED ||
+        eventType == nsIAccessibleEvent::EVENT_TABLE_STYLING_CHANGED) {
+      // Invalidate the cache on our parent table
+      [self invalidateLayoutTableCache];
     }
   }
 
-  return false;
+  [super handleAccessibleEvent:eventType];
 }
 
+- (BOOL)isLayoutTablePart {
+  // mIsLayoutTable is a cache on each mozTableAccessible that stores
+  // the previous result of calling IsProbablyLayoutTable in core. To see
+  // how/when the cache is invalidated, view handleAccessibleEvent.
+  // The cache contains one of three values from the CachedBool enum
+  // defined in mozTableAccessible.h
+  mozAccessible* parent = (mozAccessible*)[self moxUnignoredParent];
+  if ([parent isKindOfClass:[mozTablePartAccessible class]]) {
+    return [(mozTablePartAccessible*)parent isLayoutTablePart];
+  } else if ([parent isKindOfClass:[mozOutlineAccessible class]]) {
+    return [(mozOutlineAccessible*)parent isLayoutTablePart];
+  }
+
+  return NO;
+}
+
+- (void)invalidateLayoutTableCache {
+  mozAccessible* parent = (mozAccessible*)[self moxUnignoredParent];
+  if ([parent isKindOfClass:[mozTablePartAccessible class]]) {
+    // We do this to prevent dispatching invalidateLayoutTableCache
+    // on outlines or outline parts. This is possible here because
+    // outline rows subclass table rows, which are a table part.
+    // This means `parent` could be an outline, and there is no
+    // cache on outlines to invalidate.
+    [(mozTablePartAccessible*)parent invalidateLayoutTableCache];
+  }
+}
 @end
 
 @implementation mozTableAccessible
 
+- (void)invalidateLayoutTableCache {
+  mIsLayoutTable = eCachedBoolMiss;
+}
+
+- (BOOL)isLayoutTablePart {
+  if (mIsLayoutTable != eCachedBoolMiss) {
+    return mIsLayoutTable == eCachedTrue;
+  }
+
+  if (mGeckoAccessible->Role() == roles::TREE_TABLE) {
+    // tree tables are never layout tables, and we shouldn't
+    // query IsProbablyLayoutTable() on them, so we short
+    // circuit here
+    mIsLayoutTable = eCachedFalse;
+    return false;
+  }
+
+  bool tableGuess;
+  if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
+    tableGuess = acc->AsTable()->IsProbablyLayoutTable();
+  } else {
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
+    tableGuess = proxy->TableIsProbablyForLayout();
+  }
+
+  mIsLayoutTable = tableGuess ? eCachedTrue : eCachedFalse;
+  return tableGuess;
+}
+
 - (void)handleAccessibleEvent:(uint32_t)eventType {
-  if (eventType == nsIAccessibleEvent::EVENT_REORDER) {
+  if (eventType == nsIAccessibleEvent::EVENT_REORDER ||
+      eventType == nsIAccessibleEvent::EVENT_OBJECT_ATTRIBUTE_CHANGED ||
+      eventType == nsIAccessibleEvent::EVENT_TABLE_STYLING_CHANGED) {
+    [self invalidateLayoutTableCache];
     [self invalidateColumns];
   }
 
@@ -170,28 +219,28 @@ using namespace mozilla::a11y;
 }
 
 - (void)dealloc {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
   [self invalidateColumns];
   [super dealloc];
 
-  NS_OBJC_END_TRY_ABORT_BLOCK;
+  NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 - (NSNumber*)moxRowCount {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  return mGeckoAccessible.IsAccessible()
-             ? @(mGeckoAccessible.AsAccessible()->AsTable()->RowCount())
-             : @(mGeckoAccessible.AsProxy()->TableRowCount());
+  return mGeckoAccessible->IsLocal()
+             ? @(mGeckoAccessible->AsLocal()->AsTable()->RowCount())
+             : @(mGeckoAccessible->AsRemote()->TableRowCount());
 }
 
 - (NSNumber*)moxColumnCount {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  return mGeckoAccessible.IsAccessible()
-             ? @(mGeckoAccessible.AsAccessible()->AsTable()->ColCount())
-             : @(mGeckoAccessible.AsProxy()->TableColumnCount());
+  return mGeckoAccessible->IsLocal()
+             ? @(mGeckoAccessible->AsLocal()->AsTable()->ColCount())
+             : @(mGeckoAccessible->AsRemote()->TableColumnCount());
 }
 
 - (NSArray*)moxRows {
@@ -205,7 +254,7 @@ using namespace mozilla::a11y;
 }
 
 - (NSArray*)moxColumns {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   if (mColContainers) {
     return mColContainers;
@@ -214,10 +263,10 @@ using namespace mozilla::a11y;
   mColContainers = [[NSMutableArray alloc] init];
   uint32_t numCols = 0;
 
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
+  if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
     numCols = acc->AsTable()->ColCount();
   } else {
-    numCols = mGeckoAccessible.AsProxy()->TableColumnCount();
+    numCols = mGeckoAccessible->AsRemote()->TableColumnCount();
   }
 
   for (uint32_t i = 0; i < numCols; i++) {
@@ -239,30 +288,30 @@ using namespace mozilla::a11y;
 }
 
 - (NSArray*)moxColumnHeaderUIElements {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
   uint32_t numCols = 0;
   TableAccessible* table = nullptr;
 
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
-    table = mGeckoAccessible.AsAccessible()->AsTable();
+  if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
+    table = mGeckoAccessible->AsLocal()->AsTable();
     numCols = table->ColCount();
   } else {
-    numCols = mGeckoAccessible.AsProxy()->TableColumnCount();
+    numCols = mGeckoAccessible->AsRemote()->TableColumnCount();
   }
 
   NSMutableArray* colHeaders =
-      [[NSMutableArray alloc] initWithCapacity:numCols];
+      [[[NSMutableArray alloc] initWithCapacity:numCols] autorelease];
 
   for (uint32_t i = 0; i < numCols; i++) {
-    AccessibleOrProxy cell;
+    Accessible* cell;
     if (table) {
       cell = table->CellAt(0, i);
     } else {
-      cell = mGeckoAccessible.AsProxy()->TableCellAt(0, i);
+      cell = mGeckoAccessible->AsRemote()->TableCellAt(0, i);
     }
 
-    if (!cell.IsNull() && cell.Role() == roles::COLUMNHEADER) {
+    if (cell && cell->Role() == roles::COLUMNHEADER) {
       mozAccessible* colHeader = GetNativeFromGeckoAccessible(cell);
       [colHeaders addObject:colHeader];
     }
@@ -279,16 +328,16 @@ using namespace mozilla::a11y;
   uint32_t col = [[columnAndRow objectAtIndex:0] unsignedIntValue];
   uint32_t row = [[columnAndRow objectAtIndex:1] unsignedIntValue];
 
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  AccessibleOrProxy cell;
-  if (mGeckoAccessible.IsAccessible()) {
-    cell = mGeckoAccessible.AsAccessible()->AsTable()->CellAt(row, col);
+  Accessible* cell;
+  if (mGeckoAccessible->IsLocal()) {
+    cell = mGeckoAccessible->AsLocal()->AsTable()->CellAt(row, col);
   } else {
-    cell = mGeckoAccessible.AsProxy()->TableCellAt(row, col);
+    cell = mGeckoAccessible->AsRemote()->TableCellAt(row, col);
   }
 
-  if (cell.IsNull()) {
+  if (!cell) {
     return nil;
   }
 
@@ -296,12 +345,12 @@ using namespace mozilla::a11y;
 }
 
 - (void)invalidateColumns {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
   if (mColContainers) {
     [mColContainers release];
     mColContainers = nil;
   }
-  NS_OBJC_END_TRY_ABORT_BLOCK;
+  NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 @end
@@ -329,60 +378,60 @@ using namespace mozilla::a11y;
 @implementation mozTableCellAccessible
 
 - (NSValue*)moxRowIndexRange {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  if (mGeckoAccessible.IsAccessible()) {
-    TableCellAccessible* cell = mGeckoAccessible.AsAccessible()->AsTableCell();
+  if (mGeckoAccessible->IsLocal()) {
+    TableCellAccessible* cell = mGeckoAccessible->AsLocal()->AsTableCell();
     return
         [NSValue valueWithRange:NSMakeRange(cell->RowIdx(), cell->RowExtent())];
   } else {
-    ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
     return [NSValue
         valueWithRange:NSMakeRange(proxy->RowIdx(), proxy->RowExtent())];
   }
 }
 
 - (NSValue*)moxColumnIndexRange {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  if (mGeckoAccessible.IsAccessible()) {
-    TableCellAccessible* cell = mGeckoAccessible.AsAccessible()->AsTableCell();
+  if (mGeckoAccessible->IsLocal()) {
+    TableCellAccessible* cell = mGeckoAccessible->AsLocal()->AsTableCell();
     return
         [NSValue valueWithRange:NSMakeRange(cell->ColIdx(), cell->ColExtent())];
   } else {
-    ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
     return [NSValue
         valueWithRange:NSMakeRange(proxy->ColIdx(), proxy->ColExtent())];
   }
 }
 
 - (NSArray*)moxRowHeaderUIElements {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  if (mGeckoAccessible.IsAccessible()) {
-    TableCellAccessible* cell = mGeckoAccessible.AsAccessible()->AsTableCell();
-    AutoTArray<Accessible*, 10> headerCells;
+  if (mGeckoAccessible->IsLocal()) {
+    TableCellAccessible* cell = mGeckoAccessible->AsLocal()->AsTableCell();
+    AutoTArray<LocalAccessible*, 10> headerCells;
     cell->RowHeaderCells(&headerCells);
     return utils::ConvertToNSArray(headerCells);
   } else {
-    ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
-    nsTArray<ProxyAccessible*> headerCells;
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
+    nsTArray<RemoteAccessible*> headerCells;
     proxy->RowHeaderCells(&headerCells);
     return utils::ConvertToNSArray(headerCells);
   }
 }
 
 - (NSArray*)moxColumnHeaderUIElements {
-  MOZ_ASSERT(!mGeckoAccessible.IsNull());
+  MOZ_ASSERT(mGeckoAccessible);
 
-  if (mGeckoAccessible.IsAccessible()) {
-    TableCellAccessible* cell = mGeckoAccessible.AsAccessible()->AsTableCell();
-    AutoTArray<Accessible*, 10> headerCells;
+  if (mGeckoAccessible->IsLocal()) {
+    TableCellAccessible* cell = mGeckoAccessible->AsLocal()->AsTableCell();
+    AutoTArray<LocalAccessible*, 10> headerCells;
     cell->ColHeaderCells(&headerCells);
     return utils::ConvertToNSArray(headerCells);
   } else {
-    ProxyAccessible* proxy = mGeckoAccessible.AsProxy();
-    nsTArray<ProxyAccessible*> headerCells;
+    RemoteAccessible* proxy = mGeckoAccessible->AsRemote();
+    nsTArray<RemoteAccessible*> headerCells;
     proxy->ColHeaderCells(&headerCells);
     return utils::ConvertToNSArray(headerCells);
   }
@@ -392,17 +441,21 @@ using namespace mozilla::a11y;
 
 @implementation mozOutlineAccessible
 
+- (BOOL)isLayoutTablePart {
+  return NO;
+}
+
 - (NSArray*)moxRows {
   // Create a new array with the list of outline rows. We
   // use pivot here to do a deep traversal of all rows nested
   // in this outline, not just those which are direct
   // children, since that's what VO expects.
-  NSMutableArray* allRows = [[NSMutableArray alloc] init];
+  NSMutableArray* allRows = [[[NSMutableArray alloc] init] autorelease];
   Pivot p = Pivot(mGeckoAccessible);
   OutlineRule rule = OutlineRule();
-  AccessibleOrProxy firstChild = mGeckoAccessible.FirstChild();
-  AccessibleOrProxy match = p.Next(firstChild, rule, true);
-  while (!match.IsNull()) {
+  Accessible* firstChild = mGeckoAccessible->FirstChild();
+  Accessible* match = p.Next(firstChild, rule, true);
+  while (match) {
     [allRows addObject:GetNativeFromGeckoAccessible(match)];
     match = p.Next(match, rule);
   }
@@ -410,18 +463,18 @@ using namespace mozilla::a11y;
 }
 
 - (NSArray*)moxColumns {
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
+  if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
     if (acc->IsContent() && acc->GetContent()->IsXULElement(nsGkAtoms::tree)) {
       XULTreeAccessible* treeAcc = (XULTreeAccessible*)acc;
-      NSMutableArray* cols = [[NSMutableArray alloc] init];
+      NSMutableArray* cols = [[[NSMutableArray alloc] init] autorelease];
       // XUL trees store their columns in a group at the tree's first
       // child. Here, we iterate over that group to get each column's
       // native accessible and add it to our col array.
-      Accessible* treeColumns = treeAcc->GetChildAt(0);
+      LocalAccessible* treeColumns = treeAcc->LocalChildAt(0);
       if (treeColumns) {
         uint32_t colCount = treeColumns->ChildCount();
         for (uint32_t i = 0; i < colCount; i++) {
-          Accessible* treeColumnItem = treeColumns->GetChildAt(i);
+          LocalAccessible* treeColumnItem = treeColumns->LocalChildAt(i);
           [cols addObject:GetNativeFromGeckoAccessible(treeColumnItem)];
         }
         return cols;
@@ -434,7 +487,7 @@ using namespace mozilla::a11y;
 }
 
 - (NSArray*)moxSelectedRows {
-  NSMutableArray* selectedRows = [[NSMutableArray alloc] init];
+  NSMutableArray* selectedRows = [[[NSMutableArray alloc] init] autorelease];
   NSArray* allRows = [self moxRows];
   for (mozAccessible* row in allRows) {
     if ([row stateWithMask:states::SELECTED] != 0) {
@@ -514,9 +567,9 @@ using namespace mozilla::a11y;
 
 - (NSNumber*)moxDisclosureLevel {
   GroupPos groupPos;
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
+  if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
     groupPos = acc->GroupPosition();
-  } else if (ProxyAccessible* proxy = mGeckoAccessible.AsProxy()) {
+  } else if (RemoteAccessible* proxy = mGeckoAccessible->AsRemote()) {
     groupPos = proxy->GroupPosition();
   }
   // mac expects 0-indexed levels, but groupPos.level is 1-indexed
@@ -548,26 +601,19 @@ using namespace mozilla::a11y;
 }
 
 - (NSNumber*)moxIndex {
-  mozAccessible* parent = (mozAccessible*)[self moxUnignoredParent];
-  while (parent) {
-    if ([[parent moxRole] isEqualToString:@"AXOutline"]) {
-      break;
-    }
-    parent = (mozAccessible*)[parent moxUnignoredParent];
-  }
+  id<MOXAccessible> outline =
+      [self moxFindAncestor:^BOOL(id<MOXAccessible> moxAcc, BOOL* stop) {
+        return [[moxAcc moxRole] isEqualToString:@"AXOutline"];
+      }];
 
-  NSUInteger index =
-      [[(mozOutlineAccessible*)parent moxRows] indexOfObjectIdenticalTo:self];
+  NSUInteger index = [[outline moxRows] indexOfObjectIdenticalTo:self];
   return index == NSNotFound ? nil : @(index);
 }
 
 - (NSString*)moxLabel {
   nsAutoString title;
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
-    acc->Name(title);
-  } else {
-    mGeckoAccessible.AsProxy()->Name(title);
-  }
+  mGeckoAccessible->Name(title);
+
   // XXX: When parsing outlines built with ul/lu's, we
   // include the bullet in this description even
   // though webkit doesn't. Not all outlines are built with
@@ -576,15 +622,52 @@ using namespace mozilla::a11y;
   return nsCocoaUtils::ToNSString(title);
 }
 
+enum CheckedState {
+  kUncheckable = -1,
+  kUnchecked = 0,
+  kChecked = 1,
+  kMixed = 2
+};
+
+- (int)checkedValue {
+  uint64_t state = [self
+      stateWithMask:(states::CHECKABLE | states::CHECKED | states::MIXED)];
+
+  if (state & states::CHECKABLE) {
+    if (state & states::CHECKED) {
+      return kChecked;
+    }
+
+    if (state & states::MIXED) {
+      return kMixed;
+    }
+
+    return kUnchecked;
+  }
+
+  return kUncheckable;
+}
+
+- (id)moxValue {
+  int checkedValue = [self checkedValue];
+  return checkedValue >= 0 ? @(checkedValue) : nil;
+}
+
 - (void)stateChanged:(uint64_t)state isEnabled:(BOOL)enabled {
   [super stateChanged:state isEnabled:enabled];
 
-  if (state == states::EXPANDED) {
+  if (state & states::EXPANDED) {
     // If the EXPANDED state is updated, fire appropriate events on the
     // outline row.
     [self moxPostNotification:(enabled
                                    ? NSAccessibilityRowExpandedNotification
                                    : NSAccessibilityRowCollapsedNotification)];
+  }
+
+  if (state & (states::CHECKED | states::CHECKABLE | states::MIXED)) {
+    // If the MIXED, CHECKED or CHECKABLE state changes, update the value we
+    // expose for the row, which communicates checked status.
+    [self moxPostNotification:NSAccessibilityValueChangedNotification];
   }
 }
 

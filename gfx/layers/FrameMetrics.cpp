@@ -28,7 +28,7 @@ std::ostream& operator<<(std::ostream& aStream, const FrameMetrics& aMetrics) {
   }
   aStream << "] [dp=" << aMetrics.GetDisplayPort()
           << "] [cdp=" << aMetrics.GetCriticalDisplayPort()
-          << "] [rcs=" << aMetrics.GetRootCompositionSize()
+          << "] [rcs=" << aMetrics.GetBoundingCompositionSize()
           << "] [v=" << aMetrics.GetLayoutViewport()
           << nsPrintfCString("] [z=(ld=%.3f r=%.3f",
                              aMetrics.GetDevPixelsPerCSSPixel().scale,
@@ -36,7 +36,7 @@ std::ostream& operator<<(std::ostream& aStream, const FrameMetrics& aMetrics) {
                  .get()
           << " cr=" << aMetrics.GetCumulativeResolution()
           << " z=" << aMetrics.GetZoom()
-          << " er=" << aMetrics.GetExtraResolution() << " )] [u=("
+          << " t=" << aMetrics.GetTransformToAncestorScale() << " )] [u=("
           << (int)aMetrics.GetVisualScrollUpdateType() << " "
           << aMetrics.GetScrollGeneration()
           << ")] scrollId=" << aMetrics.GetScrollId();
@@ -123,7 +123,31 @@ void FrameMetrics::KeepLayoutViewportEnclosingVisualViewport(
   aLayoutViewport = aLayoutViewport.MoveInsideAndClamp(aScrollableRect);
 }
 
-void FrameMetrics::ApplyScrollUpdateFrom(const ScrollPositionUpdate& aUpdate) {
+/* static */
+CSSRect FrameMetrics::CalculateScrollRange(
+    const CSSRect& aScrollableRect, const ParentLayerRect& aCompositionBounds,
+    const CSSToParentLayerScale& aZoom) {
+  CSSSize scrollPortSize =
+      CalculateCompositedSizeInCssPixels(aCompositionBounds, aZoom);
+  CSSRect scrollRange = aScrollableRect;
+  scrollRange.SetWidth(
+      std::max(scrollRange.Width() - scrollPortSize.width, 0.0f));
+  scrollRange.SetHeight(
+      std::max(scrollRange.Height() - scrollPortSize.height, 0.0f));
+  return scrollRange;
+}
+
+/* static */
+CSSSize FrameMetrics::CalculateCompositedSizeInCssPixels(
+    const ParentLayerRect& aCompositionBounds,
+    const CSSToParentLayerScale& aZoom) {
+  if (aZoom == CSSToParentLayerScale(0)) {
+    return CSSSize();  // avoid division by zero
+  }
+  return aCompositionBounds.Size() / aZoom;
+}
+
+bool FrameMetrics::ApplyScrollUpdateFrom(const ScrollPositionUpdate& aUpdate) {
   // In applying a main-thread scroll update, try to preserve the relative
   // offset between the visual and layout viewports.
   CSSPoint relativeOffset = GetVisualScrollOffset() - GetLayoutScrollOffset();
@@ -131,8 +155,10 @@ void FrameMetrics::ApplyScrollUpdateFrom(const ScrollPositionUpdate& aUpdate) {
   // We need to set the two offsets together, otherwise a subsequent
   // RecalculateLayoutViewportOffset() could see divergent layout and
   // visual offsets.
-  SetLayoutScrollOffset(aUpdate.GetDestination());
-  ClampAndSetVisualScrollOffset(aUpdate.GetDestination() + relativeOffset);
+  bool offsetChanged = SetLayoutScrollOffset(aUpdate.GetDestination());
+  offsetChanged |=
+      ClampAndSetVisualScrollOffset(aUpdate.GetDestination() + relativeOffset);
+  return offsetChanged;
 }
 
 CSSPoint FrameMetrics::ApplyRelativeScrollUpdateFrom(
@@ -289,12 +315,6 @@ std::ostream& operator<<(std::ostream& aStream,
           << "] [color=" << aMetadata.GetBackgroundColor();
   if (aMetadata.GetScrollParentId() != ScrollableLayerGuid::NULL_SCROLL_ID) {
     aStream << "] [scrollParent=" << aMetadata.GetScrollParentId();
-  }
-  if (aMetadata.HasScrollClip()) {
-    aStream << "] [clip=" << aMetadata.ScrollClip().GetClipRect();
-  }
-  if (aMetadata.HasMaskLayer()) {
-    aStream << "] [mask=" << aMetadata.ScrollClip().GetMaskLayerIndex().value();
   }
   aStream << "] [overscroll=" << aMetadata.GetOverscrollBehavior() << "] ["
           << aMetadata.GetScrollUpdates().Length() << " scrollupdates"

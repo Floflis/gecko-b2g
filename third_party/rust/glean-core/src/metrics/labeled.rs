@@ -11,18 +11,17 @@ const MAX_LABELS: usize = 16;
 const OTHER_LABEL: &str = "__other__";
 const MAX_LABEL_LENGTH: usize = 61;
 
-/// Checks whether the given value matches the label regex.
+/// Checks whether the given label is sane.
 ///
-/// This regex is used for matching against labels and should allow for dots,
-/// underscores, and/or hyphens. Labels are also limited to starting with either
-/// a letter or an underscore character.
+/// The check corresponds to the following regular expression:
 ///
-/// The exact regex (from the pipeline schema [here](https://github.com/mozilla-services/mozilla-pipeline-schemas/blob/master/templates/include/glean/dot_separated_short_id.1.schema.json)) is:
+/// ```text
+/// ^[a-z_][a-z0-9_-]{0,29}(\\.[a-z_][a-z0-9_-]{0,29})*$
+/// ```
 ///
-///    "^[a-z_][a-z0-9_-]{0,29}(\\.[a-z_][a-z0-9_-]{0,29})*$"
-///
-/// The regex crate isn't used here because it adds to the binary size, and the
-/// Glean SDK doesn't use regular expressions anywhere else.
+/// We do a manul check here instead of using a regex,
+/// because the regex crate adds to the binary size significantly,
+/// and the Glean SDK doesn't use regular expressions anywhere else.
 ///
 /// Some examples of good and bad labels:
 ///
@@ -160,7 +159,7 @@ where
                 let label = self.static_label(label);
                 self.new_metric_with_name(combine_base_identifier_and_label(
                     &self.submetric.meta().name,
-                    &label,
+                    label,
                 ))
             }
             None => self.new_metric_with_dynamic_label(label.to_string()),
@@ -200,7 +199,7 @@ pub fn strip_label(identifier: &str) -> &str {
 ///
 /// The entire identifier for the metric, including the base identifier and the corrected label.
 /// The errors are logged.
-pub fn dynamic_label(
+pub fn validate_dynamic_label(
     glean: &Glean,
     meta: &CommonMetricData,
     base_identifier: &str,
@@ -223,7 +222,7 @@ pub fn dynamic_label(
     for store in &meta.send_in_pings {
         glean
             .storage()
-            .iter_store_from(lifetime, store, Some(&prefix), &mut snapshotter);
+            .iter_store_from(lifetime, store, Some(prefix), &mut snapshotter);
     }
 
     let error = if label_count >= MAX_LABELS {

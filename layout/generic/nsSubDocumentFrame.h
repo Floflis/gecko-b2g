@@ -21,7 +21,6 @@ class PresShell;
 
 namespace mozilla::layers {
 class Layer;
-class RefLayer;
 class RenderRootStateManager;
 class WebRenderLayerScrollData;
 class WebRenderScrollData;
@@ -129,7 +128,10 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   }
 
   nsFrameLoader* FrameLoader() const;
-  void ResetFrameLoader();
+
+  enum class RetainPaintData : bool { No, Yes };
+  void ResetFrameLoader(RetainPaintData);
+  void ClearRetainedPaintData();
 
   void PropagateIsUnderHiddenEmbedderElementToSubView(
       bool aIsUnderHiddenEmbedderElement);
@@ -137,6 +139,14 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   void ClearDisplayItems();
 
   void SubdocumentIntrinsicSizeOrRatioChanged();
+
+  struct RemoteFramePaintData {
+    mozilla::layers::LayersId mLayersId;
+    mozilla::dom::TabId mTabId{0};
+  };
+
+  RemoteFramePaintData GetRemotePaintData() const;
+  bool HasRetainedPaintData() const { return mRetainedRemoteFrame.isSome(); }
 
  protected:
   friend class AsyncFrameInit;
@@ -170,24 +180,28 @@ class nsSubDocumentFrame final : public nsAtomicContainerFrame,
   nsView* mOuterView;
   nsView* mInnerView;
 
-  bool mIsInline;
-  bool mPostedReflowCallback;
-  bool mDidCreateDoc;
-  bool mCallingShow;
+  // When process-switching a remote tab, we might temporarily paint the old
+  // one.
+  Maybe<RemoteFramePaintData> mRetainedRemoteFrame;
+
+  bool mIsInline : 1;
+  bool mPostedReflowCallback : 1;
+  bool mDidCreateDoc : 1;
+  bool mCallingShow : 1;
 };
+
+namespace mozilla {
 
 /**
  * A nsDisplayRemote will graft a remote frame's shadow layer tree (for a given
  * nsFrameLoader) into its parent frame's layer tree.
  */
 class nsDisplayRemote final : public nsPaintedDisplayItem {
-  typedef mozilla::ContainerLayerParameters ContainerLayerParameters;
   typedef mozilla::dom::TabId TabId;
   typedef mozilla::gfx::Matrix4x4 Matrix4x4;
   typedef mozilla::layers::EventRegionsOverride EventRegionsOverride;
   typedef mozilla::layers::Layer Layer;
   typedef mozilla::layers::LayersId LayersId;
-  typedef mozilla::layers::RefLayer RefLayer;
   typedef mozilla::layers::StackingContextHelper StackingContextHelper;
   typedef mozilla::LayerState LayerState;
   typedef mozilla::LayoutDeviceRect LayoutDeviceRect;
@@ -196,14 +210,6 @@ class nsDisplayRemote final : public nsPaintedDisplayItem {
  public:
   nsDisplayRemote(nsDisplayListBuilder* aBuilder, nsSubDocumentFrame* aFrame,
                   bool aPassPointerEventsToChildren);
-
-  LayerState GetLayerState(
-      nsDisplayListBuilder* aBuilder, LayerManager* aManager,
-      const ContainerLayerParameters& aParameters) override;
-
-  already_AddRefed<Layer> BuildLayer(
-      nsDisplayListBuilder* aBuilder, LayerManager* aManager,
-      const ContainerLayerParameters& aContainerParameters) override;
 
   void Paint(nsDisplayListBuilder* aBuilder, gfxContext* aCtx) override;
 
@@ -223,15 +229,18 @@ class nsDisplayRemote final : public nsPaintedDisplayItem {
   NS_DISPLAY_DECL_NAME("Remote", TYPE_REMOTE)
 
  private:
-  friend class nsDisplayItemBase;
+  friend class nsDisplayItem;
+  using RemoteFramePaintData = nsSubDocumentFrame::RemoteFramePaintData;
+
   nsFrameLoader* GetFrameLoader() const;
 
-  TabId mTabId;
-  LayersId mLayersId;
+  RemoteFramePaintData mPaintData;
   LayoutDevicePoint mOffset;
   EventRegionsOverride mEventRegionsOverride;
 
   bool mPassPointerEventsToChildren;
 };
+
+}  // namespace mozilla
 
 #endif /* NSSUBDOCUMENTFRAME_H_ */

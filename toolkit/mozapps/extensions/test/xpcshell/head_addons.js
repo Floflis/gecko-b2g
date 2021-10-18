@@ -4,8 +4,8 @@
 
 /* eslint no-unused-vars: ["error", {vars: "local", args: "none"}] */
 
-if (!_TEST_FILE[0].includes("toolkit/mozapps/extensions/test/xpcshell/")) {
-  ok(
+if (!_TEST_NAME.includes("toolkit/mozapps/extensions/test/xpcshell/")) {
+  Assert.ok(
     false,
     "head_addons.js may not be loaded by tests outside of " +
       "the add-on manager component."
@@ -1199,9 +1199,7 @@ async function mockGfxBlocklistItemsFromDisk(path) {
 }
 
 async function mockGfxBlocklistItems(items) {
-  const { generateUUID } = Cc["@mozilla.org/uuid-generator;1"].getService(
-    Ci.nsIUUIDGenerator
-  );
+  const { generateUUID } = Services.uuid;
   let bsPass = ChromeUtils.import("resource://gre/modules/Blocklist.jsm", null);
   const client = RemoteSettings(
     Services.prefs.getCharPref("services.blocklist.gfx.collection"),
@@ -1263,57 +1261,6 @@ async function saveJSON(aData, aFile) {
     new TextEncoder().encode(JSON.stringify(aData, null, 2))
   );
   info("Done saving JSON file " + aFile);
-}
-
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "pluginHost",
-  "@mozilla.org/plugin/host;1",
-  "nsIPluginHost"
-);
-
-class MockPluginTag {
-  constructor(opts, enabledState = Ci.nsIPluginTag.STATE_ENABLED) {
-    this.pluginTag = pluginHost.createFakePlugin({
-      handlerURI: "resource://fake-plugin/${Math.random()}.xhtml",
-      mimeEntries: [{ type: "application/x-fake-plugin" }],
-      fileName: `${opts.name}.so`,
-      ...opts,
-    });
-    this.pluginTag.enabledState = enabledState;
-
-    this.name = opts.name;
-    this.version = opts.version;
-  }
-  async isBlocklisted() {
-    let state = await Blocklist.getPluginBlocklistState(this.pluginTag);
-    return state == Services.blocklist.STATE_BLOCKED;
-  }
-  get disabled() {
-    return this.pluginTag.enabledState == Ci.nsIPluginTag.STATE_DISABLED;
-  }
-  set disabled(val) {
-    this.enabledState =
-      Ci.nsIPluginTag[val ? "STATE_DISABLED" : "STATE_ENABLED"];
-  }
-  get enabledState() {
-    return this.pluginTag.enabledState;
-  }
-  set enabledState(val) {
-    this.pluginTag.enabledState = val;
-  }
-}
-
-function mockPluginHost(plugins) {
-  let PluginHost = {
-    getPluginTags() {
-      return plugins.map(p => p.pluginTag);
-    },
-
-    QueryInterface: ChromeUtils.generateQI(["nsIPluginHost"]),
-  };
-
-  MockRegistrar.register("@mozilla.org/plugin/host;1", PluginHost);
 }
 
 async function setInitialState(addon, initialState) {

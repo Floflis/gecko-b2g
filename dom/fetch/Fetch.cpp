@@ -7,6 +7,7 @@
 #include "Fetch.h"
 
 #include "mozilla/dom/Document.h"
+#include "mozilla/ipc/PBackgroundSharedTypes.h"
 #include "nsIGlobalObject.h"
 
 #include "nsDOMString.h"
@@ -36,7 +37,6 @@
 #include "mozilla/net/CookieJarSettings.h"
 
 #include "BodyExtractor.h"
-#include "EmptyBody.h"
 #include "FetchObserver.h"
 #include "InternalRequest.h"
 #include "InternalResponse.h"
@@ -235,6 +235,8 @@ class WorkerFetchResolver final : public FetchDriverObserver {
   RefPtr<WeakWorkerRef> mWorkerRef;
   bool mIsShutdown;
 
+  Atomic<bool> mNeedOnDataAvailable;
+
  public:
   // Returns null if worker is shutting down.
   static already_AddRefed<WorkerFetchResolver> Create(
@@ -310,7 +312,7 @@ class WorkerFetchResolver final : public FetchDriverObserver {
 
   void OnResponseAvailableInternal(InternalResponse* aResponse) override;
 
-  void OnResponseEnd(FetchDriverObserver::EndReason eReason) override;
+  void OnResponseEnd(FetchDriverObserver::EndReason aReason) override;
 
   bool NeedOnDataAvailable() override;
 
@@ -323,6 +325,7 @@ class WorkerFetchResolver final : public FetchDriverObserver {
     mIsShutdown = true;
     mPromiseProxy->CleanUp();
 
+    mNeedOnDataAvailable = false;
     mFetchObserver = nullptr;
 
     if (mSignalProxy) {
@@ -344,7 +347,8 @@ class WorkerFetchResolver final : public FetchDriverObserver {
       : mPromiseProxy(aProxy),
         mSignalProxy(aSignalProxy),
         mFetchObserver(aObserver),
-        mIsShutdown(false) {
+        mIsShutdown(false),
+        mNeedOnDataAvailable(!!aObserver) {
     MOZ_ASSERT(!NS_IsMainThread());
     MOZ_ASSERT(mPromiseProxy);
   }
@@ -545,7 +549,7 @@ already_AddRefed<Promise> FetchRequest(nsIGlobalObject* aGlobal,
         return nullptr;
       }
 
-      cookieJarSettings = mozilla::net::CookieJarSettings::Create();
+      cookieJarSettings = mozilla::net::CookieJarSettings::Create(principal);
     }
 
     if (!loadGroup) {
@@ -626,13 +630,23 @@ void MainThreadFetchResolver::OnResponseAvailableInternal(
   AssertIsOnMainThread();
 
   if (aResponse->Type() != ResponseType::Error) {
+    nsCOMPtr<nsIGlobalObject> go = mPromise->GetParentObject();
+    nsCOMPtr<nsPIDOMWindowInner> inner = do_QueryInterface(go);
+
+    // Notify the document when a fetch completes successfully. This is
+    // used by the password manager as a hint to observe DOM mutations.
+    // Call this prior to setting state to Complete so we can set up the
+    // observer before mutations occurs.
+    Document* doc = inner ? inner->GetExtantDoc() : nullptr;
+    if (doc) {
+      doc->NotifyFetchOrXHRSuccess();
+    }
+
     if (mFetchObserver) {
       mFetchObserver->SetState(FetchState::Complete);
     }
 
-    nsCOMPtr<nsIGlobalObject> go = mPromise->GetParentObject();
     mResponse = new Response(go, aResponse, mSignalImpl);
-    nsCOMPtr<nsPIDOMWindowInner> inner = do_QueryInterface(go);
     BrowsingContext* bc = inner ? inner->GetBrowsingContext() : nullptr;
     bc = bc ? bc->Top() : nullptr;
     if (bc && bc->IsLoading()) {
@@ -829,8 +843,7 @@ void WorkerFetchResolver::OnResponseAvailableInternal(
 
 bool WorkerFetchResolver::NeedOnDataAvailable() {
   AssertIsOnMainThread();
-  MutexAutoLock lock(mPromiseProxy->Lock());
-  return !!mFetchObserver;
+  return mNeedOnDataAvailable;
 }
 
 void WorkerFetchResolver::OnDataAvailable() {
@@ -1141,6 +1154,10 @@ bool FetchBody<Derived>::CheckBodyUsed() const {
   return bodyUsed;
 }
 
+template bool FetchBody<Request>::CheckBodyUsed() const;
+
+template bool FetchBody<Response>::CheckBodyUsed() const;
+
 template <class Derived>
 void FetchBody<Derived>::SetBodyUsed(JSContext* aCx, ErrorResult& aRv) {
   MOZ_ASSERT(aCx);
@@ -1354,6 +1371,7 @@ template void FetchBody<Request>::SetReadableStreamBody(JSContext* aCx,
 template void FetchBody<Response>::SetReadableStreamBody(JSContext* aCx,
                                                          JSObject* aBody);
 
+#ifndef MOZ_DOM_STREAMS
 template <class Derived>
 void FetchBody<Derived>::GetBody(JSContext* aCx,
                                  JS::MutableHandle<JSObject*> aBodyOut,
@@ -1414,6 +1432,7 @@ template void FetchBody<Request>::GetBody(JSContext* aCx,
 
 template void FetchBody<Response>::GetBody(
     JSContext* aCx, JS::MutableHandle<JSObject*> aMessage, ErrorResult& aRv);
+#endif
 
 template <class Derived>
 void FetchBody<Derived>::LockStream(JSContext* aCx, JS::HandleObject aStream,
@@ -1533,5 +1552,75 @@ void FetchBody<Derived>::RunAbortAlgorithm() {
 template void FetchBody<Request>::RunAbortAlgorithm();
 
 template void FetchBody<Response>::RunAbortAlgorithm();
+
+NS_IMPL_ADDREF_INHERITED(EmptyBody, FetchBody<EmptyBody>)
+NS_IMPL_RELEASE_INHERITED(EmptyBody, FetchBody<EmptyBody>)
+
+NS_IMPL_CYCLE_COLLECTION_CLASS(EmptyBody)
+
+NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(EmptyBody, FetchBody<EmptyBody>)
+  AbortFollower::Unlink(static_cast<AbortFollower*>(tmp));
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mOwner)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mAbortSignalImpl)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mFetchStreamReader)
+NS_IMPL_CYCLE_COLLECTION_UNLINK_END
+
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(EmptyBody,
+                                                  FetchBody<EmptyBody>)
+  AbortFollower::Traverse(static_cast<AbortFollower*>(tmp), cb);
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mOwner)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAbortSignalImpl)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mFetchStreamReader)
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
+
+NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN_INHERITED(EmptyBody, FetchBody<EmptyBody>)
+NS_IMPL_CYCLE_COLLECTION_TRACE_END
+
+NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(EmptyBody)
+NS_INTERFACE_MAP_END_INHERITING(FetchBody<EmptyBody>)
+
+EmptyBody::EmptyBody(nsIGlobalObject* aGlobal,
+                     mozilla::ipc::PrincipalInfo* aPrincipalInfo,
+                     AbortSignalImpl* aAbortSignalImpl,
+                     const nsACString& aMimeType,
+                     already_AddRefed<nsIInputStream> aBodyStream)
+    : FetchBody<EmptyBody>(aGlobal),
+      mAbortSignalImpl(aAbortSignalImpl),
+      mMimeType(aMimeType),
+      mBodyStream(std::move(aBodyStream)) {
+  if (aPrincipalInfo) {
+    mPrincipalInfo = MakeUnique<mozilla::ipc::PrincipalInfo>(*aPrincipalInfo);
+  }
+}
+
+EmptyBody::~EmptyBody() = default;
+
+/* static */
+already_AddRefed<EmptyBody> EmptyBody::Create(
+    nsIGlobalObject* aGlobal, mozilla::ipc::PrincipalInfo* aPrincipalInfo,
+    AbortSignalImpl* aAbortSignalImpl, const nsACString& aMimeType,
+    ErrorResult& aRv) {
+  nsCOMPtr<nsIInputStream> bodyStream;
+  aRv = NS_NewCStringInputStream(getter_AddRefs(bodyStream), ""_ns);
+  if (NS_WARN_IF(aRv.Failed())) {
+    return nullptr;
+  }
+
+  RefPtr<EmptyBody> emptyBody =
+      new EmptyBody(aGlobal, aPrincipalInfo, aAbortSignalImpl, aMimeType,
+                    bodyStream.forget());
+  return emptyBody.forget();
+}
+
+void EmptyBody::GetBody(nsIInputStream** aStream, int64_t* aBodyLength) {
+  MOZ_ASSERT(aStream);
+
+  if (aBodyLength) {
+    *aBodyLength = 0;
+  }
+
+  nsCOMPtr<nsIInputStream> bodyStream = mBodyStream;
+  bodyStream.forget(aStream);
+}
 
 }  // namespace mozilla::dom

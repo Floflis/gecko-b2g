@@ -39,7 +39,7 @@ void HTMLOptGroupElement::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
   if (nsIFrame* frame = GetPrimaryFrame()) {
     // FIXME(emilio): This poking at the style of the frame is broken unless we
     // flush before every event handling, which we don't really want to.
-    if (frame->StyleUI()->mUserInput == StyleUserInput::None) {
+    if (frame->StyleUI()->UserInput() == StyleUserInput::None) {
       return;
     }
   }
@@ -55,17 +55,15 @@ Element* HTMLOptGroupElement::GetSelect() {
   return parent;
 }
 
-nsresult HTMLOptGroupElement::InsertChildBefore(nsIContent* aKid,
-                                                nsIContent* aBeforeThis,
-                                                bool aNotify) {
+void HTMLOptGroupElement::InsertChildBefore(nsIContent* aKid,
+                                            nsIContent* aBeforeThis,
+                                            bool aNotify, ErrorResult& aRv) {
   int32_t index = aBeforeThis ? ComputeIndexOf(aBeforeThis) : GetChildCount();
   SafeOptionListMutation safeMutation(GetSelect(), this, aKid, index, aNotify);
-  nsresult rv =
-      nsGenericHTMLElement::InsertChildBefore(aKid, aBeforeThis, aNotify);
-  if (NS_FAILED(rv)) {
+  nsGenericHTMLElement::InsertChildBefore(aKid, aBeforeThis, aNotify, aRv);
+  if (aRv.Failed()) {
     safeMutation.MutationFailed();
   }
-  return rv;
 }
 
 void HTMLOptGroupElement::RemoveChildNode(nsIContent* aKid, bool aNotify) {

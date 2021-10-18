@@ -19,20 +19,20 @@
 #include "mozilla/net/NeckoParent.h"
 #include "mozilla/InputStreamLengthHelper.h"
 #include "mozilla/IntegerPrintfMacros.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/StoragePrincipalHelper.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Unused.h"
 #include "HttpBackgroundChannelParent.h"
 #include "ParentChannelListener.h"
+#include "nsICacheInfoChannel.h"
 #include "nsHttpHandler.h"
 #include "nsNetCID.h"
 #include "nsNetUtil.h"
 #include "nsISupportsPriority.h"
-#include "nsIAuthPromptProvider.h"
 #include "mozilla/net/BackgroundChannelRegistrar.h"
 #include "nsSerializationHelper.h"
 #include "nsISerializable.h"
-#include "nsIApplicationCacheService.h"
 #include "mozilla/ipc/InputStreamUtils.h"
 #include "mozilla/ipc/URIUtils.h"
 #include "SerializedLoadContext.h"
@@ -46,6 +46,7 @@
 #include "nsIIPCSerializableInputStream.h"
 #include "nsIPrompt.h"
 #include "nsIPromptFactory.h"
+#include "mozilla/net/ChannelEventQueue.h"
 #include "mozilla/net/RedirectChannelRegistrar.h"
 #include "nsIWindowWatcher.h"
 #include "mozilla/dom/Document.h"
@@ -128,18 +129,18 @@ bool HttpChannelParent::Init(const HttpChannelCreationArgs& aArgs) {
           a.requestMethod(), a.uploadStream(), a.uploadStreamHasHeaders(),
           a.priority(), a.classOfService(), a.redirectionLimit(), a.allowSTS(),
           a.thirdPartyFlags(), a.resumeAt(), a.startPos(), a.entityID(),
-          a.chooseApplicationCache(), a.appCacheClientID(), a.allowSpdy(),
-          a.allowHttp3(), a.allowAltSvc(), a.beConservative(), a.tlsFlags(),
-          a.loadInfo(), a.cacheKey(), a.requestContextID(), a.preflightArgs(),
-          a.initialRwin(), a.blockAuthPrompt(), a.allowStaleCacheContent(),
+          a.allowSpdy(), a.allowHttp3(), a.allowAltSvc(), a.beConservative(),
+          a.bypassProxy(), a.tlsFlags(), a.loadInfo(), a.cacheKey(),
+          a.requestContextID(), a.preflightArgs(), a.initialRwin(),
+          a.blockAuthPrompt(), a.allowStaleCacheContent(),
           a.preferCacheLoadOverBypass(), a.contentTypeHint(), a.corsMode(),
           a.redirectMode(), a.channelId(), a.integrityMetadata(),
           a.contentWindowId(), a.preferredAlternativeTypes(),
-          a.topLevelOuterContentWindowId(), a.launchServiceWorkerStart(),
+          a.topBrowsingContextId(), a.launchServiceWorkerStart(),
           a.launchServiceWorkerEnd(), a.dispatchFetchEventStart(),
           a.dispatchFetchEventEnd(), a.handleFetchEventStart(),
           a.handleFetchEventEnd(), a.forceMainDocumentChannel(),
-          a.navigationStartTimeStamp(), a.hasNonEmptySandboxingFlag());
+          a.navigationStartTimeStamp());
     }
     case HttpChannelCreationArgs::THttpChannelConnectArgs: {
       const HttpChannelConnectArgs& cArgs = aArgs.get_HttpChannelConnectArgs();
@@ -266,9 +267,7 @@ NS_INTERFACE_MAP_BEGIN(HttpChannelParent)
   NS_INTERFACE_MAP_ENTRY(nsIRequestObserver)
   NS_INTERFACE_MAP_ENTRY(nsIStreamListener)
   NS_INTERFACE_MAP_ENTRY(nsIParentChannel)
-  NS_INTERFACE_MAP_ENTRY(nsIAuthPromptProvider)
   NS_INTERFACE_MAP_ENTRY(nsIParentRedirectingChannel)
-  NS_INTERFACE_MAP_ENTRY(nsIDeprecationWarner)
   NS_INTERFACE_MAP_ENTRY(nsIAsyncVerifyRedirectReadyCallback)
   NS_INTERFACE_MAP_ENTRY(nsIChannelEventSink)
   NS_INTERFACE_MAP_ENTRY(nsIRedirectResultListener)
@@ -283,12 +282,6 @@ NS_INTERFACE_MAP_END
 
 NS_IMETHODIMP
 HttpChannelParent::GetInterface(const nsIID& aIID, void** result) {
-  // Only support nsIAuthPromptProvider in Content process
-  if (XRE_IsParentProcess() && aIID.Equals(NS_GET_IID(nsIAuthPromptProvider))) {
-    *result = nullptr;
-    return NS_OK;
-  }
-
   // A system XHR can be created without reference to a window, hence mTabParent
   // may be null.  In that case we want to let the window watcher pick a prompt
   // directly.
@@ -370,10 +363,9 @@ bool HttpChannelParent::DoAsyncOpen(
     const int16_t& priority, const uint32_t& classOfService,
     const uint8_t& redirectionLimit, const bool& allowSTS,
     const uint32_t& thirdPartyFlags, const bool& doResumeAt,
-    const uint64_t& startPos, const nsCString& entityID,
-    const bool& chooseApplicationCache, const nsCString& appCacheClientID,
-    const bool& allowSpdy, const bool& allowHttp3, const bool& allowAltSvc,
-    const bool& beConservative, const uint32_t& tlsFlags,
+    const uint64_t& startPos, const nsCString& entityID, const bool& allowSpdy,
+    const bool& allowHttp3, const bool& allowAltSvc, const bool& beConservative,
+    const bool& bypassProxy, const uint32_t& tlsFlags,
     const Maybe<LoadInfoArgs>& aLoadInfoArgs, const uint32_t& aCacheKey,
     const uint64_t& aRequestContextID,
     const Maybe<CorsPreflightArgs>& aCorsPreflightArgs,
@@ -384,7 +376,7 @@ bool HttpChannelParent::DoAsyncOpen(
     const nsString& aIntegrityMetadata, const uint64_t& aContentWindowId,
     const nsTArray<PreferredAlternativeDataTypeParams>&
         aPreferredAlternativeTypes,
-    const uint64_t& aTopLevelOuterContentWindowId,
+    const uint64_t& aTopBrowsingContextId,
     const TimeStamp& aLaunchServiceWorkerStart,
     const TimeStamp& aLaunchServiceWorkerEnd,
     const TimeStamp& aDispatchFetchEventStart,
@@ -392,8 +384,7 @@ bool HttpChannelParent::DoAsyncOpen(
     const TimeStamp& aHandleFetchEventStart,
     const TimeStamp& aHandleFetchEventEnd,
     const bool& aForceMainDocumentChannel,
-    const TimeStamp& aNavigationStartTimeStamp,
-    const bool& aHasNonEmptySandboxingFlag) {
+    const TimeStamp& aNavigationStartTimeStamp) {
   nsCOMPtr<nsIURI> uri = DeserializeURI(aURI);
   if (!uri) {
     // URIParams does MOZ_ASSERT if null, but we need to protect opt builds from
@@ -406,9 +397,8 @@ bool HttpChannelParent::DoAsyncOpen(
   nsCOMPtr<nsIURI> topWindowUri = DeserializeURI(aTopWindowURI);
 
   LOG(("HttpChannelParent RecvAsyncOpen [this=%p uri=%s, gid=%" PRIu64
-       " topwinid=%" PRIx64 "]\n",
-       this, uri->GetSpecOrDefault().get(), aChannelId,
-       aTopLevelOuterContentWindowId));
+       " top bid=%" PRIx64 "]\n",
+       this, uri->GetSpecOrDefault().get(), aChannelId, aTopBrowsingContextId));
 
   nsresult rv;
 
@@ -441,7 +431,7 @@ bool HttpChannelParent::DoAsyncOpen(
   // Set the channelId allocated in child to the parent instance
   httpChannel->SetChannelId(aChannelId);
   httpChannel->SetTopLevelContentWindowId(aContentWindowId);
-  httpChannel->SetTopLevelOuterContentWindowId(aTopLevelOuterContentWindowId);
+  httpChannel->SetTopBrowsingContextId(aTopBrowsingContextId);
 
   httpChannel->SetIntegrityMetadata(aIntegrityMetadata);
 
@@ -451,7 +441,7 @@ bool HttpChannelParent::DoAsyncOpen(
   }
   httpChannel->SetTimingEnabled(true);
   if (mPBOverride != kPBOverride_Unset) {
-    httpChannel->SetPrivate(mPBOverride == kPBOverride_Private ? true : false);
+    httpChannel->SetPrivate(mPBOverride == kPBOverride_Private);
   }
 
   if (doResumeAt) httpChannel->ResumeAt(startPos, entityID);
@@ -470,15 +460,12 @@ bool HttpChannelParent::DoAsyncOpen(
     httpChannel->SetTopWindowURI(topWindowUri);
   }
 
-  if (aLoadFlags != nsIRequest::LOAD_NORMAL)
+  if (aLoadFlags != nsIRequest::LOAD_NORMAL) {
     httpChannel->SetLoadFlags(aLoadFlags);
+  }
 
   if (aForceMainDocumentChannel) {
     httpChannel->SetIsMainDocumentChannel(true);
-  }
-
-  if (aHasNonEmptySandboxingFlag) {
-    httpChannel->SetHasNonEmptySandboxingFlag(true);
   }
 
   for (uint32_t i = 0; i < requestHeaders.Length(); i++) {
@@ -529,7 +516,7 @@ bool HttpChannelParent::DoAsyncOpen(
       do_QueryInterface(static_cast<nsIChannel*>(httpChannel.get()));
   if (cacheChannel) {
     cacheChannel->SetCacheKey(aCacheKey);
-    for (auto& data : aPreferredAlternativeTypes) {
+    for (const auto& data : aPreferredAlternativeTypes) {
       cacheChannel->PreferAlternativeDataType(data.type(), data.contentType(),
                                               data.deliverAltData());
     }
@@ -570,45 +557,6 @@ bool HttpChannelParent::DoAsyncOpen(
   httpChannel->SetHandleFetchEventEnd(aHandleFetchEventEnd);
 
   httpChannel->SetNavigationStartTimeStamp(aNavigationStartTimeStamp);
-
-  nsCOMPtr<nsIApplicationCacheChannel> appCacheChan =
-      do_QueryObject(httpChannel);
-  nsCOMPtr<nsIApplicationCacheService> appCacheService =
-      do_GetService(NS_APPLICATIONCACHESERVICE_CONTRACTID);
-
-  bool setChooseApplicationCache = chooseApplicationCache;
-  if (appCacheChan && appCacheService) {
-    // We might potentially want to drop this flag (that is TRUE by default)
-    // after we successfully associate the channel with an application cache
-    // reported by the channel child.  Dropping it here may be too early.
-    appCacheChan->SetInheritApplicationCache(false);
-    if (!appCacheClientID.IsEmpty()) {
-      nsCOMPtr<nsIApplicationCache> appCache;
-      rv = appCacheService->GetApplicationCache(appCacheClientID,
-                                                getter_AddRefs(appCache));
-      if (NS_SUCCEEDED(rv)) {
-        appCacheChan->SetApplicationCache(appCache);
-        setChooseApplicationCache = false;
-      }
-    }
-
-    if (setChooseApplicationCache) {
-      OriginAttributes attrs;
-      StoragePrincipalHelper::GetOriginAttributes(
-          httpChannel, attrs, StoragePrincipalHelper::eRegularPrincipal);
-
-      nsCOMPtr<nsIPrincipal> principal =
-          BasePrincipal::CreateContentPrincipal(uri, attrs);
-
-      bool chooseAppCache = false;
-      // This works because we've already called SetNotificationCallbacks and
-      // done mPBOverride logic by this point.
-      chooseAppCache = NS_ShouldCheckAppCache(principal);
-
-      appCacheChan->SetChooseApplicationCache(chooseAppCache);
-    }
-  }
-
   httpChannel->SetRequestContextID(aRequestContextID);
 
   // Store the strong reference of channel and parent listener object until
@@ -705,7 +653,7 @@ bool HttpChannelParent::ConnectChannel(const uint32_t& registrarId) {
     // redirected-to channel may not support PB
     nsCOMPtr<nsIPrivateBrowsingChannel> pbChannel = do_QueryObject(mChannel);
     if (pbChannel) {
-      pbChannel->SetPrivate(mPBOverride == kPBOverride_Private ? true : false);
+      pbChannel->SetPrivate(mPBOverride == kPBOverride_Private);
     }
   }
 
@@ -808,8 +756,7 @@ mozilla::ipc::IPCResult HttpChannelParent::RecvRedirect2Verify(
     const Maybe<ChildLoadInfoForwarderArgs>& aTargetLoadInfoForwarder,
     const uint32_t& loadFlags, nsIReferrerInfo* aReferrerInfo,
     const Maybe<URIParams>& aAPIRedirectURI,
-    const Maybe<CorsPreflightArgs>& aCorsPreflightArgs,
-    const bool& aChooseAppcache) {
+    const Maybe<CorsPreflightArgs>& aCorsPreflightArgs) {
   LOG(("HttpChannelParent::RecvRedirect2Verify [this=%p result=%" PRIx32 "]\n",
        this, static_cast<uint32_t>(aResult)));
 
@@ -867,28 +814,6 @@ mozilla::ipc::IPCResult HttpChannelParent::RecvRedirect2Verify(
                                                     true);
           MOZ_ASSERT(NS_SUCCEEDED(rv));
         }
-      }
-
-      nsCOMPtr<nsIApplicationCacheChannel> appCacheChannel =
-          do_QueryInterface(newHttpChannel);
-      if (appCacheChannel) {
-        bool setChooseAppCache = false;
-        if (aChooseAppcache) {
-          nsCOMPtr<nsIURI> uri;
-          // Using GetURI because this is what DoAsyncOpen uses.
-          newHttpChannel->GetURI(getter_AddRefs(uri));
-
-          OriginAttributes attrs;
-          StoragePrincipalHelper::GetOriginAttributes(
-              newHttpChannel, attrs, StoragePrincipalHelper::eRegularPrincipal);
-
-          nsCOMPtr<nsIPrincipal> principal =
-              BasePrincipal::CreateContentPrincipal(uri, attrs);
-
-          setChooseAppCache = NS_ShouldCheckAppCache(principal);
-        }
-
-        appCacheChannel->SetChooseApplicationCache(setChooseAppCache);
       }
 
       if (aTargetLoadInfoForwarder.isSome()) {
@@ -1027,16 +952,6 @@ mozilla::ipc::IPCResult HttpChannelParent::RecvDocumentChannelCleanup(
   if (clearCacheEntry) {
     mCacheEntry = nullptr;  // Else we'll block other channels reading same URI
   }
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult
-HttpChannelParent::RecvMarkOfflineCacheEntryAsForeign() {
-  if (mOfflineForeignMarker) {
-    mOfflineForeignMarker->MarkAsForeign();
-    mOfflineForeignMarker = nullptr;
-  }
-
   return IPC_OK();
 }
 
@@ -1194,19 +1109,6 @@ HttpChannelParent::OnStartRequest(nsIRequest* aRequest) {
           httpChannelImpl->DataSentToChildProcess() && !args.isFromCache();
     }
     args.dataFromSocketProcess() = mDataSentToChildProcess;
-
-    bool loadedFromApplicationCache = false;
-    httpChannelImpl->GetLoadedFromApplicationCache(&loadedFromApplicationCache);
-    if (loadedFromApplicationCache) {
-      mOfflineForeignMarker.reset(
-          httpChannelImpl->GetOfflineCacheEntryAsForeignMarker());
-      nsCOMPtr<nsIApplicationCache> appCache;
-      httpChannelImpl->GetApplicationCache(getter_AddRefs(appCache));
-      nsCString appCacheGroupId;
-      nsCString appCacheClientId;
-      appCache->GetGroupID(args.appCacheGroupId());
-      appCache->GetClientID(args.appCacheClientId());
-    }
   }
 
   // Propagate whether or not conversion should occur from the parent-side
@@ -1230,7 +1132,7 @@ HttpChannelParent::OnStartRequest(nsIRequest* aRequest) {
   if (httpChannelImpl) {
     httpChannelImpl->GetCacheToken(getter_AddRefs(cacheEntry));
     mCacheEntry = do_QueryInterface(cacheEntry);
-    args.cacheEntryAvailable() = mCacheEntry ? true : false;
+    args.cacheEntryAvailable() = static_cast<bool>(mCacheEntry);
 
     httpChannelImpl->GetCacheKey(&args.cacheKey());
     httpChannelImpl->GetAlternativeDataType(args.altDataType());
@@ -1242,6 +1144,7 @@ HttpChannelParent::OnStartRequest(nsIRequest* aRequest) {
   UpdateAndSerializeSecurityInfo(args.securityInfoSerialization());
 
   chan->GetRedirectCount(&args.redirectCount());
+  chan->GetHasHTTPSRR(&args.hasHTTPSRR());
 
   nsCOMPtr<nsILoadInfo> loadInfo = chan->LoadInfo();
   mozilla::ipc::LoadInfoToParentLoadInfoForwarder(loadInfo,
@@ -1299,11 +1202,26 @@ HttpChannelParent::OnStartRequest(nsIRequest* aRequest) {
 
   rv = NS_OK;
 
+  nsCOMPtr<nsICacheEntry> altDataSource;
+  nsCOMPtr<nsICacheInfoChannel> cacheChannel =
+      do_QueryInterface(static_cast<nsIChannel*>(mChannel.get()));
+  if (cacheChannel) {
+    for (const auto& pref : cacheChannel->PreferredAlternativeDataTypes()) {
+      if (pref.type() == args.altDataType() &&
+          pref.deliverAltData() ==
+              nsICacheInfoChannel::PreferredAlternativeDataDeliveryType::
+                  SERIALIZE) {
+        altDataSource = mCacheEntry;
+        break;
+      }
+    }
+  }
+
   if (mIPCClosed ||
       !mBgParent->OnStartRequest(
           *responseHead, useResponseHead,
           cleanedUpRequest ? cleanedUpRequestHeaders : requestHead->Headers(),
-          args)) {
+          args, altDataSource)) {
     rv = NS_ERROR_UNEXPECTED;
   }
   requestHead->Exit();
@@ -1562,28 +1480,6 @@ mozilla::ipc::IPCResult HttpChannelParent::RecvOpenOriginalCacheInputStream() {
   }
 
   Unused << SendOriginalCacheInputStreamAvailable(
-      autoStream.TakeOptionalValue());
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult HttpChannelParent::RecvOpenAltDataCacheInputStream(
-    const nsCString& aType) {
-  if (mIPCClosed) {
-    return IPC_OK();
-  }
-  AutoIPCStream autoStream;
-  if (mCacheEntry) {
-    nsCOMPtr<nsIInputStream> inputStream;
-    nsresult rv = mCacheEntry->OpenAlternativeInputStream(
-        aType, getter_AddRefs(inputStream));
-    if (NS_SUCCEEDED(rv)) {
-      PContentParent* pcp = Manager()->Manager();
-      Unused << autoStream.Serialize(inputStream,
-                                     static_cast<ContentParent*>(pcp));
-    }
-  }
-
-  Unused << SendAltDataCacheInputStreamAvailable(
       autoStream.TakeOptionalValue());
   return IPC_OK();
 }
@@ -1928,15 +1824,6 @@ nsresult HttpChannelParent::OpenAlternativeOutputStream(
   return rv;
 }
 
-NS_IMETHODIMP
-HttpChannelParent::GetAuthPrompt(uint32_t aPromptReason, const nsIID& iid,
-                                 void** aResult) {
-  nsCOMPtr<nsIAuthPrompt2> prompt =
-      new NeckoParent::NestedFrameAuthPrompt(Manager(), TabId(0));
-  prompt.forget(aResult);
-  return NS_OK;
-}
-
 void HttpChannelParent::UpdateAndSerializeSecurityInfo(
     nsACString& aSerializedSecurityInfoOut) {
   nsCOMPtr<nsISupports> secInfoSupp;
@@ -1978,12 +1865,6 @@ nsresult HttpChannelParent::ReportSecurityMessage(
                         nsString(aMessageTag), nsString(aMessageCategory)))) {
     return NS_ERROR_UNEXPECTED;
   }
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-HttpChannelParent::IssueWarning(uint32_t aWarning, bool aAsError) {
-  Unused << SendIssueDeprecationWarning(aWarning, aAsError);
   return NS_OK;
 }
 

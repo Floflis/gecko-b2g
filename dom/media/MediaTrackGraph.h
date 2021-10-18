@@ -49,7 +49,7 @@ namespace mozilla {
 extern LazyLogModule gMediaTrackGraphLog;
 
 namespace dom {
-enum class AudioContextOperation;
+enum class AudioContextOperation : uint8_t;
 enum class AudioContextOperationFlags;
 enum class AudioContextState : uint8_t;
 }  // namespace dom
@@ -99,8 +99,31 @@ class MediaTrack;
 class MediaTrackGraph;
 class MediaTrackGraphImpl;
 class MediaTrackListener;
+class NativeInputTrack;
 class ProcessedMediaTrack;
 class SourceMediaTrack;
+
+// The interleaved audio input data from audio input callbacks
+class AudioInputSamples {
+ public:
+  AudioInputSamples() = default;
+  ~AudioInputSamples() = default;
+
+  const AudioDataValue* Data() const;
+  size_t FrameCount() const;
+  TrackRate Rate() const;
+  uint32_t Channels() const;
+
+  bool IsEmpty() const;
+  void Push(const AudioDataValue* aBuffer, size_t aFrames, TrackRate aRate,
+            uint32_t aChannels);
+  void Clear();
+
+ private:
+  nsTArray<AudioDataValue> mData;
+  TrackRate mRate = 0;
+  uint32_t mChannels = 0;
+};
 
 class AudioDataListenerInterface {
  protected:
@@ -123,6 +146,7 @@ class AudioDataListenerInterface {
    * until the driver is restarted or another driver has started.
    */
   virtual void NotifyInputStopped(MediaTrackGraphImpl* aGraph) = 0;
+
   /**
    * Input data from a microphone (or other audio source.  This is not
    * guaranteed to be in any particular size chunks.
@@ -399,6 +423,7 @@ class MediaTrack : public mozilla::LinkedListElement<MediaTrack> {
   virtual ForwardedInputTrack* AsForwardedInputTrack() { return nullptr; }
   virtual CrossGraphTransmitter* AsCrossGraphTransmitter() { return nullptr; }
   virtual CrossGraphReceiver* AsCrossGraphReceiver() { return nullptr; }
+  virtual NativeInputTrack* AsNativeInputTrack() { return nullptr; }
 
   // These Impl methods perform the core functionality of the control methods
   // above, on the media graph thread.
@@ -1081,16 +1106,12 @@ class MediaTrackGraph {
   static MediaTrackGraph* CreateNonRealtimeInstance(
       TrackRate aSampleRate, nsPIDOMWindowInner* aWindowId);
 
-  // Return the correct main thread for this graph. This always returns
-  // something that is valid. Thread safe.
-  AbstractThread* AbstractMainThread();
-
   // Idempotent
   void ForceShutDown();
 
   virtual nsresult OpenAudioInput(CubebUtils::AudioDeviceID aID,
                                   AudioDataListener* aListener) = 0;
-  virtual void CloseAudioInput(Maybe<CubebUtils::AudioDeviceID>& aID,
+  virtual void CloseAudioInput(CubebUtils::AudioDeviceID aID,
                                AudioDataListener* aListener) = 0;
 
   // Control API.

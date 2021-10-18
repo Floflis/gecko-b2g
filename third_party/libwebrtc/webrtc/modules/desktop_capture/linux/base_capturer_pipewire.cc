@@ -20,6 +20,7 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 
+#include <cstring>
 #include <memory>
 #include <utility>
 
@@ -112,7 +113,9 @@ void BaseCapturerPipeWire::OnStreamParamChanged(void *data, uint32_t id,
 
   auto width = that->spa_video_format_.size.width;
   auto height = that->spa_video_format_.size.height;
-  auto stride = SPA_ROUND_UP_N(width * kBytesPerPixel, 4);
+  // In order to be able to build in the non unified environment kBytesPerPixel
+  // must be fully qualified, see Bug 1725145
+  auto stride = SPA_ROUND_UP_N(width * BasicDesktopFrame::kBytesPerPixel, 4);
   auto size = height * stride;
 
   that->desktop_size_ = DesktopSize(width, height);
@@ -124,6 +127,8 @@ void BaseCapturerPipeWire::OnStreamParamChanged(void *data, uint32_t id,
   const struct spa_pod* params[3];
   params[0] = reinterpret_cast<spa_pod *>(spa_pod_builder_add_object(&builder,
               SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+              SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1<<SPA_DATA_MemPtr) |
+                                                                   (1<<SPA_DATA_MemFd)),
               SPA_PARAM_BUFFERS_size, SPA_POD_Int(size),
               SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
               SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 1, 32)));
@@ -232,6 +237,10 @@ BaseCapturerPipeWire::~BaseCapturerPipeWire() {
     g_object_unref(proxy_);
     proxy_ = nullptr;
   }
+
+  if (pw_fd_ != -1) {
+    close(pw_fd_);
+  }
 }
 
 void BaseCapturerPipeWire::InitPortal() {
@@ -253,7 +262,7 @@ void BaseCapturerPipeWire::InitPipeWire() {
     return;
   }
 
-  pw_core_ = pw_context_connect(pw_context_, nullptr, 0);
+  pw_core_ = pw_context_connect_fd(pw_context_, pw_fd_, nullptr, 0);
   if (!pw_core_) {
     RTC_LOG(LS_ERROR) << "Failed to connect PipeWire context";
     return;
@@ -402,14 +411,13 @@ void BaseCapturerPipeWire::HandleBuffer(pw_buffer* buffer) {
   }
 
   rtc::CritScope lock(&current_frame_lock_);
-  if (!current_frame_ ||
-      (video_metadata_use_ && !video_size_.equals(video_size_prev))) {
+  if (!current_frame_ || !video_size_.equals(video_size_prev)) {
     current_frame_ =
       std::make_unique<uint8_t[]>
-        (video_size_.width() * video_size_.height() * kBytesPerPixel);
+        (video_size_.width() * video_size_.height() * BasicDesktopFrame::kBytesPerPixel);
   }
 
-  const int32_t dstStride = video_size_.width() * kBytesPerPixel;
+  const int32_t dstStride = video_size_.width() * BasicDesktopFrame::kBytesPerPixel;
   const int32_t srcStride = spaBuffer->datas[0].chunk->stride;
 
   // Adjust source content based on metadata video position
@@ -420,7 +428,7 @@ void BaseCapturerPipeWire::HandleBuffer(pw_buffer* buffer) {
   const int xOffset =
       video_metadata_use_ &&
         (video_metadata->region.position.x + video_size_.width() <= desktop_size_.width())
-          ? video_metadata->region.position.x * kBytesPerPixel
+          ? video_metadata->region.position.x * BasicDesktopFrame::kBytesPerPixel
           : 0;
 
   uint8_t* dst = current_frame_.get();
@@ -587,8 +595,12 @@ void BaseCapturerPipeWire::OnSessionRequestResponseSignal(
   guint32 portal_response;
   GVariant* response_data;
   g_variant_get(parameters, "(u@a{sv})", &portal_response, &response_data);
-  g_variant_lookup(response_data, "session_handle", "s",
-                   &that->session_handle_);
+
+  GVariant* session_handle =
+      g_variant_lookup_value(response_data, "session_handle", NULL);
+  that->session_handle_ = g_variant_dup_string(session_handle, NULL);
+
+  g_variant_unref(session_handle);
   g_variant_unref(response_data);
 
   if (!that->session_handle_ || portal_response) {
@@ -891,7 +903,7 @@ void BaseCapturerPipeWire::CaptureFrame() {
 
   std::unique_ptr<DesktopFrame> result(new BasicDesktopFrame(frame_size));
   result->CopyPixelsFrom(
-      current_frame_.get(), (frame_size.width() * kBytesPerPixel),
+      current_frame_.get(), (frame_size.width() * BasicDesktopFrame::kBytesPerPixel),
       DesktopRect::MakeWH(frame_size.width(), frame_size.height()));
   if (!result) {
     callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);

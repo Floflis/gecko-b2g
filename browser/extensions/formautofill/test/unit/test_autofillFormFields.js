@@ -13,7 +13,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.import(
 var FormAutofillHandler, OSKeyStore;
 add_task(async function setup() {
   ({ FormAutofillHandler } = ChromeUtils.import(
-    "resource://formautofill/FormAutofillHandler.jsm"
+    "resource://autofill/FormAutofillHandler.jsm"
   ));
   ({ OSKeyStore } = ChromeUtils.import(
     "resource://gre/modules/OSKeyStore.jsm"
@@ -263,8 +263,8 @@ const TESTCASES = [
       guid: "123",
       "cc-number": "4111111111111111",
       "cc-name": "test name",
-      "cc-exp-month": "06",
-      "cc-exp-year": "25",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
     },
     expectedResult: {
       "street-addr": "",
@@ -274,7 +274,143 @@ const TESTCASES = [
       tel: "",
       "cc-number": "4111111111111111",
       "cc-name": "test name",
+      "cc-exp-month": "6",
+      "cc-exp-year": "25",
+    },
+  },
+  {
+    description:
+      "Fill credit card fields in a form with a placeholder on expiration month input field",
+    document: `<form>
+              <input id="cc-number" autocomplete="cc-number">
+              <input id="cc-name" autocomplete="cc-name">
+              <input id="cc-exp-month" autocomplete="cc-exp-month" placeholder="MM">
+              <input id="cc-exp-year" autocomplete="cc-exp-year">
+              </form>
+              `,
+    focusedInputId: "cc-number",
+    profileData: {
+      guid: "123",
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
       "cc-exp-month": "06",
+      "cc-exp-year": "25",
+    },
+  },
+  {
+    description:
+      "Fill credit card fields in a form without a placeholder on expiration month input field",
+    document: `<form>
+              <input id="cc-number" autocomplete="cc-number">
+              <input id="cc-name" autocomplete="cc-name">
+              <input id="cc-exp-month" autocomplete="cc-exp-month">
+              <input id="cc-exp-year" autocomplete="cc-exp-year">
+              </form>
+              `,
+    focusedInputId: "cc-number",
+    profileData: {
+      guid: "123",
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": "6",
+      "cc-exp-year": "25",
+    },
+  },
+  {
+    description:
+      "Form with hidden input and visible input that share the same autocomplete attribute",
+    document: `<form>
+               <input id="hidden-cc" autocomplete="cc-number" hidden>
+               <input id="hidden-cc-2" autocomplete="cc-number" style="display:none">
+               <input id="visible-cc" autocomplete="cc-number">
+               <input id="hidden-name" autocomplete="cc-name" hidden>
+               <input id="hidden-name-2" autocomplete="cc-name" style="display:none">
+               <input id="visible-name" autocomplete="cc-name">
+               <input id="cc-exp-month" autocomplete="cc-exp-month">
+               <input id="cc-exp-year" autocomplete="cc-exp-year">
+               </form>`,
+    focusedInputId: "visible-cc",
+    profileData: {
+      guid: "123",
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      guid: "123",
+      "visible-cc": "4111111111111111",
+      "visible-name": "test name",
+      "cc-exp-month": "6",
+      "cc-exp-year": "25",
+      "hidden-cc": undefined,
+      "hidden-cc-2": undefined,
+      "hidden-name": undefined,
+      "hidden-name-2": undefined,
+    },
+  },
+  {
+    description:
+      "Fill credit card fields in a form where the value property is being used as a placeholder for cardholder name",
+    document: `<form>
+              <input id="cc-number" autocomplete="cc-number">
+              <input id="cc-name" autocomplete="cc-name" value="JOHN DOE">
+              <input id="cc-exp-month" autocomplete="cc-exp-month">
+              <input id="cc-exp-year" autocomplete="cc-exp-year">
+              </form>`,
+    focusedInputId: "cc-number",
+    profileData: {
+      guid: "123",
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      guid: "123",
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": "6",
+      "cc-exp-year": "25",
+    },
+  },
+  {
+    description:
+      "Fill credit card number fields in a form with multiple cc-number inputs",
+    document: `<form>
+                <input id="cc-number1" maxlength="4">
+                <input id="cc-number2" maxlength="4">
+                <input id="cc-number3" maxlength="4">
+                <input id="cc-number4" maxlength="4">
+                <input id="cc-exp-month" autocomplete="cc-exp-month">
+                <input id="cc-exp-year" autocomplete="cc-exp-year">
+                </form>`,
+    focusedInputId: "cc-number1",
+    profileData: {
+      guid: "123",
+      "cc-number": "371449635398431",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      guid: "123",
+      "cc-number1": "3714",
+      "cc-number2": "4963",
+      "cc-number3": "5398",
+      "cc-number4": "431",
+      "cc-exp-month": "6",
       "cc-exp-year": "25",
     },
   },
@@ -480,6 +616,31 @@ const TESTCASES_FILL_SELECT = [
     },
     expectedResult: {
       country: "XX",
+    },
+  },
+  {
+    description:
+      "Fill credit card expiration month field in a form with select field",
+    document: `<form>
+              <input id="cc-number" autocomplete="cc-number">
+              <input id="cc-name" autocomplete="cc-name">
+              <select id="cc-exp-month" autocomplete="cc-exp-month">
+                <option value="">MM</option>
+                <option value="6">06</option>
+              </select></form>`,
+    focusedInputId: "cc-number",
+    profileData: {
+      guid: "123",
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": 6,
+      "cc-exp-year": 25,
+    },
+    expectedResult: {
+      "cc-number": "4111111111111111",
+      "cc-name": "test name",
+      "cc-exp-month": "6",
+      "cc-exp-year": "2025",
     },
   },
 ];

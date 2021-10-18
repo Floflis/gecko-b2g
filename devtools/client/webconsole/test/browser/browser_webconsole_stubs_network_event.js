@@ -4,15 +4,20 @@
 "use strict";
 
 const {
-  createResourceWatcherForTab,
+  createCommandsForTab,
   STUBS_UPDATE_ENV,
-  getStubFile,
   getCleanedPacket,
+  getSerializedPacket,
+  getStubFile,
   writeStubsToFile,
 } = require(`${CHROME_URL_ROOT}stub-generator-helpers`);
 
+// Note: we use http://mochi.test:8888 because this will be accepted even when
+// https-first mode is enabled. Other stubs are simply using https://example.com
+// but we cannot use it here because there is a bug capturing 404 from httpd.js
+// in DevTools when using HTTPS (see Bug 1733420).
 const TEST_URI =
-  "http://example.com/browser/devtools/client/webconsole/test/browser/stub-generators/test-network-event.html";
+  "http://mochi.test:8888/browser/devtools/client/webconsole/test/browser/stub-generators/test-network-event.html";
 const STUB_FILE = "networkEvent.js";
 
 add_task(async function() {
@@ -40,9 +45,15 @@ add_task(async function() {
 
   let failed = false;
   for (const [key, packet] of generatedStubs) {
-    const existingPacket = existingStubs.stubPackets.get(key);
-    const packetStr = JSON.stringify(packet, null, 2);
-    const existingPacketStr = JSON.stringify(existingPacket, null, 2);
+    // const existingPacket = existingStubs.stubPackets.get(key);
+    const packetStr = getSerializedPacket(packet, {
+      sortKeys: true,
+      replaceActorIds: true,
+    });
+    const existingPacketStr = getSerializedPacket(
+      existingStubs.stubPackets.get(key),
+      { sortKeys: true, replaceActorIds: true }
+    );
     is(packetStr, existingPacketStr, `"${key}" packet has expected value`);
     failed = failed || packetStr !== existingPacketStr;
   }
@@ -57,14 +68,17 @@ add_task(async function() {
 async function generateNetworkEventStubs() {
   const stubs = new Map();
   const tab = await addTab(TEST_URI);
-  const resourceWatcher = await createResourceWatcherForTab(tab);
+  const commands = await createCommandsForTab(tab);
+  await commands.targetCommand.startListening();
+  const resourceCommand = commands.resourceCommand;
+
   const stacktraces = new Map();
   let addNetworkStub = function() {};
   let addNetworkUpdateStub = function() {};
 
   const onAvailable = resources => {
     for (const resource of resources) {
-      if (resource.resourceType == resourceWatcher.TYPES.NETWORK_EVENT) {
+      if (resource.resourceType == resourceCommand.TYPES.NETWORK_EVENT) {
         if (stacktraces.has(resource.channelId)) {
           const { stacktraceAvailable, lastFrame } = stacktraces.get(
             resource.channelId
@@ -77,7 +91,7 @@ async function generateNetworkEventStubs() {
         continue;
       }
       if (
-        resource.resourceType == resourceWatcher.TYPES.NETWORK_EVENT_STACKTRACE
+        resource.resourceType == resourceCommand.TYPES.NETWORK_EVENT_STACKTRACE
       ) {
         stacktraces.set(resource.channelId, resource);
       }
@@ -89,10 +103,10 @@ async function generateNetworkEventStubs() {
     }
   };
 
-  await resourceWatcher.watchResources(
+  await resourceCommand.watchResources(
     [
-      resourceWatcher.TYPES.NETWORK_EVENT_STACKTRACE,
-      resourceWatcher.TYPES.NETWORK_EVENT,
+      resourceCommand.TYPES.NETWORK_EVENT_STACKTRACE,
+      resourceCommand.TYPES.NETWORK_EVENT,
     ],
     {
       onAvailable,
@@ -135,16 +149,19 @@ async function generateNetworkEventStubs() {
     });
     await Promise.all([networkEventDone, networkEventUpdateDone]);
   }
-  resourceWatcher.unwatchResources(
+  resourceCommand.unwatchResources(
     [
-      resourceWatcher.TYPES.NETWORK_EVENT_STACKTRACE,
-      resourceWatcher.TYPES.NETWORK_EVENT,
+      resourceCommand.TYPES.NETWORK_EVENT_STACKTRACE,
+      resourceCommand.TYPES.NETWORK_EVENT,
     ],
     {
       onAvailable,
       onUpdated,
     }
   );
+
+  await commands.destroy();
+
   return stubs;
 }
 // Ensures the order of the resource properties

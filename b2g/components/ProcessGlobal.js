@@ -235,6 +235,21 @@ ProcessGlobal.prototype = {
     );
 
     let JSWINDOWACTORS = {
+      AudioVolumeControlOverride: {
+        parent: {
+          moduleURI:
+            "resource://gre/actors/AudioVolumeControlOverrideParent.jsm",
+        },
+        child: {
+          moduleURI:
+            "resource://gre/actors/AudioVolumeControlOverrideChild.jsm",
+          events: {
+            fullscreenchange: {},
+          },
+        },
+        allFrames: true,
+      },
+
       SelectionAction: {
         parent: {
           moduleURI: "resource://gre/actors/SelectionActionParent.jsm",
@@ -260,13 +275,36 @@ ProcessGlobal.prototype = {
         includeChrome: true,
       },
 
-      WebViewForContent: {
+      WebViewExporter: {
         child: {
-          moduleURI: "resource://gre/actors/WebViewForContentChild.jsm",
+          moduleURI: "resource://gre/actors/WebViewExporterChild.jsm",
           events: {
             DOMContentLoaded: { capture: true },
           },
         },
+        allFrames: true,
+      },
+
+      WebViewForContent: {
+        child: {
+          moduleURI: "resource://gre/actors/WebViewForContentChild.jsm",
+          events: {
+            DOMTitleChanged: { mozSystemGroup: true },
+            DOMLinkAdded: { capture: true },
+            DOMMetaAdded: { capture: true },
+            DOMMetaChanged: { capture: true },
+            DOMMetaRemoved: { capture: true },
+            "webview-getbackgroundcolor": { capture: true },
+          },
+        },
+        allFrames: true,
+      },
+
+      Prompt: {
+        parent: {
+          moduleURI: "resource://gre/actors/PromptParent.jsm",
+        },
+        includeChrome: true,
         allFrames: true,
       },
     };

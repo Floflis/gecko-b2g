@@ -4,6 +4,9 @@
 "use strict";
 
 const { PushDB, PushService, PushServiceWebSocket } = serviceExports;
+// Create the profile directory early to ensure pushBroadcastService
+// is initialized with the correct path
+do_get_profile();
 const { BroadcastService } = ChromeUtils.import(
   "resource://gre/modules/PushBroadcastService.jsm",
   null
@@ -23,7 +26,6 @@ const userAgentID = "bd744428-f125-436a-b6d0-dd0c9845837f";
 const channelID = "0ef2ad4a-6c49-41ad-af6e-95d2425276bf";
 
 function run_test() {
-  do_get_profile();
   setPrefs({
     userAgentID,
     alwaysConnect: true,
@@ -76,10 +78,7 @@ add_task(async function test_register_success() {
             "Handshake: doesn't consult listeners"
           );
           equal(data.messageType, "hello", "Handshake: wrong message type");
-          ok(
-            !data.uaid,
-            "Should not send UAID in handshake without local subscriptions"
-          );
+          equal(data.uaid, userAgentID, "Handshake: wrong device ID");
           this.serverSendMsg(
             JSON.stringify({
               messageType: "hello",
@@ -171,10 +170,7 @@ add_task(async function test_handle_hello_broadcasts() {
             "Handshake: doesn't consult listeners"
           );
           equal(data.messageType, "hello", "Handshake: wrong message type");
-          ok(
-            !data.uaid,
-            "Should not send UAID in handshake without local subscriptions"
-          );
+          equal(data.uaid, userAgentID, "Handshake: wrong device ID");
           this.serverSendMsg(
             JSON.stringify({
               messageType: "hello",

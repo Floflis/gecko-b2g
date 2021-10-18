@@ -110,9 +110,6 @@ const BACKUP_USB_PREFIX = "24";
 const BACKUP_USB_DHCPSERVER_STARTIP = "172.16.0.10";
 const BACKUP_USB_DHCPSERVER_ENDIP = "172.16.0.30";
 
-const DEFAULT_DNS1 = "8.8.8.8";
-const DEFAULT_DNS2 = "8.8.4.4";
-
 const DEFAULT_WIFI_DHCPSERVER_STARTIP = "192.168.1.10";
 const DEFAULT_WIFI_DHCPSERVER_ENDIP = "192.168.1.30";
 
@@ -497,15 +494,19 @@ TetheringService.prototype = {
     if (data && data.state === "registered") {
       let ril = gRil.getRadioInterface(this._dataDefaultServiceId);
 
-      this.dunRetryTimes = 0;
-      ril.setupDataCallByType(Ci.nsINetworkInfo.NETWORK_TYPE_MOBILE_DUN);
-      this.dunConnectTimer.cancel();
-      this.dunConnectTimer.initWithCallback(
-        this.onDunConnectTimerTimeout.bind(this),
-        MOBILE_DUN_CONNECT_TIMEOUT,
-        Ci.nsITimer.TYPE_ONE_SHOT
-      );
-      return;
+      try {
+        this.dunConnectTimer.cancel();
+        ril.setupDataCallByType(Ci.nsINetworkInfo.NETWORK_TYPE_MOBILE_DUN);
+        this.dunRetryTimes = 0;
+        this.dunConnectTimer.initWithCallback(
+          this.onDunConnectTimerTimeout.bind(this),
+          MOBILE_DUN_CONNECT_TIMEOUT,
+          Ci.nsITimer.TYPE_ONE_SHOT
+        );
+        return;
+      } catch (e) {
+        debug("setupDunConnection: error: " + e);
+      }
     }
 
     if (this.dunRetryTimes++ >= MOBILE_DUN_MAX_RETRIES) {
@@ -547,9 +548,15 @@ TetheringService.prototype = {
       this._pendingTetheringRequests = [];
 
       if (dun && dun.state == Ci.nsINetworkInfo.NETWORK_STATE_CONNECTED) {
-        gRil
-          .getRadioInterface(this._dataDefaultServiceId)
-          .deactivateDataCallByType(Ci.nsINetworkInfo.NETWORK_TYPE_MOBILE_DUN);
+        try {
+          gRil
+            .getRadioInterface(this._dataDefaultServiceId)
+            .deactivateDataCallByType(
+              Ci.nsINetworkInfo.NETWORK_TYPE_MOBILE_DUN
+            );
+        } catch (e) {
+          debug("deactivateDunConnection: error: " + e);
+        }
       }
       return;
     }
@@ -601,8 +608,6 @@ TetheringService.prototype = {
     check("wifiEndIp", DEFAULT_WIFI_DHCPSERVER_ENDIP);
     check("usbStartIp", DEFAULT_USB_DHCPSERVER_STARTIP);
     check("usbEndIp", DEFAULT_USB_DHCPSERVER_ENDIP);
-    check("dns1", DEFAULT_DNS1);
-    check("dns2", DEFAULT_DNS2);
 
     return config;
   },
@@ -1048,8 +1053,6 @@ TetheringService.prototype = {
         current[tetheringType[i]] = {
           internalIfname: this._internalInterface[tetheringType[i]],
           externalIfname: aNetworkInfo.name,
-          dns1: DEFAULT_DNS1,
-          dns2: DEFAULT_DNS2,
           dnses: aNetworkInfo.getDnses(),
           ipv6Ip: this.getIpv6TetheringAddress(aNetworkInfo),
         };
@@ -1067,11 +1070,15 @@ TetheringService.prototype = {
           );
           if (dun && dun.state == Ci.nsINetworkInfo.NETWORK_STATE_CONNECTED) {
             debug("Wifi connected, switch dun to Wifi as external interface.");
-            gRil
-              .getRadioInterface(this._dataDefaultServiceId)
-              .deactivateDataCallByType(
-                Ci.nsINetworkInfo.NETWORK_TYPE_MOBILE_DUN
-              );
+            try {
+              gRil
+                .getRadioInterface(this._dataDefaultServiceId)
+                .deactivateDataCallByType(
+                  Ci.nsINetworkInfo.NETWORK_TYPE_MOBILE_DUN
+                );
+            } catch (e) {
+              debug("deactivateDunConnection: error: " + e);
+            }
           }
         }
         // Handle the dun as external interface case, when embedded is dun.
@@ -1096,12 +1103,6 @@ TetheringService.prototype = {
         }
 
         let callback = function() {
-          // Restart and refine USB tethering if subnet conflict with external interface
-          if (this.isTetherSubnetConflict()) {
-            this.refineTetherSubnet(true);
-            return;
-          }
-
           // Update external aNetworkInfo interface.
           debug("Update upstream interface to " + aNetworkInfo.name);
           if (wifiTetheringEnabled) {
@@ -1113,6 +1114,11 @@ TetheringService.prototype = {
             );
           }
           if (usbTetheringEnabled) {
+            // Restart and refine USB tethering if subnet conflict with external interface
+            if (this.isTetherSubnetConflict()) {
+              this.refineTetherSubnet(true);
+              return;
+            }
             gNetworkService.updateUpStream(
               TETHERING_TYPE_USB,
               previous[TETHERING_TYPE_USB],

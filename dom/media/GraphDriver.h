@@ -22,10 +22,6 @@
 
 #include <thread>
 
-#if defined(XP_WIN)
-#  include "mozilla/audio/AudioNotificationReceiver.h"
-#endif
-
 struct cubeb_stream;
 
 template <>
@@ -79,7 +75,7 @@ class OfflineClockDriver;
 class SystemClockDriver;
 
 namespace dom {
-enum class AudioContextOperation;
+enum class AudioContextOperation : uint8_t;
 }
 
 struct GraphInterface : public nsISupports {
@@ -572,13 +568,7 @@ enum class AudioInputType { Unknown, Voice };
  *   API, we have to do block processing at 128 frames per block, we need to
  *   keep a little spill buffer to store the extra frames.
  */
-class AudioCallbackDriver : public GraphDriver,
-                            public MixerCallbackReceiver
-#if defined(XP_WIN)
-    ,
-                            public audio::DeviceChangeListener
-#endif
-{
+class AudioCallbackDriver : public GraphDriver, public MixerCallbackReceiver {
   using IterationResult = GraphInterface::IterationResult;
   enum class FallbackDriverState;
   class FallbackWrapper;
@@ -596,9 +586,6 @@ class AudioCallbackDriver : public GraphDriver,
 
   void Start() override;
   MOZ_CAN_RUN_SCRIPT void Shutdown() override;
-#if defined(XP_WIN)
-  void ResetDefaultDevice() override;
-#endif
 
   /* Static wrapper function cubeb calls back. */
   static long DataCallback_s(cubeb_stream* aStream, void* aUser,
@@ -786,8 +773,8 @@ class AudioCallbackDriver : public GraphDriver,
   /* The mixer that the graph mixes into during an iteration. Audio thread only.
    */
   AudioMixer mMixer;
-  /* Contains the id of the audio thread, from profiler_get_thread_id. */
-  std::atomic<int> mAudioThreadId;
+  /* Contains the id of the audio thread, from profiler_current_thread_id. */
+  std::atomic<ProfilerThreadId> mAudioThreadId;
   /* This allows implementing AutoInCallback. This is equal to the current
    * thread id when in an audio callback, and is an invalid thread id otherwise.
    */

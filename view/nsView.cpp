@@ -36,7 +36,6 @@ nsView::nsView(nsViewManager* aViewManager, nsViewVisibility aVisibility)
       mNextSibling(nullptr),
       mFirstChild(nullptr),
       mFrame(nullptr),
-      mDirtyRegion(nullptr),
       mZIndex(0),
       mVis(aVisibility),
       mPosX(0),
@@ -104,8 +103,6 @@ nsView::~nsView() {
   DestroyWidget();
 
   MOZ_RELEASE_ASSERT(!mFrame);
-
-  delete mDirtyRegion;
 }
 
 class DestroyWidgetRunnable : public Runnable {
@@ -331,6 +328,9 @@ void nsView::DoResetWidgetBounds(bool aMoveOnly, bool aInvalidateChangedSize) {
     // to be on or off-screen.
     return;
   }
+
+  // Apply the widget size constraints to newBounds.
+  widget->ConstrainSize(&newBounds.width, &newBounds.height);
 
   bool changedPos = curBounds.TopLeft() != newBounds.TopLeft();
   bool changedSize = curBounds.Size() != newBounds.Size();

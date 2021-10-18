@@ -11,6 +11,7 @@
 #include "AudioWorkletImpl.h"
 #include "jsapi.h"
 #include "js/ForOfIterator.h"
+#include "js/PropertyAndElement.h"  // JS_GetProperty
 #include "mozilla/dom/AudioWorkletGlobalScopeBinding.h"
 #include "mozilla/dom/AudioWorkletProcessor.h"
 #include "mozilla/dom/BindingCallContext.h"
@@ -19,7 +20,8 @@
 #include "mozilla/dom/WorkletPrincipals.h"
 #include "mozilla/dom/AudioParamDescriptorBinding.h"
 #include "nsPrintfCString.h"
-#include "nsTHashtable.h"
+#include "nsTHashSet.h"
+#include "Tracing.h"
 
 namespace mozilla::dom {
 
@@ -60,6 +62,9 @@ bool AudioWorkletGlobalScope::WrapGlobalObject(
 void AudioWorkletGlobalScope::RegisterProcessor(
     JSContext* aCx, const nsAString& aName,
     AudioWorkletProcessorConstructor& aProcessorCtor, ErrorResult& aRv) {
+  TRACE_COMMENT("AudioWorkletGlobalScope::RegisterProcessor", "%s",
+                NS_ConvertUTF16toUTF8(aName).get());
+
   JS::Rooted<JSObject*> processorConstructor(aCx,
                                              aProcessorCtor.CallableOrNull());
 
@@ -171,7 +176,8 @@ void AudioWorkletGlobalScope::RegisterProcessor(
    * 8. Append the key-value pair name → processorCtor to node name to processor
    * constructor map of the associated AudioWorkletGlobalScope.
    */
-  if (!mNameToProcessorMap.Put(aName, RefPtr{&aProcessorCtor}, fallible)) {
+  if (!mNameToProcessorMap.InsertOrUpdate(aName, RefPtr{&aProcessorCtor},
+                                          fallible)) {
     aRv.Throw(NS_ERROR_OUT_OF_MEMORY);
     return;
   }
@@ -213,7 +219,7 @@ AudioParamDescriptorMap AudioWorkletGlobalScope::DescriptorsFromJS(
     JSContext* aCx, JS::ForOfIterator* aIter, ErrorResult& aRv) {
   AudioParamDescriptorMap res;
   // To check for duplicates
-  nsTHashtable<nsStringHashKey> namesSet;
+  nsTHashSet<nsString> namesSet;
 
   JS::Rooted<JS::Value> nextValue(aCx);
   bool done = false;
@@ -249,7 +255,7 @@ AudioParamDescriptorMap AudioWorkletGlobalScope::DescriptorsFromJS(
       return AudioParamDescriptorMap();
     }
 
-    if (!namesSet.PutEntry(descriptor.mName, fallible)) {
+    if (!namesSet.Insert(descriptor.mName, fallible)) {
       aRv.Throw(NS_ERROR_OUT_OF_MEMORY);
       return AudioParamDescriptorMap();
     }
@@ -281,6 +287,8 @@ bool AudioWorkletGlobalScope::ConstructProcessor(
     NotNull<StructuredCloneHolder*> aSerializedOptions,
     UniqueMessagePortId& aPortIdentifier,
     JS::MutableHandle<JSObject*> aRetProcessor) {
+  TRACE_COMMENT("AudioWorkletProcessor::ConstructProcessor", "%s",
+                NS_ConvertUTF16toUTF8(aName).get());
   /**
    * See
    * https://webaudio.github.io/web-audio-api/#AudioWorkletProcessor-instantiation

@@ -7,6 +7,12 @@
 @namespace html url("http://www.w3.org/1999/xhtml");
 
 %include ../shared/browser.inc.css
+/**
+ * We intentionally do not include browser-custom-colors.inc.css,
+ * instead choosing to fall back to system colours and transparencies
+ * in order to accomodate the wider variety of system themes on that
+ * platform.
+ */
 
 :root {
   --toolbar-non-lwt-bgcolor: -moz-dialog;
@@ -15,24 +21,21 @@
 
   --toolbarbutton-border-radius: 4px;
   --toolbarbutton-vertical-text-padding: calc(var(--toolbarbutton-inner-padding) - 1px);
-  --toolbarbutton-icon-fill-opacity: .85;
 
   --panel-separator-color: ThreeDShadow;
-  --arrowpanel-dimmed: hsla(0,0%,80%,.35);
-  --arrowpanel-dimmed-further: hsla(0,0%,80%,.5);
-  --arrowpanel-dimmed-even-further: hsla(0,0%,80%,.8);
 
-  --urlbar-separator-color: ThreeDShadow;
+  --tabs-border-color: rgba(0,0,0,.3);
 
   --chrome-content-separator-color: ThreeDShadow;
 }
 
-#navigator-toolbox {
-  --tabs-border-color: rgba(0,0,0,.3);
+:root:not(:-moz-lwtheme) {
+  --focus-outline-color: -moz-accent-color;
 }
 
-#tabbrowser-tabs {
-  --tab-line-color: highlight;
+#TabsToolbar:not(:-moz-lwtheme),
+#TabsToolbar[brighttext]:not(:-moz-lwtheme) {
+  --attention-icon-color: -moz-accent-color;
 }
 
 :root:-moz-lwtheme {
@@ -43,10 +46,6 @@
 
 :root[lwt-popup-brighttext] {
   --panel-separator-color: rgba(249,249,250,.1);
-
-  --arrowpanel-dimmed: rgba(249,249,250,.1);
-  --arrowpanel-dimmed-further: rgba(249,249,250,.15);
-  --arrowpanel-dimmed-even-further: rgba(249,249,250,.2);
 }
 
 #menubar-items {
@@ -99,8 +98,8 @@ menuitem.bookmark-item {
 
 /* Bookmark drag and drop styles */
 .bookmark-item[dragover-into="true"] {
-  background: Highlight !important;
-  color: HighlightText !important;
+  background: SelectedItem !important;
+  color: SelectedItemText !important;
 }
 
 .bookmark-item[cutting] > .toolbarbutton-icon,
@@ -113,62 +112,13 @@ menuitem.bookmark-item {
   opacity: 0.7;
 }
 
+#PlacesToolbar menu menupopup {
+  margin-top: -12px;
+}
+
 %include ../shared/toolbarbuttons.inc.css
 %include ../shared/toolbarbutton-icons.inc.css
 %include ../shared/menupanel.inc.css
-
-/* Fullscreen window controls */
-
-#minimize-button,
-#restore-button,
-#close-button {
-  appearance: none;
-  padding: 6px 12px;
-  -moz-context-properties: stroke;
-  stroke: currentColor;
-  color: inherit;
-}
-
-#minimize-button {
-  list-style-image: url(chrome://browser/skin/window-controls/minimize.svg);
-}
-
-#restore-button {
-  list-style-image: url(chrome://browser/skin/window-controls/restore.svg);
-}
-
-#minimize-button:hover,
-#restore-button:hover {
-  background-color: hsla(0,0%,0%,.12);
-}
-
-#minimize-button:hover:active,
-#restore-button:hover:active {
-  background-color: hsla(0,0%,0%,.22);
-}
-
-#TabsToolbar[brighttext] > #window-controls > #minimize-button:hover,
-#TabsToolbar[brighttext] > #window-controls > #restore-button:hover {
-  background-color: hsla(0,0%,100%,.12);
-}
-
-#TabsToolbar[brighttext] > #window-controls > #minimize-button:hover:active,
-#TabsToolbar[brighttext] > #window-controls > #restore-button:hover:active {
-  background-color: hsla(0,0%,100%,.22);
-}
-
-#close-button {
-  list-style-image: url(chrome://browser/skin/window-controls/close.svg);
-}
-
-#close-button:hover {
-  background-color: #d70022;
-  stroke: white;
-}
-
-#close-button:hover:active {
-  background-color: #ff0039;
-}
 
 /* Address bar */
 
@@ -185,9 +135,8 @@ menuitem.bookmark-item {
   }
 }
 
-#urlbar:not(:-moz-lwtheme, [focused="true"]) > #urlbar-background,
-#searchbar:not(:-moz-lwtheme, :focus-within) {
-  border-color: ThreeDShadow;
+:root {
+  --toolbar-field-border-color: ThreeDShadow;
 }
 
 %include ../shared/identity-block/identity-block.inc.css
@@ -198,9 +147,10 @@ menuitem.bookmark-item {
 
 %include ../shared/urlbarView.inc.css
 
-:root {
-  --urlbar-popup-url-color: -moz-nativehyperlinktext;
+:root:not(:-moz-lwtheme) {
   --urlbar-popup-action-color: -moz-nativehyperlinktext;
+  --autocomplete-popup-highlight-background: SelectedItem;
+  --autocomplete-popup-highlight-color: SelectedItemText;
 }
 
 /* Translation infobar */
@@ -262,12 +212,6 @@ menuitem.bookmark-item {
   #TabsToolbar {
     -moz-window-dragging: drag;
   }
-}
-
-.keyboard-focused-tab > .tab-stack > .tab-content,
-.tabbrowser-tab:focus:not([aria-activedescendant]) > .tab-stack > .tab-content {
-  outline: 1px dotted;
-  outline-offset: -6px;
 }
 
 #context_reloadTab {
@@ -378,6 +322,10 @@ menuitem.bookmark-item {
   margin-inline-end: 0 !important;
 }
 
+.cui-widget-panelview[id^=PanelUI-webext-] {
+  border-radius: var(--arrowpanel-border-radius);
+}
+
 .webextension-popup-browser,
 .webextension-popup-stack {
   border-radius: inherit;
@@ -387,7 +335,7 @@ menuitem.bookmark-item {
 @media (-moz-gtk-csd-available) {
   /* Some Gtk+ themes use non-rectangular toplevel windows. To fully support
    * such themes we need to make toplevel window transparent.
-   * It may cause performanance issues so let's put it under a preference
+   * It may cause performance issues so let's put it under a preference
    * and enable it for desktop environment which do that by default.
    * See nsWindow::TopLevelWindowUseARGBVisual() for details. */
   @media (-moz-gtk-csd-transparent-background) {
@@ -400,7 +348,17 @@ menuitem.bookmark-item {
   :root[tabsintitlebar] #titlebar {
     appearance: auto;
     -moz-default-appearance: -moz-window-titlebar-maximized;
+    color: CaptionText;
   }
+
+  :root[tabsintitlebar] #titlebar:-moz-window-inactive {
+    color: InactiveCaptionText;
+  }
+
+  :root[tabsintitlebar] #titlebar:-moz-lwtheme {
+    color: inherit;
+  }
+
   :root[tabsintitlebar][sizemode="normal"]:not([gtktiledwindow="true"]) #titlebar {
     appearance: auto;
     -moz-default-appearance: -moz-window-titlebar;
@@ -419,13 +377,7 @@ menuitem.bookmark-item {
     height: var(--tab-min-height);
   }
   :root[tabsintitlebar][sizemode="normal"] #toolbar-menubar[autohide="true"] {
-    height: calc(var(--tab-min-height) + var(--space-above-tabbar));
-  }
-
-  /* Add extra space to titlebar for dragging */
-  :root[sizemode="normal"][chromehidden~="menubar"] #TabsToolbar > .toolbar-items,
-  :root[sizemode="normal"] #toolbar-menubar[autohide="true"][inactive] + #TabsToolbar > .toolbar-items {
-    padding-top: var(--space-above-tabbar);
+    height: var(--tab-min-height);
   }
 
   /* Make #TabsToolbar transparent as we style underlying #titlebar with
@@ -434,6 +386,11 @@ menuitem.bookmark-item {
   :root[tabsintitlebar][sizemode="maximized"] #TabsToolbar,
   :root[tabsintitlebar] #toolbar-menubar {
     appearance: none;
+    color: inherit;
+  }
+
+  :root[tabsintitlebar] #main-menubar {
+    color: inherit;
   }
 
   /* The button box must appear on top of the navigator-toolbox in order for
@@ -447,46 +404,40 @@ menuitem.bookmark-item {
 
   /* Render titlebar command buttons according to system config.
    * Use full scale icons here as the Gtk+ does. */
-  @media (-moz-gtk-csd-minimize-button) {
-    .titlebar-min {
-      appearance: auto;
-      -moz-default-appearance: -moz-window-button-minimize;
-    }
+  .titlebar-min {
+    appearance: auto;
+    -moz-default-appearance: -moz-window-button-minimize;
   }
-  @media (-moz-gtk-csd-minimize-button: 0) {
+  .titlebar-max {
+    appearance: auto;
+    -moz-default-appearance: -moz-window-button-maximize;
+  }
+  .titlebar-restore {
+    appearance: auto;
+    -moz-default-appearance: -moz-window-button-restore;
+  }
+  .titlebar-close {
+    appearance: auto;
+    -moz-default-appearance: -moz-window-button-close;
+  }
+
+  @media not (-moz-gtk-csd-minimize-button) {
     .titlebar-min {
       display: none;
     }
   }
-
-  @media (-moz-gtk-csd-maximize-button) {
-    .titlebar-max {
-      appearance: auto;
-      -moz-default-appearance: -moz-window-button-maximize;
-    }
-    .titlebar-restore {
-      appearance: auto;
-      -moz-default-appearance: -moz-window-button-restore;
-    }
-  }
-  @media (-moz-gtk-csd-maximize-button: 0) {
+  @media not (-moz-gtk-csd-maximize-button) {
     .titlebar-restore,
     .titlebar-max {
       display: none;
     }
   }
-
-  @media (-moz-gtk-csd-close-button) {
-    .titlebar-close {
-      appearance: auto;
-      -moz-default-appearance: -moz-window-button-close;
-    }
-  }
-  @media (-moz-gtk-csd-close-button: 0) {
+  @media not (-moz-gtk-csd-close-button) {
     .titlebar-close {
       display: none;
     }
   }
+
   @media (-moz-gtk-csd-reversed-placement) {
     .titlebar-buttonbox-container,
     .titlebar-close {

@@ -5,6 +5,9 @@
 "use strict";
 
 const Services = require("Services");
+const {
+  getLongStringFullText,
+} = require("devtools/client/shared/string-utils");
 
 // Helper tracer. Should be generic sharable by other modules (bug 1171927)
 const trace = {
@@ -16,8 +19,7 @@ const trace = {
  * HTTP requests executed by the page (including inner iframes).
  */
 function HarCollector(options) {
-  this.webConsoleFront = options.webConsoleFront;
-  this.resourceWatcher = options.resourceWatcher;
+  this.commands = options.commands;
 
   this.onResourceAvailable = this.onResourceAvailable.bind(this);
   this.onResourceUpdated = this.onResourceUpdated.bind(this);
@@ -36,8 +38,8 @@ HarCollector.prototype = {
   // Connection
 
   start: async function() {
-    await this.resourceWatcher.watchResources(
-      [this.resourceWatcher.TYPES.NETWORK_EVENT],
+    await this.commands.resourceCommand.watchResources(
+      [this.commands.resourceCommand.TYPES.NETWORK_EVENT],
       {
         onAvailable: this.onResourceAvailable,
         onUpdated: this.onResourceUpdated,
@@ -46,8 +48,8 @@ HarCollector.prototype = {
   },
 
   stop: async function() {
-    await this.resourceWatcher.unwatchResources(
-      [this.resourceWatcher.TYPES.NETWORK_EVENT],
+    await this.commands.resourceCommand.unwatchResources(
+      [this.commands.resourceCommand.TYPES.NETWORK_EVENT],
       {
         onAvailable: this.onResourceAvailable,
         onUpdated: this.onResourceUpdated,
@@ -297,29 +299,28 @@ HarCollector.prototype = {
     }
   },
 
-  getData: function(actor, method, callback) {
-    return new Promise(resolve => {
-      if (!this.webConsoleFront[method]) {
-        console.error("HarCollector.getData: ERROR Unknown method!");
-        resolve();
-      }
+  async getData(actor, method, callback) {
+    const file = this.getFile(actor);
 
-      const file = this.getFile(actor);
+    trace.log(
+      "HarCollector.getData; REQUEST " + method + ", " + file.url,
+      file
+    );
 
-      trace.log(
-        "HarCollector.getData; REQUEST " + method + ", " + file.url,
-        file
-      );
+    // Bug 1519082: We don't create fronts for NetworkEvent actors,
+    // so that we have to do the request manually via DevToolsClient.request()
+    const packet = {
+      to: actor,
+      type: method,
+    };
+    const response = await this.commands.client.request(packet);
 
-      this.webConsoleFront[method](actor, response => {
-        trace.log(
-          "HarCollector.getData; RESPONSE " + method + ", " + file.url,
-          response
-        );
-        callback(response);
-        resolve(response);
-      });
-    });
+    trace.log(
+      "HarCollector.getData; RESPONSE " + method + ", " + file.url,
+      response
+    );
+    callback(response);
+    return response;
   },
 
   /**
@@ -453,8 +454,8 @@ HarCollector.prototype = {
    *         A promise that is resolved when the full string contents
    *         are available, or rejected if something goes wrong.
    */
-  getString: function(stringGrip) {
-    const promise = this.webConsoleFront.getString(stringGrip);
+  getString: async function(stringGrip) {
+    const promise = getLongStringFullText(this.commands.client, stringGrip);
     this.requests.push(promise);
     return promise;
   },

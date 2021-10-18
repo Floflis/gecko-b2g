@@ -15,6 +15,7 @@
 #include "Tracing.h"
 #include "VideoFrameUtils.h"
 #include "VideoUtils.h"
+#include "ImageContainer.h"
 #include "webrtc/common_video/include/video_frame_buffer.h"
 #include "webrtc/common_video/libyuv/include/webrtc_libyuv.h"
 
@@ -120,28 +121,6 @@ void MediaEngineRemoteVideoSource::Init() {
 
   SetName(NS_ConvertUTF8toUTF16(deviceName));
   mUniqueId = uniqueId;
-
-  mInitDone = true;
-}
-
-void MediaEngineRemoteVideoSource::Shutdown() {
-  LOG("%s", __PRETTY_FUNCTION__);
-  AssertIsOnOwningThread();
-
-  if (!mInitDone) {
-    // Already shut down
-    return;
-  }
-
-  if (mState == kStarted) {
-    Stop();
-  }
-  if (mState == kAllocated || mState == kStopped) {
-    Deallocate();
-  }
-  MOZ_ASSERT(mState == kReleased);
-
-  mInitDone = false;
 }
 
 void MediaEngineRemoteVideoSource::SetName(nsString aName) {
@@ -198,11 +177,6 @@ nsresult MediaEngineRemoteVideoSource::Allocate(
   AssertIsOnOwningThread();
 
   MOZ_ASSERT(mState == kReleased);
-
-  if (!mInitDone) {
-    LOG("Init not done");
-    return NS_ERROR_FAILURE;
-  }
 
   NormalizedConstraints constraints(aConstraints);
   webrtc::CaptureCapability newCapability;
@@ -274,7 +248,7 @@ void MediaEngineRemoteVideoSource::SetTrack(const RefPtr<MediaTrack>& aTrack,
   MOZ_ASSERT(aTrack->AsSourceTrack());
 
   if (!mImageContainer) {
-    mImageContainer = layers::LayerManager::CreateImageContainer(
+    mImageContainer = MakeAndAddRef<layers::ImageContainer>(
         layers::ImageContainer::ASYNCHRONOUS);
   }
 
@@ -290,7 +264,6 @@ nsresult MediaEngineRemoteVideoSource::Start() {
   AssertIsOnOwningThread();
 
   MOZ_ASSERT(mState == kAllocated || mState == kStopped);
-  MOZ_ASSERT(mInitDone);
   MOZ_ASSERT(mTrack);
 
   {
@@ -376,8 +349,6 @@ nsresult MediaEngineRemoteVideoSource::Reconfigure(
     const char** aOutBadConstraint) {
   LOG("%s", __PRETTY_FUNCTION__);
   AssertIsOnOwningThread();
-
-  MOZ_ASSERT(mInitDone);
 
   NormalizedConstraints constraints(aConstraints);
   webrtc::CaptureCapability newCapability;

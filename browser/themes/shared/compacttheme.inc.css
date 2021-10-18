@@ -10,3 +10,9 @@
   /* !important to override LightweightThemeConsumer.jsm */
   --autocomplete-popup-background: #2A2A2E !important;
 }
+
+#urlbar {
+  --urlbar-box-bgcolor: var(--toolbar-field-focus-background-color);
+  --urlbar-box-focus-bgcolor: var(--button-bgcolor);
+  --urlbar-box-hover-bgcolor: var(--button-hover-bgcolor);
+}

@@ -4,7 +4,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "FrameAnimator.h"
-#include "GeckoProfiler.h"
 
 #include <utility>
 
@@ -12,6 +11,7 @@
 #include "RasterImage.h"
 #include "imgIContainer.h"
 #include "mozilla/CheckedInt.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/StaticPrefs_image.h"
 
 namespace mozilla {
@@ -467,7 +467,7 @@ LookupResult FrameAnimator::GetCompositedFrame(AnimationState& aState,
       // getting called which calls UpdateState. The reason we care about this
       // is that img.decode promises won't resolve until GetCompositedFrame
       // returns a frame.
-      UnorientedIntRect rect = UnorientedIntRect::FromUnknownRect(
+      OrientedIntRect rect = OrientedIntRect::FromUnknownRect(
           aState.UpdateStateInternal(result, mSize));
 
       if (!rect.IsEmpty()) {

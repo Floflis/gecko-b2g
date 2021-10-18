@@ -14,6 +14,7 @@ import os
 import socket
 import sys
 import traceback
+import subprocess
 
 try:
     import urlparse
@@ -126,7 +127,6 @@ class VirtualenvMixin(object):
         optional=False,
         two_pass=False,
         editable=False,
-        legacy_resolver=False,
     ):
         """Register a module to be installed with the virtualenv.
 
@@ -137,16 +137,7 @@ class VirtualenvMixin(object):
         applied.
         """
         self._virtualenv_modules.append(
-            (
-                name,
-                url,
-                method,
-                requirements,
-                optional,
-                two_pass,
-                editable,
-                legacy_resolver,
-            )
+            (name, url, method, requirements, optional, two_pass, editable)
         )
 
     def query_virtualenv_path(self):
@@ -260,7 +251,6 @@ class VirtualenvMixin(object):
         global_options=[],
         no_deps=False,
         editable=False,
-        legacy_resolver=False,
     ):
         """
         Install module via pip.
@@ -291,8 +281,6 @@ class VirtualenvMixin(object):
                 command = [pip, "install"]
             if no_deps:
                 command += ["--no-deps"]
-            if legacy_resolver:
-                command += ["--use-deprecated=legacy-resolver"]
             # To avoid timeouts with our pypi server, increase default timeout:
             # https://bugzilla.mozilla.org/show_bug.cgi?id=1007230#c802
             command += ["--timeout", str(c.get("pip_timeout", 120))]
@@ -324,9 +312,7 @@ class VirtualenvMixin(object):
             try:
                 socket.gethostbyname(parsed.hostname)
             except socket.gaierror as e:
-                self.info(
-                    "error resolving %s (ignoring): %s" % (parsed.hostname, e.message)
-                )
+                self.info("error resolving %s (ignoring): %s" % (parsed.hostname, e))
                 continue
 
             command.extend(["--find-links", link])
@@ -477,6 +463,31 @@ class VirtualenvMixin(object):
                 partial_env={"VIRTUALENV_NO_DOWNLOAD": "1"},
                 halt_on_failure=True,
             )
+        self.info(self.platform_name())
+        if self.platform_name().startswith("macos"):
+            tmp_path = "{}/bin/bak".format(venv_path)
+            self.info(
+                "Copying venv python binaries to {} to clear for re-sign".format(
+                    tmp_path
+                )
+            )
+            subprocess.call("mkdir -p {}".format(tmp_path), shell=True)
+            subprocess.call(
+                "cp {}/bin/python* {}/".format(venv_path, tmp_path), shell=True
+            )
+            self.info("Replacing venv python binaries with reset copies")
+            subprocess.call(
+                "mv -f {}/* {}/bin/".format(tmp_path, venv_path), shell=True
+            )
+            self.info(
+                "codesign -s - --preserve-metadata=identifier,entitlements,flags,runtime "
+                "-f {}/bin/*".format(venv_path)
+            )
+            subprocess.call(
+                "codesign -s - --preserve-metadata=identifier,entitlements,flags,runtime -f "
+                "{}/bin/python*".format(venv_path),
+                shell=True,
+            )
 
         if not modules:
             modules = c.get("virtualenv_modules", [])
@@ -518,7 +529,6 @@ class VirtualenvMixin(object):
             optional,
             two_pass,
             editable,
-            legacy_resolver,
         ) in self._virtualenv_modules:
             if two_pass:
                 self.install_module(
@@ -529,7 +539,6 @@ class VirtualenvMixin(object):
                     optional=optional,
                     no_deps=True,
                     editable=editable,
-                    legacy_resolver=legacy_resolver,
                 )
             self.install_module(
                 module=module,
@@ -538,7 +547,6 @@ class VirtualenvMixin(object):
                 requirements=requirements or (),
                 optional=optional,
                 editable=editable,
-                legacy_resolver=legacy_resolver,
             )
 
         self.info("Done creating virtualenv %s." % venv_path)
@@ -879,7 +887,7 @@ class ResourceMonitoringMixin(PerfherderResourceOptionsMixin):
 
 # This needs to be inherited only if you have already inherited ScriptMixin
 class Python3Virtualenv(object):
-    """ Support Python3.5+ virtualenv creation."""
+    """Support Python3.5+ virtualenv creation."""
 
     py3_initialized_venv = False
 
@@ -967,9 +975,7 @@ class Python3Virtualenv(object):
             try:
                 socket.gethostbyname(parsed.hostname)
             except socket.gaierror as e:
-                self.info(
-                    "error resolving %s (ignoring): %s" % (parsed.hostname, e.message)
-                )
+                self.info("error resolving %s (ignoring): %s" % (parsed.hostname, e))
                 continue
 
             pip_args += ["--find-links", link]

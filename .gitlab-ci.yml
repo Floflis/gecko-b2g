@@ -5,211 +5,123 @@
 # LIMITED or its affiliate company and may be registered in some jurisdictions.
 # All other trademarks are the property of their respective owners.
 
-variables:
-  GIT_DEPTH: 1
-  # specify '1.48.0_1' in favor of the ambiguous 'latest' since pull_policy of runners are 'if-not-present'
-  # in this way unnecessary `docker pull` can be prevented.
-  DEFAULT_DOCKER_IMAGE: "${CI_REGISTRY}/re/kaios-build/next/daily:1.49.0"
-  # GIT_CLONE_PATH would be overidden with "koost" if pipeline gets triggered from within koost
-  GIT_CLONE_PATH: ${CI_BUILDS_DIR}/${CI_PROJECT_NAMESPACE}/gecko
+workflow:
+  rules:
+    - if: '$CI_MERGE_REQUEST_PROJECT_PATH == "KaiOS/gecko-dev"'
+    - if: '$CI_PROJECT_PATH == "KaiOS/gecko-dev" && $CI_COMMIT_BRANCH == "next"'
+    - when: never
 
-.global_setup: &global_setup
-  - export CI_USE_MIRROR=${CI_USE_MIRROR:-false} # in case not set in config.toml
-  - echo -e "machine ${CI_SERVER_HOST}\nlogin gitlab-ci-token\npassword ${CI_JOB_TOKEN}" > ~/.netrc
-  - git config --global url."${CI_SERVER_URL}/".insteadOf "git@${CI_SERVER_HOST}:"
-  - |
-    if ${CI_USE_MIRROR}; then
-      git fetch origin ${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME} --unshallow
-      echo -e "\033[1;33mAlternatively use ${LOCAL_GIT_MIRROR} for git-clone. \033[0m"
-      git config --global url."${LOCAL_GIT_MIRROR}".insteadOf "${CI_SERVER_URL}"
-    fi
-
-.koost_setup: &koost_setup
-  - |
-    if [[ ${GIT_CLONE_PATH##*/} == koost ]]; then
-      printf "\033[0;31mYou're using GECKO_PATH defined from ${CI_PROJECT_PATH} !\033[0m\n"
-      cd ${GECKO_PATH}
-      git init
-      git fetch ${CI_SERVER_URL}/KaiOS/gecko-dev.git next --no-tags --depth 1
-      git checkout FETCH_HEAD
-      check_format_opt="${check_format_opt} --koost"
-    else
-      cd ${GIT_CLONE_PATH}
-      git clone ${CI_SERVER_URL}/KaiOS/koost.git -b next --depth 1
-    fi
-  - |
-    rm -rf gonk-q
-    if [ "${CI_JOB_NAME}" == "build:arm" ]; then
-      git clone ${CI_SERVER_URL}/KaiOS/dummy/gonk-q.git --depth 1
-    fi
+include:
+  - '.gitlab/ci/bases.yml'
+  - '.gitlab/ci/lint.yml'
+  - '.gitlab/ci/scm/sidl_services.yml'
 
 default:
-  image: $DEFAULT_DOCKER_IMAGE
+  image: ${CI_REGISTRY}/re/kaios-build/next/daily:1.53.0_6_1
   tags:
-    - gecko-dev
-  before_script:
-    - *global_setup
-    - *koost_setup
+    - hk-fantastic4
+  interruptible: true
+
+variables:
+  # GIT_CLONE_PATH would be overidden with "koost" if pipeline gets triggered from within koost
+  # also, in order for sccache, perisitent path is preferred
+  GIT_CLONE_PATH: ${CI_BUILDS_DIR}/kaios/gecko
+  # since we can always get nearly the whole git history from mirror,
+  # it's ok to `fetch` the incoming MR instead of re-cloning the repo.
+  GIT_STRATEGY: fetch
 
 stages:
   - lint
   - build
+  - deploy
 
-.lint_base:
+Check if MR is rebased:
+  extends: .rebase_validation
+
+Validate message format:
+  extends: .commit_validation
+
+lint:eslint:
+  extends: .lint_eslint
   stage: lint
-  script:
-    - 'check_format_opt="--against HEAD~${mr_commits} -v"'
-    - *koost_setup
-    - ./check-format.sh ${check_format_opt}
 
-lint(count commits contained by the MR in advance):
-  extends: .lint_base
-  variables:
-    # force the runner not to initialize the repository
-    GIT_STRATEGY: none
-  before_script:
-    - *global_setup
-    - apt-get install jq -yy
-    - |
-      cd ${CI_BUILDS_DIR}
-      export mr_commits=$(curl -s \
-        -H "Private-Token: ${GITLAB_API_KEY}" \
-        "${CI_API_V4_URL}/projects/${CI_MERGE_REQUEST_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/commits" \
-        | jq length)
-    - |
-      rm -rf ${GIT_CLONE_PATH}
-      git clone ${CI_MERGE_REQUEST_SOURCE_PROJECT_URL}.git \
-        -b ${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME} \
-        --depth $((mr_commits+1)) \
-      ${GIT_CLONE_PATH}
-  only:
-    refs:
-      - merge_requests
-    variables:
-      - $GITLAB_API_KEY # set from your fork by going to "Settings -> CI / CD -> (Expand) Variables -> Add variables"
-  except:
-    refs:
-      - pipelines
-    variables:
-      - $CI_MERGE_REQUEST_TITLE =~ /skip-lint|^WIP\:/
+lint:common:
+  extends: .lint_common
+  stage: lint
 
-lint:
-  extends: .lint_base
-  before_script:
-    - *global_setup
-    - git fetch origin ${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME} --unshallow || true
-    - 'git log --decorate --oneline --graph --since="1 weeks" HEAD kaios/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}'
-    - 'export mr_commits=$(git rev-list kaios/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}.. --count)'
-  only:
-    - merge_requests
-  except:
-    refs:
-      - pipelines
-    variables:
-      - $CI_MERGE_REQUEST_TITLE =~ /skip-lint|^WIP\:/
-      - $GITLAB_API_KEY
+lint:cpp:
+  extends: .lint_cpp
+  stage: lint
 
-.get_mozbuild: &get_mozbuild
-  - |
-    case "${PREFERRED_MOZBUILD_VER}" in
-    "3"|"4"|"5")
-      if [ "$(cat ${HOME}/.mozbuild/ver)" != "${PREFERRED_MOZBUILD_VER}" ]; then
-        echo -e "\033[1;33mNeed mozbuild at ver ${PREFERRED_MOZBUILD_VER}.\033[0m"
-        remote_mozbuild="https://packages.preprod.kaiostech.com/ndk/v${PREFERRED_MOZBUILD_VER}/mozbuild.tar.bz2"
-        if ${CI_USE_MIRROR}; then
-          local_mozbuild="${LOCAL_GIT_MIRROR}/ndk/v${PREFERRED_MOZBUILD_VER}/mozbuild.tar.bz2"
-          if [[ -f ${local_mozbuild} ]]; then
-            echo "Directly decompress ${local_mozbuild}..."
-            tar xjf ${local_mozbuild} -C ${HOME}/
-          else
-            echo "${local_mozbuild} not found, try curl"
-            curl ${remote_mozbuild} | tar -C ${HOME}/ -xj
-          fi
-        else
-          curl ${remote_mozbuild} | tar -C ${HOME}/ -xj
-        fi
-      fi
-      ;;
-    *)
-      echo "Unsupported mozbuild version."
-      exit 1
-      ;;
-    esac
+lint:python:
+  extends: .lint_python
+  stage: lint
 
-build:desktop:
-  variables:
-    DEFAULT_DOCKER_IMAGE: "${CI_REGISTRY}/re/kaios-build/next/desktop:1.49.0"
-    MOZ_OBJDIR: 'objdir-desktop-gecko'
-    MOZCONFIG: 'mozconfig-b2g-desktop'
-    PREFERRED_MOZBUILD_VER: '5'
-  stage: build
-  before_script:
-    - *global_setup
-    - *get_mozbuild
-    - *koost_setup
-  script:
-    - ./mach build
-    - ./mach package
-  artifacts:
-    expire_in: 1 week
-    paths:
-      - "objdir-desktop-gecko/dist/b2g-*"
-  only:
-    - merge_requests
-  except:
-    - pipelines
+lint:rs:
+  extends: .lint_rs
+  stage: lint
 
-build:emulator:
-  before_script:
-    - *global_setup
-    - git clone --depth 1 git@git.kaiostech.com:KaiOS/dummy/emulator-10.git > /dev/null 2>&1
-  variables:
-    GONK_PATH: "${CI_PROJECT_DIR}/emulator-10"
-    GECKO_OBJDIR: "${CI_PROJECT_DIR}/objdir-emulator-gecko"
-    GONK_PRODUCT_NAME: generic_x86_64
-    PLATFORM_VERSION: 29
-    TARGET_ARCH: x86_64
-    TARGET_ARCH_VARIANT: x86_64
-    TARGET_CPU_VARIANT: generic
-    BINSUFFIX: 64
-    B2G_DEBUG: 1
-  stage: build
-  script:
-    - ./build-b2g.sh
-    - ./build-b2g.sh package
-  only:
-    - merge_requests
-    - pipelines
-  except:
-    variables:
-      - $GIT_CLONE_PATH =~ /koost$/
+lint:yml:
+  extends: .lint_yml
+  stage: lint
 
 build:arm:
-  before_script:
-    - *global_setup
-    - *koost_setup
-  variables:
-    GONK_PATH: "${CI_BUILDS_DIR}/${CI_PROJECT_NAMESPACE}/gecko/gonk-q"
-    GECKO_OBJDIR: "${CI_BUILDS_DIR}/${CI_PROJECT_NAMESPACE}/gecko/objdir-arm-gecko"
-    GONK_PRODUCT_NAME: msm8937_32go
-    GET_FRAMEBUFFER_FORMAT_FROM_HWC: 1
-    PLATFORM_VERSION: 29
-    TARGET_ARCH: arm
-    TARGET_ARCH_VARIANT: armv8-a
-    TARGET_CPU_VARIANT: cortex-a53
-    ANDROID_NDK: '~/.mozbuild/android-ndk-r20b-canary'
-    PRODUCT_MANUFACTURER: QUALCOMM
+  extends:
+    - .build_arm
+    - .rules:unskippable
   stage: build
-  script:
-    - ./build-b2g.sh
-    - ./build-b2g.sh package
+
+build:desktop:
+  extends:
+    - .build_desktop
+    - .build:rules:delayed
+  stage: build
+
+build:emulator:
+  extends:
+    - .build_emulator
+    - .build:rules:delayed
+  stage: build
+
+production:desktop:
+  extends: .build_desktop
+  stage: deploy
+  variables:
+    GIT_CHECKOUT: 'true'
+    # releng/ci-util/b2g-desktop
+    B2G_DESKTOP_PROJECT_ID: 11099
+  # override the whole before_script since we don't need the typical preparartion of repository
+  interruptible: false
+  before_script:
+    - '[[ -f /entrypoint.sh ]] && /entrypoint.sh'
+    - |
+      if ${CI_USE_MIRROR}; then
+        git clone ${LOCAL_GIT_MIRROR}/KaiOS/koost.git -b ${CI_COMMIT_BRANCH}
+        echo -e "machine ${CI_SERVER_HOST}\nlogin gitlab-ci-token\npassword ${CI_JOB_TOKEN}" > ~/.netrc
+        git -C koost fetch ${CI_SERVER_URL}/KaiOS/koost.git ${CI_COMMIT_BRANCH}
+        git -C koost checkout FETCH_HEAD -f -q
+      else
+        git clone ${CI_SERVER_URL}/KaiOS/koost.git -b ${CI_COMMIT_BRANCH} --depth 1
+      fi
+    - git -C koost log -1
   after_script:
-    - ls -al ~/.cache/sccache || true
-  only:
-    - merge_requests
-    - pipelines
-  artifacts:
-    expire_in: 2 week
-    paths:
-      - "objdir-arm-gecko/dist/b2g-*"
-      - "push-b2g.sh"
+    - ./mach package
+    - base64 ${MOZ_OBJDIR}/dist/b2g*.tar.bz2 > b2g-desktop-b64
+    - |
+      cat <<-EOF >commit_message
+      ${CI_COMMIT_MESSAGE}
+
+      Source: ${CI_PROJECT_PATH}@${CI_COMMIT_SHORT_SHA}
+      EOF
+      cat commit_message
+    - |
+      curl --request POST --header "PRIVATE-TOKEN: ${B2G_DESKTOP_DEPLOY_KEY}" \
+        --form "branch=${CI_COMMIT_BRANCH}" \
+        --form "commit_message=$(cat commit_message)" \
+        --form "actions[][action]=update" \
+        --form "actions[][file_path]=b2g.linux-x86_64.tar.bz2" \
+        --form "actions[][content]=<./b2g-desktop-b64" \
+        --form "actions[][encoding]=base64" \
+        "${CI_API_V4_URL}/projects/${B2G_DESKTOP_PROJECT_ID}/repository/commits"
+  rules:
+    - if: '$CI_PROJECT_PATH == "KaiOS/gecko-dev" && $CI_COMMIT_BRANCH == "next"'

@@ -11,20 +11,25 @@
  */
 
 
-typedef (DOMString or DocumentFragment or Document) SanitizerInput;
-
-// unimplemented during prototyping
-dictionary SanitizerOptions {
-  sequence<DOMString> allowed;
-  sequence<DOMString> removed;
-};
+typedef (DocumentFragment or Document) SanitizerInput;
+typedef record<DOMString, sequence<DOMString>> AttributeMatchList;
 
 [Exposed=Window, SecureContext, Pref="dom.security.sanitizer.enabled"]
 interface Sanitizer {
   [Throws]
-  constructor(optional SanitizerOptions options = {}); // optionality still discussed in spec
+  constructor(optional SanitizerConfig sanitizerConfig = {});
   [Throws]
-  DocumentFragment sanitize(optional SanitizerInput input);
+  DocumentFragment sanitize(SanitizerInput input);
   [Throws]
-  DOMString sanitizeToString(optional SanitizerInput input);
+  Element? sanitizeFor(DOMString element, DOMString input);
+};
+
+dictionary SanitizerConfig {
+  sequence<DOMString> allowElements;
+  sequence<DOMString> blockElements;
+  sequence<DOMString> dropElements;
+  AttributeMatchList allowAttributes;
+  AttributeMatchList dropAttributes;
+  boolean allowCustomElements;
+  boolean allowComments;
 };

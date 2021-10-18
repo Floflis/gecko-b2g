@@ -7,6 +7,7 @@
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Promise.h"
+#include "mozilla/dom/RootedDictionary.h"
 #include "mozilla/dom/ToJSValue.h"
 #include "mozilla/dom/WebActivity.h"
 #include "mozilla/dom/WebActivityWorker.h"
@@ -83,8 +84,8 @@ already_AddRefed<nsIActivityProxy> WebActivity::GetOrCreateActivityProxy() {
 
 /*static*/
 already_AddRefed<WebActivity> WebActivity::Constructor(
-    const GlobalObject& aOwner, const WebActivityOptions& aOptions,
-    ErrorResult& aRv) {
+    const GlobalObject& aOwner, const nsAString& aName,
+    JS::Handle<JS::Value> aData, ErrorResult& aRv) {
   nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(aOwner.GetAsSupports());
 
   RefPtr<WebActivityImpl> impl;
@@ -103,7 +104,11 @@ already_AddRefed<WebActivity> WebActivity::Constructor(
     return nullptr;
   }
 
-  rv = activity->Initialize(aOwner, aOptions);
+  RootedDictionary<WebActivityOptions> options(aOwner.Context());
+  options.mName = aName;
+  options.mData = aData;
+
+  rv = activity->Initialize(aOwner, options);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     aRv.Throw(rv);
     return nullptr;

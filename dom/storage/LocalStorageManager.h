@@ -16,9 +16,9 @@
 #include "mozilla/dom/Storage.h"
 
 #include "nsTHashtable.h"
-#include "nsDataHashtable.h"
 #include "nsClassHashtable.h"
 #include "nsHashKeys.h"
+#include "nsTHashMap.h"
 
 namespace mozilla {
 
@@ -109,7 +109,7 @@ class LocalStorageManager final : public nsIDOMStorageManager,
                               Storage** aRetval);
 
   // Suffix->origin->cache map
-  typedef nsTHashtable<LocalStorageCacheHashKey> CacheOriginHashtable;
+  using CacheOriginHashtable = nsTHashtable<LocalStorageCacheHashKey>;
   nsClassHashtable<nsCStringHashKey, CacheOriginHashtable> mCaches;
 
   // If mLowDiskSpace is true it indicates a low device storage situation and
@@ -130,7 +130,7 @@ class LocalStorageManager final : public nsIDOMStorageManager,
 
  private:
   // Keeps usage cache objects for eTLD+1 scopes we have touched.
-  nsDataHashtable<nsCStringHashKey, RefPtr<StorageUsage> > mUsages;
+  nsTHashMap<nsCString, RefPtr<StorageUsage> > mUsages;
 
   friend class LocalStorageCache;
   friend class StorageDBChild;

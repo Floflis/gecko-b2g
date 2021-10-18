@@ -138,7 +138,8 @@ nsresult WinWifiScanner::GetAccessPointsFromWLAN(
                              &interface_list->InterfaceInfo[i].InterfaceGuid,
                              nullptr,  // Use all SSIDs.
                              DOT11_BSS_TYPE_UNUSED,
-                             false,    // bSecurityEnabled - unused
+                             false,    // bSecurityEnabled -
+                                       // unused
                              nullptr,  // reserved
                              &bss_list)) {
       continue;

@@ -1,14 +1,15 @@
 import { GlobalOverrider } from "test/unit/utils";
 import {
   MultiStageAboutWelcome,
+  SecondaryCTA,
+  StepsIndicator,
   WelcomeScreen,
 } from "content-src/aboutwelcome/components/MultiStageAboutWelcome";
+import { Themes } from "content-src/aboutwelcome/components/Themes";
 import React from "react";
 import { shallow, mount } from "enzyme";
-import {
-  DEFAULT_WELCOME_CONTENT,
-  AboutWelcomeUtils,
-} from "content-src/lib/aboutwelcome-utils";
+import { DEFAULT_WELCOME_CONTENT } from "aboutwelcome/lib/AboutWelcomeDefaults.jsm";
+import { AboutWelcomeUtils } from "content-src/lib/aboutwelcome-utils";
 
 describe("MultiStageAboutWelcome module", () => {
   let globals;
@@ -30,6 +31,8 @@ describe("MultiStageAboutWelcome module", () => {
       AWSendEventTelemetry: () => {},
       AWWaitForRegionChange: () => Promise.resolve(),
       AWGetRegion: () => Promise.resolve(),
+      AWWaitForMigrationClose: () => Promise.resolve(),
+      AWSelectTheme: () => Promise.resolve(),
     });
     sandbox = sinon.createSandbox();
   });
@@ -63,7 +66,7 @@ describe("MultiStageAboutWelcome module", () => {
       assert.calledTwice(impressionSpy);
       assert.equal(
         impressionSpy.firstCall.args[0],
-        `${DEFAULT_PROPS.message_id}_${DEFAULT_PROPS.screens[0].id}`
+        `${DEFAULT_PROPS.message_id}_${DEFAULT_PROPS.screens[0].order}_${DEFAULT_PROPS.screens[0].id}`
       );
       assert.equal(
         impressionSpy.secondCall.args[0],
@@ -110,7 +113,7 @@ describe("MultiStageAboutWelcome module", () => {
   describe("WelcomeScreen component", () => {
     describe("get started screen", () => {
       const startScreen = DEFAULT_WELCOME_CONTENT.screens.find(screen => {
-        return screen.id === "AW_GET_STARTED";
+        return screen.id === "AW_SET_DEFAULT";
       });
 
       const GET_STARTED_SCREEN_PROPS = {
@@ -131,26 +134,71 @@ describe("MultiStageAboutWelcome module", () => {
         assert.ok(wrapper.exists());
       });
 
-      it("should have primary and secondary button in the rendered input", () => {
-        const wrapper = mount(<WelcomeScreen {...GET_STARTED_SCREEN_PROPS} />);
-        assert.ok(wrapper.find(".primary"));
-        assert.isTrue(wrapper.find("div.secondary-cta").hasClass("top"));
-        assert.ok(wrapper.find(".secondary"));
-      });
-    });
-    describe("theme screen", () => {
-      const themeScreen = DEFAULT_WELCOME_CONTENT.screens.find(screen => {
-        return screen.id === "AW_CHOOSE_THEME";
+      it("should render secondary.top button", () => {
+        let SCREEN_PROPS = {
+          content: {
+            title: "Step",
+            secondary_button_top: {
+              text: "test",
+              label: "test label",
+            },
+          },
+          position: "top",
+        };
+        const wrapper = mount(<SecondaryCTA {...SCREEN_PROPS} />);
+        assert.ok(wrapper.find("div.secondary_button_top"));
       });
 
+      it("should render steps indicator", () => {
+        let SCREEN_PROPS = {
+          totalNumberOfScreens: 1,
+          order: 0,
+        };
+        <StepsIndicator {...SCREEN_PROPS} />;
+        const wrapper = mount(<StepsIndicator {...SCREEN_PROPS} />);
+        assert.ok(wrapper.find("div.indicator"));
+      });
+
+      it("should have a primary, secondary and secondary.top button in the rendered input", () => {
+        const wrapper = mount(<WelcomeScreen {...GET_STARTED_SCREEN_PROPS} />);
+        assert.ok(wrapper.find(".primary"));
+        assert.ok(wrapper.find(".secondary button[value='secondary_button']"));
+        assert.ok(
+          wrapper.find(".secondary button[value='secondary_button_top']")
+        );
+      });
+    });
+
+    describe("theme screen", () => {
       const THEME_SCREEN_PROPS = {
-        id: themeScreen.id,
+        id: "test-theme-screen",
         totalNumberofScreens: 1,
-        order: themeScreen.order,
-        content: themeScreen.content,
+        order: 0,
+        content: {
+          title: "test title",
+          subtitle: "test subtitle",
+          tiles: {
+            type: "theme",
+            action: {
+              theme: "<event>",
+            },
+            data: [
+              {
+                theme: "automatic",
+                label: "test-label",
+                tooltip: "test-tooltip",
+                description: "test-description",
+              },
+            ],
+          },
+          primary_button: {
+            action: {},
+            label: "test button",
+          },
+        },
         navigate: null,
         topSites: [],
-        messageId: `${DEFAULT_PROPS.message_id}_${themeScreen.id}`,
+        messageId: `${DEFAULT_PROPS.message_id}_"test-theme-screen"`,
         UTMTerm: DEFAULT_PROPS.utm_term,
         flowParams: null,
         activeTheme: "automatic",
@@ -162,24 +210,107 @@ describe("MultiStageAboutWelcome module", () => {
         assert.ok(wrapper.exists());
       });
 
-      it("should select this.props.activeTheme in the rendered input", () => {
-        const wrapper = shallow(<WelcomeScreen {...THEME_SCREEN_PROPS} />);
-
-        const selectedThemeInput = wrapper.find(".theme.selected input");
-        assert.strictEqual(
-          selectedThemeInput.prop("value"),
-          THEME_SCREEN_PROPS.activeTheme
-        );
-      });
-
       it("should check this.props.activeTheme in the rendered input", () => {
-        const wrapper = shallow(<WelcomeScreen {...THEME_SCREEN_PROPS} />);
+        const wrapper = shallow(<Themes {...THEME_SCREEN_PROPS} />);
 
         const selectedThemeInput = wrapper.find(".theme input[checked=true]");
         assert.strictEqual(
           selectedThemeInput.prop("value"),
           THEME_SCREEN_PROPS.activeTheme
         );
+      });
+    });
+    describe("import screen", () => {
+      const IMPORT_SCREEN_PROPS = {
+        content: {
+          title: "test title",
+          subtitle: "test subtitle",
+          help_text: {
+            text: "test help text",
+            position: "default",
+          },
+        },
+      };
+      it("should render ImportScreen", () => {
+        const wrapper = mount(<WelcomeScreen {...IMPORT_SCREEN_PROPS} />);
+        assert.ok(wrapper.exists());
+      });
+      it("should not have a primary or secondary button", () => {
+        const wrapper = mount(<WelcomeScreen {...IMPORT_SCREEN_PROPS} />);
+        assert.isFalse(wrapper.find(".primary").exists());
+        assert.isFalse(
+          wrapper.find(".secondary button[value='secondary_button']").exists()
+        );
+        assert.isFalse(
+          wrapper
+            .find(".secondary button[value='secondary_button_top']")
+            .exists()
+        );
+      });
+    });
+    describe("#handleAction", () => {
+      let SCREEN_PROPS;
+      let TEST_ACTION;
+      beforeEach(() => {
+        SCREEN_PROPS = {
+          content: {
+            title: "test title",
+            subtitle: "test subtitle",
+            primary_button: {
+              action: {},
+              label: "test button",
+            },
+          },
+          navigate: sandbox.stub(),
+          setActiveTheme: sandbox.stub(),
+          UTMTerm: "you_tee_emm",
+        };
+        TEST_ACTION = SCREEN_PROPS.content.primary_button.action;
+        sandbox.stub(AboutWelcomeUtils, "handleUserAction");
+      });
+      it("should handle navigate", () => {
+        TEST_ACTION.navigate = true;
+        const wrapper = mount(<WelcomeScreen {...SCREEN_PROPS} />);
+
+        wrapper.find(".primary").simulate("click");
+
+        assert.calledOnce(SCREEN_PROPS.navigate);
+      });
+      it("should handle theme", () => {
+        TEST_ACTION.theme = "test";
+        const wrapper = mount(<WelcomeScreen {...SCREEN_PROPS} />);
+
+        wrapper.find(".primary").simulate("click");
+
+        assert.calledWith(SCREEN_PROPS.setActiveTheme, "test");
+      });
+      it("should handle SHOW_FIREFOX_ACCOUNTS", () => {
+        TEST_ACTION.type = "SHOW_FIREFOX_ACCOUNTS";
+        const wrapper = mount(<WelcomeScreen {...SCREEN_PROPS} />);
+
+        wrapper.find(".primary").simulate("click");
+
+        assert.calledWith(AboutWelcomeUtils.handleUserAction, {
+          data: {
+            extraParams: {
+              utm_campaign: "firstrun",
+              utm_medium: "referral",
+              utm_source: "activity-stream",
+              utm_term: "aboutwelcome-you_tee_emm-screen",
+            },
+          },
+          type: "SHOW_FIREFOX_ACCOUNTS",
+        });
+      });
+      it("should handle SHOW_MIGRATION_WIZARD", () => {
+        TEST_ACTION.type = "SHOW_MIGRATION_WIZARD";
+        const wrapper = mount(<WelcomeScreen {...SCREEN_PROPS} />);
+
+        wrapper.find(".primary").simulate("click");
+
+        assert.calledWith(AboutWelcomeUtils.handleUserAction, {
+          type: "SHOW_MIGRATION_WIZARD",
+        });
       });
     });
   });

@@ -8,6 +8,7 @@
 
 #include "nsContentSecurityUtils.h"
 
+#include "mozilla/Components.h"
 #include "mozilla/dom/nsMixedContentBlocker.h"
 #include "mozilla/dom/ScriptSettings.h"
 #include "nsComponentManagerUtils.h"
@@ -20,6 +21,7 @@
 #include "nsNetUtil.h"
 #include "nsSandboxFlags.h"
 #if defined(XP_WIN)
+#  include "mozilla/WinHeaderOnlyUtils.h"
 #  include "WinUtils.h"
 #  include <wininet.h>
 #endif
@@ -27,6 +29,7 @@
 #include "FramingChecker.h"
 #include "js/Array.h"  // JS::GetArrayLength
 #include "js/ContextOptions.h"
+#include "js/PropertyAndElement.h"  // JS_GetElement
 #include "js/RegExp.h"
 #include "js/RegExpFlags.h"  // JS::RegExpFlags
 #include "mozilla/ExtensionPolicyService.h"
@@ -49,6 +52,10 @@ using namespace mozilla::dom;
 using namespace mozilla::Telemetry;
 
 extern mozilla::LazyLogModule sCSMLog;
+extern Atomic<bool, mozilla::Relaxed> sJSHacksChecked;
+extern Atomic<bool, mozilla::Relaxed> sJSHacksPresent;
+extern Atomic<bool, mozilla::Relaxed> sCSSHacksChecked;
+extern Atomic<bool, mozilla::Relaxed> sCSSHacksPresent;
 extern Atomic<bool, mozilla::Relaxed> sTelemetryEventEnabled;
 
 // Helper function for IsConsideredSameOriginForUIR which makes
@@ -199,6 +206,66 @@ nsresult RegexEval(const nsAString& aPattern, const nsAString& aString,
 }
 
 /*
+ * MOZ_CRASH_UNSAFE_PRINTF has a sPrintfCrashReasonSize-sized buffer. We need
+ * to make sure we don't exceed it.  These functions perform this check and
+ * munge things for us.
+ *
+ */
+
+/*
+ * Destructively truncates a string to fit within the limit
+ */
+char* nsContentSecurityUtils::SmartFormatCrashString(const char* str) {
+  return nsContentSecurityUtils::SmartFormatCrashString(strdup(str));
+}
+
+char* nsContentSecurityUtils::SmartFormatCrashString(char* str) {
+  auto str_len = strlen(str);
+
+  if (str_len > sPrintfCrashReasonSize) {
+    str[sPrintfCrashReasonSize - 1] = '\0';
+    str_len = strlen(str);
+  }
+  MOZ_RELEASE_ASSERT(sPrintfCrashReasonSize > str_len);
+
+  return str;
+}
+
+/*
+ * Destructively truncates two strings to fit within the limit.
+ * format_string is a format string containing two %s entries
+ * The second string will be truncated to the _last_ 25 characters
+ * The first string will be truncated to the remaining limit.
+ */
+nsCString nsContentSecurityUtils::SmartFormatCrashString(
+    const char* part1, const char* part2, const char* format_string) {
+  return SmartFormatCrashString(strdup(part1), strdup(part2), format_string);
+}
+
+nsCString nsContentSecurityUtils::SmartFormatCrashString(
+    char* part1, char* part2, const char* format_string) {
+  auto part1_len = strlen(part1);
+  auto part2_len = strlen(part2);
+
+  auto constant_len = strlen(format_string) - 4;
+
+  if (part1_len + part2_len + constant_len > sPrintfCrashReasonSize) {
+    if (part2_len > 25) {
+      part2 += (part2_len - 25);
+    }
+    part2_len = strlen(part2);
+
+    part1[sPrintfCrashReasonSize - (constant_len + part2_len + 1)] = '\0';
+    part1_len = strlen(part1);
+  }
+  MOZ_RELEASE_ASSERT(sPrintfCrashReasonSize >
+                     constant_len + part1_len + part2_len);
+
+  auto parts = nsPrintfCString(format_string, part1, part2);
+  return std::move(parts);
+}
+
+/*
  * Telemetry Events extra data only supports 80 characters, so we optimize the
  * filename to be smaller and collect more data.
  */
@@ -242,9 +309,13 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
   static constexpr auto kResourceURI = "resourceuri"_ns;
   static constexpr auto kBlobUri = "bloburi"_ns;
   static constexpr auto kDataUri = "dataurl"_ns;
+  static constexpr auto kAboutUri = "abouturi"_ns;
+  static constexpr auto kDataUriWebExtCStyle =
+      "dataurl-extension-contentstyle"_ns;
   static constexpr auto kSingleString = "singlestring"_ns;
-  static constexpr auto kMozillaExtension = "mozillaextension"_ns;
-  static constexpr auto kOtherExtension = "otherextension"_ns;
+  static constexpr auto kMozillaExtensionFile = "mozillaextension_file"_ns;
+  static constexpr auto kOtherExtensionFile = "otherextension_file"_ns;
+  static constexpr auto kExtensionURI = "extension_uri"_ns;
   static constexpr auto kSuspectedUserChromeJS = "suspectedUserChromeJS"_ns;
 #if defined(XP_WIN)
   static constexpr auto kSanitizedWindowsURL = "sanitizedWindowsURL"_ns;
@@ -274,6 +345,9 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
   if (StringBeginsWith(fileName, u"blob:"_ns)) {
     return FilenameTypeAndDetails(kBlobUri, Nothing());
   }
+  if (StringBeginsWith(fileName, u"data:text/css;extension=style;"_ns)) {
+    return FilenameTypeAndDetails(kDataUriWebExtCStyle, Nothing());
+  }
   if (StringBeginsWith(fileName, u"data:"_ns)) {
     return FilenameTypeAndDetails(kDataUri, Nothing());
   }
@@ -283,7 +357,7 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
     return FilenameTypeAndDetails(kOtherWorker, Nothing());
   }
 
-  // Extension
+  // Extension as loaded via a file://
   bool regexMatch;
   nsTArray<nsString> regexResults;
   nsresult rv = RegexEval(kExtensionRegex, fileName, /* aOnlyMatch = */ false,
@@ -293,8 +367,8 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
   }
   if (regexMatch) {
     nsCString type = StringEndsWith(regexResults[2], u"mozilla.org.xpi"_ns)
-                         ? kMozillaExtension
-                         : kOtherExtension;
+                         ? kMozillaExtensionFile
+                         : kOtherExtensionFile;
     auto& extensionNameAndPath =
         Substring(regexResults[0], ArrayLength("extensions/") - 1);
     return FilenameTypeAndDetails(type,
@@ -320,6 +394,74 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
     return FilenameTypeAndDetails(kSuspectedUserChromeJS, Nothing());
   }
 
+  // Something loaded via an about:// URI.
+  if (StringBeginsWith(fileName, u"about:"_ns)) {
+    // Remove any querystrings and such
+    long int desired_length = fileName.Length();
+    long int possible_new_length = 0;
+
+    possible_new_length = fileName.FindChar('?');
+    if (possible_new_length != -1 && possible_new_length < desired_length) {
+      desired_length = possible_new_length;
+    }
+
+    possible_new_length = fileName.FindChar('#');
+    if (possible_new_length != -1 && possible_new_length < desired_length) {
+      desired_length = possible_new_length;
+    }
+
+    auto subFileName = Substring(fileName, 0, desired_length);
+
+    return FilenameTypeAndDetails(kAboutUri, Some(subFileName));
+  }
+
+  // Something loaded via a moz-extension:// URI.
+  if (StringBeginsWith(fileName, u"moz-extension://"_ns)) {
+    if (!collectAdditionalExtensionData) {
+      return FilenameTypeAndDetails(kExtensionURI, Nothing());
+    }
+
+    nsAutoString sanitizedPathAndScheme;
+    sanitizedPathAndScheme.Append(u"moz-extension://["_ns);
+
+    nsCOMPtr<nsIURI> uri;
+    nsresult rv = NS_NewURI(getter_AddRefs(uri), fileName);
+    if (NS_FAILED(rv)) {
+      // Return after adding ://[ so we know we failed here.
+      return FilenameTypeAndDetails(kExtensionURI,
+                                    Some(sanitizedPathAndScheme));
+    }
+
+    mozilla::extensions::URLInfo url(uri);
+    if (NS_IsMainThread()) {
+      // EPS is only usable on main thread
+      auto* policy =
+          ExtensionPolicyService::GetSingleton().GetByHost(url.Host());
+      if (policy) {
+        nsString addOnId;
+        policy->GetId(addOnId);
+
+        sanitizedPathAndScheme.Append(addOnId);
+        sanitizedPathAndScheme.Append(u": "_ns);
+        sanitizedPathAndScheme.Append(policy->Name());
+        sanitizedPathAndScheme.Append(u"]"_ns);
+
+        if (policy->IsPrivileged()) {
+          sanitizedPathAndScheme.Append(u"P=1"_ns);
+        } else {
+          sanitizedPathAndScheme.Append(u"P=0"_ns);
+        }
+      } else {
+        sanitizedPathAndScheme.Append(u"failed finding addon by host]"_ns);
+      }
+    } else {
+      sanitizedPathAndScheme.Append(u"can't get addon off main thread]"_ns);
+    }
+
+    sanitizedPathAndScheme.Append(url.FilePath());
+    return FilenameTypeAndDetails(kExtensionURI, Some(sanitizedPathAndScheme));
+  }
+
 #if defined(XP_WIN)
   auto flags = mozilla::widget::WinUtils::PathTransformFlags::Default |
                mozilla::widget::WinUtils::PathTransformFlags::RequireFilePath;
@@ -336,38 +478,6 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
       if (sanitizedPathAndScheme == u"file"_ns) {
         sanitizedPathAndScheme.Append(u"://.../"_ns);
         sanitizedPathAndScheme.Append(strSanitizedPath);
-      } else if (sanitizedPathAndScheme == u"moz-extension"_ns &&
-                 collectAdditionalExtensionData) {
-        sanitizedPathAndScheme.Append(u"://["_ns);
-
-        nsCOMPtr<nsIURI> uri;
-        nsresult rv = NS_NewURI(getter_AddRefs(uri), fileName);
-        if (NS_FAILED(rv)) {
-          // Return after adding ://[ so we know we failed here.
-          return FilenameTypeAndDetails(kSanitizedWindowsURL,
-                                        Some(sanitizedPathAndScheme));
-        }
-
-        mozilla::extensions::URLInfo url(uri);
-        if (NS_IsMainThread()) {
-          // EPS is only usable on main thread
-          auto* policy =
-              ExtensionPolicyService::GetSingleton().GetByHost(url.Host());
-          if (policy) {
-            nsString addOnId;
-            policy->GetId(addOnId);
-
-            sanitizedPathAndScheme.Append(addOnId);
-            sanitizedPathAndScheme.Append(u": "_ns);
-            sanitizedPathAndScheme.Append(policy->Name());
-          } else {
-            sanitizedPathAndScheme.Append(u"failed finding addon by host"_ns);
-          }
-        } else {
-          sanitizedPathAndScheme.Append(u"can't get addon off main thread"_ns);
-        }
-        sanitizedPathAndScheme.Append(u"]"_ns);
-        sanitizedPathAndScheme.Append(url.FilePath());
       }
       return FilenameTypeAndDetails(kSanitizedWindowsURL,
                                     Some(sanitizedPathAndScheme));
@@ -380,6 +490,70 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
 
   return FilenameTypeAndDetails(kOther, Nothing());
 }
+
+#ifdef NIGHTLY_BUILD
+// Crash String must be safe from a telemetry point of view.
+// This will be ensured when this function is used.
+void PossiblyCrash(const char* aPrefSuffix, const char* aUnsafeCrashString,
+                   const nsCString& aSafeCrashString) {
+  if (MOZ_UNLIKELY(!XRE_IsParentProcess())) {
+    // We only crash in the parent (unfortunately) because it's
+    // the only place we can be sure that our only-crash-once
+    // pref-writing works.
+    return;
+  }
+  if (!NS_IsMainThread()) {
+    // Setting a pref off the main thread causes ContentParent to observe the
+    // pref set, resulting in a Release Assertion when it tries to update the
+    // child off main thread. So don't do any of this off main thread. (Which
+    // is a bit of a blind spot for this purpose...)
+    return;
+  }
+
+  nsCString previous_crashes("security.crash_tracking.");
+  previous_crashes.Append(aPrefSuffix);
+  previous_crashes.Append(".prevCrashes");
+
+  nsCString max_crashes("security.crash_tracking.");
+  max_crashes.Append(aPrefSuffix);
+  max_crashes.Append(".maxCrashes");
+
+  int32_t numberOfPreviousCrashes = 0;
+  numberOfPreviousCrashes = Preferences::GetInt(previous_crashes.get(), 0);
+
+  int32_t maxAllowableCrashes = 0;
+  maxAllowableCrashes = Preferences::GetInt(max_crashes.get(), 0);
+
+  if (numberOfPreviousCrashes >= maxAllowableCrashes) {
+    return;
+  }
+
+  nsresult rv =
+      Preferences::SetInt(previous_crashes.get(), ++numberOfPreviousCrashes);
+  if (NS_FAILED(rv)) {
+    return;
+  }
+
+  nsCOMPtr<nsIPrefService> prefsCom = Preferences::GetService();
+  Preferences* prefs = static_cast<Preferences*>(prefsCom.get());
+
+  if (!prefs->AllowOffMainThreadSave()) {
+    // Do not crash if we can't save prefs off the main thread
+    return;
+  }
+
+  rv = prefs->SavePrefFileBlocking();
+  if (!NS_FAILED(rv)) {
+    // We can only use this in local builds where we don't send stuff up to the
+    // crash reporter because it has user private data.
+    // MOZ_CRASH_UNSAFE_PRINTF("%s",
+    //                        nsContentSecurityUtils::SmartFormatCrashString(aUnsafeCrashString));
+    MOZ_CRASH_UNSAFE_PRINTF(
+        "%s",
+        nsContentSecurityUtils::SmartFormatCrashString(aSafeCrashString.get()));
+  }
+}
+#endif
 
 class EvalUsageNotificationRunnable final : public Runnable {
  public:
@@ -421,7 +595,7 @@ bool nsContentSecurityUtils::IsEvalAllowed(JSContext* cx,
       // Test-only third-party library
       "resource://testing-common/sinon-7.2.7.js"_ns,
       // Test-only third-party library
-      "resource://testing-common/ajv-4.1.1.js"_ns,
+      "resource://testing-common/ajv-6.12.6.js"_ns,
       // Test-only utility
       "resource://testing-common/content-task.js"_ns,
 
@@ -474,30 +648,14 @@ bool nsContentSecurityUtils::IsEvalAllowed(JSContext* cx,
     return true;
   }
 
-  // We only perform a check of this preference on the Main Thread
-  // (because a String-based preference check is only safe on Main Thread.)
-  // The consequence of this is that if a user is using userChromeJS _and_
-  // the scripts they use start a worker and that worker uses eval - we will
-  // enter this function, skip over this pref check that would normally cause
-  // us to allow the eval usage - and we will block it.
-  // While not ideal, we do not officially support userChromeJS, and hopefully
-  // the usage of workers and eval in workers is even lower that userChromeJS
-  // usage.
-  if (NS_IsMainThread()) {
-    // This preference is a file used for autoconfiguration of Firefox
-    // by administrators. It has also been (ab)used by the userChromeJS
-    // project to run legacy-style 'extensions', some of which use eval,
-    // all of which run in the System Principal context.
-    nsAutoString jsConfigPref;
-    Preferences::GetString("general.config.filename", jsConfigPref);
-    if (!jsConfigPref.IsEmpty()) {
-      MOZ_LOG(sCSMLog, LogLevel::Debug,
-              ("Allowing eval() %s because of "
-               "general.config.filename",
-               (aIsSystemPrincipal ? "with System Principal"
-                                   : "in parent process")));
-      return true;
-    }
+  DetectJsHacks();
+  if (MOZ_UNLIKELY(sJSHacksPresent)) {
+    MOZ_LOG(
+        sCSMLog, LogLevel::Debug,
+        ("Allowing eval() %s because some "
+         "JS hacks may be present.",
+         (aIsSystemPrincipal ? "with System Principal" : "in parent process")));
+    return true;
   }
 
   if (XRE_IsE10sParentProcess() &&
@@ -555,29 +713,20 @@ bool nsContentSecurityUtils::IsEvalAllowed(JSContext* cx,
   }
 
   // Log to MOZ_LOG
-  MOZ_LOG(sCSMLog, LogLevel::Warning,
+  MOZ_LOG(sCSMLog, LogLevel::Error,
           ("Blocking eval() %s from file %s and script "
            "provided %s",
            (aIsSystemPrincipal ? "with System Principal" : "in parent process"),
            fileName.get(), NS_ConvertUTF16toUTF8(aScript).get()));
 
   // Maybe Crash
-#ifdef DEBUG
-  // MOZ_CRASH_UNSAFE_PRINTF gives us at most 1024 characters to print.
-  // The given string literal leaves us with ~950, so I'm leaving
-  // each 475 for fileName and aScript each.
-  if (fileName.Length() > 475) {
-    fileName.SetLength(475);
-  }
-  nsAutoCString trimmedScript = NS_ConvertUTF16toUTF8(aScript);
-  if (trimmedScript.Length() > 475) {
-    trimmedScript.SetLength(475);
-  }
-  MOZ_CRASH_UNSAFE_PRINTF(
-      "Blocking eval() %s from file %s and script provided "
-      "%s",
-      (aIsSystemPrincipal ? "with System Principal" : "in parent process"),
-      fileName.get(), trimmedScript.get());
+#if defined(DEBUG) || defined(FUZZING)
+  auto crashString = nsContentSecurityUtils::SmartFormatCrashString(
+      NS_ConvertUTF16toUTF8(aScript).get(), fileName.get(),
+      (aIsSystemPrincipal
+           ? "Blocking eval() with System Principal with script %s from file %s"
+           : "Blocking eval() in parent process with script %s from file %s"));
+  MOZ_CRASH_UNSAFE_PRINTF("%s", crashString.get());
 #endif
 
   return false;
@@ -623,7 +772,7 @@ void nsContentSecurityUtils::NotifyEvalUsage(bool aIsSystemPrincipal,
   }
   nsCOMPtr<nsIStringBundle> bundle;
   nsCOMPtr<nsIStringBundleService> stringService =
-      mozilla::services::GetStringBundleService();
+      mozilla::components::StringBundle::Service();
   if (!stringService) {
     return;
   }
@@ -649,6 +798,70 @@ void nsContentSecurityUtils::NotifyEvalUsage(bool aIsSystemPrincipal,
     return;
   }
   console->LogMessage(error);
+}
+
+/* static */
+void nsContentSecurityUtils::DetectJsHacks() {
+  // We can only perform the check of this preference on the Main Thread
+  // (because a String-based preference check is only safe on Main Thread.)
+  // In theory, it would be possible that a separate thread could get here
+  // before the main thread, resulting in the other thread not being able to
+  // perform this check, but the odds of that are small (and probably zero.)
+  if (!NS_IsMainThread()) {
+    return;
+  }
+  // No need to check again.
+  if (MOZ_LIKELY(sJSHacksChecked || sJSHacksPresent)) {
+    return;
+  }
+  // This preference is required by bootstrapLoader.xpi, which is an
+  // alternate way to load legacy-style extensions. It only works on
+  // DevEdition/Nightly.
+  bool xpinstallSignatures =
+      Preferences::GetBool("xpinstall.signatures.required", false);
+  if (!xpinstallSignatures) {
+    sJSHacksPresent = true;
+    sJSHacksChecked = true;
+    return;
+  }
+
+  // This preference is a file used for autoconfiguration of Firefox
+  // by administrators. It has also been (ab)used by the userChromeJS
+  // project to run legacy-style 'extensions', some of which use eval,
+  // all of which run in the System Principal context.
+  nsAutoString jsConfigPref;
+  nsresult rv = Preferences::GetString("general.config.filename", jsConfigPref);
+  if (NS_FAILED(rv)) {
+    return;
+  }
+  if (!jsConfigPref.IsEmpty()) {
+    sJSHacksPresent = true;
+  }
+
+  sJSHacksChecked = true;
+}
+
+/* static */
+void nsContentSecurityUtils::DetectCssHacks() {
+  // We can only perform the check of this preference on the Main Thread
+  // It's possible that this function may therefore race and we expect the
+  // caller to ensure that the checks have actually happened.
+  if (!NS_IsMainThread()) {
+    return;
+  }
+  // No need to check again.
+  if (MOZ_LIKELY(sCSSHacksChecked || sCSSHacksPresent)) {
+    return;
+  }
+
+  // This preference is a bool to see if userChrome css is loaded
+  bool customStylesPresent = Preferences::GetBool(
+      "toolkit.legacyUserProfileCustomizations.stylesheets", false);
+  if (customStylesPresent) {
+    sCSSHacksPresent = true;
+  }
+
+  sCSSHacksChecked = true;
 }
 
 /* static */
@@ -882,6 +1095,9 @@ void nsContentSecurityUtils::AssertAboutPageHasCSP(Document* aDocument) {
     "about:printpreview"_ns,
     // about:logo just displays the firefox logo -> no CSP
     "about:logo"_ns,
+    // about:sync is a special mozilla-signed developer addon with low usage ->
+    // no CSP
+    "about:sync"_ns,
 #  if defined(ANDROID)
     "about:config"_ns,
 #  endif
@@ -920,14 +1136,13 @@ void nsContentSecurityUtils::AssertAboutPageHasCSP(Document* aDocument) {
   MOZ_ASSERT(!foundWorkerSrc,
              "about: page must not contain a CSP including worker-src");
 
-  // addons, preferences, debugging, newinstall, ion, devtools all have
-  // to allow some remote web resources
+  // addons, preferences, debugging, ion, devtools all have to allow some
+  // remote web resources
   MOZ_ASSERT(!foundWebScheme ||
                  StringBeginsWith(aboutSpec, "about:preferences"_ns) ||
                  StringBeginsWith(aboutSpec, "about:addons"_ns) ||
                  StringBeginsWith(aboutSpec, "about:newtab"_ns) ||
                  StringBeginsWith(aboutSpec, "about:debugging"_ns) ||
-                 StringBeginsWith(aboutSpec, "about:newinstall"_ns) ||
                  StringBeginsWith(aboutSpec, "about:ion"_ns) ||
                  StringBeginsWith(aboutSpec, "about:compat"_ns) ||
                  StringBeginsWith(aboutSpec, "about:logins"_ns) ||
@@ -936,7 +1151,8 @@ void nsContentSecurityUtils::AssertAboutPageHasCSP(Document* aDocument) {
 #ifdef MOZ_B2G
                  StringBeginsWith(aboutSpec, "about:neterror"_ns) ||
 #endif
-                 StringBeginsWith(aboutSpec, "about:devtools"_ns),
+                 StringBeginsWith(aboutSpec, "about:devtools"_ns) ||
+                 StringBeginsWith(aboutSpec, "about:pocket-saved"_ns),
              "about: page must not contain a CSP including a web scheme");
 
   if (aDocument->IsExtensionPage()) {
@@ -986,7 +1202,6 @@ void nsContentSecurityUtils::AssertAboutPageHasCSP(Document* aDocument) {
 /* static */
 bool nsContentSecurityUtils::ValidateScriptFilename(const char* aFilename,
                                                     bool aIsSystemRealm) {
-  static Maybe<bool> sGeneralConfigFilenameSet;
   // If the pref is permissive, allow everything
   if (StaticPrefs::security_allow_parent_unrestricted_js_loads()) {
     return true;
@@ -997,30 +1212,33 @@ bool nsContentSecurityUtils::ValidateScriptFilename(const char* aFilename,
     return true;
   }
 
-  // We only perform a check of this preference on the Main Thread
-  // (because a String-based preference check is only safe on Main Thread.)
-  // The consequence of this is that if a user is using userChromeJS _and_
-  // the scripts they use start a worker - we will enter this function,
-  // skip over this pref check that would normally cause us to allow the
-  // load - and we will block it.
-  // While not ideal, we do not officially support userChromeJS, and hopefully
-  // the usage of workers is even lower than userChromeJS usage.
-  if (NS_IsMainThread()) {
-    // This preference is a file used for autoconfiguration of Firefox
-    // by administrators. It will also run in the parent process and throw
-    // assumptions about what can run where out of the window.
-    if (!sGeneralConfigFilenameSet.isSome()) {
-      nsAutoString jsConfigPref;
-      Preferences::GetString("general.config.filename", jsConfigPref);
-      sGeneralConfigFilenameSet.emplace(!jsConfigPref.IsEmpty());
-    }
-    if (sGeneralConfigFilenameSet.value()) {
-      MOZ_LOG(sCSMLog, LogLevel::Debug,
-              ("Allowing a javascript load of %s because "
-               "general.config.filename is set",
-               aFilename));
+  // If we have allowed eval (because of a user configuration or more
+  // likely a test has requested it), and the script is an eval, allow it.
+  NS_ConvertUTF8toUTF16 filenameU(aFilename);
+  if (StaticPrefs::security_allow_eval_with_system_principal() ||
+      StaticPrefs::security_allow_eval_in_parent_process()) {
+    if (StringEndsWith(filenameU, u"> eval"_ns)) {
       return true;
     }
+  }
+
+  DetectJsHacks();
+
+  if (MOZ_UNLIKELY(!sJSHacksChecked)) {
+    MOZ_LOG(
+        sCSMLog, LogLevel::Debug,
+        ("Allowing a javascript load of %s because "
+         "we have not yet been able to determine if JS hacks may be present",
+         aFilename));
+    return true;
+  }
+
+  if (MOZ_UNLIKELY(sJSHacksPresent)) {
+    MOZ_LOG(sCSMLog, LogLevel::Debug,
+            ("Allowing a javascript load of %s because "
+             "some JS hacks may be present",
+             aFilename));
+    return true;
   }
 
   if (XRE_IsE10sParentProcess() &&
@@ -1032,7 +1250,6 @@ bool nsContentSecurityUtils::ValidateScriptFilename(const char* aFilename,
     return true;
   }
 
-  NS_ConvertUTF8toUTF16 filenameU(aFilename);
   if (StringBeginsWith(filenameU, u"chrome://"_ns)) {
     // If it's a chrome:// url, allow it
     return true;
@@ -1055,8 +1272,55 @@ bool nsContentSecurityUtils::ValidateScriptFilename(const char* aFilename,
     return true;
   }
 
+  auto kAllowedExtensionScriptFilenames = {
+      u"/experiment-apis/translateUi/TranslationBrowserChromeUi.js"_ns,
+      u"/experiment-apis/translateUi/TranslationBrowserChromeUiManager.js"_ns,
+      u"/experiment-apis/translateUi/content/translation-notification.js"_ns};
+
+  if (StringBeginsWith(filenameU, u"moz-extension://"_ns)) {
+    nsCOMPtr<nsIURI> uri;
+    nsresult rv = NS_NewURI(getter_AddRefs(uri), aFilename);
+    if (!NS_FAILED(rv) && NS_IsMainThread()) {
+      mozilla::extensions::URLInfo url(uri);
+      auto* policy =
+          ExtensionPolicyService::GetSingleton().GetByHost(url.Host());
+
+      if (policy && policy->IsPrivileged()) {
+        bool matchedAnAllowlist = false;
+        for (auto allowedFilename : kAllowedExtensionScriptFilenames) {
+          if (StringBeginsWith(url.FilePath(), allowedFilename)) {
+            matchedAnAllowlist = true;
+          }
+        }
+
+        if (matchedAnAllowlist) {
+          MOZ_LOG(sCSMLog, LogLevel::Debug,
+                  ("Allowing a javascript load of %s because the web extension "
+                   "it is "
+                   "associated with is privileged.",
+                   aFilename));
+          return true;
+        }
+      }
+    }
+  }
+
+  auto kAllowedFilenames = {
+      // Allow through the injection provided by about:sync addon
+      u"data:,new function() {\n  Components.utils.import(\"chrome://aboutsync/content/AboutSyncRedirector.js\");\n  AboutSyncRedirector.register();\n}"_ns,
+      // Until 371900 is fixed, we need to do something about about:downloads
+      // and this is the most reasonable. See 1727770
+      u"about:downloads"_ns,
+      // We think this is the same problem as about:downloads
+      u"about:preferences"_ns};
+  for (auto allowedFilename : kAllowedFilenames) {
+    if (filenameU == allowedFilename) {
+      return true;
+    }
+  }
+
   // Log to MOZ_LOG
-  MOZ_LOG(sCSMLog, LogLevel::Info,
+  MOZ_LOG(sCSMLog, LogLevel::Error,
           ("ValidateScriptFilename System:%i %s\n", (aIsSystemRealm ? 1 : 0),
            aFilename));
 
@@ -1082,6 +1346,25 @@ bool nsContentSecurityUtils::ValidateScriptFilename(const char* aFilename,
   }
   Telemetry::RecordEvent(eventType, mozilla::Some(fileNameTypeAndDetails.first),
                          extra);
+
+#ifdef NIGHTLY_BUILD
+  // Cause a crash (if we've never crashed before and we can ensure we won't do
+  // it again.)
+  // The details in the second arg, passed to UNSAFE_PRINTF, are also included
+  // in Event Telemetry and have received data review.
+  if (fileNameTypeAndDetails.second.isSome()) {
+    PossiblyCrash("js_load_1", aFilename,
+                  NS_ConvertUTF16toUTF8(fileNameTypeAndDetails.second.value()));
+  } else {
+    PossiblyCrash("js_load_1", aFilename, "(None)"_ns);
+  }
+#elif defined(FUZZING)
+  auto crashString = nsContentSecurityUtils::SmartFormatCrashString(
+      aFilename,
+      NS_ConvertUTF16toUTF8(fileNameTypeAndDetails.second.value()).get(),
+      "Blocking a script load %s from file %s");
+  MOZ_CRASH_UNSAFE_PRINTF("%s", crashString.get());
+#endif
 
   // Presently we are not enforcing any restrictions for the script filename,
   // we're only reporting Telemetry. In the future we will assert in debug

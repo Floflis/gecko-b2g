@@ -80,8 +80,8 @@ class MOZ_STACK_CLASS DragDataProducer {
                                             nsIContent** outImageOrLinkNode,
                                             bool* outDragSelectedText);
   static already_AddRefed<nsIContent> FindParentLinkNode(nsIContent* inNode);
-  static MOZ_MUST_USE nsresult GetAnchorURL(nsIContent* inNode,
-                                            nsAString& outURL);
+  [[nodiscard]] static nsresult GetAnchorURL(nsIContent* inNode,
+                                             nsAString& outURL);
   static void GetNodeString(nsIContent* inNode, nsAString& outNodeString);
   static void CreateLinkText(const nsAString& inURL, const nsAString& inText,
                              nsAString& outLinkText);
@@ -345,25 +345,18 @@ DragDataProducer::DragDataProducer(nsPIDOMWindowOuter* aWindow,
 //
 // FindParentLinkNode
 //
-// Finds the parent with the given link tag starting at |inNode|. If
+// Finds the parent with the given link tag starting at |aContent|. If
 // it gets up to the root without finding it, we stop looking and
 // return null.
 //
 already_AddRefed<nsIContent> DragDataProducer::FindParentLinkNode(
-    nsIContent* inNode) {
-  nsIContent* content = inNode;
-  if (!content) {
-    // That must have been the document node; nothing else to do here;
-    return nullptr;
-  }
-
-  for (; content; content = content->GetParent()) {
+    nsIContent* aContent) {
+  for (nsIContent* content = aContent; content;
+       content = content->GetFlattenedTreeParent()) {
     if (nsContentUtils::IsDraggableLink(content)) {
-      nsCOMPtr<nsIContent> ret = content;
-      return ret.forget();
+      return do_AddRef(content);
     }
   }
-
   return nullptr;
 }
 
@@ -468,8 +461,8 @@ nsresult DragDataProducer::GetImageData(imgIContainer* aImage,
         mimeInfo->GetPrimaryExtension(primaryExtension);
         if (!primaryExtension.IsEmpty()) {
           rv = NS_MutateURI(imgUrl)
-                   .Apply(NS_MutatorMethod(&nsIURLMutator::SetFileExtension,
-                                           primaryExtension, nullptr))
+                   .Apply(&nsIURLMutator::SetFileExtension, primaryExtension,
+                          nullptr)
                    .Finalize(imgUrl);
           NS_ENSURE_SUCCESS(rv, rv);
         }
@@ -588,7 +581,8 @@ nsresult DragDataProducer::Produce(DataTransfer* aDataTransfer, bool* aCanDrag,
       // Note that while <object> elements implement nsIFormControl, we should
       // really allow dragging them if they happen to be images.
       nsCOMPtr<nsIFormControl> form(do_QueryInterface(mTarget));
-      if (form && !mIsAltKeyPressed && form->ControlType() != NS_FORM_OBJECT) {
+      if (form && !mIsAltKeyPressed &&
+          form->ControlType() != FormControlType::Object) {
         *aCanDrag = false;
         return NS_OK;
       }

@@ -3,14 +3,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::super::shader_source::{OPTIMIZED_SHADERS, UNOPTIMIZED_SHADERS};
-use api::{ColorF, ImageDescriptor, ImageFormat};
+use api::{ColorF, ImageDescriptor, ImageFormat, Parameter, BoolParameter};
 use api::{MixBlendMode, ImageBufferKind, VoidPtrToSizeFn};
 use api::{CrashAnnotator, CrashAnnotation, CrashAnnotatorGuard};
 use api::units::*;
 use euclid::default::Transform3D;
 use gleam::gl;
 use crate::render_api::MemoryReport;
-use crate::internal_types::{FastHashMap, LayerIndex, RenderTargetInfo, Swizzle, SwizzleSettings};
+use crate::internal_types::{FastHashMap, RenderTargetInfo, Swizzle, SwizzleSettings};
 use crate::util::round_up_to_multiple;
 use crate::profiler;
 use log::Level;
@@ -20,7 +20,6 @@ use std::{
     cell::{Cell, RefCell},
     cmp,
     collections::hash_map::Entry,
-    fmt::Write,
     marker::PhantomData,
     mem,
     num::NonZeroUsize,
@@ -34,11 +33,11 @@ use std::{
     thread,
     time::Duration,
 };
-use uuid::Uuid;
 use webrender_build::shader::{
     ProgramSourceDigest, ShaderKind, ShaderVersion, build_shader_main_string,
     build_shader_prefix_string, do_build_shader_string, shader_source_from_file,
 };
+use malloc_size_of::MallocSizeOfOps;
 
 /// Sequence number for frames, as tracked by the device layer.
 #[derive(Debug, Copy, Clone, PartialEq, Ord, Eq, PartialOrd)]
@@ -73,7 +72,7 @@ pub enum DepthFunction {
 }
 
 #[repr(u32)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub enum TextureFilter {
@@ -154,9 +153,17 @@ fn depth_target_size_in_bytes(dimensions: &DeviceIntSize) -> usize {
 pub fn get_gl_target(target: ImageBufferKind) -> gl::GLuint {
     match target {
         ImageBufferKind::Texture2D => gl::TEXTURE_2D,
-        ImageBufferKind::Texture2DArray => gl::TEXTURE_2D_ARRAY,
         ImageBufferKind::TextureRect => gl::TEXTURE_RECTANGLE,
         ImageBufferKind::TextureExternal => gl::TEXTURE_EXTERNAL_OES,
+    }
+}
+
+pub fn from_gl_target(target: gl::GLuint) -> ImageBufferKind {
+    match target {
+        gl::TEXTURE_2D => ImageBufferKind::Texture2D,
+        gl::TEXTURE_RECTANGLE => ImageBufferKind::TextureRect,
+        gl::TEXTURE_EXTERNAL_OES => ImageBufferKind::TextureExternal,
+        _ => panic!("Unexpected target {:?}", target),
     }
 }
 
@@ -425,17 +432,16 @@ bitflags! {
 pub struct Texture {
     id: gl::GLuint,
     target: gl::GLuint,
-    layer_count: i32,
     format: ImageFormat,
     size: DeviceIntSize,
     filter: TextureFilter,
     flags: TextureFlags,
     /// An internally mutable swizzling state that may change between batches.
     active_swizzle: Cell<Swizzle>,
-    /// Framebuffer Objects, one for each layer of the texture, allowing this
-    /// texture to be rendered to. Empty if this texture is not used as a render
-    /// target.
-    fbos: Vec<FBOId>,
+    /// Framebuffer Object allowing this texture to be rendered to.
+    ///
+    /// Empty if this texture is not used as a render target or if a depth buffer is needed.
+    fbo: Option<FBOId>,
     /// Same as the above, but with a depth buffer attached.
     ///
     /// FBOs are cheap to create but expensive to reconfigure (since doing so
@@ -448,25 +454,18 @@ pub struct Texture {
     /// empty if this texture is not used as a render target _or_ if it is, but
     /// the depth buffer has never been requested.
     ///
-    /// Note that we always fill fbos, and then lazily create fbos_with_depth
+    /// Note that we always fill fbo, and then lazily create fbo_with_depth
     /// when needed. We could make both lazy (i.e. render targets would have one
     /// or the other, but not both, unless they were actually used in both
     /// configurations). But that would complicate a lot of logic in this module,
     /// and FBOs are cheap enough to create.
-    fbos_with_depth: Vec<FBOId>,
-    /// If we are unable to blit directly to a texture array then we need
-    /// an intermediate renderbuffer.
-    blit_workaround_buffer: Option<(RBOId, FBOId)>,
+    fbo_with_depth: Option<FBOId>,
     last_frame_used: GpuFrameId,
 }
 
 impl Texture {
     pub fn get_dimensions(&self) -> DeviceIntSize {
         self.size
-    }
-
-    pub fn get_layer_count(&self) -> i32 {
-        self.layer_count
     }
 
     pub fn get_format(&self) -> ImageFormat {
@@ -477,15 +476,12 @@ impl Texture {
         self.filter
     }
 
-    pub fn is_array(&self) -> bool {
-        match self.target {
-            gl::TEXTURE_2D_ARRAY => true,
-            _ => false
-        }
+    pub fn get_target(&self) -> ImageBufferKind {
+        from_gl_target(self.target)
     }
 
     pub fn supports_depth(&self) -> bool {
-        !self.fbos_with_depth.is_empty()
+        self.fbo_with_depth.is_some()
     }
 
     pub fn last_frame_used(&self) -> GpuFrameId {
@@ -497,7 +493,7 @@ impl Texture {
     }
 
     pub fn is_render_target(&self) -> bool {
-        !self.fbos.is_empty()
+        self.fbo.is_some()
     }
 
     /// Returns true if this texture was used within `threshold` frames of
@@ -516,20 +512,13 @@ impl Texture {
         &mut self.flags
     }
 
-    /// Returns the number of bytes (generally in GPU memory) that each layer of
-    /// this texture consumes.
-    pub fn layer_size_in_bytes(&self) -> usize {
-        assert!(self.layer_count > 0 || self.size.width + self.size.height == 0);
+    /// Returns the number of bytes (generally in GPU memory) that this texture
+    /// consumes.
+    pub fn size_in_bytes(&self) -> usize {
         let bpp = self.format.bytes_per_pixel() as usize;
         let w = self.size.width as usize;
         let h = self.size.height as usize;
         bpp * w * h
-    }
-
-    /// Returns the number of bytes (generally in GPU memory) that this texture
-    /// consumes.
-    pub fn size_in_bytes(&self) -> usize {
-        self.layer_size_in_bytes() * (self.layer_count as usize)
     }
 
     #[cfg(feature = "replay")]
@@ -561,6 +550,7 @@ pub struct Program {
     id: gl::GLuint,
     u_transform: gl::GLint,
     u_mode: gl::GLint,
+    u_texture_size: gl::GLint,
     source_info: ProgramSourceInfo,
     is_initialized: bool,
 }
@@ -667,6 +657,7 @@ enum ProgramSourceType {
 pub struct ProgramSourceInfo {
     base_filename: &'static str,
     features: Vec<&'static str>,
+    full_name_cstr: Rc<std::ffi::CString>,
     source_type: ProgramSourceType,
     digest: ProgramSourceDigest,
 }
@@ -691,11 +682,11 @@ impl ProgramSourceInfo {
         // Hash the renderer name.
         hasher.write(device.capabilities.renderer_name.as_bytes());
 
-        let full_name = &Self::make_full_name(name, features);
+        let full_name = Self::make_full_name(name, features);
 
         let optimized_source = if device.use_optimized_shaders {
-            OPTIMIZED_SHADERS.get(&(gl_version, full_name)).or_else(|| {
-                warn!("Missing optimized shader source for {}", full_name);
+            OPTIMIZED_SHADERS.get(&(gl_version, &full_name)).or_else(|| {
+                warn!("Missing optimized shader source for {}", &full_name);
                 None
             })
         } else {
@@ -767,6 +758,7 @@ impl ProgramSourceInfo {
         ProgramSourceInfo {
             base_filename: name,
             features: features.to_vec(),
+            full_name_cstr: Rc::new(std::ffi::CString::new(full_name).unwrap()),
             source_type,
             digest: hasher.into(),
         }
@@ -958,10 +950,6 @@ pub struct Capabilities {
     pub supports_color_buffer_float: bool,
     /// Whether the device supports persistently mapped buffers, via glBufferStorage.
     pub supports_buffer_storage: bool,
-    /// Whether we are able to use `glBlitFramebuffers` with the draw fbo
-    /// bound to a non-0th layer of a texture array. This is buggy on
-    /// Adreno devices.
-    pub supports_blit_to_texture_array: bool,
     /// Whether advanced blend equations are supported.
     pub supports_advanced_blend_equation: bool,
     /// Whether dual-source blending is supported.
@@ -980,12 +968,32 @@ pub struct Capabilities {
     pub supports_render_target_partial_update: bool,
     /// Whether we can use SSBOs.
     pub supports_shader_storage_object: bool,
-    /// Whether the driver prefers fewer and larger texture uploads
-    /// over many smaller updates.
-    pub prefers_batched_texture_uploads: bool,
+    /// Whether to enforce that texture uploads be batched regardless of what
+    /// the pref says.
+    pub requires_batched_texture_uploads: Option<bool>,
+    /// Whether we are able to ue glClear to clear regions of an alpha render target.
+    /// If false, we must use a shader to clear instead.
+    pub supports_alpha_target_clears: bool,
+    /// Whether we must perform a full unscissored glClear on alpha targets
+    /// prior to rendering.
+    pub requires_alpha_target_full_clear: bool,
+    /// Whether the driver can correctly invalidate render targets. This can be
+    /// a worthwhile optimization, but is buggy on some devices.
+    pub supports_render_target_invalidate: bool,
+    /// Whether the driver can reliably upload data to R8 format textures.
+    pub supports_r8_texture_upload: bool,
     /// Whether clip-masking is supported natively by the GL implementation
     /// rather than emulated in shaders.
     pub uses_native_clip_mask: bool,
+    /// Whether anti-aliasing is supported natively by the GL implementation
+    /// rather than emulated in shaders.
+    pub uses_native_antialiasing: bool,
+    /// Whether the extension GL_OES_EGL_image_external_essl3 is supported. If true, external
+    /// textures can be used as normal. If false, external textures can only be rendered with
+    /// certain shaders, and must first be copied in to regular textures for others.
+    pub supports_image_external_essl3: bool,
+    /// Whether the VAO must be rebound after an attached VBO has been orphaned.
+    pub requires_vao_rebind_after_orphaning: bool,
     /// The name of the renderer, as reported by GL
     pub renderer_name: String,
 }
@@ -1057,8 +1065,9 @@ pub struct Device {
     // device state
     bound_textures: [gl::GLuint; 16],
     bound_program: gl::GLuint,
+    bound_program_name: Rc<std::ffi::CString>,
     bound_vao: gl::GLuint,
-    bound_read_fbo: FBOId,
+    bound_read_fbo: (FBOId, DeviceIntPoint),
     bound_draw_fbo: FBOId,
     program_mode_id: UniformLocation,
     default_read_fbo: FBOId,
@@ -1069,6 +1078,12 @@ pub struct Device {
     depth_available: bool,
 
     upload_method: UploadMethod,
+    use_batched_texture_uploads: bool,
+    /// Whether to use draw calls instead of regular blitting commands.
+    ///
+    /// Note: this currently only applies to the batched texture uploads
+    /// path.
+    use_draw_calls_for_texture_copy: bool,
 
     // HW or API capabilities
     capabilities: Capabilities,
@@ -1088,6 +1103,7 @@ pub struct Device {
     // debug
     inside_frame: bool,
     crash_annotator: Option<Box<dyn CrashAnnotator>>,
+    annotate_draw_call_crashes: bool,
 
     // resources
     resource_override_path: Option<PathBuf>,
@@ -1096,7 +1112,6 @@ pub struct Device {
     use_optimized_shaders: bool,
 
     max_texture_size: i32,
-    max_texture_layers: u32,
     cached_programs: Option<Rc<ProgramCache>>,
 
     // Frame counter. This is used to map between CPU
@@ -1110,19 +1125,21 @@ pub struct Device {
     /// format, we fall back to glTexImage*.
     texture_storage_usage: TexStorageUsage,
 
-    optimal_pbo_stride: StrideAlignment,
+    /// Required stride alignment for pixel transfers. This may be required for
+    /// correctness reasons due to driver bugs, or for performance reasons to
+    /// ensure we remain on the fast-path for transfers.
+    required_pbo_stride: StrideAlignment,
 
     /// Whether we must ensure the source strings passed to glShaderSource()
     /// are null-terminated, to work around driver bugs.
     requires_null_terminated_shader_source: bool,
 
-    /// Whether we must ensure the source strings passed to glShaderSource()
-    /// are unique, to work around driver bugs.
-    requires_unique_shader_source: bool,
-
     /// Whether we must unbind any texture from GL_TEXTURE_EXTERNAL_OES before
     /// binding to GL_TEXTURE_2D, to work around an android emulator bug.
     requires_texture_external_unbind: bool,
+
+    ///
+    is_software_webrender: bool,
 
     // GL extensions
     extensions: Vec<String>,
@@ -1164,12 +1181,8 @@ pub enum DrawTarget {
     Texture {
         /// Size of the texture in pixels
         dimensions: DeviceIntSize,
-        /// The slice within the texture array to draw to
-        layer: LayerIndex,
         /// Whether to draw with the texture's associated depth target
         with_depth: bool,
-        /// Workaround buffers for devices with broken texture array copy implementation
-        blit_workaround_buffer: Option<(RBOId, FBOId)>,
         /// FBO that corresponds to the selected layer / depth mode
         fbo_id: FBOId,
         /// Native GL texture ID
@@ -1210,21 +1223,18 @@ impl DrawTarget {
 
     pub fn from_texture(
         texture: &Texture,
-        layer: usize,
         with_depth: bool,
     ) -> Self {
         let fbo_id = if with_depth {
-            texture.fbos_with_depth[layer]
+            texture.fbo_with_depth.unwrap()
         } else {
-            texture.fbos[layer]
+            texture.fbo.unwrap()
         };
 
         DrawTarget::Texture {
             dimensions: texture.get_dimensions(),
             fbo_id,
             with_depth,
-            layer,
-            blit_workaround_buffer: texture.blit_workaround_buffer,
             id: texture.id,
             target: texture.target,
         }
@@ -1246,8 +1256,12 @@ impl DrawTarget {
             DrawTarget::Default { ref rect, surface_origin_is_top_left, .. } => {
                 // perform a Y-flip here
                 if !surface_origin_is_top_left {
-                    fb_rect.origin.y = rect.origin.y + rect.size.height - fb_rect.origin.y - fb_rect.size.height;
-                    fb_rect.origin.x += rect.origin.x;
+                    let w = fb_rect.width();
+                    let h = fb_rect.height();
+                    fb_rect.min.x = fb_rect.min.x + rect.min.x;
+                    fb_rect.min.y = rect.max.y - fb_rect.max.y;
+                    fb_rect.max.x = fb_rect.min.x + w;
+                    fb_rect.max.y = fb_rect.min.y + h;
                 }
             }
             DrawTarget::Texture { .. } | DrawTarget::External { .. } | DrawTarget::NativeSurface { .. } => (),
@@ -1286,8 +1300,7 @@ impl DrawTarget {
                 }
             }
             None => {
-                FramebufferIntRect::new(
-                    FramebufferIntPoint::zero(),
+                FramebufferIntRect::from_size(
                     device_size_as_framebuffer_size(dimensions),
                 )
             }
@@ -1309,15 +1322,33 @@ pub enum ReadTarget {
     External {
         fbo: FBOId,
     },
+    /// An FBO bound to a native (OS compositor) surface
+    NativeSurface {
+        fbo_id: FBOId,
+        offset: DeviceIntPoint,
+    },
 }
 
 impl ReadTarget {
     pub fn from_texture(
         texture: &Texture,
-        layer: usize,
     ) -> Self {
         ReadTarget::Texture {
-            fbo_id: texture.fbos[layer],
+            fbo_id: texture.fbo.unwrap(),
+        }
+    }
+
+    fn offset(&self) -> DeviceIntPoint {
+        match *self {
+            ReadTarget::Default |
+            ReadTarget::Texture { .. } |
+            ReadTarget::External { .. } => {
+                DeviceIntPoint::zero()
+            }
+
+            ReadTarget::NativeSurface { offset, .. } => {
+                offset
+            }
         }
     }
 }
@@ -1325,14 +1356,21 @@ impl ReadTarget {
 impl From<DrawTarget> for ReadTarget {
     fn from(t: DrawTarget) -> Self {
         match t {
-            DrawTarget::Default { .. } => ReadTarget::Default,
-            DrawTarget::NativeSurface { .. } => {
-                unreachable!("bug: native surfaces cannot be read targets");
+            DrawTarget::Default { .. } => {
+                ReadTarget::Default
             }
-            DrawTarget::Texture { fbo_id, .. } =>
-                ReadTarget::Texture { fbo_id },
-            DrawTarget::External { fbo, .. } =>
-                ReadTarget::External { fbo },
+            DrawTarget::NativeSurface { external_fbo_id, offset, .. } => {
+                ReadTarget::NativeSurface {
+                    fbo_id: FBOId(external_fbo_id),
+                    offset,
+                }
+            }
+            DrawTarget::Texture { fbo_id, .. } => {
+                ReadTarget::Texture { fbo_id }
+            }
+            DrawTarget::External { fbo, .. } => {
+                ReadTarget::External { fbo }
+            }
         }
     }
 }
@@ -1352,16 +1390,19 @@ impl Device {
         panic_on_gl_error: bool,
     ) -> Device {
         let mut max_texture_size = [0];
-        let mut max_texture_layers = [0];
         unsafe {
             gl.get_integer_v(gl::MAX_TEXTURE_SIZE, &mut max_texture_size);
-            gl.get_integer_v(gl::MAX_ARRAY_TEXTURE_LAYERS, &mut max_texture_layers);
         }
 
-        let max_texture_size = max_texture_size[0];
-        let max_texture_layers = max_texture_layers[0] as u32;
+        // We cap the max texture size at 16384. Some hardware report higher
+        // capabilities but get very unstable with very large textures.
+        // Bug 1702494 tracks re-evaluating this cap.
+        let max_texture_size = max_texture_size[0].min(16384);
+
         let renderer_name = gl.get_string(gl::RENDERER);
         info!("Renderer: {}", renderer_name);
+        let version_string = gl.get_string(gl::VERSION);
+        info!("Version: {}", version_string);
         info!("Max texture size: {}", max_texture_size);
 
         let mut extension_count = [0];
@@ -1434,10 +1475,6 @@ impl Device {
         // [3] https://www.khronos.org/registry/OpenGL/extensions/EXT/EXT_texture_storage.txt
         // [4] http://http.download.nvidia.com/developer/Papers/2005/Fast_Texture_Transfers/Fast_Texture_Transfers.pdf
 
-        // To support BGRA8 with glTexStorage* we specifically need
-        // GL_EXT_texture_storage and GL_EXT_texture_format_BGRA8888.
-        let supports_gles_bgra = supports_extension(&extensions, "GL_EXT_texture_format_BGRA8888");
-
         // On the android emulator glTexImage fails to create textures larger than 3379.
         // So we must use glTexStorage instead. See bug 1591436.
         let is_emulator = renderer_name.starts_with("Android Emulator");
@@ -1453,10 +1490,22 @@ impl Device {
         let supports_texture_storage = allow_texture_storage_support && !cfg!(target_os = "macos") &&
             match gl.get_type() {
                 gl::GlType::Gl => supports_extension(&extensions, "GL_ARB_texture_storage"),
-                // ES 3 technically always supports glTexStorage, but only check here for the extension
-                // necessary to interact with BGRA.
-                gl::GlType::Gles => supports_extension(&extensions, "GL_EXT_texture_storage"),
+                gl::GlType::Gles => true,
             };
+
+        // The GL_EXT_texture_format_BGRA8888 extension allows us to use BGRA as an internal format
+        // with glTexImage on GLES. However, we can only use BGRA8 as an internal format for
+        // glTexStorage when GL_EXT_texture_storage is also explicitly supported. This is because
+        // glTexStorage was added in GLES 3, but GL_EXT_texture_format_BGRA8888 was written against
+        // GLES 2 and GL_EXT_texture_storage.
+        // To complicate things even further, some Intel devices claim to support both extensions
+        // but in practice do not allow BGRA to be used with glTexStorage.
+        let supports_gles_bgra = supports_extension(&extensions, "GL_EXT_texture_format_BGRA8888");
+        let supports_texture_storage_with_gles_bgra = supports_gles_bgra
+            && supports_extension(&extensions, "GL_EXT_texture_storage")
+            && !renderer_name.starts_with("Intel(R) HD Graphics for BayTrail")
+            && !renderer_name.starts_with("Intel(R) HD Graphics for Atom(TM) x5/x7");
+
         let supports_texture_swizzle = allow_texture_swizzling &&
             match gl.get_type() {
                 // see https://www.g-truc.net/post-0734.html
@@ -1482,27 +1531,19 @@ impl Device {
                 Swizzle::Rgba, // converted on uploads by the driver, no swizzling needed
                 TexStorageUsage::Never
             ),
-            // We can use glTexStorage with BGRA8 as the internal format.
-            gl::GlType::Gles if supports_gles_bgra && supports_texture_storage => (
+            // glTexStorage is always supported in GLES 3, but because the GL_EXT_texture_storage
+            // extension is supported we can use glTexStorage with BGRA8 as the internal format.
+            // Prefer BGRA textures over RGBA.
+            gl::GlType::Gles if supports_texture_storage_with_gles_bgra => (
                 TextureFormatPair::from(ImageFormat::BGRA8),
                 TextureFormatPair { internal: gl::BGRA8_EXT, external: gl::BGRA_EXT },
                 gl::UNSIGNED_BYTE,
                 Swizzle::Rgba, // no conversion needed
                 TexStorageUsage::Always,
             ),
-            // For BGRA8 textures we must use the unsized BGRA internal
-            // format and glTexImage. If texture storage is supported we can
-            // use it for other formats, which is always the case for ES 3.
-            // We can't use glTexStorage with BGRA8 as the internal format.
-            gl::GlType::Gles if supports_gles_bgra && !avoid_tex_image => (
-                TextureFormatPair::from(ImageFormat::RGBA8),
-                TextureFormatPair::from(gl::BGRA_EXT),
-                gl::UNSIGNED_BYTE,
-                Swizzle::Rgba, // no conversion needed
-                TexStorageUsage::NonBGRA8,
-            ),
-            // BGRA is not supported as an internal format, therefore we will
-            // use RGBA. The swizzling will happen at the texture unit.
+            // BGRA is not supported as an internal format with glTexStorage, therefore we will
+            // use RGBA textures instead and pretend BGRA data is RGBA when uploading.
+            // The swizzling will happen at the texture unit.
             gl::GlType::Gles if supports_texture_swizzle => (
                 TextureFormatPair::from(ImageFormat::RGBA8),
                 TextureFormatPair { internal: gl::RGBA8, external: gl::RGBA },
@@ -1510,22 +1551,40 @@ impl Device {
                 Swizzle::Bgra, // pretend it's RGBA, rely on swizzling
                 TexStorageUsage::Always,
             ),
-            // BGRA and swizzling are not supported. We force the conversion done by the driver.
-            gl::GlType::Gles => (
-                TextureFormatPair::from(ImageFormat::RGBA8),
-                TextureFormatPair { internal: gl::RGBA8, external: gl::BGRA },
+            // BGRA is not supported as an internal format with glTexStorage, and we cannot use
+            // swizzling either. Therefore prefer BGRA textures over RGBA, but use glTexImage
+            // to initialize BGRA textures. glTexStorage can still be used for other formats.
+            gl::GlType::Gles if supports_gles_bgra && !avoid_tex_image => (
+                TextureFormatPair::from(ImageFormat::BGRA8),
+                TextureFormatPair::from(gl::BGRA_EXT),
                 gl::UNSIGNED_BYTE,
-                Swizzle::Rgba,
-                TexStorageUsage::Always,
+                Swizzle::Rgba, // no conversion needed
+                TexStorageUsage::NonBGRA8,
             ),
+            // Neither BGRA or swizzling are supported. GLES does not allow format conversion
+            // during upload so we must use RGBA textures and pretend BGRA data is RGBA when
+            // uploading. Images may be rendered incorrectly as a result.
+            gl::GlType::Gles => {
+                warn!("Neither BGRA or texture swizzling are supported. Images may be rendered incorrectly.");
+                (
+                    TextureFormatPair::from(ImageFormat::RGBA8),
+                    TextureFormatPair { internal: gl::RGBA8, external: gl::RGBA },
+                    gl::UNSIGNED_BYTE,
+                    Swizzle::Rgba,
+                    TexStorageUsage::Always,
+                )
+            }
         };
 
         let is_software_webrender = renderer_name.starts_with("Software WebRender");
-        let (depth_format, upload_method) = if is_software_webrender {
-            (gl::DEPTH_COMPONENT16, UploadMethod::Immediate)
+        let upload_method = if is_software_webrender {
+            // Uploads in SWGL generally reduce to simple memory copies.
+            UploadMethod::Immediate
         } else {
-            (gl::DEPTH_COMPONENT24, upload_method)
+            upload_method
         };
+        // Prefer 24-bit depth format. While 16-bit depth also works, it may exhaust depth ids easily.
+        let depth_format = gl::DEPTH_COMPONENT24;
 
         info!("GL texture cache {:?}, bgra {:?} swizzle {:?}, texture storage {:?}, depth {:?}",
             color_formats, bgra_formats, bgra8_sampling_swizzle, texture_storage_usage, depth_format);
@@ -1542,8 +1601,14 @@ impl Device {
             supports_extension(&extensions, "GL_ARB_copy_image")
         };
 
+        // We have seen crashes on x86 PowerVR Rogue G6430 devices during GPU cache
+        // updates using the scatter shader. It seems likely that GL_EXT_color_buffer_float
+        // is broken. See bug 1709408.
+        let is_x86_powervr_rogue_g6430 = renderer_name.starts_with("PowerVR Rogue G6430")
+            && cfg!(target_arch = "x86");
         let supports_color_buffer_float = match gl.get_type() {
             gl::GlType::Gl => true,
+            gl::GlType::Gles if is_x86_powervr_rogue_g6430 => false,
             gl::GlType::Gles => supports_extension(&extensions, "GL_EXT_color_buffer_float"),
         };
 
@@ -1559,10 +1624,6 @@ impl Device {
             supports_extension(&extensions, "GL_EXT_buffer_storage") ||
             supports_extension(&extensions, "GL_ARB_buffer_storage")
         };
-
-        // Due to a bug on Adreno devices, blitting to an fbo bound to
-        // a non-0th layer of a texture array is not supported.
-        let supports_blit_to_texture_array = !renderer_name.starts_with("Adreno");
 
         // KHR_blend_equation_advanced renders incorrectly on Adreno
         // devices. This has only been confirmed up to Adreno 5xx, and has been
@@ -1584,12 +1645,6 @@ impl Device {
         // strings are not null-terminated. See bug 1591945.
         let requires_null_terminated_shader_source = is_emulator;
 
-        // On Adreno 505 and 506 we encounter crashes during glLinkProgram(), which
-        // appear to be caused by some driver-internal caching of shader strings.
-        // We attempt to workaround this by appending unique comments to each source.
-        // See bug 1609191.
-        let requires_unique_shader_source = renderer_name == "Adreno (TM) 505" || renderer_name == "Adreno (TM) 506";
-
         // The android emulator gets confused if you don't explicitly unbind any texture
         // from GL_TEXTURE_EXTERNAL_OES before binding another to GL_TEXTURE_2D. See bug 1636085.
         let requires_texture_external_unbind = is_emulator;
@@ -1599,12 +1654,19 @@ impl Device {
              //  (XXX: we apply this restriction to all GPUs to handle switching)
 
         let is_angle = renderer_name.starts_with("ANGLE");
+        let is_adreno_3xx = renderer_name.starts_with("Adreno (TM) 3");
 
-        // On certain GPUs PBO texture upload is only performed asynchronously
-        // if the stride of the data is a multiple of a certain value.
-        let optimal_pbo_stride = if is_adreno {
-            // On Adreno it must be a multiple of 64 pixels, meaning value in bytes
-            // varies with the texture format.
+        // Some GPUs require the stride of the data during texture uploads to be
+        // aligned to certain requirements, either for correctness or performance
+        // reasons.
+        let required_pbo_stride = if is_adreno_3xx {
+            // On Adreno 3xx, alignments of < 128 bytes can result in corrupted
+            // glyphs. See bug 1696039.
+            StrideAlignment::Bytes(NonZeroUsize::new(128).unwrap())
+        } else if is_adreno {
+            // On later Adreno devices it must be a multiple of 64 *pixels* to
+            // hit the fast path, meaning value in bytes varies with the texture
+            // format. This is purely an optimization.
             StrideAlignment::Pixels(NonZeroUsize::new(64).unwrap())
         } else if is_macos {
             // On AMD Mac, it must always be a multiple of 256 bytes.
@@ -1624,12 +1686,12 @@ impl Device {
         // from a non-zero offset within a PBO to fail. See bug 1603783.
         let supports_nonzero_pbo_offsets = !is_macos;
 
-        let is_mali_g = renderer_name.starts_with("Mali-G");
-
-        // On Mali-Gxx there is a driver bug when rendering partial updates to
+        // On Mali-Gxx and Txxx there is a driver bug when rendering partial updates to
         // offscreen render targets, so we must ensure we render to the entire target.
         // See bug 1663355.
-        let supports_render_target_partial_update = !is_mali_g;
+        let is_mali_g = renderer_name.starts_with("Mali-G");
+        let is_mali_t = renderer_name.starts_with("Mali-T");
+        let supports_render_target_partial_update = !is_mali_g && !is_mali_t;
 
         let supports_shader_storage_object = match gl.get_type() {
             // see https://www.g-truc.net/post-0734.html
@@ -1643,17 +1705,84 @@ impl Device {
         // clip-masking.
         let uses_native_clip_mask = is_software_webrender;
 
-        // On Mali-Gxx the driver really struggles with many small texture uploads,
-        // and handles fewer, larger uploads better.
-        let prefers_batched_texture_uploads = is_mali_g;
+        // SWGL uses swgl_antiAlias() instead of implementing anti-aliasing in shaders.
+        // As above, this allows bypassing certain alpha-pass variants.
+        let uses_native_antialiasing = is_software_webrender;
+
+        // If running on android with a mesa driver (eg intel chromebooks), parse the mesa version.
+        let mut android_mesa_version = None;
+        if cfg!(target_os = "android") && renderer_name.starts_with("Mesa") {
+            if let Some((_, mesa_version)) = version_string.split_once("Mesa ") {
+                if let Some((major_str, _)) = mesa_version.split_once(".") {
+                    if let Ok(major) = major_str.parse::<i32>() {
+                        android_mesa_version = Some(major);
+                    }
+                }
+            }
+        }
+
+        // If the device supports OES_EGL_image_external_essl3 we can use it to render
+        // external images. If not, we must use the ESSL 1.0 OES_EGL_image_external
+        // extension instead.
+        // Mesa versions prior to 20.0 do not implement textureSize(samplerExternalOES),
+        // so we must use the fallback path.
+        let supports_image_external_essl3 = match android_mesa_version {
+            Some(major) if major < 20 => false,
+            _ => supports_extension(&extensions, "GL_OES_EGL_image_external_essl3"),
+        };
+
+        let mut requires_batched_texture_uploads = None;
+        if is_software_webrender {
+            // No benefit to batching texture uploads with swgl.
+            requires_batched_texture_uploads = Some(false);
+        } else if is_mali_g {
+            // On Mali-Gxx the driver really struggles with many small texture uploads,
+            // and handles fewer, larger uploads better.
+            requires_batched_texture_uploads = Some(true);
+        }
+
+        // On Mali-Txxx devices we have observed crashes during draw calls when rendering
+        // to an alpha target immediately after using glClear to clear regions of it.
+        // Using a shader to clear the regions avoids the crash. See bug 1638593.
+        let supports_alpha_target_clears = !is_mali_t;
+
+        // On Adreno 4xx devices with older drivers we have seen render tasks to alpha targets have
+        // no effect unless the target is fully cleared prior to rendering. See bug 1714227.
+        let is_adreno_4xx = renderer_name.starts_with("Adreno (TM) 4");
+        let requires_alpha_target_full_clear = is_adreno_4xx;
+
+        // On PowerVR Rogue devices we have seen that invalidating render targets after we are done
+        // with them can incorrectly cause pending renders to be written to different targets
+        // instead. See bug 1719345.
+        let is_powervr_rogue = renderer_name.starts_with("PowerVR Rogue");
+        let supports_render_target_invalidate = !is_powervr_rogue;
+
+        // On Linux we we have seen uploads to R8 format textures result in
+        // corruption on some AMD cards.
+        // See https://bugzilla.mozilla.org/show_bug.cgi?id=1687554#c13
+        let supports_r8_texture_upload = if cfg!(target_os = "linux")
+            && renderer_name.starts_with("AMD Radeon RX")
+        {
+            false
+        } else {
+            true
+        };
+
+        // On some Adreno 3xx devices the vertex array object must be unbound and rebound after
+        // an attached buffer has been orphaned.
+        let requires_vao_rebind_after_orphaning = is_adreno_3xx;
 
         Device {
             gl,
             base_gl: None,
             crash_annotator,
+            annotate_draw_call_crashes: false,
             resource_override_path,
             use_optimized_shaders,
             upload_method,
+            use_batched_texture_uploads: requires_batched_texture_uploads.unwrap_or(false),
+            use_draw_calls_for_texture_copy: false,
+
             inside_frame: false,
 
             capabilities: Capabilities {
@@ -1661,7 +1790,6 @@ impl Device {
                 supports_copy_image_sub_data,
                 supports_color_buffer_float,
                 supports_buffer_storage,
-                supports_blit_to_texture_array,
                 supports_advanced_blend_equation,
                 supports_dual_source_blending,
                 supports_khr_debug,
@@ -1670,8 +1798,15 @@ impl Device {
                 supports_texture_usage,
                 supports_render_target_partial_update,
                 supports_shader_storage_object,
-                prefers_batched_texture_uploads,
+                requires_batched_texture_uploads,
+                supports_alpha_target_clears,
+                requires_alpha_target_full_clear,
+                supports_render_target_invalidate,
+                supports_r8_texture_upload,
                 uses_native_clip_mask,
+                uses_native_antialiasing,
+                supports_image_external_essl3,
+                requires_vao_rebind_after_orphaning,
                 renderer_name,
             },
 
@@ -1687,8 +1822,9 @@ impl Device {
 
             bound_textures: [0; 16],
             bound_program: 0,
+            bound_program_name: Rc::new(std::ffi::CString::new("").unwrap()),
             bound_vao: 0,
-            bound_read_fbo: FBOId(0),
+            bound_read_fbo: (FBOId(0), DeviceIntPoint::zero()),
             bound_draw_fbo: FBOId(0),
             program_mode_id: UniformLocation::INVALID,
             default_read_fbo: FBOId(0),
@@ -1697,15 +1833,14 @@ impl Device {
             depth_available: true,
 
             max_texture_size,
-            max_texture_layers,
             cached_programs,
             frame_id: GpuFrameId(0),
             extensions,
             texture_storage_usage,
             requires_null_terminated_shader_source,
-            requires_unique_shader_source,
             requires_texture_external_unbind,
-            optimal_pbo_stride,
+            is_software_webrender,
+            required_pbo_stride,
             dump_shader_source,
             surface_origin_is_top_left,
 
@@ -1722,6 +1857,29 @@ impl Device {
         &self.gl
     }
 
+    pub fn set_parameter(&mut self, param: &Parameter) {
+        match param {
+            Parameter::Bool(BoolParameter::PboUploads, enabled) => {
+                if !self.is_software_webrender {
+                    self.upload_method = if *enabled {
+                        UploadMethod::PixelBuffer(crate::ONE_TIME_USAGE_HINT)
+                    } else {
+                        UploadMethod::Immediate
+                    };
+                }
+            }
+            Parameter::Bool(BoolParameter::BatchedUploads, enabled) => {
+                self.use_batched_texture_uploads = *enabled;
+            }
+            Parameter::Bool(BoolParameter::DrawCallsForTextureCopy, enabled) => {
+                if self.capabilities.requires_batched_texture_uploads.is_none() {
+                    self.use_draw_calls_for_texture_copy = *enabled;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Ensures that the maximum texture size is less than or equal to the
     /// provided value. If the provided value is less than the value supported
     /// by the driver, the latter is used.
@@ -1736,11 +1894,6 @@ impl Device {
 
     pub fn surface_origin_is_top_left(&self) -> bool {
         self.surface_origin_is_top_left
-    }
-
-    /// Returns the limit on texture array layers.
-    pub fn max_texture_layers(&self) -> usize {
-        self.max_texture_layers as usize
     }
 
     pub fn get_capabilities(&self) -> &Capabilities {
@@ -1781,8 +1934,20 @@ impl Device {
         return (self.max_depth_ids() - 1) as f32;
     }
 
-    pub fn optimal_pbo_stride(&self) -> StrideAlignment {
-        self.optimal_pbo_stride
+    pub fn required_pbo_stride(&self) -> StrideAlignment {
+        self.required_pbo_stride
+    }
+
+    pub fn upload_method(&self) -> &UploadMethod {
+        &self.upload_method
+    }
+
+    pub fn use_batched_texture_uploads(&self) -> bool {
+        self.use_batched_texture_uploads
+    }
+
+    pub fn use_draw_calls_for_texture_copy(&self) -> bool {
+        self.use_draw_calls_for_texture_copy
     }
 
     pub fn reset_state(&mut self) {
@@ -1795,8 +1960,8 @@ impl Device {
         self.bound_vao = 0;
         self.gl.bind_vertex_array(0);
 
-        self.bound_read_fbo = self.default_read_fbo;
-        self.gl.bind_framebuffer(gl::READ_FRAMEBUFFER, self.bound_read_fbo.0);
+        self.bound_read_fbo = (self.default_read_fbo, DeviceIntPoint::zero());
+        self.gl.bind_framebuffer(gl::READ_FRAMEBUFFER, self.default_read_fbo.0);
 
         self.bound_draw_fbo = self.default_draw_fbo;
         self.gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, self.bound_draw_fbo.0);
@@ -1831,13 +1996,6 @@ impl Device {
         let id = self.gl.create_shader(shader_type);
 
         let mut new_source = Cow::from(source.as_str());
-        // On some drivers we encounter crashes during glLinkProgram(), which
-        // appear to be caused by some driver-internal caching of shader strings.
-        // We attempt to workaround this by appending unique comments to each source.
-        if self.requires_unique_shader_source {
-            let uuid = Uuid::new_v4().to_hyphenated();
-            write!(new_source.to_mut(), "\n//{}\n", uuid).unwrap();
-        }
         // Ensure the source strings we pass to glShaderSource are
         // null-terminated on buggy platforms.
         if self.requires_null_terminated_shader_source {
@@ -1852,7 +2010,12 @@ impl Device {
             self.gl.get_shader_iv(id, gl::COMPILE_STATUS, &mut status);
         }
         if status[0] == 0 {
-            error!("Failed to compile shader: {}\n{}", name, log);
+            let type_str = match shader_type {
+                gl::VERTEX_SHADER => "vertex",
+                gl::FRAGMENT_SHADER => "fragment",
+                _ => panic!("Unexpected shader type {:x}", shader_type),
+            };
+            error!("Failed to compile {} shader: {}\n{}", type_str, name, log);
             #[cfg(debug_assertions)]
             Self::print_shader_errors(source, &log);
             Err(ShaderError::Compilation(name.to_string(), log))
@@ -1876,9 +2039,17 @@ impl Device {
         // wrapper from our GL context.
         let being_profiled = profiler::thread_is_being_profiled();
         let using_wrapper = self.base_gl.is_some();
-        if being_profiled && !using_wrapper {
+
+        // We can usually unwind driver stacks on x86 so we don't need to manually instrument
+        // gl calls there. Timestamps can be pretty expensive on Windows (2us each and perhaps
+        // an opportunity to be descheduled?) which makes the profiles gathered with this
+        // turned on less useful so only profile on ARM.
+        if cfg!(any(target_arch = "arm", target_arch = "aarch64"))
+            && being_profiled
+            && !using_wrapper
+        {
             fn note(name: &str, duration: Duration) {
-                profiler::add_text_marker(cstr!("OpenGL Calls"), name, duration);
+                profiler::add_text_marker("OpenGL Calls", name, duration);
             }
             let threshold = Duration::from_millis(1);
             let wrapped = gl::ProfilingGl::wrap(self.gl.clone(), threshold, note);
@@ -1970,13 +2141,18 @@ impl Device {
         self.bind_texture_impl(slot.into(), external_texture.id, external_texture.target, None);
     }
 
-    pub fn bind_read_target_impl(&mut self, fbo_id: FBOId) {
+    pub fn bind_read_target_impl(
+        &mut self,
+        fbo_id: FBOId,
+        offset: DeviceIntPoint,
+    ) {
         debug_assert!(self.inside_frame);
 
-        if self.bound_read_fbo != fbo_id {
-            self.bound_read_fbo = fbo_id;
+        if self.bound_read_fbo != (fbo_id, offset) {
             fbo_id.bind(self.gl(), FBOTarget::Read);
         }
+
+        self.bound_read_fbo = (fbo_id, offset);
     }
 
     pub fn bind_read_target(&mut self, target: ReadTarget) {
@@ -1984,9 +2160,10 @@ impl Device {
             ReadTarget::Default => self.default_read_fbo,
             ReadTarget::Texture { fbo_id } => fbo_id,
             ReadTarget::External { fbo } => fbo,
+            ReadTarget::NativeSurface { fbo_id, .. } => fbo_id,
         };
 
-        self.bind_read_target_impl(fbo_id)
+        self.bind_read_target_impl(fbo_id, target.offset())
     }
 
     fn bind_draw_target_impl(&mut self, fbo_id: FBOId) {
@@ -2000,7 +2177,7 @@ impl Device {
 
     pub fn reset_read_target(&mut self) {
         let fbo = self.default_read_fbo;
-        self.bind_read_target_impl(fbo);
+        self.bind_read_target_impl(fbo, DeviceIntPoint::zero());
     }
 
 
@@ -2016,11 +2193,10 @@ impl Device {
     ) {
         let (fbo_id, rect, depth_available) = match target {
             DrawTarget::Default { rect, .. } => {
-                (self.default_draw_fbo, rect, true)
+                (self.default_draw_fbo, rect, false)
             }
             DrawTarget::Texture { dimensions, fbo_id, with_depth, .. } => {
-                let rect = FramebufferIntRect::new(
-                    FramebufferIntPoint::zero(),
+                let rect = FramebufferIntRect::from_size(
                     device_size_as_framebuffer_size(dimensions),
                 );
                 (fbo_id, rect, with_depth)
@@ -2031,7 +2207,7 @@ impl Device {
             DrawTarget::NativeSurface { external_fbo_id, offset, dimensions, .. } => {
                 (
                     FBOId(external_fbo_id),
-                    device_rect_as_framebuffer_rect(&DeviceIntRect::new(offset, dimensions)),
+                    device_rect_as_framebuffer_rect(&DeviceIntRect::from_origin_and_size(offset, dimensions)),
                     true
                 )
             }
@@ -2040,10 +2216,10 @@ impl Device {
         self.depth_available = depth_available;
         self.bind_draw_target_impl(fbo_id);
         self.gl.viewport(
-            rect.origin.x,
-            rect.origin.y,
-            rect.size.width,
-            rect.size.height,
+            rect.min.x,
+            rect.min.y,
+            rect.width(),
+            rect.height(),
         );
     }
 
@@ -2102,10 +2278,12 @@ impl Device {
         program: &mut Program,
         descriptor: &VertexDescriptor,
     ) -> Result<(), ShaderError> {
+        profile_scope!("compile shader");
+
         let _guard = CrashAnnotatorGuard::new(
             &self.crash_annotator,
             CrashAnnotation::CompileShader,
-            &program.source_info.full_name()
+            &program.source_info.full_name_cstr
         );
 
         assert!(!program.is_initialized());
@@ -2151,7 +2329,7 @@ impl Device {
         if build_program {
             // Compile the vertex shader
             let vs_source = info.compute_source(self, ShaderKind::Vertex);
-            let vs_id = match self.compile_shader(&info.base_filename, gl::VERTEX_SHADER, &vs_source) {
+            let vs_id = match self.compile_shader(&info.full_name(), gl::VERTEX_SHADER, &vs_source) {
                     Ok(vs_id) => vs_id,
                     Err(err) => return Err(err),
                 };
@@ -2159,7 +2337,7 @@ impl Device {
             // Compile the fragment shader
             let fs_source = info.compute_source(self, ShaderKind::Fragment);
             let fs_id =
-                match self.compile_shader(&info.base_filename, gl::FRAGMENT_SHADER, &fs_source) {
+                match self.compile_shader(&info.full_name(), gl::FRAGMENT_SHADER, &fs_source) {
                     Ok(fs_id) => fs_id,
                     Err(err) => {
                         self.gl.delete_shader(vs_id);
@@ -2252,6 +2430,7 @@ impl Device {
         program.is_initialized = true;
         program.u_transform = self.gl.get_uniform_location(program.id, "uTransform");
         program.u_mode = self.gl.get_uniform_location(program.id, "uMode");
+        program.u_texture_size = self.gl.get_uniform_location(program.id, "uTextureSize");
 
         Ok(())
     }
@@ -2270,6 +2449,7 @@ impl Device {
         if self.bound_program != program.id {
             self.gl.use_program(program.id);
             self.bound_program = program.id;
+            self.bound_program_name = program.source_info.full_name_cstr.clone();
             self.program_mode_id = UniformLocation(program.u_mode);
         }
         true
@@ -2283,7 +2463,6 @@ impl Device {
         mut height: i32,
         filter: TextureFilter,
         render_target: Option<RenderTargetInfo>,
-        layer_count: i32,
     ) -> Texture {
         debug_assert!(self.inside_frame);
 
@@ -2298,13 +2477,11 @@ impl Device {
             id: self.gl.gen_textures(1)[0],
             target: get_gl_target(target),
             size: DeviceIntSize::new(width, height),
-            layer_count,
             format,
             filter,
             active_swizzle: Cell::default(),
-            fbos: vec![],
-            fbos_with_depth: vec![],
-            blit_workaround_buffer: None,
+            fbo: None,
+            fbo_with_depth: None,
             last_frame_used: self.frame_id,
             flags: TextureFlags::default(),
         };
@@ -2317,12 +2494,6 @@ impl Device {
 
         // Allocate storage.
         let desc = self.gl_describe_format(texture.format);
-        let is_array = match texture.target {
-            gl::TEXTURE_2D_ARRAY => true,
-            gl::TEXTURE_2D | gl::TEXTURE_RECTANGLE | gl::TEXTURE_EXTERNAL_OES => false,
-            _ => panic!("BUG: Unexpected texture target!"),
-        };
-        assert!(is_array || texture.layer_count == 1);
 
         // Firefox doesn't use mipmaps, but Servo uses them for standalone image
         // textures images larger than 512 pixels. This is the only case where
@@ -2345,49 +2516,26 @@ impl Device {
             TexStorageUsage::NonBGRA8 => texture.format != ImageFormat::BGRA8,
             TexStorageUsage::Never => false,
         };
-        match (use_texture_storage, is_array) {
-            (true, true) =>
-                self.gl.tex_storage_3d(
-                    gl::TEXTURE_2D_ARRAY,
-                    mipmap_levels,
-                    desc.internal,
-                    texture.size.width as gl::GLint,
-                    texture.size.height as gl::GLint,
-                    texture.layer_count,
-                ),
-            (true, false) =>
-                self.gl.tex_storage_2d(
-                    texture.target,
-                    mipmap_levels,
-                    desc.internal,
-                    texture.size.width as gl::GLint,
-                    texture.size.height as gl::GLint,
-                ),
-            (false, true) =>
-                self.gl.tex_image_3d(
-                    gl::TEXTURE_2D_ARRAY,
-                    0,
-                    desc.internal as gl::GLint,
-                    texture.size.width as gl::GLint,
-                    texture.size.height as gl::GLint,
-                    texture.layer_count,
-                    0,
-                    desc.external,
-                    desc.pixel_type,
-                    None,
-                ),
-            (false, false) =>
-                self.gl.tex_image_2d(
-                    texture.target,
-                    0,
-                    desc.internal as gl::GLint,
-                    texture.size.width as gl::GLint,
-                    texture.size.height as gl::GLint,
-                    0,
-                    desc.external,
-                    desc.pixel_type,
-                    None,
-                ),
+        if use_texture_storage {
+            self.gl.tex_storage_2d(
+                texture.target,
+                mipmap_levels,
+                desc.internal,
+                texture.size.width as gl::GLint,
+                texture.size.height as gl::GLint,
+            );
+        } else {
+            self.gl.tex_image_2d(
+                texture.target,
+                0,
+                desc.internal as gl::GLint,
+                texture.size.width as gl::GLint,
+                texture.size.height as gl::GLint,
+                0,
+                desc.external,
+                desc.pixel_type,
+                None,
+            );            
         }
 
         // Set up FBOs, if required.
@@ -2396,28 +2544,6 @@ impl Device {
             if rt_info.has_depth {
                 self.init_fbos(&mut texture, true);
             }
-        }
-
-        // Set up intermediate buffer for blitting to texture, if required.
-        if texture.layer_count > 1 && !self.capabilities.supports_blit_to_texture_array {
-            let rbo = RBOId(self.gl.gen_renderbuffers(1)[0]);
-            let fbo = FBOId(self.gl.gen_framebuffers(1)[0]);
-            self.gl.bind_renderbuffer(gl::RENDERBUFFER, rbo.0);
-            self.gl.renderbuffer_storage(
-                gl::RENDERBUFFER,
-                self.matching_renderbuffer_format(texture.format),
-                texture.size.width as _,
-                texture.size.height as _
-            );
-
-            self.bind_draw_target_impl(fbo);
-            self.gl.framebuffer_renderbuffer(
-                gl::DRAW_FRAMEBUFFER,
-                gl::COLOR_ATTACHMENT0,
-                gl::RENDERBUFFER,
-                rbo.0
-            );
-            texture.blit_workaround_buffer = Some((rbo, fbo));
         }
 
         texture
@@ -2457,20 +2583,16 @@ impl Device {
         debug_assert!(self.inside_frame);
         debug_assert!(dst.size.width >= src.size.width);
         debug_assert!(dst.size.height >= src.size.height);
-        debug_assert!(dst.layer_count >= src.layer_count);
 
         self.copy_texture_sub_region(
             src,
             0,
             0,
-            0,
             dst,
-            0,
             0,
             0,
             src.size.width as _,
             src.size.height as _,
-            src.layer_count as _,
         );
     }
 
@@ -2480,14 +2602,11 @@ impl Device {
         src_texture: &Texture,
         src_x: usize,
         src_y: usize,
-        src_z: LayerIndex,
         dest_texture: &Texture,
         dest_x: usize,
         dest_y: usize,
-        dest_z: LayerIndex,
         width: usize,
         height: usize,
-        depth: LayerIndex,
     ) {
         if self.capabilities.supports_copy_image_sub_data {
             assert_ne!(
@@ -2501,57 +2620,57 @@ impl Device {
                     0,
                     src_x as _,
                     src_y as _,
-                    src_z as _,
+                    0,
                     dest_texture.id,
                     dest_texture.target,
                     0,
                     dest_x as _,
                     dest_y as _,
-                    dest_z as _,
+                    0,
                     width as _,
                     height as _,
-                    depth as _,
+                    1,
                 );
             }
         } else {
-            for i in 0..depth as LayerIndex {
-                let src_offset = FramebufferIntPoint::new(src_x as i32, src_y as i32);
-                let dest_offset = FramebufferIntPoint::new(dest_x as i32, dest_y as i32);
-                let size = FramebufferIntSize::new(width as i32, height as i32);
+            let src_offset = FramebufferIntPoint::new(src_x as i32, src_y as i32);
+            let dest_offset = FramebufferIntPoint::new(dest_x as i32, dest_y as i32);
+            let size = FramebufferIntSize::new(width as i32, height as i32);
 
-                self.blit_render_target(
-                    ReadTarget::from_texture(src_texture, src_z + i),
-                    FramebufferIntRect::new(src_offset, size),
-                    DrawTarget::from_texture(dest_texture, dest_z + i, false),
-                    FramebufferIntRect::new(dest_offset, size),
-                    // In most cases the filter shouldn't matter, as there is no scaling involved
-                    // in the blit. We were previously using Linear, but this caused issues when
-                    // blitting RGBAF32 textures on Mali, so use Nearest to be safe.
-                    TextureFilter::Nearest,
-                );
-            }
+            self.blit_render_target(
+                ReadTarget::from_texture(src_texture),
+                FramebufferIntRect::from_origin_and_size(src_offset, size),
+                DrawTarget::from_texture(dest_texture, false),
+                FramebufferIntRect::from_origin_and_size(dest_offset, size),
+                // In most cases the filter shouldn't matter, as there is no scaling involved
+                // in the blit. We were previously using Linear, but this caused issues when
+                // blitting RGBAF32 textures on Mali, so use Nearest to be safe.
+                TextureFilter::Nearest,
+            );
         }
     }
 
     /// Notifies the device that the contents of a render target are no longer
     /// needed.
     pub fn invalidate_render_target(&mut self, texture: &Texture) {
-        let (fbos, attachments) = if texture.supports_depth() {
-            (&texture.fbos_with_depth,
-             &[gl::COLOR_ATTACHMENT0, gl::DEPTH_ATTACHMENT] as &[gl::GLenum])
-        } else {
-            (&texture.fbos, &[gl::COLOR_ATTACHMENT0] as &[gl::GLenum])
-        };
+        if self.capabilities.supports_render_target_invalidate {
+            let (fbo, attachments) = if texture.supports_depth() {
+                (&texture.fbo_with_depth,
+                 &[gl::COLOR_ATTACHMENT0, gl::DEPTH_ATTACHMENT] as &[gl::GLenum])
+            } else {
+                (&texture.fbo, &[gl::COLOR_ATTACHMENT0] as &[gl::GLenum])
+            };
 
-        let original_bound_fbo = self.bound_draw_fbo;
-        for fbo_id in fbos.iter() {
-            // Note: The invalidate extension may not be supported, in which
-            // case this is a no-op. That's ok though, because it's just a
-            // hint.
-            self.bind_external_draw_target(*fbo_id);
-            self.gl.invalidate_framebuffer(gl::FRAMEBUFFER, attachments);
+            if let Some(fbo_id) = fbo {
+                let original_bound_fbo = self.bound_draw_fbo;
+                // Note: The invalidate extension may not be supported, in which
+                // case this is a no-op. That's ok though, because it's just a
+                // hint.
+                self.bind_external_draw_target(*fbo_id);
+                self.gl.invalidate_framebuffer(gl::FRAMEBUFFER, attachments);
+                self.bind_external_draw_target(original_bound_fbo);
+            }
         }
-        self.bind_external_draw_target(original_bound_fbo);
     }
 
     /// Notifies the device that the contents of the current framebuffer's depth
@@ -2561,7 +2680,12 @@ impl Device {
     /// to allow tiled GPUs to avoid writing the contents back to memory.
     pub fn invalidate_depth_target(&mut self) {
         assert!(self.depth_available);
-        self.gl.invalidate_framebuffer(gl::DRAW_FRAMEBUFFER, &[gl::DEPTH_ATTACHMENT]);
+        let attachments = if self.bound_draw_fbo == self.default_draw_fbo {
+            &[gl::DEPTH] as &[gl::GLenum]
+        } else {
+            &[gl::DEPTH_ATTACHMENT] as &[gl::GLenum]
+        };
+        self.gl.invalidate_framebuffer(gl::DRAW_FRAMEBUFFER, attachments);
     }
 
     /// Notifies the device that a render target is about to be reused.
@@ -2581,69 +2705,47 @@ impl Device {
     }
 
     fn init_fbos(&mut self, texture: &mut Texture, with_depth: bool) {
-        let (fbos, depth_rb) = if with_depth {
+        let (fbo, depth_rb) = if with_depth {
             let depth_target = self.acquire_depth_target(texture.get_dimensions());
-            (&mut texture.fbos_with_depth, Some(depth_target))
+            (&mut texture.fbo_with_depth, Some(depth_target))
         } else {
-            (&mut texture.fbos, None)
+            (&mut texture.fbo, None)
         };
 
         // Generate the FBOs.
-        assert!(fbos.is_empty());
-        fbos.extend(self.gl.gen_framebuffers(texture.layer_count).into_iter().map(FBOId));
+        assert!(fbo.is_none());
+        let fbo_id = FBOId(*self.gl.gen_framebuffers(1).first().unwrap());
+        *fbo = Some(fbo_id);
 
         // Bind the FBOs.
         let original_bound_fbo = self.bound_draw_fbo;
-        for (fbo_index, &fbo_id) in fbos.iter().enumerate() {
-            self.bind_external_draw_target(fbo_id);
-            match texture.target {
-                gl::TEXTURE_2D_ARRAY => {
-                    self.gl.framebuffer_texture_layer(
-                        gl::DRAW_FRAMEBUFFER,
-                        gl::COLOR_ATTACHMENT0,
-                        texture.id,
-                        0,
-                        fbo_index as _,
-                    )
-                }
-                _ => {
-                    assert_eq!(fbo_index, 0);
-                    self.gl.framebuffer_texture_2d(
-                        gl::DRAW_FRAMEBUFFER,
-                        gl::COLOR_ATTACHMENT0,
-                        texture.target,
-                        texture.id,
-                        0,
-                    )
-                }
-            }
 
-            if let Some(depth_rb) = depth_rb {
-                self.gl.framebuffer_renderbuffer(
-                    gl::DRAW_FRAMEBUFFER,
-                    gl::DEPTH_ATTACHMENT,
-                    gl::RENDERBUFFER,
-                    depth_rb.0,
-                );
-            }
+        self.bind_external_draw_target(fbo_id);
 
-            debug_assert_eq!(
-                self.gl.check_frame_buffer_status(gl::DRAW_FRAMEBUFFER),
-                gl::FRAMEBUFFER_COMPLETE,
-                "Incomplete framebuffer",
+        self.gl.framebuffer_texture_2d(
+            gl::DRAW_FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0,
+            texture.target,
+            texture.id,
+            0,
+        );
+
+        if let Some(depth_rb) = depth_rb {
+            self.gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::DEPTH_ATTACHMENT,
+                gl::RENDERBUFFER,
+                depth_rb.0,
             );
         }
-        self.bind_external_draw_target(original_bound_fbo);
-    }
 
-    fn deinit_fbos(&mut self, fbos: &mut Vec<FBOId>) {
-        if !fbos.is_empty() {
-            let fbo_ids: SmallVec<[gl::GLuint; 8]> = fbos
-                .drain(..)
-                .map(|FBOId(fbo_id)| fbo_id)
-                .collect();
-            self.gl.delete_framebuffers(&fbo_ids[..]);
-        }
+        debug_assert_eq!(
+            self.gl.check_frame_buffer_status(gl::DRAW_FRAMEBUFFER),
+            gl::FRAMEBUFFER_COMPLETE,
+            "Incomplete framebuffer",
+        );
+
+        self.bind_external_draw_target(original_bound_fbo);
     }
 
     fn acquire_depth_target(&mut self, dimensions: DeviceIntSize) -> RBOId {
@@ -2695,15 +2797,18 @@ impl Device {
             TextureFilter::Linear | TextureFilter::Trilinear => gl::LINEAR,
         };
 
+        let src_x0 = src_rect.min.x + self.bound_read_fbo.1.x;
+        let src_y0 = src_rect.min.y + self.bound_read_fbo.1.y;
+
         self.gl.blit_framebuffer(
-            src_rect.origin.x,
-            src_rect.origin.y,
-            src_rect.origin.x + src_rect.size.width,
-            src_rect.origin.y + src_rect.size.height,
-            dest_rect.origin.x,
-            dest_rect.origin.y,
-            dest_rect.origin.x + dest_rect.size.width,
-            dest_rect.origin.y + dest_rect.size.height,
+            src_x0,
+            src_y0,
+            src_x0 + src_rect.width(),
+            src_y0 + src_rect.height(),
+            dest_rect.min.x,
+            dest_rect.min.y,
+            dest_rect.max.x,
+            dest_rect.max.y,
             gl::COLOR_BUFFER_BIT,
             filter,
         );
@@ -2723,60 +2828,9 @@ impl Device {
 
         self.bind_read_target(src_target);
 
-        match dest_target {
-            DrawTarget::Texture { layer, blit_workaround_buffer, dimensions, id, target, .. } if layer != 0 &&
-                !self.capabilities.supports_blit_to_texture_array =>
-            {
-                // This should have been initialized in create_texture().
-                let (_rbo, fbo) = blit_workaround_buffer.expect("Blit workaround buffer has not been initialized.");
+        self.bind_draw_target(dest_target);
 
-                // Blit from read target to intermediate buffer.
-                self.bind_draw_target_impl(fbo);
-                self.blit_render_target_impl(
-                    src_rect,
-                    dest_rect,
-                    filter
-                );
-
-                // dest_rect may be inverted, so min_x/y() might actually be the
-                // bottom-right, max_x/y() might actually be the top-left,
-                // and width/height might be negative. See servo/euclid#321.
-                // Calculate the non-inverted rect here.
-                let dest_bounds = DeviceIntRect::new(
-                    DeviceIntPoint::new(
-                        dest_rect.min_x().min(dest_rect.max_x()),
-                        dest_rect.min_y().min(dest_rect.max_y()),
-                    ),
-                    DeviceIntSize::new(
-                        dest_rect.size.width.abs(),
-                        dest_rect.size.height.abs(),
-                    ),
-                ).intersection(&dimensions.into()).unwrap_or_else(DeviceIntRect::zero);
-
-                self.bind_read_target_impl(fbo);
-                self.bind_texture_impl(
-                    DEFAULT_TEXTURE,
-                    id,
-                    target,
-                    None, // not depending on swizzle
-                );
-
-                // Copy from intermediate buffer to the texture layer.
-                self.gl.copy_tex_sub_image_3d(
-                    target, 0,
-                    dest_bounds.origin.x, dest_bounds.origin.y,
-                    layer as _,
-                    dest_bounds.origin.x, dest_bounds.origin.y,
-                    dest_bounds.size.width, dest_bounds.size.height,
-                );
-
-            }
-            _ => {
-                self.bind_draw_target(dest_target);
-
-                self.blit_render_target_impl(src_rect, dest_rect, filter);
-            }
-        }
+        self.blit_render_target_impl(src_rect, dest_rect, filter);
     }
 
     /// Performs a blit while flipping vertically. Useful for blitting textures
@@ -2792,8 +2846,8 @@ impl Device {
         debug_assert!(self.inside_frame);
 
         let mut inverted_dest_rect = dest_rect;
-        inverted_dest_rect.origin.y = dest_rect.max_y();
-        inverted_dest_rect.size.height *= -1;
+        inverted_dest_rect.min.y = dest_rect.max.y;
+        inverted_dest_rect.max.y = dest_rect.min.y;
 
         self.blit_render_target(
             src_target,
@@ -2807,14 +2861,17 @@ impl Device {
     pub fn delete_texture(&mut self, mut texture: Texture) {
         debug_assert!(self.inside_frame);
         let had_depth = texture.supports_depth();
-        self.deinit_fbos(&mut texture.fbos);
-        self.deinit_fbos(&mut texture.fbos_with_depth);
+        if let Some(fbo) = texture.fbo {
+            self.gl.delete_framebuffers(&[fbo.0]);
+            texture.fbo = None;
+        }
+        if let Some(fbo) = texture.fbo_with_depth {
+            self.gl.delete_framebuffers(&[fbo.0]);
+            texture.fbo_with_depth = None;
+        }
+
         if had_depth {
             self.release_depth_target(texture.get_dimensions());
-        }
-        if let Some((rbo, fbo)) = texture.blit_workaround_buffer {
-            self.gl.delete_framebuffers(&[fbo.0]);
-            self.gl.delete_renderbuffers(&[rbo.0]);
         }
 
         self.gl.delete_textures(&[texture.id]);
@@ -2881,6 +2938,7 @@ impl Device {
             id: pid,
             u_transform: 0,
             u_mode: 0,
+            u_texture_size: 0,
             source_info,
             is_initialized: false,
         };
@@ -2947,6 +3005,22 @@ impl Device {
         self.gl.uniform_1i(self.program_mode_id.0, mode);
     }
 
+    /// Sets the uTextureSize uniform. Most shaders do not require this to be called
+    /// as they use the textureSize GLSL function instead.
+    pub fn set_shader_texture_size(
+        &self,
+        program: &Program,
+        texture_size: DeviceSize,
+    ) {
+        debug_assert!(self.inside_frame);
+        #[cfg(debug_assertions)]
+        debug_assert!(self.shader_is_ready);
+
+        if program.u_texture_size != -1 {
+            self.gl.uniform_2f(program.u_texture_size, texture_size.width, texture_size.height);
+        }
+    }
+
     pub fn create_pbo(&mut self) -> PBO {
         let id = self.gl.gen_buffers(1)[0];
         PBO {
@@ -2979,7 +3053,7 @@ impl Device {
         format: ImageFormat,
         pbo: &PBO,
     ) {
-        let byte_size = rect.size.area() as usize * format.bytes_per_pixel() as usize;
+        let byte_size = rect.area() as usize * format.bytes_per_pixel() as usize;
 
         assert!(byte_size <= pbo.reserved_size);
 
@@ -2992,10 +3066,10 @@ impl Device {
 
         unsafe {
             self.gl.read_pixels_into_pbo(
-                rect.origin.x as _,
-                rect.origin.y as _,
-                rect.size.width as _,
-                rect.size.height as _,
+                rect.min.x as _,
+                rect.min.y as _,
+                rect.width() as _,
+                rect.height() as _,
                 gl_format.read,
                 gl_format.pixel_type,
             );
@@ -3048,7 +3122,7 @@ impl Device {
         let bytes_pp = format.bytes_per_pixel() as usize;
         let width_bytes = size.width as usize * bytes_pp;
 
-        let dst_stride = round_up_to_multiple(width_bytes, self.optimal_pbo_stride.num_bytes(format));
+        let dst_stride = round_up_to_multiple(width_bytes, self.required_pbo_stride.num_bytes(format));
 
         // The size of the chunk should only need to be (height - 1) * dst_stride + width_bytes,
         // however, the android emulator will error unless it is height * dst_stride.
@@ -3084,35 +3158,17 @@ impl Device {
     ) {
         self.bind_texture(DEFAULT_TEXTURE, texture, Swizzle::default());
         let desc = self.gl_describe_format(texture.format);
-        match texture.target {
-            gl::TEXTURE_2D | gl::TEXTURE_RECTANGLE | gl::TEXTURE_EXTERNAL_OES =>
-                self.gl.tex_sub_image_2d(
-                    texture.target,
-                    0,
-                    0,
-                    0,
-                    texture.size.width as gl::GLint,
-                    texture.size.height as gl::GLint,
-                    desc.external,
-                    desc.pixel_type,
-                    texels_to_u8_slice(pixels),
-                ),
-            gl::TEXTURE_2D_ARRAY =>
-                self.gl.tex_sub_image_3d(
-                    texture.target,
-                    0,
-                    0,
-                    0,
-                    0,
-                    texture.size.width as gl::GLint,
-                    texture.size.height as gl::GLint,
-                    texture.layer_count as gl::GLint,
-                    desc.external,
-                    desc.pixel_type,
-                    texels_to_u8_slice(pixels),
-                ),
-            _ => panic!("BUG: Unexpected texture target!"),
-        }
+        self.gl.tex_sub_image_2d(
+            texture.target,
+            0,
+            0,
+            0,
+            texture.size.width as gl::GLint,
+            texture.size.height as gl::GLint,
+            desc.external,
+            desc.pixel_type,
+            texels_to_u8_slice(pixels),
+        );
     }
 
     pub fn read_pixels(&mut self, img_desc: &ImageDescriptor) -> Vec<u8> {
@@ -3135,15 +3191,15 @@ impl Device {
     ) {
         let bytes_per_pixel = format.bytes_per_pixel();
         let desc = self.gl_describe_format(format);
-        let size_in_bytes = (bytes_per_pixel * rect.size.width * rect.size.height) as usize;
+        let size_in_bytes = (bytes_per_pixel * rect.area()) as usize;
         assert_eq!(output.len(), size_in_bytes);
 
         self.gl.flush();
         self.gl.read_pixels_into_buffer(
-            rect.origin.x as _,
-            rect.origin.y as _,
-            rect.size.width as _,
-            rect.size.height as _,
+            rect.min.x as _,
+            rect.min.y as _,
+            rect.width() as _,
+            rect.height() as _,
             desc.read,
             desc.pixel_type,
             output,
@@ -3169,40 +3225,24 @@ impl Device {
     }
 
     /// Attaches the provided texture to the current Read FBO binding.
-    fn attach_read_texture_raw(
-        &mut self, texture_id: gl::GLuint, target: gl::GLuint, layer_id: i32
-    ) {
-        match target {
-            gl::TEXTURE_2D_ARRAY => {
-                self.gl.framebuffer_texture_layer(
-                    gl::READ_FRAMEBUFFER,
-                    gl::COLOR_ATTACHMENT0,
-                    texture_id,
-                    0,
-                    layer_id,
-                )
-            }
-            _ => {
-                assert_eq!(layer_id, 0);
-                self.gl.framebuffer_texture_2d(
-                    gl::READ_FRAMEBUFFER,
-                    gl::COLOR_ATTACHMENT0,
-                    target,
-                    texture_id,
-                    0,
-                )
-            }
-        }
+    fn attach_read_texture_raw(&mut self, texture_id: gl::GLuint, target: gl::GLuint) {
+        self.gl.framebuffer_texture_2d(
+            gl::READ_FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0,
+            target,
+            texture_id,
+            0,
+        )
     }
 
     pub fn attach_read_texture_external(
-        &mut self, texture_id: gl::GLuint, target: ImageBufferKind, layer_id: i32
+        &mut self, texture_id: gl::GLuint, target: ImageBufferKind
     ) {
-        self.attach_read_texture_raw(texture_id, get_gl_target(target), layer_id)
+        self.attach_read_texture_raw(texture_id, get_gl_target(target))
     }
 
-    pub fn attach_read_texture(&mut self, texture: &Texture, layer_id: i32) {
-        self.attach_read_texture_raw(texture.id, texture.target, layer_id)
+    pub fn attach_read_texture(&mut self, texture: &Texture) {
+        self.attach_read_texture_raw(texture.id, texture.target)
     }
 
     fn bind_vao_impl(&mut self, id: gl::GLuint) {
@@ -3446,6 +3486,14 @@ impl Device {
                 self.update_vbo_data(vao.instance_vbo_id, instances, usage_hint);
             }
         }
+
+        // On some devices the VAO must be manually unbound and rebound after an attached buffer has
+        // been orphaned. Failure to do so appeared to result in the orphaned buffer's contents
+        // being used for the subsequent draw call, rather than the new buffer's contents.
+        if self.capabilities.requires_vao_rebind_after_orphaning {
+            self.bind_vao_impl(0);
+            self.bind_vao_impl(vao.id);
+        }
     }
 
     pub fn update_vao_indices<I>(&mut self, vao: &VAO, indices: &[I], usage_hint: VertexUsageHint) {
@@ -3466,6 +3514,16 @@ impl Device {
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
 
+        let _guard = if self.annotate_draw_call_crashes {
+            Some(CrashAnnotatorGuard::new(
+                &self.crash_annotator,
+                CrashAnnotation::DrawShader,
+                &self.bound_program_name,
+            ))
+        } else {
+            None
+        };
+
         self.gl.draw_elements(
             gl::TRIANGLES,
             index_count,
@@ -3478,6 +3536,16 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+
+        let _guard = if self.annotate_draw_call_crashes {
+            Some(CrashAnnotatorGuard::new(
+                &self.crash_annotator,
+                CrashAnnotation::DrawShader,
+                &self.bound_program_name,
+            ))
+        } else {
+            None
+        };
 
         self.gl.draw_elements(
             gl::TRIANGLES,
@@ -3492,6 +3560,16 @@ impl Device {
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
 
+        let _guard = if self.annotate_draw_call_crashes {
+            Some(CrashAnnotatorGuard::new(
+                &self.crash_annotator,
+                CrashAnnotation::DrawShader,
+                &self.bound_program_name,
+            ))
+        } else {
+            None
+        };
+
         self.gl.draw_arrays(gl::POINTS, first_vertex, vertex_count);
     }
 
@@ -3500,6 +3578,16 @@ impl Device {
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
 
+        let _guard = if self.annotate_draw_call_crashes {
+            Some(CrashAnnotatorGuard::new(
+                &self.crash_annotator,
+                CrashAnnotation::DrawShader,
+                &self.bound_program_name,
+            ))
+        } else {
+            None
+        };
+
         self.gl.draw_arrays(gl::LINES, first_vertex, vertex_count);
     }
 
@@ -3507,6 +3595,16 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+
+        let _guard = if self.annotate_draw_call_crashes {
+            Some(CrashAnnotatorGuard::new(
+                &self.crash_annotator,
+                CrashAnnotation::DrawShader,
+                &self.bound_program_name,
+            ))
+        } else {
+            None
+        };
 
         self.gl.draw_elements(
             gl::TRIANGLES,
@@ -3520,6 +3618,16 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+
+        let _guard = if self.annotate_draw_call_crashes {
+            Some(CrashAnnotatorGuard::new(
+                &self.crash_annotator,
+                CrashAnnotation::DrawShader,
+                &self.bound_program_name,
+            ))
+        } else {
+            None
+        };
 
         self.gl.draw_elements_instanced(
             gl::TRIANGLES,
@@ -3587,10 +3695,10 @@ impl Device {
                 Some(rect) => {
                     self.gl.enable(gl::SCISSOR_TEST);
                     self.gl.scissor(
-                        rect.origin.x,
-                        rect.origin.y,
-                        rect.size.width,
-                        rect.size.height,
+                        rect.min.x,
+                        rect.min.y,
+                        rect.width(),
+                        rect.height(),
                     );
                     self.gl.clear(clear_bits);
                     self.gl.disable(gl::SCISSOR_TEST);
@@ -3627,10 +3735,10 @@ impl Device {
 
     pub fn set_scissor_rect(&self, rect: FramebufferIntRect) {
         self.gl.scissor(
-            rect.origin.x,
-            rect.origin.y,
-            rect.size.width,
-            rect.size.height,
+            rect.min.x,
+            rect.min.y,
+            rect.width(),
+            rect.height(),
         );
     }
 
@@ -3748,6 +3856,24 @@ impl Device {
         self.set_blend_factors(
             (gl::ONE, gl::ONE_MINUS_SRC1_COLOR),
             (gl::ONE, gl::ONE_MINUS_SRC1_ALPHA),
+        );
+    }
+    pub fn set_blend_mode_multiply_dual_source(&mut self) {
+        self.set_blend_factors(
+            (gl::ONE_MINUS_DST_ALPHA, gl::ONE_MINUS_SRC1_COLOR),
+            (gl::ONE, gl::ONE_MINUS_SRC_ALPHA),
+        );
+    }
+    pub fn set_blend_mode_screen(&mut self) {
+        self.set_blend_factors(
+            (gl::ONE, gl::ONE_MINUS_SRC_COLOR),
+            (gl::ONE, gl::ONE_MINUS_SRC_ALPHA),
+        );
+    }
+    pub fn set_blend_mode_exclusion(&mut self) {
+        self.set_blend_factors(
+            (gl::ONE_MINUS_DST_COLOR, gl::ONE_MINUS_SRC_COLOR),
+            (gl::ONE, gl::ONE_MINUS_SRC_ALPHA),
         );
     }
     pub fn set_blend_mode_show_overdraw(&mut self) {
@@ -3896,28 +4022,28 @@ impl Device {
         }
     }
 
-    /// Returns a GL format matching an ImageFormat suitable for a renderbuffer.
-    fn matching_renderbuffer_format(&self, format: ImageFormat) -> gl::GLenum {
-        match format {
-            ImageFormat::R8 => gl::R8,
-            ImageFormat::R16 => gl::R16UI,
-            // BGRA8 renderbuffers are not supported, so use RGBA8.
-            ImageFormat::BGRA8 => gl::RGBA8,
-            ImageFormat::RGBAF32 => gl::RGBA32F,
-            ImageFormat::RG8 => gl::RG8,
-            ImageFormat::RG16 => gl::RG16,
-            ImageFormat::RGBAI32 => gl::RGBA32I,
-            ImageFormat::RGBA8 => gl::RGBA8,
+    /// Generates a memory report for the resources managed by the device layer.
+    pub fn report_memory(&self, size_op_funs: &MallocSizeOfOps, swgl: *mut c_void) -> MemoryReport {
+        let mut report = MemoryReport::default();
+        report.depth_target_textures += self.depth_targets_memory();
+
+        #[cfg(feature = "sw_compositor")]
+        if !swgl.is_null() {
+            report.swgl += swgl::Context::from(swgl).report_memory(size_op_funs.size_of_op);
         }
+        // unconditionally use swgl stuff
+        let _ = size_op_funs;
+        let _ = swgl;
+        report
     }
 
-    /// Generates a memory report for the resources managed by the device layer.
-    pub fn report_memory(&self) -> MemoryReport {
-        let mut report = MemoryReport::default();
+    pub fn depth_targets_memory(&self) -> usize {
+        let mut total = 0;
         for dim in self.depth_targets.keys() {
-            report.depth_target_textures += depth_target_size_in_bytes(dim);
+            total += depth_target_size_in_bytes(dim);
         }
-        report
+
+        total
     }
 }
 
@@ -3936,7 +4062,6 @@ pub struct FormatDesc {
 #[derive(Debug)]
 struct UploadChunk<'a> {
     rect: DeviceIntRect,
-    layer_index: i32,
     stride: Option<i32>,
     offset: usize,
     format_override: Option<ImageFormat>,
@@ -4298,7 +4423,7 @@ pub struct TextureUploader<'a> {
     /// A list of buffers containing uploads that need to be flushed.
     buffers: Vec<PixelBuffer<'a>>,
     /// Pool used to obtain PBOs to fill with texture data.
-    pbo_pool: &'a mut UploadPBOPool,
+    pub pbo_pool: &'a mut UploadPBOPool,
 }
 
 impl<'a> Drop for TextureUploader<'a> {
@@ -4384,7 +4509,6 @@ impl<'a> TextureUploader<'a> {
         device: &mut Device,
         texture: &'a Texture,
         rect: DeviceIntRect,
-        layer_index: i32,
         format_override: Option<ImageFormat>,
         mut staging_buffer: UploadStagingBuffer<'a>,
     ) -> usize {
@@ -4392,7 +4516,6 @@ impl<'a> TextureUploader<'a> {
 
         staging_buffer.buffer.chunks.push(UploadChunk {
             rect,
-            layer_index,
             stride: Some(staging_buffer.stride as i32),
             offset: staging_buffer.offset,
             format_override,
@@ -4416,7 +4539,6 @@ impl<'a> TextureUploader<'a> {
         device: &mut Device,
         texture: &'a Texture,
         mut rect: DeviceIntRect,
-        layer_index: i32,
         stride: Option<i32>,
         format_override: Option<ImageFormat>,
         data: *const T,
@@ -4425,7 +4547,7 @@ impl<'a> TextureUploader<'a> {
         // Textures dimensions may have been clamped by the hardware. Crop the
         // upload region to match.
         let cropped = rect.intersection(
-            &DeviceIntRect::new(DeviceIntPoint::zero(), texture.get_dimensions())
+            &DeviceIntRect::from_size(texture.get_dimensions())
         );
         if cfg!(debug_assertions) && cropped.map_or(true, |r| r != rect) {
             warn!("Cropping texture upload {:?} to {:?}", rect, cropped);
@@ -4436,13 +4558,13 @@ impl<'a> TextureUploader<'a> {
         };
 
         let bytes_pp = texture.format.bytes_per_pixel() as usize;
-        let width_bytes = rect.size.width as usize * bytes_pp;
+        let width_bytes = rect.width() as usize * bytes_pp;
 
         let src_stride = stride.map_or(width_bytes, |stride| {
             assert!(stride >= 0);
             stride as usize
         });
-        let src_size = (rect.size.height as usize - 1) * src_stride + width_bytes;
+        let src_size = (rect.height() as usize - 1) * src_stride + width_bytes;
         assert!(src_size <= len * mem::size_of::<T>());
 
         match device.upload_method {
@@ -4457,17 +4579,16 @@ impl<'a> TextureUploader<'a> {
 
                 Self::update_impl(device, UploadChunk {
                     rect,
-                    layer_index,
                     stride: Some(src_stride as i32),
                     offset: data as _,
                     format_override,
                     texture,
                 });
 
-                width_bytes * rect.size.height as usize
+                width_bytes * rect.height() as usize
             }
             UploadMethod::PixelBuffer(_) => {
-                let mut staging_buffer = match self.stage(device, texture.format, rect.size) {
+                let mut staging_buffer = match self.stage(device, texture.format, rect.size()) {
                     Ok(staging_buffer) => staging_buffer,
                     Err(_) => return 0,
                 };
@@ -4483,7 +4604,7 @@ impl<'a> TextureUploader<'a> {
                     } else {
                         // copy the data line-by-line in to the buffer so
                         // that it has an optimal stride
-                        for y in 0..rect.size.height as usize {
+                        for y in 0..rect.height() as usize {
                             let src_start = y * src_stride;
                             let src_end = src_start + width_bytes;
                             let dst_start = y * staging_buffer.get_stride();
@@ -4494,7 +4615,7 @@ impl<'a> TextureUploader<'a> {
                     }
                 }
 
-                self.upload_staged(device, texture, rect, layer_index, format_override, staging_buffer)
+                self.upload_staged(device, texture, rect, format_override, staging_buffer)
             }
         }
     }
@@ -4553,25 +4674,10 @@ impl<'a> TextureUploader<'a> {
             );
         }
 
-        let pos = chunk.rect.origin;
-        let size = chunk.rect.size;
+        let pos = chunk.rect.min;
+        let size = chunk.rect.size();
 
         match chunk.texture.target {
-            gl::TEXTURE_2D_ARRAY => {
-                device.gl.tex_sub_image_3d_pbo(
-                    chunk.texture.target,
-                    0,
-                    pos.x as _,
-                    pos.y as _,
-                    chunk.layer_index,
-                    size.width as _,
-                    size.height as _,
-                    1,
-                    gl_format,
-                    data_type,
-                    chunk.offset,
-                );
-            }
             gl::TEXTURE_2D | gl::TEXTURE_RECTANGLE | gl::TEXTURE_EXTERNAL_OES => {
                 device.gl.tex_sub_image_2d_pbo(
                     chunk.texture.target,

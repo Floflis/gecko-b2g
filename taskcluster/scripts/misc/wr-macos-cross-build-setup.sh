@@ -3,8 +3,6 @@ set -x -e -v
 
 export TARGET_TRIPLE="x86_64-apple-darwin"
 
-source "${GECKO_PATH}/taskcluster/scripts/misc/tooltool-download.sh"
-
 MACOS_SYSROOT="${MOZ_FETCHES_DIR}/MacOSX10.12.sdk"
 CLANGDIR="${MOZ_FETCHES_DIR}/clang"
 
@@ -31,7 +29,7 @@ END_PKGCONFIG_WRAPPER
 chmod +x "${TARGET_TRIPLE}-pkg-config"
 popd
 
-export PATH="${MOZ_FETCHES_DIR}/rustc/bin:${MOZ_FETCHES_DIR}/cctools/bin:${MOZ_FETCHES_DIR}/clang/bin:${MOZ_FETCHES_DIR}/llvm-dsymutil/bin:${MOZ_FETCHES_DIR}/wrench-deps/meson:${PATH}"
+export PATH="${MOZ_FETCHES_DIR}/rustc/bin:${MOZ_FETCHES_DIR}/cctools/bin:${MOZ_FETCHES_DIR}/clang/bin:${MOZ_FETCHES_DIR}/wrench-deps/meson:${PATH}"
 
 # The x86_64-darwin11-ld linker from cctools requires libraries provided
 # by clang, so we need to set LD_LIBRARY_PATH for that to work.

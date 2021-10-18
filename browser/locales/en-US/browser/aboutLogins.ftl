@@ -11,7 +11,7 @@ login-filter =
 create-login-button = Create New Login
 
 fxaccounts-sign-in-text = Get your passwords on your other devices
-fxaccounts-sign-in-button = Sign in to { -sync-brand-short-name }
+fxaccounts-sign-in-sync-button = Sign in to sync
 fxaccounts-avatar-button =
   .title = Manage account
 
@@ -43,6 +43,8 @@ login-list-count =
 login-list-sort-label-text = Sort by:
 login-list-name-option = Name (A-Z)
 login-list-name-reverse-option = Name (Z-A)
+login-list-username-option = Username (A-Z)
+login-list-username-reverse-option = Username (Z-A)
 about-logins-login-list-alerts-option = Alerts
 login-list-last-changed-option = Last Modified
 login-list-last-used-option = Last Used
@@ -57,15 +59,21 @@ about-logins-list-item-breach-icon =
   .title = Breached website
 about-logins-list-item-vulnerable-password-icon =
   .title = Vulnerable password
+about-logins-list-section-breach = Breached websites
+about-logins-list-section-vulnerable = Vulnerable passwords
+about-logins-list-section-nothing = No alert
+about-logins-list-section-today = Today
+about-logins-list-section-yesterday = Yesterday
+about-logins-list-section-week = Last 7 days
 
 ## Introduction screen
 
-about-logins-login-intro-heading-logged-out = Looking for your saved logins? Set up { -sync-brand-short-name } or Import Them.
+about-logins-login-intro-heading-logged-out2 = Looking for your saved logins? Turn on sync or import them.
 about-logins-login-intro-heading-logged-in = No synced logins found.
 login-intro-description = If you saved your logins to { -brand-product-name } on a different device, here’s how to get them here:
-login-intro-instruction-fxa = Create or sign in to your { -fxaccount-brand-name } on the device where your logins are saved
-login-intro-instruction-fxa-settings = Make sure you’ve selected the Logins checkbox in { -sync-brand-short-name } Settings
-about-logins-intro-instruction-help = Visit <a data-l10n-name="help-link">{ -lockwise-brand-short-name } Support</a> for more help
+login-intro-instructions-fxa = Create or sign in to your { -fxaccount-brand-name(capitalization: "sentence") } on the device where your logins are saved.
+login-intro-instructions-fxa-settings = Go to Settings > Sync > Turn on syncing… Select the Logins and passwords checkbox.
+login-intro-instructions-fxa-help = Visit <a data-l10n-name="help-link">{ -lockwise-brand-short-name } Support</a> for more help.
 about-logins-intro-import = If your logins are saved in another browser, you can <a data-l10n-name="import-link">import them into { -lockwise-brand-short-name }</a>
 about-logins-intro-import2 = If your logins are saved outside of { -brand-product-name }, you can <a data-l10n-name="import-browser-link">import them from another browser</a> or <a data-l10n-name="import-file-link">from a file</a>
 
@@ -134,24 +142,6 @@ master-password-reload-button =
   .label = Log in
   .accesskey = L
 
-## Password Sync notification
-
-enable-password-sync-notification-message =
-  { PLATFORM() ->
-      [windows] Want your logins everywhere you use { -brand-product-name }? Go to your { -sync-brand-short-name } Options and select the Logins checkbox.
-     *[other] Want your logins everywhere you use { -brand-product-name }? Go to your { -sync-brand-short-name } Preferences and select the Logins checkbox.
-  }
-enable-password-sync-preferences-button =
-  .label =
-    { PLATFORM() ->
-        [windows] Visit { -sync-brand-short-name } Options
-       *[other] Visit { -sync-brand-short-name } Preferences
-    }
-  .accesskey = V
-about-logins-enable-password-sync-dont-ask-again-button =
-  .label = Don’t ask me again
-  .accesskey = D
-
 ## Dialogs
 
 confirmation-dialog-cancel-button = Cancel
@@ -201,7 +191,7 @@ about-logins-confirm-export-dialog-message = Your passwords will be saved as rea
 about-logins-confirm-export-dialog-confirm-button = Export…
 
 about-logins-alert-import-title = Import Complete
-about-logins-alert-import-message = View detailed import summary
+about-logins-alert-import-message = View detailed Import Summary
 
 confirm-discard-changes-dialog-title = Discard unsaved changes?
 confirm-discard-changes-dialog-message = All unsaved changes will be lost.
@@ -236,7 +226,6 @@ about-logins-error-message-duplicate-login-with-link = An entry for { $loginTitl
 
 # This is a generic error message.
 about-logins-error-message-default = An error occurred while trying to save this password.
-
 
 ## Login Export Dialog
 
@@ -310,8 +299,48 @@ about-logins-import-dialog-error-unable-to-read-title = Unable to Parse File
 about-logins-import-dialog-error-unable-to-read-description = Make sure you selected a CSV or TSV file.
 about-logins-import-dialog-error-no-logins-imported = No logins have been imported
 about-logins-import-dialog-error-learn-more = Learn more
-about-logins-import-dialog-error-try-again = Try Again…
+about-logins-import-dialog-error-try-import-again = Try Import Again…
 about-logins-import-dialog-error-cancel = Cancel
+
+about-logins-import-report-title = Import Summary
+about-logins-import-report-description = Logins and passwords imported to { -brand-short-name }.
+
+#
+# Variables:
+#  $number (number) - The number of the row
+about-logins-import-report-row-index = Row { $number }
+about-logins-import-report-row-description-no-change = Duplicate: Exact match of existing login
+about-logins-import-report-row-description-modified = Existing login updated
+about-logins-import-report-row-description-added = New login added
+about-logins-import-report-row-description-error = Error: Missing field
+
+##
+## Variables:
+##  $field (String) - The name of the field from the CSV file for example url, username or password
+
+about-logins-import-report-row-description-error-multiple-values = Error: Multiple values for { $field }
+about-logins-import-report-row-description-error-missing-field = Error: Missing { $field }
+
+##
+## Variables:
+##  $count (number) - The number of affected elements
+
+about-logins-import-report-added =
+  { $count ->
+      *[other] <div data-l10n-name="count">{ $count }</div> <div data-l10n-name="details">New logins added</div>
+  }
+about-logins-import-report-modified =
+  { $count ->
+      *[other] <div data-l10n-name="count">{ $count }</div> <div data-l10n-name="details">Existing logins updated</div>
+  }
+about-logins-import-report-no-change =
+  { $count ->
+      *[other] <div data-l10n-name="count">{ $count }</div> <div data-l10n-name="details">Duplicate logins</div> <div data-l10n-name="not-imported">(not imported)</div>
+  }
+about-logins-import-report-error =
+  { $count ->
+      *[other] <div data-l10n-name="count">{ $count }</div> <div data-l10n-name="details">Errors</div> <div data-l10n-name="not-imported">(not imported)</div>
+  }
 
 ## Logins import report page
 

@@ -70,6 +70,7 @@ var serverRichList = {
         dbKey: item.dbKey,
         asciiHost: item.asciiHost,
         port: item.port,
+        originAttributes: item.originAttributes,
         isTemporary: item.isTemporary,
         displayName: cert !== null ? cert.displayName : "",
       };
@@ -106,6 +107,10 @@ var serverRichList = {
     richlistitem.setAttribute("host", item.asciiHost);
     richlistitem.setAttribute("port", item.port);
     richlistitem.setAttribute("hostPort", item.hostPort);
+    richlistitem.setAttribute(
+      "originAttributes",
+      JSON.stringify(item.originAttributes)
+    );
 
     let hbox = document.createXULElement("hbox");
     hbox.setAttribute("flex", "1");
@@ -155,7 +160,8 @@ var serverRichList = {
     if (retVals.deleteConfirmed) {
       overrideService.clearValidityOverride(
         selectedItem.attributes.host.value,
-        selectedItem.attributes.port.value
+        selectedItem.attributes.port.value,
+        JSON.parse(selectedItem.attributes.originAttributes.value)
       );
       this.buildRichList();
     }
@@ -268,10 +274,20 @@ var rememberedDecisionsRichList = {
       hbox.appendChild(createRichlistItem({ raw: "" }));
     } else {
       let tmpCert = certdb.findCertByDBKey(item.dbKey);
-
-      hbox.appendChild(createRichlistItem({ raw: tmpCert.commonName }));
-
-      hbox.appendChild(createRichlistItem({ raw: tmpCert.serialNumber }));
+      // The certificate corresponding to this item's dbKey may not be
+      // available (for example, if it was stored on a token that's been
+      // removed, or if it was deleted).
+      if (tmpCert) {
+        hbox.appendChild(createRichlistItem({ raw: tmpCert.commonName }));
+        hbox.appendChild(createRichlistItem({ raw: tmpCert.serialNumber }));
+      } else {
+        hbox.appendChild(
+          createRichlistItem({ l10nid: "certificate-not-available" })
+        );
+        hbox.appendChild(
+          createRichlistItem({ l10nid: "certificate-not-available" })
+        );
+      }
     }
 
     richlistitem.appendChild(hbox);

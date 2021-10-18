@@ -15,6 +15,7 @@
 #include "NamespaceImports.h"
 
 #include "js/OffThreadScriptCompilation.h"
+#include "js/Transcoding.h"
 #include "js/UniquePtr.h"
 #include "threading/LockGuard.h"
 #include "threading/Mutex.h"
@@ -31,6 +32,10 @@ namespace js {
 class AutoLockHelperThreadState;
 struct PromiseHelperTask;
 class SourceCompressionTask;
+
+namespace gc {
+class GCRuntime;
+}
 
 namespace jit {
 class IonCompileTask;
@@ -73,6 +78,10 @@ void DestroyHelperThreadsState();
 
 // Initialize helper threads unless already initialized.
 bool EnsureHelperThreadsInitialized();
+
+size_t GetHelperThreadCount();
+size_t GetHelperThreadCPUCount();
+size_t GetMaxWasmCompilationThreads();
 
 // This allows the JS shell to override GetCPUCount() when passed the
 // --thread-count=N option.
@@ -198,6 +207,15 @@ JS::OffThreadToken* StartOffThreadParseScript(
     JS::SourceText<mozilla::Utf8Unit>& srcBuf,
     JS::OffThreadCompileCallback callback, void* callbackData);
 
+JS::OffThreadToken* StartOffThreadCompileToStencil(
+    JSContext* cx, const JS::ReadOnlyCompileOptions& options,
+    JS::SourceText<char16_t>& srcBuf, JS::OffThreadCompileCallback callback,
+    void* callbackData);
+JS::OffThreadToken* StartOffThreadCompileToStencil(
+    JSContext* cx, const JS::ReadOnlyCompileOptions& options,
+    JS::SourceText<mozilla::Utf8Unit>& srcBuf,
+    JS::OffThreadCompileCallback callback, void* callbackData);
+
 JS::OffThreadToken* StartOffThreadParseModule(
     JSContext* cx, const JS::ReadOnlyCompileOptions& options,
     JS::SourceText<char16_t>& srcBuf, JS::OffThreadCompileCallback callback,
@@ -212,7 +230,7 @@ JS::OffThreadToken* StartOffThreadDecodeScript(
     const JS::TranscodeRange& range, JS::OffThreadCompileCallback callback,
     void* callbackData);
 
-JS::OffThreadToken* StartOffThreadDecodeMultiScripts(
+JS::OffThreadToken* StartOffThreadDecodeMultiStencils(
     JSContext* cx, const JS::ReadOnlyCompileOptions& options,
     JS::TranscodeSources& sources, JS::OffThreadCompileCallback callback,
     void* callbackData);

@@ -6,10 +6,6 @@
 
 XPIDL_SOURCES += [
     "mozIThirdPartyUtil.idl",
-    "nsIApplicationCache.idl",
-    "nsIApplicationCacheChannel.idl",
-    "nsIApplicationCacheContainer.idl",
-    "nsIApplicationCacheService.idl",
     "nsIArrayBufferInputStream.idl",
     "nsIAsyncStreamCopier.idl",
     "nsIAsyncStreamCopier2.idl",
@@ -36,7 +32,6 @@ XPIDL_SOURCES += [
     "nsIContentSniffer.idl",
     "nsIDashboard.idl",
     "nsIDashboardEventNotifier.idl",
-    "nsIDeprecationWarner.idl",
     "nsIDHCPClient.idl",
     "nsIDownloader.idl",
     "nsIEncodedChannel.idl",
@@ -98,6 +93,7 @@ XPIDL_SOURCES += [
     "nsISerializationHelper.idl",
     "nsIServerSocket.idl",
     "nsISimpleStreamListener.idl",
+    "nsISimpleURIMutator.idl",
     "nsISocketFilter.idl",
     "nsISocketTransport.idl",
     "nsISocketTransportService.idl",
@@ -158,6 +154,7 @@ EXPORTS.mozilla += [
 ]
 
 EXPORTS.mozilla.net += [
+    "CacheInfoIPCTypes.h",
     "CaptivePortalService.h",
     "Dashboard.h",
     "DashboardTypes.h",
@@ -172,7 +169,6 @@ EXPORTS.mozilla.net += [
     "RequestContextService.h",
     "SimpleChannelParent.h",
     "SSLTokensCache.h",
-    "TCPFastOpen.h",
     "ThrottleQueue.h",
 ]
 
@@ -241,7 +237,6 @@ UNIFIED_SOURCES += [
     "SimpleChannel.cpp",
     "SimpleChannelParent.cpp",
     "SSLTokensCache.cpp",
-    "TCPFastOpenLayer.cpp",
     "ThrottleQueue.cpp",
     "Tickler.cpp",
     "TLSServerSocket.cpp",
@@ -329,3 +324,5 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
 
 if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     CXXFLAGS += ["-Wno-error=shadow"]
+
+REQUIRES_UNIFIED_BUILD = True

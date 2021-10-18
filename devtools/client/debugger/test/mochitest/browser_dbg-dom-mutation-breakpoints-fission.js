@@ -21,7 +21,7 @@ Services.scriptloader.loadSubScript(
  * the attribute.
  */
 const TEST_COM_URI =
-  `http://example.com/document-builder.sjs?html=` +
+  `https://example.com/document-builder.sjs?html=` +
   encodeURI(
     `<input disabled=""/>
      <button onclick="document.querySelector('input').toggleAttribute('disabled')">
@@ -30,7 +30,7 @@ const TEST_COM_URI =
   );
 
 // Embed the example.com test page in an example.org iframe.
-const TEST_URI = `http://example.org/document-builder.sjs?html=
+const TEST_URI = `https://example.org/document-builder.sjs?html=
 <iframe src="${encodeURI(TEST_COM_URI)}"></iframe><body>`;
 
 add_task(async function() {
@@ -68,51 +68,45 @@ add_task(async function() {
   const mutationItem = await waitForElement(dbg, "domMutationItem");
   ok(mutationItem, "A DOM mutation breakpoint exists");
 
-  if (isFissionEnabled()) {
-    // The behavior of the else branch currently times out on fission.
-    // See Bug 1688569.
-    todo(false, "Disabling DOM breakpoints in frames fails with Fission");
-  } else {
-    mutationItem.scrollIntoView();
+  mutationItem.scrollIntoView();
 
-    info("Enabling and disabling the DOM mutation breakpoint works");
-    const checkbox = mutationItem.querySelector("input");
-    checkbox.click();
-    await waitFor(() => !checkbox.checked);
+  info("Enabling and disabling the DOM mutation breakpoint works");
+  const checkbox = mutationItem.querySelector("input");
+  checkbox.click();
+  await waitFor(() => !checkbox.checked);
 
-    info(
-      "Click the button in the remote iframe, should not hit the breakpoint"
-    );
-    BrowserTestUtils.synthesizeMouse("button", 0, 0, {}, frameBC);
+  info(
+    "Click the button in the remote iframe, should not hit the breakpoint"
+  );
+  BrowserTestUtils.synthesizeMouseAtCenter("button", {}, frameBC);
 
-    info("Wait until the input is enabled");
-    await asyncWaitUntil(() =>
-      SpecialPowers.spawn(gBrowser.selectedBrowser, [], function() {
-        return SpecialPowers.spawn(
-          content.document.querySelector("iframe"),
-          [],
-          () => !content.document.querySelector("input").disabled
-        );
-      })
-    );
-    is(isPaused(dbg), false, "DOM breakpoint should not have been hit");
-
-    info("Restore the disabled attribute");
-    await SpecialPowers.spawn(gBrowser.selectedBrowser, [], function() {
+  info("Wait until the input is enabled");
+  await asyncWaitUntil(() =>
+    SpecialPowers.spawn(gBrowser.selectedBrowser, [], function() {
       return SpecialPowers.spawn(
         content.document.querySelector("iframe"),
         [],
-        () =>
-          !content.document.querySelector("input").setAttribute("disabled", "")
+        () => !content.document.querySelector("input").disabled
       );
-    });
+    })
+  );
+  is(isPaused(dbg), false, "DOM breakpoint should not have been hit");
 
-    checkbox.click();
-    await waitFor(() => checkbox.checked);
-  }
+  info("Restore the disabled attribute");
+  await SpecialPowers.spawn(gBrowser.selectedBrowser, [], function() {
+    return SpecialPowers.spawn(
+      content.document.querySelector("iframe"),
+      [],
+      () =>
+        !content.document.querySelector("input").setAttribute("disabled", "")
+    );
+  });
+
+  checkbox.click();
+  await waitFor(() => checkbox.checked);
 
   info("Click the button in the remote iframe, to trigger the breakpoint");
-  BrowserTestUtils.synthesizeMouse("button", 0, 0, {}, frameBC);
+  BrowserTestUtils.synthesizeMouseAtCenter("button", {}, frameBC);
 
   info("Wait for paused");
   await waitForPaused(dbg);

@@ -124,13 +124,13 @@ void PreloaderBase::AddLoadBackgroundFlag(nsIChannel* aChannel) {
 
 void PreloaderBase::NotifyOpen(const PreloadHashKey& aKey,
                                dom::Document* aDocument, bool aIsPreload) {
-  if (aDocument && !aDocument->Preloads().RegisterPreload(aKey, this)) {
+  if (aDocument) {
+    DebugOnly<bool> alreadyRegistered =
+        aDocument->Preloads().RegisterPreload(aKey, this);
     // This means there is already a preload registered under this key in this
     // document.  We only allow replacement when this is a regular load.
     // Otherwise, this should never happen and is a suspected misuse of the API.
-    MOZ_ASSERT(!aIsPreload);
-    aDocument->Preloads().DeregisterPreload(aKey);
-    aDocument->Preloads().RegisterPreload(aKey, this);
+    MOZ_ASSERT_IF(alreadyRegistered, !aIsPreload);
   }
 
   mKey = aKey;
@@ -343,7 +343,7 @@ nsCString PreloaderBase::RedirectRecord::Fragment() const {
 
 // PreloaderBase::UsageTimer
 
-NS_IMPL_ISUPPORTS(PreloaderBase::UsageTimer, nsITimerCallback)
+NS_IMPL_ISUPPORTS(PreloaderBase::UsageTimer, nsITimerCallback, nsINamed)
 
 NS_IMETHODIMP PreloaderBase::UsageTimer::Notify(nsITimer* aTimer) {
   if (!mPreload || !mDocument) {
@@ -374,6 +374,12 @@ NS_IMETHODIMP PreloaderBase::UsageTimer::Notify(nsITimer* aTimer) {
                                   mDocument, nsContentUtils::eDOM_PROPERTIES,
                                   "UnusedLinkPreloadPending",
                                   nsTArray<nsString>({std::move(spec)}));
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+PreloaderBase::UsageTimer::GetName(nsACString& aName) {
+  aName.AssignLiteral("PreloaderBase::UsageTimer");
   return NS_OK;
 }
 

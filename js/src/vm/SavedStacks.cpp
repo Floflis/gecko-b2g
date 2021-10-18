@@ -14,7 +14,6 @@
 #include <utility>
 
 #include "jsapi.h"
-#include "jsfriendapi.h"
 #include "jsmath.h"
 #include "jsnum.h"
 
@@ -25,8 +24,10 @@
 #include "gc/Rooting.h"
 #include "js/CharacterEncoding.h"
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
+#include "js/PropertyAndElement.h"    // JS_DefineProperty, JS_GetProperty
 #include "js/PropertySpec.h"
 #include "js/SavedFrameAPI.h"
+#include "js/Stack.h"
 #include "js/Vector.h"
 #include "util/DifferentialTesting.h"
 #include "util/StringBuffer.h"
@@ -371,7 +372,7 @@ const ClassSpec SavedFrame::classSpec_ = {
 
 /* static */ const JSClass SavedFrame::class_ = {
     "SavedFrame",
-    JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(SavedFrame::JSSLOT_COUNT) |
+    JSCLASS_HAS_RESERVED_SLOTS(SavedFrame::JSSLOT_COUNT) |
         JSCLASS_HAS_CACHED_PROTO(JSProto_SavedFrame) |
         JSCLASS_FOREGROUND_FINALIZE,
     &SavedFrameClassOps, &SavedFrame::classSpec_};
@@ -661,7 +662,7 @@ static SavedFrame* GetFirstSubsumedFrame(JSContext* cx,
                               frame, selfHosted, skippedAsync);
 }
 
-JS_FRIEND_API JSObject* GetFirstSubsumedSavedFrame(
+JS_PUBLIC_API JSObject* GetFirstSubsumedSavedFrame(
     JSContext* cx, JSPrincipals* principals, HandleObject savedFrame,
     JS::SavedFrameSelfHosted selfHosted) {
   if (!savedFrame) {
@@ -684,9 +685,9 @@ JS_FRIEND_API JSObject* GetFirstSubsumedSavedFrame(
                               skippedAsync);
 }
 
-static MOZ_MUST_USE bool SavedFrame_checkThis(JSContext* cx, CallArgs& args,
-                                              const char* fnName,
-                                              MutableHandleObject frame) {
+[[nodiscard]] static bool SavedFrame_checkThis(JSContext* cx, CallArgs& args,
+                                               const char* fnName,
+                                               MutableHandleObject frame) {
   const Value& thisValue = args.thisv();
 
   if (!thisValue.isObject()) {
@@ -1070,7 +1071,7 @@ JS_PUBLIC_API bool BuildStackString(JSContext* cx, JSPrincipals* principals,
           }
           break;
         case js::StackFormat::Default:
-          MOZ_MAKE_COMPILER_ASSUME_IS_UNREACHABLE("Unexpected value");
+          MOZ_CRASH("Unexpected value");
           break;
       }
 
@@ -1491,7 +1492,6 @@ bool SavedStacks::insertFrames(JSContext* cx, MutableHandleSavedFrame frame,
                                 nullptr,  // parent (not known yet)
                                 principals, iter.mutedErrors(), framePtr,
                                 iter.pc(), &activation)) {
-      ReportOutOfMemory(cx);
       return false;
     }
 

@@ -19,7 +19,7 @@ macosx64-plain/opt:
     treeherder:
         symbol: Bp
         platform: osx/opt
-        tier: 2
+        tier: 1
     worker:
         env:
             PERFHERDER_EXTRA_OPTIONS: plain
@@ -36,10 +36,12 @@ macosx64-plain/opt:
     run-on-projects: ['mozilla-central']
     fetches:
         toolchain:
+            - macosx64-clang
             - macosx64-cbindgen
             - macosx64-nasm
             - macosx64-node
             - macosx64-rust
+            - sysroot-wasm32-wasi
     optimization:
         skip-unless-expanded: null
 
@@ -50,7 +52,7 @@ macosx64-plain/debug:
     treeherder:
         symbol: Bp
         platform: osx/debug
-        tier: 2
+        tier: 1
     worker:
         env:
             PERFHERDER_EXTRA_OPTIONS: plain
@@ -67,9 +69,75 @@ macosx64-plain/debug:
     run-on-projects: ['trunk']
     fetches:
         toolchain:
+            - macosx64-clang
             - macosx64-cbindgen
             - macosx64-nasm
             - macosx64-node
             - macosx64-rust
+            - sysroot-wasm32-wasi
     optimization:
         skip-unless-expanded: null
+
+macosx64-rusttests/opt:
+    description: "MacOS X x64 Rust Tests Opt"
+    index:
+        job-name: macosx64-rusttests-opt
+    treeherder:
+        platform: macosx64/opt
+        symbol: BR
+        tier: 1
+    worker:
+        env:
+            PERFHERDER_EXTRA_OPTIONS: rusttests
+    run:
+        actions: [build]
+        config:
+            - builds/releng_base_firefox.py
+            - builds/taskcluster_base_macosx.py
+            - builds/releng_sub_mac_configs/rusttests.py
+        extra-config:
+            mozconfig_platform: macosx64
+        mozconfig-variant: rusttests
+    run-on-projects: ['mozilla-central']
+    fetches:
+        toolchain:
+            - macosx64-clang
+            - macosx64-rust
+            - macosx64-cbindgen
+            - macosx64-nasm
+            - macosx64-node
+            - sysroot-wasm32-wasi
+    optimization:
+        test-inclusive: [rusttests]
+
+macosx64-rusttests/debug:
+    description: "MacOS X x64 Rust Tests Debug"
+    index:
+        job-name: macosx64-rusttests-debug
+    treeherder:
+        platform: macosx64/debug
+        symbol: BR
+        tier: 1
+    worker:
+        env:
+            PERFHERDER_EXTRA_OPTIONS: rusttests
+    run:
+        actions: [build]
+        config:
+            - builds/releng_base_firefox.py
+            - builds/taskcluster_base_macosx.py
+            - builds/releng_sub_mac_configs/rusttests.py
+        extra-config:
+            mozconfig_platform: macosx64
+        mozconfig-variant: rusttests-debug
+    run-on-projects: ['trunk']
+    fetches:
+        toolchain:
+            - macosx64-clang
+            - macosx64-rust
+            - macosx64-cbindgen
+            - macosx64-nasm
+            - macosx64-node
+            - sysroot-wasm32-wasi
+    optimization:
+        test-inclusive: [rusttests]

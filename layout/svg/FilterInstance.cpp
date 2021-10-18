@@ -28,8 +28,8 @@
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/SVGFilterInstance.h"
 #include "mozilla/SVGUtils.h"
+#include "mozilla/dom/Document.h"
 #include "CSSFilterInstance.h"
-#include "SVGFilterPaintCallback.h"
 #include "SVGIntegrationUtils.h"
 
 using namespace mozilla::dom;
@@ -60,12 +60,10 @@ static UniquePtr<UserSpaceMetrics> UserSpaceMetricsForFrame(nsIFrame* aFrame) {
   return MakeUnique<NonSVGFrameUserSpaceMetrics>(aFrame);
 }
 
-void FilterInstance::PaintFilteredFrame(nsIFrame* aFilteredFrame,
-                                        gfxContext* aCtx,
-                                        SVGFilterPaintCallback* aPaintCallback,
-                                        const nsRegion* aDirtyArea,
-                                        imgDrawingParams& aImgParams,
-                                        float aOpacity) {
+void FilterInstance::PaintFilteredFrame(
+    nsIFrame* aFilteredFrame, gfxContext* aCtx,
+    const SVGFilterPaintCallback& aPaintCallback, const nsRegion* aDirtyArea,
+    imgDrawingParams& aImgParams, float aOpacity) {
   auto filterChain = aFilteredFrame->StyleEffects()->mFilters.AsSpan();
   UniquePtr<UserSpaceMetrics> metrics =
       UserSpaceMetricsForFrame(aFilteredFrame);
@@ -123,6 +121,20 @@ bool FilterInstance::BuildWebRenderFilters(nsIFrame* aFilteredFrame,
                                            Span<const StyleFilter> aFilters,
                                            WrFiltersHolder& aWrFilters,
                                            Maybe<nsRect>& aPostFilterClip) {
+  bool status = BuildWebRenderFiltersImpl(aFilteredFrame, aFilters, aWrFilters,
+                                          aPostFilterClip);
+  if (!status) {
+    aFilteredFrame->PresContext()->Document()->SetUseCounter(
+        eUseCounter_custom_WrFilterFallback);
+  }
+
+  return status;
+}
+
+bool FilterInstance::BuildWebRenderFiltersImpl(nsIFrame* aFilteredFrame,
+                                               Span<const StyleFilter> aFilters,
+                                               WrFiltersHolder& aWrFilters,
+                                               Maybe<nsRect>& aPostFilterClip) {
   aWrFilters.filters.Clear();
   aWrFilters.filter_datas.Clear();
   aWrFilters.values.Clear();
@@ -437,7 +449,7 @@ nsRect FilterInstance::GetPostFilterBounds(nsIFrame* aFilteredFrame,
 FilterInstance::FilterInstance(
     nsIFrame* aTargetFrame, nsIContent* aTargetContent,
     const UserSpaceMetrics& aMetrics, Span<const StyleFilter> aFilterChain,
-    bool aFilterInputIsTainted, SVGFilterPaintCallback* aPaintCallback,
+    bool aFilterInputIsTainted, const SVGFilterPaintCallback& aPaintCallback,
     const gfxMatrix& aPaintTransform, const nsRegion* aPostFilterDirtyRegion,
     const nsRegion* aPreFilterDirtyRegion,
     const nsRect* aPreFilterInkOverflowRectOverride,
@@ -733,7 +745,7 @@ void FilterInstance::BuildSourceImage(DrawTarget* aDest,
     imageFlags &= ~imgIContainer::FLAG_HIGH_QUALITY_SCALING;
   }
   imgDrawingParams imgParams(imageFlags);
-  mPaintCallback->Paint(*ctx, mTargetFrame, mPaintTransform, &dirty, imgParams);
+  mPaintCallback(*ctx, mTargetFrame, mPaintTransform, &dirty, imgParams);
   aImgParams.result = imgParams.result;
 
   mSourceGraphic.mSourceSurface = offscreenDT->Snapshot();

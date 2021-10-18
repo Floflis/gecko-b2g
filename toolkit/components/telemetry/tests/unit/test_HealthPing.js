@@ -6,14 +6,8 @@
 
 "use strict";
 
-ChromeUtils.import("resource://gre/modules/TelemetryController.jsm", this);
-ChromeUtils.import("resource://gre/modules/TelemetryStorage.jsm", this);
-ChromeUtils.import("resource://gre/modules/TelemetryUtils.jsm", this);
-ChromeUtils.import("resource://gre/modules/Preferences.jsm", this);
-ChromeUtils.import("resource://gre/modules/XPCOMUtils.jsm", this);
-ChromeUtils.import(
-  "resource://testing-common/TelemetryArchiveTesting.jsm",
-  this
+const { TelemetryArchiveTesting } = ChromeUtils.import(
+  "resource://testing-common/TelemetryArchiveTesting.jsm"
 );
 
 ChromeUtils.defineModuleGetter(
@@ -40,12 +34,9 @@ function checkHealthPingStructure(ping, expectedFailuresDict) {
 }
 
 function fakeHealthSchedulerTimer(set, clear) {
-  let telemetryHealthPing = ChromeUtils.import(
-    "resource://gre/modules/HealthPing.jsm",
-    null
-  );
-  telemetryHealthPing.Policy.setSchedulerTickTimeout = set;
-  telemetryHealthPing.Policy.clearSchedulerTickTimeout = clear;
+  let { Policy } = ChromeUtils.import("resource://gre/modules/HealthPing.jsm");
+  Policy.setSchedulerTickTimeout = set;
+  Policy.clearSchedulerTickTimeout = clear;
 }
 
 async function waitForConditionWithPromise(
@@ -65,11 +56,10 @@ async function waitForConditionWithPromise(
 }
 
 function fakeSendSubmissionTimeout(timeOut) {
-  let telemetryHealthPing = ChromeUtils.import(
-    "resource://gre/modules/TelemetrySend.jsm",
-    null
+  let { Policy } = ChromeUtils.import(
+    "resource://gre/modules/TelemetrySend.jsm"
   );
-  telemetryHealthPing.Policy.pingSubmissionTimeout = () => timeOut;
+  Policy.pingSubmissionTimeout = () => timeOut;
 }
 
 add_task(async function setup() {
@@ -177,11 +167,10 @@ add_task(async function test_healthPingOnTop() {
   // Now trigger sending pings again.
   fakeNow(futureDate(now, 5 * 60 * 1000));
   await TelemetrySend.notifyCanUpload();
-  let scheduler = ChromeUtils.import(
-    "resource://gre/modules/TelemetrySend.jsm",
-    null
+  let { SendScheduler } = ChromeUtils.import(
+    "resource://gre/modules/TelemetrySend.jsm"
   );
-  scheduler.SendScheduler.triggerSendingPings(true);
+  SendScheduler.triggerSendingPings(true);
 
   let pings = await PingServer.promiseNextPings(4);
   Assert.equal(
@@ -227,11 +216,10 @@ add_task(async function test_sendOnTimeout() {
     response.finish();
   }
 
-  let telemetryHealthPing = ChromeUtils.import(
-    "resource://gre/modules/TelemetrySend.jsm",
-    null
+  let { PING_SUBMIT_TIMEOUT_MS } = ChromeUtils.import(
+    "resource://gre/modules/TelemetrySend.jsm"
   );
-  fakeSendSubmissionTimeout(telemetryHealthPing.PING_SUBMIT_TIMEOUT_MS);
+  fakeSendSubmissionTimeout(PING_SUBMIT_TIMEOUT_MS);
   PingServer.resetPingHandler();
   TelemetrySend.notifyCanUpload();
 
@@ -349,14 +337,8 @@ add_task(async function test_discardedForSizePending() {
 });
 
 add_task(async function test_usePingSenderOnShutdown() {
-  if (
-    gIsAndroid ||
-    (AppConstants.platform == "linux" && OS.Constants.Sys.bits == 32)
-  ) {
+  if (gIsAndroid) {
     // We don't support the pingsender on Android, yet, see bug 1335917.
-    // We also don't support the pingsender testing on Treeherder for
-    // Linux 32 bit (due to missing libraries). So skip it there too.
-    // See bug 1310703 comment 78.
     return;
   }
 
@@ -388,12 +370,12 @@ add_task(async function test_usePingSenderOnShutdown() {
   // Check that the health ping is sent at shutdown using the pingsender.
   Assert.equal(
     request.getHeader("User-Agent"),
-    "pingsender/1.0",
+    "pingsender/2.0",
     "Should have received the correct user agent string."
   );
   Assert.equal(
     request.getHeader("X-PingSender-Version"),
-    "1.0",
+    "2.0",
     "Should have received the correct PingSender version string."
   );
 });

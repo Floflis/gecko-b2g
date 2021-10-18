@@ -10,6 +10,7 @@
 #include "mozilla/ArrayAlgorithm.h"
 #include "mozilla/Casting.h"
 #include "mozilla/Logging.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/Telemetry.h"
 #include "nsCOMArray.h"
 #include "nsComponentManagerUtils.h"
@@ -82,27 +83,7 @@ class NotifyTargetChangeRunnable final : public Runnable {
 uint32_t BackgroundFileSaver::sThreadCount = 0;
 uint32_t BackgroundFileSaver::sTelemetryMaxThreadCount = 0;
 
-BackgroundFileSaver::BackgroundFileSaver()
-    : mControlEventTarget(nullptr),
-      mBackgroundET(nullptr),
-      mPipeOutputStream(nullptr),
-      mPipeInputStream(nullptr),
-      mObserver(nullptr),
-      mLock("BackgroundFileSaver.mLock"),
-      mWorkerThreadAttentionRequested(false),
-      mFinishRequested(false),
-      mComplete(false),
-      mStatus(NS_OK),
-      mAppend(false),
-      mInitialTarget(nullptr),
-      mInitialTargetKeepPartial(false),
-      mRenamedTarget(nullptr),
-      mRenamedTargetKeepPartial(false),
-      mAsyncCopyContext(nullptr),
-      mSha256Enabled(false),
-      mSignatureInfoEnabled(false),
-      mActualTarget(nullptr),
-      mActualTargetKeepPartial(false) {
+BackgroundFileSaver::BackgroundFileSaver() {
   LOG(("Created BackgroundFileSaver [this = %p]", this));
 }
 
@@ -532,6 +513,10 @@ nsresult BackgroundFileSaver::ProcessStateChange() {
     if (rv != NS_ERROR_FILE_NOT_FOUND) {
       NS_ENSURE_SUCCESS(rv, rv);
 
+      // Try to clean up the inputStream if an error occurs.
+      auto closeGuard =
+          mozilla::MakeScopeExit([&] { Unused << inputStream->Close(); });
+
       char buffer[BUFFERED_IO_SIZE];
       while (true) {
         uint32_t count;
@@ -543,11 +528,21 @@ nsresult BackgroundFileSaver::ProcessStateChange() {
           break;
         }
 
-        nsresult rv =
-            mDigest->Update(BitwiseCast<unsigned char*, char*>(buffer), count);
+        rv = mDigest->Update(BitwiseCast<unsigned char*, char*>(buffer), count);
         NS_ENSURE_SUCCESS(rv, rv);
+
+        // The pending resume operation may have been cancelled by the control
+        // thread while the worker thread was reading in the existing file.
+        // Abort reading in the original file in that case, as the digest will
+        // be discarded anyway.
+        MutexAutoLock lock(mLock);
+        if (NS_FAILED(mStatus)) {
+          return NS_ERROR_ABORT;
+        }
       }
 
+      // Close explicitly to handle any errors.
+      closeGuard.release();
       rv = inputStream->Close();
       NS_ENSURE_SUCCESS(rv, rv);
     }
@@ -930,13 +925,6 @@ BackgroundFileSaverOutputStream::OnOutputStreamReady(
 
 NS_IMPL_ISUPPORTS(BackgroundFileSaverStreamListener, nsIBackgroundFileSaver,
                   nsIRequestObserver, nsIStreamListener)
-
-BackgroundFileSaverStreamListener::BackgroundFileSaverStreamListener()
-    : BackgroundFileSaver(),
-      mSuspensionLock("BackgroundFileSaverStreamListener.mSuspensionLock"),
-      mReceivedTooMuchData(false),
-      mRequest(nullptr),
-      mRequestSuspended(false) {}
 
 bool BackgroundFileSaverStreamListener::HasInfiniteBuffer() { return true; }
 

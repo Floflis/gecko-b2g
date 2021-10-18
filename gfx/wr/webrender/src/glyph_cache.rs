@@ -3,8 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use crate::glyph_rasterizer::{FontInstance, GlyphFormat, GlyphKey, GlyphRasterizer};
-use crate::internal_types::FastHashMap;
-use crate::render_backend::{FrameId, FrameStamp};
+use crate::internal_types::{FrameId, FrameStamp, FastHashMap};
 use crate::resource_cache::ResourceClassCache;
 use std::sync::Arc;
 use crate::texture_cache::{EvictionNotice, TextureCache};
@@ -56,6 +55,9 @@ pub enum CachedGlyphData {
 #[derive(Default)]
 pub struct GlyphKeyCacheInfo {
     eviction_notice: EvictionNotice,
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    #[cfg_attr(feature = "replay", serde(default))]
     last_frame_used: FrameId,
 }
 
@@ -98,12 +100,21 @@ impl GlyphCache {
         }
     }
 
-    pub fn get_glyph_key_cache_for_font_mut(&mut self, font: FontInstance) -> &mut GlyphKeyCache {
+    pub fn insert_glyph_key_cache_for_font(&mut self, font: &FontInstance) -> &mut GlyphKeyCache {
         let cache = self.glyph_key_caches
-                        .entry(font)
+                        .entry(font.clone())
                         .or_insert_with(GlyphKeyCache::new);
-        cache.user_data.last_frame_used = self.current_frame;
+        #[cfg(debug_assertions)]
+        {
+            cache.user_data.last_frame_used = self.current_frame;
+        }
         cache
+    }
+
+    pub fn get_glyph_key_cache_for_font_mut(&mut self, font: &FontInstance) -> &mut GlyphKeyCache {
+        self.glyph_key_caches
+            .get_mut(font)
+            .expect("BUG: Unable to find glyph key cache!")
     }
 
     pub fn get_glyph_key_cache_for_font(&self, font: &FontInstance) -> &GlyphKeyCache {

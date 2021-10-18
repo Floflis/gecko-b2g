@@ -60,7 +60,7 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=453650
     }
 
     var observer = {
-      reflow: function (start, end) {
+      reflow (start, end) {
         info("Entering observer.reflow");
         if (interruptible) {
           ok(false, "expected interruptible reflow");
@@ -73,7 +73,7 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=453650
         done();
       },
 
-      reflowInterruptible: function (start, end) {
+      reflowInterruptible (start, end) {
         info("Entering observer.reflowInterruptible");
         if (!interruptible) {
           ok(false, "expected uninterruptible reflow");
@@ -99,10 +99,9 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=453650
 
   function whenLoaded(iframe) {
     info("entering whenLoaded");
-    iframe.addEventListener("load", function onLoad() {
-      iframe.removeEventListener("load", onLoad);
+    iframe.addEventListener("load", function() {
       SimpleTest.executeSoon(nextTest);
-    });
+    }, { once: true });
   }
 
   function nextTest() {

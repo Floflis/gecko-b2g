@@ -32,6 +32,7 @@
 #include "mozilla/dom/WorkerRef.h"
 #include "mozilla/layers/KnowsCompositor.h"
 #include "nsContentUtils.h"
+#include "WindowRenderer.h"
 
 static mozilla::LazyLogModule sMediaCapabilitiesLog("MediaCapabilities");
 
@@ -257,7 +258,7 @@ already_AddRefed<Promise> MediaCapabilities::DecodingInfo(
                 NS_NewRunnableFunction(
                     "MediaCapabilities::AllocPolicy:Video", []() {
                       ClearOnShutdown(&sVideoAllocPolicy,
-                                      ShutdownPhase::ShutdownThreads);
+                                      ShutdownPhase::XPCOMShutdownThreads);
                     }));
             return new SingleAllocPolicy(TrackInfo::TrackType::kVideoTrack,
                                          taskQueue);
@@ -572,12 +573,11 @@ already_AddRefed<layers::KnowsCompositor> MediaCapabilities::GetCompositor() {
   if (NS_WARN_IF(!doc)) {
     return nullptr;
   }
-  RefPtr<layers::LayerManager> layerManager =
-      nsContentUtils::LayerManagerForDocument(doc);
-  if (NS_WARN_IF(!layerManager)) {
+  WindowRenderer* renderer = nsContentUtils::WindowRendererForDocument(doc);
+  if (NS_WARN_IF(!renderer)) {
     return nullptr;
   }
-  RefPtr<layers::KnowsCompositor> knows = layerManager->AsKnowsCompositor();
+  RefPtr<layers::KnowsCompositor> knows = renderer->AsKnowsCompositor();
   if (NS_WARN_IF(!knows)) {
     return nullptr;
   }

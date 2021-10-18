@@ -152,7 +152,19 @@ static void LazyLoadCallback(
     MOZ_ASSERT(entry->Target()->IsHTMLElement(nsGkAtoms::img));
     if (entry->IsIntersecting()) {
       static_cast<HTMLImageElement*>(entry->Target())
-          ->StopLazyLoadingAndStartLoadIfNeeded();
+          ->StopLazyLoading(HTMLImageElement::FromIntersectionObserver::Yes,
+                            HTMLImageElement::StartLoading::Yes);
+    }
+  }
+}
+
+static void LazyLoadCallbackReachViewport(
+    const Sequence<OwningNonNull<DOMIntersectionObserverEntry>>& aEntries) {
+  for (const auto& entry : aEntries) {
+    MOZ_ASSERT(entry->Target()->IsHTMLElement(nsGkAtoms::img));
+    if (entry->IsIntersecting()) {
+      static_cast<HTMLImageElement*>(entry->Target())
+          ->LazyLoadImageReachedViewport();
     }
   }
 }
@@ -189,6 +201,14 @@ DOMIntersectionObserver::CreateLazyLoadObserver(Document& aDocument) {
   return observer.forget();
 }
 
+already_AddRefed<DOMIntersectionObserver>
+DOMIntersectionObserver::CreateLazyLoadObserverViewport(Document& aDocument) {
+  RefPtr<DOMIntersectionObserver> observer =
+      new DOMIntersectionObserver(aDocument, LazyLoadCallbackReachViewport);
+  observer->mThresholds.AppendElement(std::numeric_limits<double>::min());
+  return observer.forget();
+}
+
 bool DOMIntersectionObserver::SetRootMargin(const nsACString& aString) {
   return Servo_IntersectionObserverRootMargin_Parse(&aString, &mRootMargin);
 }
@@ -204,11 +224,14 @@ void DOMIntersectionObserver::GetThresholds(nsTArray<double>& aRetVal) {
 }
 
 void DOMIntersectionObserver::Observe(Element& aTarget) {
-  if (mObservationTargets.Contains(&aTarget)) {
+  if (!mObservationTargetSet.EnsureInserted(&aTarget)) {
     return;
   }
   aTarget.RegisterIntersectionObserver(this);
   mObservationTargets.AppendElement(&aTarget);
+
+  MOZ_ASSERT(mObservationTargets.Length() == mObservationTargetSet.Count());
+
   Connect();
   if (mDocument) {
     if (nsPresContext* pc = mDocument->GetPresContext()) {
@@ -218,22 +241,24 @@ void DOMIntersectionObserver::Observe(Element& aTarget) {
 }
 
 void DOMIntersectionObserver::Unobserve(Element& aTarget) {
-  if (!mObservationTargets.Contains(&aTarget)) {
-    return;
-  }
-
-  if (mObservationTargets.Length() == 1) {
-    Disconnect();
+  if (!mObservationTargetSet.EnsureRemoved(&aTarget)) {
     return;
   }
 
   mObservationTargets.RemoveElement(&aTarget);
   aTarget.UnregisterIntersectionObserver(this);
+
+  MOZ_ASSERT(mObservationTargets.Length() == mObservationTargetSet.Count());
+
+  if (mObservationTargets.IsEmpty()) {
+    Disconnect();
+  }
 }
 
 void DOMIntersectionObserver::UnlinkTarget(Element& aTarget) {
   mObservationTargets.RemoveElement(&aTarget);
-  if (mObservationTargets.Length() == 0) {
+  mObservationTargetSet.Remove(&aTarget);
+  if (mObservationTargets.IsEmpty()) {
     Disconnect();
   }
 }
@@ -255,11 +280,11 @@ void DOMIntersectionObserver::Disconnect() {
   }
 
   mConnected = false;
-  for (size_t i = 0; i < mObservationTargets.Length(); ++i) {
-    Element* target = mObservationTargets.ElementAt(i);
+  for (Element* target : mObservationTargets) {
     target->UnregisterIntersectionObserver(this);
   }
   mObservationTargets.Clear();
+  mObservationTargetSet.Clear();
   if (mDocument) {
     mDocument->RemoveIntersectionObserver(this);
   }
@@ -335,7 +360,8 @@ static Maybe<nsRect> ComputeTheIntersection(
   // apply clip-path.
   //
   // 3. While container is not the intersection root:
-  nsIFrame* containerFrame = nsLayoutUtils::GetCrossDocParentFrame(target);
+  nsIFrame* containerFrame =
+      nsLayoutUtils::GetCrossDocParentFrameInProcess(target);
   while (containerFrame && containerFrame != aRoot) {
     // FIXME(emilio): What about other scroll frames that inherit from
     // nsHTMLScrollFrame but have a different type, like nsListControlFrame?
@@ -371,7 +397,8 @@ static Maybe<nsRect> ComputeTheIntersection(
       target = containerFrame;
     }
 
-    containerFrame = nsLayoutUtils::GetCrossDocParentFrame(containerFrame);
+    containerFrame =
+        nsLayoutUtils::GetCrossDocParentFrameInProcess(containerFrame);
   }
   MOZ_ASSERT(intersectionRect);
 
@@ -428,7 +455,8 @@ struct OopIframeMetrics {
 
 static Maybe<OopIframeMetrics> GetOopIframeMetrics(Document& aDocument,
                                                    Document* aRootDocument) {
-  Document* rootDoc = nsContentUtils::GetRootDocument(&aDocument);
+  Document* rootDoc =
+      nsContentUtils::GetInProcessSubtreeRootDocument(&aDocument);
   MOZ_ASSERT(rootDoc);
 
   if (rootDoc->IsTopLevelContentDocument()) {
@@ -436,7 +464,8 @@ static Maybe<OopIframeMetrics> GetOopIframeMetrics(Document& aDocument,
   }
 
   if (aRootDocument &&
-      rootDoc == nsContentUtils::GetRootDocument(aRootDocument)) {
+      rootDoc ==
+          nsContentUtils::GetInProcessSubtreeRootDocument(aRootDocument)) {
     // aRootDoc, if non-null, is either the implicit root
     // (top-level-content-document) or a same-origin document passed explicitly.
     //
@@ -590,7 +619,9 @@ void DOMIntersectionObserver::Update(Document* aDocument,
       // NOTE(emilio): We also do this if target is the implicit root, pending
       // clarification in
       // https://github.com/w3c/IntersectionObserver/issues/456.
-      if (!nsLayoutUtils::IsAncestorFrameCrossDoc(rootFrame, targetFrame)) {
+      if (rootFrame == targetFrame ||
+          !nsLayoutUtils::IsAncestorFrameCrossDocInProcess(rootFrame,
+                                                           targetFrame)) {
         return false;
       }
 
@@ -616,10 +647,7 @@ void DOMIntersectionObserver::Update(Document* aDocument,
 
       // 2.3. Let targetRect be a DOMRectReadOnly obtained by running the
       // getBoundingClientRect() algorithm on target.
-      targetRect = nsLayoutUtils::GetAllInFlowRectsUnion(
-          targetFrame,
-          nsLayoutUtils::GetContainingBlockForClientRect(targetFrame),
-          nsLayoutUtils::RECTS_ACCOUNT_FOR_TRANSFORMS);
+      targetRect = targetFrame->GetBoundingClientRect();
 
       // 2.4. Let intersectionRect be the result of running the compute the
       // intersection algorithm on target.

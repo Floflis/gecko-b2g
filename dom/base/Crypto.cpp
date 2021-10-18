@@ -3,11 +3,13 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 #include "Crypto.h"
 #include "js/ScalarType.h"
 #include "js/experimental/TypedData.h"  // JS_GetArrayBufferViewType
 #include "nsCOMPtr.h"
 #include "nsIRandomGenerator.h"
+#include "nsReadableUtils.h"
 
 #include "mozilla/dom/CryptoBinding.h"
 #include "mozilla/dom/SubtleCrypto.h"
@@ -50,6 +52,8 @@ void Crypto::GetRandomValues(JSContext* aCx, const ArrayBufferView& aArray,
     case js::Scalar::Uint16:
     case js::Scalar::Int32:
     case js::Scalar::Uint32:
+    case js::Scalar::BigInt64:
+    case js::Scalar::BigUint64:
       break;
     default:
       aRv.Throw(NS_ERROR_DOM_TYPE_MISMATCH_ERR);
@@ -86,6 +90,18 @@ void Crypto::GetRandomValues(JSContext* aCx, const ArrayBufferView& aArray,
   free(buf);
 
   aRetval.set(view);
+}
+
+void Crypto::RandomUUID(nsAString& aRetVal) {
+  // NSID_LENGTH == 39 == 36 UUID chars + 2 curly braces + 1 NUL byte
+  static_assert(NSID_LENGTH == 39);
+
+  nsIDToCString uuidString(nsID::GenerateUUID());
+  MOZ_ASSERT(strlen(uuidString.get()) == NSID_LENGTH - 1);
+
+  // Convert UUID chars to UTF-16 retval, omitting the curly braces and NUL.
+  CopyASCIItoUTF16(Substring(uuidString.get() + 1, NSID_LENGTH - 3), aRetVal);
+  MOZ_ASSERT(aRetVal.Length() == NSID_LENGTH - 3);
 }
 
 SubtleCrypto* Crypto::Subtle() {

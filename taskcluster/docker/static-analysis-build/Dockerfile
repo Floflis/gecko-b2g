@@ -31,18 +31,16 @@ RUN apt-get update && \
       gnupg \
       jq \
       libc6-dev \
-      libstdc++-8-dev \
+      libstdc++-*-dev \
       libmpfr-dev \
       nasm \
       openjdk-8-jdk-headless \
+      opam \
       pkg-config \
       patch \
       p7zip-full \
       procps \
-      python-dev \
-      python-pip \
-      python-setuptools \
-      python-virtualenv \
+      python2.7 \
       python3-dev \
       rsync \
       screen \
@@ -51,7 +49,6 @@ RUN apt-get update && \
       uuid \
       valgrind \
       wget \
-      yasm \
       zip \
       zlib1g-dev \
       x11-utils \
@@ -63,14 +60,9 @@ RUN apt-get update && \
       libgconf2-dev \
       libgmp-dev \
       libgtk-3-dev \
-      libgtk2.0-dev \
       libpango1.0-dev \
       libpulse-dev \
       libx11-xcb-dev \
       libxt-dev \
       lib32z1 \
       patchelf
-
-# Install opam 2
-RUN curl -sL https://github.com/ocaml/opam/releases/download/2.0.3/opam-2.0.3-x86_64-linux > /usr/bin/opam && \
-    chmod +x /usr/bin/opam

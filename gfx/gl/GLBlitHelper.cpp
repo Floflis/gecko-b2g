@@ -38,6 +38,11 @@
 #  include "mozilla/layers/D3D11YCbCrImage.h"
 #endif
 
+#ifdef MOZ_WAYLAND
+#  include "mozilla/layers/DMABUFSurfaceImage.h"
+#  include "mozilla/widget/DMABufSurface.h"
+#endif
+
 using mozilla::layers::PlanarYCbCrData;
 using mozilla::layers::PlanarYCbCrImage;
 
@@ -682,8 +687,8 @@ const DrawBlitProg* GLBlitHelper::CreateDrawBlitProg(
 #ifdef XP_MACOSX
 static RefPtr<MacIOSurface> LookupSurface(
     const layers::SurfaceDescriptorMacIOSurface& sd) {
-  return MacIOSurface::LookupSurface(sd.surfaceId(), sd.scaleFactor(),
-                                     !sd.isOpaque(), sd.yUVColorSpace());
+  return MacIOSurface::LookupSurface(sd.surfaceId(), !sd.isOpaque(),
+                                     sd.yUVColorSpace());
 }
 #endif
 
@@ -706,6 +711,12 @@ bool GLBlitHelper::BlitSdToFramebuffer(const layers::SurfaceDescriptor& asd,
     case layers::SurfaceDescriptor::TSurfaceDescriptorMacIOSurface: {
       const auto& sd = asd.get_SurfaceDescriptorMacIOSurface();
       const auto surf = LookupSurface(sd);
+      if (!surf) {
+        NS_WARNING("LookupSurface(MacIOSurface) failed");
+        // Sometimes that frame for our handle gone already. That's life, for
+        // now.
+        return false;
+      }
       return BlitImage(surf, destSize, destOrigin);
     }
 #endif
@@ -758,12 +769,20 @@ bool GLBlitHelper::BlitImageToFramebuffer(layers::Image* const srcImage,
       MOZ_ASSERT(false);
       return false;
 #endif
+    case ImageFormat::DMABUF:
+#ifdef MOZ_WAYLAND
+      return BlitImage(static_cast<layers::DMABUFSurfaceImage*>(srcImage),
+                       destSize, destOrigin);
+#else
+      return false;
+#endif
     case ImageFormat::CAIRO_SURFACE:
     case ImageFormat::NV_IMAGE:
     case ImageFormat::OVERLAY_IMAGE:
     case ImageFormat::SHARED_RGB:
     case ImageFormat::TEXTURE_WRAPPER:
-    case ImageFormat::DMABUF:
+    case ImageFormat::GRALLOC_PLANAR_YCBCR:
+    case ImageFormat::GONK_CAMERA_IMAGE:
       return false;  // todo
   }
   return false;
@@ -979,6 +998,19 @@ bool GLBlitHelper::BlitImage(layers::MacIOSurfaceImage* const srcImage,
   return BlitImage(srcImage->GetSurface(), destSize, destOrigin);
 }
 
+static std::string IntAsAscii(const int x) {
+  std::string str;
+  str.reserve(6);
+  auto u = static_cast<unsigned int>(x);
+  while (u) {
+    str.insert(str.begin(), u & 0xff);
+    u >>= 8;
+  }
+  str.insert(str.begin(), '\'');
+  str.push_back('\'');
+  return str;
+}
+
 bool GLBlitHelper::BlitImage(MacIOSurface* const iosurf,
                              const gfx::IntSize& destSize,
                              const OriginPos destOrigin) const {
@@ -1002,7 +1034,7 @@ bool GLBlitHelper::BlitImage(MacIOSurface* const iosurf,
   // TODO: The colorspace is known by the IOSurface, why override it?
   // See GetYUVColorSpace/GetFullRange()
   DrawBlitProg::YUVArgs yuvArgs;
-  yuvArgs.colorSpace = gfx::YUVColorSpace::BT601;
+  yuvArgs.colorSpace = iosurf->GetYUVColorSpace();
 
   const DrawBlitProg::YUVArgs* pYuvArgs = nullptr;
 
@@ -1021,18 +1053,45 @@ bool GLBlitHelper::BlitImage(MacIOSurface* const iosurf,
   const GLuint texs[3] = {tex0, tex1, tex2};
 
   const auto pixelFormat = iosurf->GetPixelFormat();
-  const auto formatChars = (const char*)&pixelFormat;
-  const char formatStr[] = {formatChars[3], formatChars[2], formatChars[1],
-                            formatChars[0], 0};
   if (mGL->ShouldSpew()) {
-    printf_stderr("iosurf format: %s (0x%08x)\n", formatStr,
-                  uint32_t(pixelFormat));
+    const auto formatStr = IntAsAscii(pixelFormat);
+    printf_stderr("iosurf format: %s (0x%08x)\n", formatStr.c_str(),
+                  pixelFormat);
   }
 
   const char* fragBody;
   switch (planes) {
     case 1:
-      fragBody = kFragBody_RGBA;
+      switch (pixelFormat) {
+        case kCVPixelFormatType_24RGB:
+        case kCVPixelFormatType_24BGR:
+        case kCVPixelFormatType_32ARGB:
+        case kCVPixelFormatType_32BGRA:
+        case kCVPixelFormatType_32ABGR:
+        case kCVPixelFormatType_32RGBA:
+        case kCVPixelFormatType_64ARGB:
+        case kCVPixelFormatType_48RGB:
+          fragBody = kFragBody_RGBA;
+          break;
+        case kCVPixelFormatType_422YpCbCr8:
+        case kCVPixelFormatType_422YpCbCr8_yuvs:
+          fragBody = kFragBody_CrYCb;
+          pYuvArgs = &yuvArgs;
+          break;
+        default: {
+          std::string str;
+          if (pixelFormat <= 0xff) {
+            str = std::to_string(pixelFormat);
+          } else {
+            str = IntAsAscii(pixelFormat);
+          }
+          gfxCriticalError() << "Unhandled kCVPixelFormatType_*: " << str;
+        }
+          // Probably YUV though
+          fragBody = kFragBody_CrYCb;
+          pYuvArgs = &yuvArgs;
+          break;
+      }
       break;
     case 2:
       fragBody = kFragBody_NV12;
@@ -1045,11 +1104,6 @@ bool GLBlitHelper::BlitImage(MacIOSurface* const iosurf,
     default:
       gfxCriticalError() << "Unexpected plane count: " << planes;
       return false;
-  }
-
-  if (pixelFormat == kCVPixelFormatType_422YpCbCr8) {
-    fragBody = kFragBody_CrYCb;
-    pYuvArgs = &yuvArgs;
   }
 
   for (uint32_t p = 0; p < planes; p++) {
@@ -1200,12 +1254,6 @@ bool GLBlitHelper::BlitImage(layers::GPUVideoImage* const srcImage,
 
   const auto& desc = data->SD();
 
-  if (desc.type() ==
-      layers::SurfaceDescriptorGPUVideo::TSurfaceDescriptorPlugin) {
-    MOZ_ASSERT_UNREACHABLE(
-        "BlitImage does not support plugin surface descriptors");
-    return false;
-  }
   MOZ_ASSERT(
       desc.type() ==
       layers::SurfaceDescriptorGPUVideo::TSurfaceDescriptorRemoteDecoder);
@@ -1231,8 +1279,7 @@ bool GLBlitHelper::BlitImage(layers::GPUVideoImage* const srcImage,
         TSurfaceDescriptorMacIOSurface: {
       const auto& subdesc = subdescUnion.get_SurfaceDescriptorMacIOSurface();
       RefPtr<MacIOSurface> surface = MacIOSurface::LookupSurface(
-          subdesc.surfaceId(), subdesc.scaleFactor(), !subdesc.isOpaque(),
-          subdesc.yUVColorSpace());
+          subdesc.surfaceId(), !subdesc.isOpaque(), subdesc.yUVColorSpace());
       MOZ_ASSERT(surface);
       if (!surface) {
         return false;
@@ -1250,6 +1297,72 @@ bool GLBlitHelper::BlitImage(layers::GPUVideoImage* const srcImage,
       return false;
   }
 }
+
+// -------------------------------------
+#ifdef MOZ_WAYLAND
+bool GLBlitHelper::BlitImage(layers::DMABUFSurfaceImage* srcImage,
+                             const gfx::IntSize& destSize,
+                             OriginPos destOrigin) const {
+  DMABufSurface* surface = srcImage->GetSurface();
+  if (!surface) {
+    gfxCriticalError() << "Null DMABUFSurface for GLBlitHelper::BlitImage";
+    return false;
+  }
+
+  const auto& srcOrigin = OriginPos::BottomLeft;
+
+  DrawBlitProg::BaseArgs baseArgs;
+  baseArgs.yFlip = (destOrigin != srcOrigin);
+  baseArgs.destSize = destSize;
+
+  // TODO: The colorspace is known by the DMABUFSurface, why override it?
+  // See GetYUVColorSpace/GetFullRange()
+  DrawBlitProg::YUVArgs yuvArgs;
+  yuvArgs.colorSpace = surface->GetYUVColorSpace();
+
+  const DrawBlitProg::YUVArgs* pYuvArgs = nullptr;
+
+  const auto planes = surface->GetTextureCount();
+  const GLenum texTarget = LOCAL_GL_TEXTURE_2D;
+
+  const ScopedSaveMultiTex saveTex(mGL, planes, texTarget);
+  const auto pixelFormat = surface->GetSurfaceType();
+
+  const char* fragBody;
+  switch (pixelFormat) {
+    case DMABufSurface::SURFACE_RGBA:
+      fragBody = kFragBody_RGBA;
+      break;
+    case DMABufSurface::SURFACE_NV12:
+      fragBody = kFragBody_NV12;
+      pYuvArgs = &yuvArgs;
+      break;
+    case DMABufSurface::SURFACE_YUV420:
+      fragBody = kFragBody_PlanarYUV;
+      pYuvArgs = &yuvArgs;
+      break;
+    default:
+      gfxCriticalError() << "Unexpected pixel format: " << pixelFormat;
+      return false;
+  }
+
+  for (const auto p : IntegerRange(planes)) {
+    mGL->fActiveTexture(LOCAL_GL_TEXTURE0 + p);
+    mGL->fBindTexture(texTarget, surface->GetTexture(p));
+    mGL->TexParams_SetClampNoMips(texTarget);
+  }
+
+  // We support only NV12/YUV420 formats only with 1/2 texture scale.
+  // We don't set cliprect as DMABus textures are created without padding.
+  baseArgs.texMatrix0 = SubRectMat3(0, 0, 1, 1);
+  yuvArgs.texMatrix1 = SubRectMat3(0, 0, 1, 1);
+
+  const auto& prog = GetDrawBlitProg({kFragHeader_Tex2D, fragBody});
+  prog->Draw(baseArgs, pYuvArgs);
+
+  return true;
+}
+#endif
 
 }  // namespace gl
 }  // namespace mozilla

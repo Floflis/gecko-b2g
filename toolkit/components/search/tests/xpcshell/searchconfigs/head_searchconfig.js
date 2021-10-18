@@ -11,7 +11,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   AddonTestUtils: "resource://testing-common/AddonTestUtils.jsm",
   AppConstants: "resource://gre/modules/AppConstants.jsm",
   ObjectUtils: "resource://gre/modules/ObjectUtils.jsm",
-  OS: "resource://gre/modules/osfile.jsm",
   Region: "resource://gre/modules/Region.jsm",
   RemoteSettings: "resource://services-settings/remote-settings.js",
   SearchEngine: "resource://gre/modules/SearchEngine.jsm",
@@ -112,14 +111,17 @@ class SearchConfigTest {
 
   /**
    * Sets up the test.
+   *
+   * @param {string} [version]
+   *   The version to simulate for running the tests.
    */
-  async setup() {
+  async setup(version = "42.0") {
     AddonTestUtils.init(GLOBAL_SCOPE);
     AddonTestUtils.createAppInfo(
       "xpcshell@tests.mozilla.org",
       "XPCShell",
-      "42",
-      "42"
+      version,
+      version
     );
 
     await maybeSetupConfig();
@@ -216,9 +218,7 @@ class SearchConfigTest {
     if (TEST_DEBUG) {
       return ["be", "en-US", "kk", "tr", "ru", "zh-CN", "ach", "unknown"];
     }
-    const data = await OS.File.read(do_get_file("all-locales").path, {
-      encoding: "utf-8",
-    });
+    const data = await IOUtils.readUTF8(do_get_file("all-locales").path);
     // "en-US" is not in all-locales as it is the default locale
     // add it manually to ensure it is tested.
     let locales = [...data.split("\n").filter(e => e != ""), "en-US"];
@@ -289,11 +289,17 @@ class SearchConfigTest {
    *   The list of engines to check.
    * @param {string} identifier
    *   The identifier to look for in the list.
+   * @param {boolean} exactMatch
+   *   Whether to use an exactMatch for the identifier.
    * @returns {Engine}
    *   Returns the engine if found, null otherwise.
    */
-  _findEngine(engines, identifier) {
-    return engines.find(engine => engine.identifier.startsWith(identifier));
+  _findEngine(engines, identifier, exactMatch) {
+    return engines.find(engine =>
+      exactMatch
+        ? engine.identifier == identifier
+        : engine.identifier.startsWith(identifier)
+    );
   }
 
   /**
@@ -317,7 +323,8 @@ class SearchConfigTest {
     const hasExcluded = "excluded" in config;
     const identifierIncluded = !!this._findEngine(
       engines,
-      this._config.identifier
+      this._config.identifier,
+      this._config.identifierExactMatch ?? false
     );
 
     // If there's not included/excluded, then this shouldn't be the default anywhere.
@@ -336,11 +343,13 @@ class SearchConfigTest {
       hasIncluded &&
       this._localeRegionInSection(config.included, region, locale);
 
-    let notExcluded =
+    let excluded =
       hasExcluded &&
-      !this._localeRegionInSection(config.excluded, region, locale);
-
-    if (included || notExcluded) {
+      this._localeRegionInSection(config.excluded, region, locale);
+    if (
+      (included && (!hasExcluded || !excluded)) ||
+      (!hasIncluded && hasExcluded && !excluded)
+    ) {
       this.assertOk(
         identifierIncluded,
         `Should be ${section} for ${infoString}`
@@ -423,7 +432,11 @@ class SearchConfigTest {
       `Should have just one details section for region: ${region} locale: ${locale}`
     );
 
-    const engine = this._findEngine(engines, this._config.identifier);
+    const engine = this._findEngine(
+      engines,
+      this._config.identifier,
+      this._config.identifierExactMatch ?? false
+    );
     this.assertOk(engine, "Should have an engine present");
 
     if (this._config.aliases) {
@@ -555,6 +568,13 @@ class SearchConfigTest {
       this.assertOk(
         submission.uri.query.split("&").includes(rule.searchUrlCode),
         `Expected "${rule.searchUrlCode}" in search url "${submission.uri.spec}"`
+      );
+    }
+    if (rule.searchUrlCodeNotInQuery) {
+      const submission = engine.getSubmission("test", URLTYPE_SEARCH_HTML);
+      this.assertOk(
+        submission.uri.includes(rule.searchUrlCodeNotInQuery),
+        `Expected "${rule.searchUrlCodeNotInQuery}" in search url "${submission.uri.spec}"`
       );
     }
     if (rule.searchFormUrlCode) {

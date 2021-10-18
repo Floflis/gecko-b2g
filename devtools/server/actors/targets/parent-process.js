@@ -7,7 +7,7 @@
 /*
  * Target actor for the entire parent process.
  *
- * This actor extends BrowsingContextTargetActor.
+ * This actor extends WindowGlobalTargetActor.
  * This actor is extended by WebExtensionTargetActor.
  *
  * See devtools/docs/backend/actor-hierarchy.md for more details.
@@ -18,9 +18,9 @@ const Services = require("Services");
 const { DevToolsServer } = require("devtools/server/devtools-server");
 const {
   getChildDocShells,
-  BrowsingContextTargetActor,
-  browsingContextTargetPrototype,
-} = require("devtools/server/actors/targets/browsing-context");
+  WindowGlobalTargetActor,
+  windowGlobalTargetPrototype,
+} = require("devtools/server/actors/targets/window-global");
 const makeDebugger = require("devtools/server/actors/utils/make-debugger");
 
 const { extend } = require("devtools/shared/extend");
@@ -33,24 +33,33 @@ const TargetActorMixin = require("devtools/server/actors/targets/target-actor-mi
 /**
  * Protocol.js expects only the prototype object, and does not maintain the prototype
  * chain when it constructs the ActorClass. For this reason we are using `extend` to
- * maintain the properties of BrowsingContextTargetActor.prototype
+ * maintain the properties of WindowGlobalTargetActor.prototype
  */
-const parentProcessTargetPrototype = extend({}, browsingContextTargetPrototype);
+const parentProcessTargetPrototype = extend({}, windowGlobalTargetPrototype);
 
 /**
  * Creates a target actor for debugging all the chrome content in the parent process.
- * Most of the implementation is inherited from BrowsingContextTargetActor.
+ * Most of the implementation is inherited from WindowGlobalTargetActor.
  * ParentProcessTargetActor is a child of RootActor, it can be instantiated via
  * RootActor.getProcess request. ParentProcessTargetActor exposes all target-scoped actors
- * via its form() request, like BrowsingContextTargetActor.
+ * via its form() request, like WindowGlobalTargetActor.
  *
  * @param connection DevToolsServerConnection
  *        The connection to the client.
- * @param window Window object (optional)
+ * @param window {Window} object (optional)
  *        If the upper class already knows against which window the actor should attach,
  *        it is passed as a constructor argument here.
+ * @param {Object} options
+ *        - isTopLevelTarget: {Boolean} flag to indicate if this is the top
+ *          level target of the DevTools session
+ *        - window: {Window} If the upper class already knows against which
+ *          window the actor should attach, it is passed as a constructor
+ *          argument here.
  */
-parentProcessTargetPrototype.initialize = function(connection, window) {
+parentProcessTargetPrototype.initialize = function(
+  connection,
+  { isTopLevelTarget, window }
+) {
   // Defines the default docshell selected for the target actor
   if (!window) {
     window = Services.wm.getMostRecentWindow(DevToolsServer.chromeWindowType);
@@ -68,11 +77,10 @@ parentProcessTargetPrototype.initialize = function(connection, window) {
     window = Services.appShell.hiddenDOMWindow;
   }
 
-  BrowsingContextTargetActor.prototype.initialize.call(
-    this,
-    connection,
-    window.docShell
-  );
+  WindowGlobalTargetActor.prototype.initialize.call(this, connection, {
+    docShell: window.docShell,
+    isTopLevelTarget,
+  });
 
   // This creates a Debugger instance for chrome debugging all globals.
   this.makeDebugger = makeDebugger.bind(null, {
@@ -103,7 +111,7 @@ Object.defineProperty(parentProcessTargetPrototype, "docShells", {
 });
 
 parentProcessTargetPrototype.observe = function(subject, topic, data) {
-  BrowsingContextTargetActor.prototype.observe.call(this, subject, topic, data);
+  WindowGlobalTargetActor.prototype.observe.call(this, subject, topic, data);
   if (!this.attached) {
     return;
   }
@@ -122,7 +130,7 @@ parentProcessTargetPrototype._attach = function() {
     return false;
   }
 
-  BrowsingContextTargetActor.prototype._attach.call(this);
+  WindowGlobalTargetActor.prototype._attach.call(this);
 
   // Listen for any new/destroyed chrome docshell
   Services.obs.addObserver(this, "chrome-webnavigation-create");
@@ -154,7 +162,7 @@ parentProcessTargetPrototype._detach = function() {
     this._progressListener.unwatch(docShell);
   }
 
-  return BrowsingContextTargetActor.prototype._detach.call(this);
+  return WindowGlobalTargetActor.prototype._detach.call(this);
 };
 
 exports.parentProcessTargetPrototype = parentProcessTargetPrototype;

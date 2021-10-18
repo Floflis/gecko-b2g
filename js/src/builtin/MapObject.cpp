@@ -6,8 +6,13 @@
 
 #include "builtin/MapObject.h"
 
+#include "jsapi.h"
+
 #include "ds/OrderedHashTable.h"
 #include "gc/FreeOp.h"
+#include "jit/InlinableNatives.h"
+#include "js/MapAndSet.h"
+#include "js/PropertyAndElement.h"  // JS_DefineFunctions
 #include "js/PropertySpec.h"
 #include "js/Utility.h"
 #include "vm/BigIntType.h"
@@ -154,16 +159,12 @@ const JSFunctionSpec MapIteratorObject::methods[] = {
 
 static inline ValueMap::Range* MapIteratorObjectRange(NativeObject* obj) {
   MOZ_ASSERT(obj->is<MapIteratorObject>());
-  Value value = obj->getSlot(MapIteratorObject::RangeSlot);
-  if (value.isUndefined()) {
-    return nullptr;
-  }
-
-  return static_cast<ValueMap::Range*>(value.toPrivate());
+  return obj->maybePtrFromReservedSlot<ValueMap::Range>(
+      MapIteratorObject::RangeSlot);
 }
 
 inline MapObject::IteratorKind MapIteratorObject::kind() const {
-  int32_t i = getSlot(KindSlot).toInt32();
+  int32_t i = getReservedSlot(KindSlot).toInt32();
   MOZ_ASSERT(i == MapObject::Keys || i == MapObject::Values ||
              i == MapObject::Entries);
   return MapObject::IteratorKind(i);
@@ -186,7 +187,7 @@ bool GlobalObject::initMapIteratorProto(JSContext* cx,
       !DefineToStringTag(cx, proto, cx->names().MapIterator)) {
     return false;
   }
-  global->setReservedSlot(MAP_ITERATOR_PROTO, ObjectValue(*proto));
+  global->initBuiltinProto(ProtoKind::MapIteratorProto, proto);
   return true;
 }
 
@@ -252,7 +253,7 @@ MapIteratorObject* MapIteratorObject::create(JSContext* cx, HandleObject obj,
   }
 
   auto range = data->createRange(buffer, insideNursery);
-  iterobj->setSlot(RangeSlot, PrivateValue(range));
+  iterobj->setReservedSlot(RangeSlot, PrivateValue(range));
 
   return iterobj;
 }
@@ -311,7 +312,7 @@ bool MapIteratorObject::next(MapIteratorObject* mapIterator,
   // IC code calls this directly.
   AutoUnsafeCallWithABI unsafe;
 
-  // Check invariants for inlined _GetNextMapEntryForIterator.
+  // Check invariants for inlined GetNextMapEntryForIterator.
 
   // The array should be tenured, so that post-barrier can be done simply.
   MOZ_ASSERT(resultPairObj->isTenured());
@@ -354,7 +355,7 @@ bool MapIteratorObject::next(MapIteratorObject* mapIterator,
 /* static */
 JSObject* MapIteratorObject::createResultPair(JSContext* cx) {
   RootedArrayObject resultPairObj(
-      cx, NewDenseFullyAllocatedArray(cx, 2, nullptr, TenuredObject));
+      cx, NewDenseFullyAllocatedArray(cx, 2, TenuredObject));
   if (!resultPairObj) {
     return nullptr;
   }
@@ -393,7 +394,8 @@ const ClassSpec MapObject::classSpec_ = {
 
 const JSClass MapObject::class_ = {
     "Map",
-    JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(MapObject::SlotCount) |
+    JSCLASS_DELAY_METADATA_BUILDER |
+        JSCLASS_HAS_RESERVED_SLOTS(MapObject::SlotCount) |
         JSCLASS_HAS_CACHED_PROTO(JSProto_Map) | JSCLASS_FOREGROUND_FINALIZE |
         JSCLASS_SKIP_NURSERY_FINALIZE,
     &MapObject::classOps_, &MapObject::classSpec_};
@@ -408,8 +410,8 @@ const JSPropertySpec MapObject::properties[] = {
 
 // clang-format off
 const JSFunctionSpec MapObject::methods[] = {
-    JS_FN("get", get, 1, 0),
-    JS_FN("has", has, 1, 0),
+    JS_INLINABLE_FN("get", get, 1, 0, MapGet),
+    JS_INLINABLE_FN("has", has, 1, 0, MapHas),
     JS_FN("set", set, 2, 0),
     JS_FN("delete", delete_, 1, 0),
     JS_FN("keys", keys, 0, 0),
@@ -536,8 +538,8 @@ class js::OrderedHashTableRef : public gc::BufferableRef {
 };
 
 template <typename ObjectT>
-inline static MOZ_MUST_USE bool PostWriteBarrierImpl(ObjectT* obj,
-                                                     const Value& keyValue) {
+[[nodiscard]] inline static bool PostWriteBarrierImpl(ObjectT* obj,
+                                                      const Value& keyValue) {
   if (MOZ_LIKELY(!keyValue.isObject() && !keyValue.isBigInt())) {
     MOZ_ASSERT_IF(keyValue.isGCThing(), !IsInsideNursery(keyValue.toGCThing()));
     return true;
@@ -565,13 +567,13 @@ inline static MOZ_MUST_USE bool PostWriteBarrierImpl(ObjectT* obj,
   return keys->append(keyValue);
 }
 
-inline static MOZ_MUST_USE bool PostWriteBarrier(MapObject* map,
-                                                 const Value& key) {
+[[nodiscard]] inline static bool PostWriteBarrier(MapObject* map,
+                                                  const Value& key) {
   return PostWriteBarrierImpl(map, key);
 }
 
-inline static MOZ_MUST_USE bool PostWriteBarrier(SetObject* set,
-                                                 const Value& key) {
+[[nodiscard]] inline static bool PostWriteBarrier(SetObject* set,
+                                                  const Value& key) {
   return PostWriteBarrierImpl(set, key);
 }
 
@@ -626,6 +628,7 @@ MapObject* MapObject::create(JSContext* cx,
     return nullptr;
   }
 
+  AutoSetNewObjectMetadata metadata(cx);
   MapObject* mapObj = NewObjectWithClassProto<MapObject>(cx, proto);
   if (!mapObj) {
     return nullptr;
@@ -637,11 +640,22 @@ MapObject* MapObject::create(JSContext* cx,
     return nullptr;
   }
 
-  InitObjectPrivate(mapObj, map.release(), MemoryUse::MapObjectTable);
+  InitReservedSlot(mapObj, DataSlot, map.release(), MemoryUse::MapObjectTable);
   mapObj->initReservedSlot(NurseryKeysSlot, PrivateValue(nullptr));
   mapObj->initReservedSlot(HasNurseryMemorySlot,
                            JS::BooleanValue(insideNursery));
   return mapObj;
+}
+
+size_t MapObject::sizeOfData(mozilla::MallocSizeOf mallocSizeOf) {
+  size_t size = 0;
+  if (ValueMap* map = getData()) {
+    size += map->sizeOfIncludingThis(mallocSizeOf);
+  }
+  if (NurseryKeysVector* nurseryKeys = GetNurseryKeys(this)) {
+    size += nurseryKeys->sizeOfIncludingThis(mallocSizeOf);
+  }
+  return size;
 }
 
 void MapObject::finalize(JSFreeOp* fop, JSObject* obj) {
@@ -702,11 +716,12 @@ bool MapObject::construct(JSContext* cx, unsigned argc, Value* vp) {
 
 bool MapObject::is(HandleValue v) {
   return v.isObject() && v.toObject().hasClass(&class_) &&
-         v.toObject().as<MapObject>().getPrivate();
+         !v.toObject().as<MapObject>().getReservedSlot(DataSlot).isUndefined();
 }
 
 bool MapObject::is(HandleObject o) {
-  return o->hasClass(&class_) && o->as<MapObject>().getPrivate();
+  return o->hasClass(&class_) &&
+         !o->as<MapObject>().getReservedSlot(DataSlot).isUndefined();
 }
 
 #define ARG0_KEY(cx, args, key)  \
@@ -959,16 +974,12 @@ const JSFunctionSpec SetIteratorObject::methods[] = {
 
 static inline ValueSet::Range* SetIteratorObjectRange(NativeObject* obj) {
   MOZ_ASSERT(obj->is<SetIteratorObject>());
-  Value value = obj->getSlot(SetIteratorObject::RangeSlot);
-  if (value.isUndefined()) {
-    return nullptr;
-  }
-
-  return static_cast<ValueSet::Range*>(value.toPrivate());
+  return obj->maybePtrFromReservedSlot<ValueSet::Range>(
+      SetIteratorObject::RangeSlot);
 }
 
 inline SetObject::IteratorKind SetIteratorObject::kind() const {
-  int32_t i = getSlot(KindSlot).toInt32();
+  int32_t i = getReservedSlot(KindSlot).toInt32();
   MOZ_ASSERT(i == SetObject::Values || i == SetObject::Entries);
   return SetObject::IteratorKind(i);
 }
@@ -990,7 +1001,7 @@ bool GlobalObject::initSetIteratorProto(JSContext* cx,
       !DefineToStringTag(cx, proto, cx->names().SetIterator)) {
     return false;
   }
-  global->setReservedSlot(SET_ITERATOR_PROTO, ObjectValue(*proto));
+  global->initBuiltinProto(ProtoKind::SetIteratorProto, proto);
   return true;
 }
 
@@ -1048,7 +1059,7 @@ SetIteratorObject* SetIteratorObject::create(JSContext* cx, HandleObject obj,
   }
 
   auto range = data->createRange(buffer, insideNursery);
-  iterobj->setSlot(RangeSlot, PrivateValue(range));
+  iterobj->setReservedSlot(RangeSlot, PrivateValue(range));
 
   return iterobj;
 }
@@ -1128,7 +1139,7 @@ bool SetIteratorObject::next(SetIteratorObject* setIterator,
 /* static */
 JSObject* SetIteratorObject::createResult(JSContext* cx) {
   RootedArrayObject resultObj(
-      cx, NewDenseFullyAllocatedArray(cx, 1, nullptr, TenuredObject));
+      cx, NewDenseFullyAllocatedArray(cx, 1, TenuredObject));
   if (!resultObj) {
     return nullptr;
   }
@@ -1166,7 +1177,8 @@ const ClassSpec SetObject::classSpec_ = {
 
 const JSClass SetObject::class_ = {
     "Set",
-    JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(SetObject::SlotCount) |
+    JSCLASS_DELAY_METADATA_BUILDER |
+        JSCLASS_HAS_RESERVED_SLOTS(SetObject::SlotCount) |
         JSCLASS_HAS_CACHED_PROTO(JSProto_Set) | JSCLASS_FOREGROUND_FINALIZE |
         JSCLASS_SKIP_NURSERY_FINALIZE,
     &SetObject::classOps_,
@@ -1183,7 +1195,7 @@ const JSPropertySpec SetObject::properties[] = {
 
 // clang-format off
 const JSFunctionSpec SetObject::methods[] = {
-    JS_FN("has", has, 1, 0),
+    JS_INLINABLE_FN("has", has, 1, 0, SetHas),
     JS_FN("add", add, 1, 0),
     JS_FN("delete", delete_, 1, 0),
     JS_FN("entries", entries, 0, 0),
@@ -1273,6 +1285,7 @@ SetObject* SetObject::create(JSContext* cx,
     return nullptr;
   }
 
+  AutoSetNewObjectMetadata metadata(cx);
   SetObject* obj = NewObjectWithClassProto<SetObject>(cx, proto);
   if (!obj) {
     return nullptr;
@@ -1284,7 +1297,7 @@ SetObject* SetObject::create(JSContext* cx,
     return nullptr;
   }
 
-  InitObjectPrivate(obj, set.release(), MemoryUse::MapObjectTable);
+  InitReservedSlot(obj, DataSlot, set.release(), MemoryUse::MapObjectTable);
   obj->initReservedSlot(NurseryKeysSlot, PrivateValue(nullptr));
   obj->initReservedSlot(HasNurseryMemorySlot, JS::BooleanValue(insideNursery));
   return obj;
@@ -1297,6 +1310,17 @@ void SetObject::trace(JSTracer* trc, JSObject* obj) {
       TraceKey(r, r.front(), trc);
     }
   }
+}
+
+size_t SetObject::sizeOfData(mozilla::MallocSizeOf mallocSizeOf) {
+  size_t size = 0;
+  if (ValueSet* set = getData()) {
+    size += set->sizeOfIncludingThis(mallocSizeOf);
+  }
+  if (NurseryKeysVector* nurseryKeys = GetNurseryKeys(this)) {
+    size += nurseryKeys->sizeOfIncludingThis(mallocSizeOf);
+  }
+  return size;
 }
 
 void SetObject::finalize(JSFreeOp* fop, JSObject* obj) {
@@ -1389,11 +1413,12 @@ bool SetObject::construct(JSContext* cx, unsigned argc, Value* vp) {
 
 bool SetObject::is(HandleValue v) {
   return v.isObject() && v.toObject().hasClass(&class_) &&
-         v.toObject().as<SetObject>().getPrivate();
+         !v.toObject().as<SetObject>().getReservedSlot(DataSlot).isUndefined();
 }
 
 bool SetObject::is(HandleObject o) {
-  return o->hasClass(&class_) && o->as<SetObject>().getPrivate();
+  return o->hasClass(&class_) &&
+         !o->as<SetObject>().getReservedSlot(DataSlot).isUndefined();
 }
 
 ValueSet& SetObject::extract(HandleObject o) {

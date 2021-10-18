@@ -337,6 +337,8 @@ void nsPageSequenceFrame::Reflow(nsPresContext* aPresContext,
     ReflowInput kidReflowInput(
         aPresContext, aReflowInput, kidFrame,
         LogicalSize(kidFrame->GetWritingMode(), sheetSize));
+    kidReflowInput.mBreakType = ReflowInput::BreakType::Page;
+
     ReflowOutput kidReflowOutput(kidReflowInput);
     nsReflowStatus status;
 
@@ -673,7 +675,7 @@ nsresult nsPageSequenceFrame::PrintNextSheet() {
   nsRegion drawingRegion(drawingRect);
   nsLayoutUtils::PaintFrame(gCtx, currentSheetFrame, drawingRegion,
                             NS_RGBA(0, 0, 0, 0),
-                            nsDisplayListBuilderMode::Painting,
+                            nsDisplayListBuilderMode::PaintForPrinting,
                             nsLayoutUtils::PaintFrameFlags::SyncDecodeImages);
   return rv;
 }
@@ -683,7 +685,7 @@ nsresult nsPageSequenceFrame::DoPageEnd() {
   if (PresContext()->IsRootPaginatedDocument()) {
     PR_PL(("***************** End Page (DoPageEnd) *****************\n"));
     rv = PresContext()->DeviceContext()->EndPage();
-    NS_ENSURE_SUCCESS(rv, rv);
+    // Fall through to clean up resources/state below even if EndPage failed.
   }
 
   ResetPrintCanvasList();
@@ -694,17 +696,21 @@ nsresult nsPageSequenceFrame::DoPageEnd() {
   return rv;
 }
 
-gfx::Matrix4x4 ComputePageSequenceTransform(nsIFrame* aFrame,
-                                            float aAppUnitsPerPixel) {
+static gfx::Matrix4x4 ComputePageSequenceTransform(const nsIFrame* aFrame,
+                                                   float aAppUnitsPerPixel) {
   MOZ_ASSERT(aFrame->IsPageSequenceFrame());
   float scale =
-      static_cast<nsPageSequenceFrame*>(aFrame)->GetPrintPreviewScale();
+      static_cast<const nsPageSequenceFrame*>(aFrame)->GetPrintPreviewScale();
   return gfx::Matrix4x4::Scaling(scale, scale, 1);
+}
+
+nsIFrame::ComputeTransformFunction nsPageSequenceFrame::GetTransformGetter()
+    const {
+  return ComputePageSequenceTransform;
 }
 
 void nsPageSequenceFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
                                            const nsDisplayListSet& aLists) {
-  aBuilder->SetInPageSequence(true);
   aBuilder->SetDisablePartialUpdates(true);
   DisplayBorderBackgroundOutline(aBuilder, aLists);
 
@@ -732,12 +738,11 @@ void nsPageSequenceFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
     }
   }
 
-  content.AppendNewToTop<nsDisplayTransform>(aBuilder, this, &content,
-                                             content.GetBuildingRect(),
-                                             ::ComputePageSequenceTransform);
+  content.AppendNewToTop<nsDisplayTransform>(
+      aBuilder, this, &content, content.GetBuildingRect(),
+      nsDisplayTransform::WithTransformGetter);
 
   aLists.Content()->AppendToTop(&content);
-  aBuilder->SetInPageSequence(false);
 }
 
 //------------------------------------------------------------------------------
@@ -757,15 +762,4 @@ void nsPageSequenceFrame::SetDateTimeStr(const nsAString& aDateTimeStr) {
   NS_ASSERTION(mPageData != nullptr, "mPageData string cannot be null!");
 
   mPageData->mDateTimeStr = aDateTimeStr;
-}
-
-void nsPageSequenceFrame::AppendDirectlyOwnedAnonBoxes(
-    nsTArray<OwnedAnonBox>& aResult) {
-  MOZ_ASSERT(
-      mFrames.FirstChild() && mFrames.FirstChild()->IsPrintedSheetFrame(),
-      "nsPageSequenceFrame must have a PrintedSheetFrame child");
-  // Only append the first child; all our children are expected to be
-  // continuations of each other, and our anon box handling always walks
-  // continuations.
-  aResult.AppendElement(mFrames.FirstChild());
 }

@@ -12,6 +12,7 @@
 #include "mozilla/gfx/2D.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/Text.h"
+#include "nsDisplayList.h"
 #include "nsIFrame.h"
 #include "nsFrameSelection.h"
 #include "nsSplittableFrame.h"
@@ -38,6 +39,7 @@ class SVGTextFrame;
 }  // namespace mozilla
 
 class nsTextFrame : public nsIFrame {
+  using nsDisplayText = mozilla::nsDisplayText;
   typedef mozilla::LayoutDeviceRect LayoutDeviceRect;
   typedef mozilla::SelectionTypeMask SelectionTypeMask;
   typedef mozilla::SelectionType SelectionType;
@@ -202,7 +204,8 @@ class nsTextFrame : public nsIFrame {
         mNextContinuation(nullptr),
         mContentOffset(0),
         mContentLengthHint(0),
-        mAscent(0) {}
+        mAscent(0),
+        mIsSelected(SelectionState::Unknown) {}
 
   NS_DECL_FRAMEARENA_HELPERS(nsTextFrame)
 
@@ -210,6 +213,9 @@ class nsTextFrame : public nsIFrame {
 
   // nsQueryFrame
   NS_DECL_QUERYFRAME
+
+  NS_DECLARE_FRAME_PROPERTY_DELETABLE(ContinuationsProperty,
+                                      nsTArray<nsTextFrame*>)
 
   // nsIFrame
   void BuildDisplayList(nsDisplayListBuilder* aBuilder,
@@ -225,6 +231,9 @@ class nsTextFrame : public nsIFrame {
 
   nsresult CharacterDataChanged(const CharacterDataChangeInfo&) final;
 
+  nsTextFrame* FirstContinuation() const override {
+    return const_cast<nsTextFrame*>(this);
+  }
   nsTextFrame* GetPrevContinuation() const override { return nullptr; }
   nsTextFrame* GetNextContinuation() const final { return mNextContinuation; }
   void SetNextContinuation(nsIFrame* aNextContinuation) final {
@@ -301,8 +310,7 @@ class nsTextFrame : public nsIFrame {
             ListFlags aFlags = ListFlags()) const final;
   nsresult GetFrameName(nsAString& aResult) const final;
   void ToCString(nsCString& aBuf, int32_t* aTotalContentLength) const;
-  void ListTextRuns(FILE* out,
-                    nsTHashtable<nsVoidPtrHashKey>& aSeen) const final;
+  void ListTextRuns(FILE* out, nsTHashSet<const void*>& aSeen) const final;
 #endif
 
   // Returns this text frame's content's text fragment.
@@ -348,7 +356,7 @@ class nsTextFrame : public nsIFrame {
   void SetLength(int32_t aLength, nsLineLayout* aLineLayout,
                  uint32_t aSetLengthFlags = 0);
 
-  nsresult GetOffsets(int32_t& start, int32_t& end) const final;
+  std::pair<int32_t, int32_t> GetOffsets() const final;
 
   void AdjustOffsetsForBidi(int32_t start, int32_t end) final;
 
@@ -776,11 +784,17 @@ class nsTextFrame : public nsIFrame {
 
   nsRect WebRenderBounds();
 
+  // Find the continuation (which may be this frame itself) containing the
+  // given offset. Note that this may return null, if the offset is beyond the
+  // text covered by the continuation chain.
+  // (To be used only on the first textframe in the chain.)
+  nsTextFrame* FindContinuationForOffset(int32_t aOffset);
+
  protected:
   virtual ~nsTextFrame();
 
-  friend class nsDisplayTextGeometry;
-  friend class nsDisplayText;
+  friend class mozilla::nsDisplayTextGeometry;
+  friend class mozilla::nsDisplayText;
 
   RefPtr<nsFontMetrics> mFontMetrics;
   RefPtr<gfxTextRun> mTextRun;
@@ -802,11 +816,24 @@ class nsTextFrame : public nsIFrame {
   int32_t mContentLengthHint;
   nscoord mAscent;
 
+  // Cached selection state.
+  enum class SelectionState : uint8_t {
+    Unknown,
+    Selected,
+    NotSelected,
+  };
+  mutable SelectionState mIsSelected;
+
+  // Whether a cached continuations array is present.
+  bool mHasContinuationsProperty = false;
+
   /**
    * Return true if the frame is part of a Selection.
    * Helper method to implement the public IsSelected() API.
    */
   bool IsFrameSelected() const final;
+
+  void InvalidateSelectionState() { mIsSelected = SelectionState::Unknown; }
 
   mozilla::UniquePtr<SelectionDetails> GetSelectionDetails();
 
@@ -984,6 +1011,20 @@ class nsTextFrame : public nsIFrame {
 
   void ClearMetrics(ReflowOutput& aMetrics);
 
+  // Return pointer to an array of all frames in the continuation chain, or
+  // null if we're too short of memory.
+  nsTArray<nsTextFrame*>* GetContinuations();
+
+  // Clear any cached continuations array; this should be called whenever the
+  // chain is modified.
+  void ClearCachedContinuations() {
+    MOZ_ASSERT(NS_IsMainThread());
+    if (mHasContinuationsProperty) {
+      RemoveProperty(ContinuationsProperty());
+      mHasContinuationsProperty = false;
+    }
+  }
+
   /**
    * UpdateIteratorFromOffset() updates the iterator from a given offset.
    * Also, aInOffset may be updated to cluster start if aInOffset isn't
@@ -995,8 +1036,6 @@ class nsTextFrame : public nsIFrame {
 
   nsPoint GetPointFromIterator(const gfxSkipCharsIterator& aIter,
                                PropertyProvider& aProperties);
-
- public:
 };
 
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(nsTextFrame::TrimmedOffsetFlags)

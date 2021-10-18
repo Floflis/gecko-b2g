@@ -118,9 +118,8 @@ class HighlightersOverlay {
    */
   constructor(inspector) {
     this.inspector = inspector;
-    this.inspectorFront = this.inspector.inspectorFront;
     this.store = this.inspector.store;
-    this.target = this.inspector.currentTarget;
+
     this.telemetry = this.inspector.telemetry;
     this.maxGridHighlighters = Services.prefs.getIntPref(
       "devtools.gridinspector.maxHighlighters"
@@ -213,13 +212,12 @@ class HighlightersOverlay {
     // Add inspector events, not specific to a given view.
     this.inspector.on("markupmutation", this.onMarkupMutation);
 
-    this.resourceWatcher = this.inspector.toolbox.resourceWatcher;
-    this.resourceWatcher.watchResources(
-      [this.resourceWatcher.TYPES.ROOT_NODE],
+    this.resourceCommand = this.inspector.toolbox.resourceCommand;
+    this.resourceCommand.watchResources(
+      [this.resourceCommand.TYPES.ROOT_NODE],
       { onAvailable: this._onResourceAvailable }
     );
 
-    this.target.on("will-navigate", this.onWillNavigate);
     this.walkerEventListener = new WalkerEventListener(this.inspector, {
       "display-change": this.onDisplayChange,
     });
@@ -227,6 +225,12 @@ class HighlightersOverlay {
     EventEmitter.decorate(this);
   }
 
+  get inspectorFront() {
+    return this.inspector.inspectorFront;
+  }
+  get target() {
+    return this.inspector.currentTarget;
+  }
   // FIXME: Shim for HighlightersOverlay.parentGridHighlighters
   // Remove after updating tests to stop accessing this map directly. Bug 1683153
   get parentGridHighlighters() {
@@ -722,7 +726,7 @@ class HighlightersOverlay {
    *        TextProperty where to write changes.
    */
   async toggleShapesHighlighter(node, options, textProperty) {
-    const shapesEditor = await this.getInContextEditor("shapesEditor");
+    const shapesEditor = await this.getInContextEditor(node, "shapesEditor");
     if (!shapesEditor) {
       return;
     }
@@ -739,7 +743,7 @@ class HighlightersOverlay {
    *         Object used for passing options to the shapes highlighter.
    */
   async showShapesHighlighter(node, options) {
-    const shapesEditor = await this.getInContextEditor("shapesEditor");
+    const shapesEditor = await this.getInContextEditor(node, "shapesEditor");
     if (!shapesEditor) {
       return;
     }
@@ -766,9 +770,11 @@ class HighlightersOverlay {
    * Hide the shapes highlighter if visible.
    * This method delegates the to the in-context shapes editor which wraps
    * the shapes highlighter with additional functionality.
+   *
+   * @param  {NodeFront} node.
    */
-  async hideShapesHighlighter() {
-    const shapesEditor = await this.getInContextEditor("shapesEditor");
+  async hideShapesHighlighter(node) {
+    const shapesEditor = await this.getInContextEditor(node, "shapesEditor");
     if (!shapesEditor) {
       return;
     }
@@ -1267,7 +1273,10 @@ class HighlightersOverlay {
    *        THe NodeFront of the element to highlight.
    */
   async showGeometryEditor(node) {
-    const highlighter = await this._getHighlighter("GeometryEditorHighlighter");
+    const highlighter = await this._getHighlighterTypeForNode(
+      "GeometryEditorHighlighter",
+      node
+    );
     if (!highlighter) {
       return;
     }
@@ -1285,14 +1294,19 @@ class HighlightersOverlay {
    * Hide the geometry editor highlighter.
    */
   async hideGeometryEditor() {
-    if (
-      !this.geometryEditorHighlighterShown ||
-      !this.highlighters.GeometryEditorHighlighter
-    ) {
+    if (!this.geometryEditorHighlighterShown) {
       return;
     }
 
-    await this.highlighters.GeometryEditorHighlighter.hide();
+    const highlighter = this.geometryEditorHighlighterShown.inspectorFront.getKnownHighlighter(
+      "GeometryEditorHighlighter"
+    );
+
+    if (!highlighter) {
+      return;
+    }
+
+    await highlighter.hide();
 
     this.emit("geometry-editor-highlighter-hidden");
     this.geometryEditorHighlighterShown = null;
@@ -1367,8 +1381,7 @@ class HighlightersOverlay {
       return;
     }
 
-    const inspectorFront = await this.target.getFront("inspector");
-    const nodeFront = await inspectorFront.walker.findNodeFront(selectors);
+    const nodeFront = await this.inspectorFront.walker.findNodeFront(selectors);
 
     if (nodeFront) {
       await showFunction(nodeFront, options);
@@ -1385,12 +1398,13 @@ class HighlightersOverlay {
    * need to write value changes back to something, like to properties in the Rule view.
    * They typically exist in the context of the page, like the ShapesInContextEditor.
    *
+   * @param  {NodeFront} node.
    * @param  {String} type
    *         Type of in-context editor. Currently supported: "shapesEditor"
    * @return {Object|null}
    *         Reference to instance for given type of in-context editor or null.
    */
-  async getInContextEditor(type) {
+  async getInContextEditor(node, type) {
     if (this.editors[type]) {
       return this.editors[type];
     }
@@ -1399,7 +1413,10 @@ class HighlightersOverlay {
 
     switch (type) {
       case "shapesEditor":
-        const highlighter = await this._getHighlighter("ShapesHighlighter");
+        const highlighter = await this._getHighlighterTypeForNode(
+          "ShapesHighlighter",
+          node
+        );
         if (!highlighter) {
           return null;
         }
@@ -1741,7 +1758,12 @@ class HighlightersOverlay {
    */
   async _onResourceAvailable(resources) {
     for (const resource of resources) {
-      if (resource.resourceType !== this.resourceWatcher.TYPES.ROOT_NODE) {
+      if (
+        resource.resourceType !== this.resourceCommand.TYPES.ROOT_NODE ||
+        // It might happen that the ROOT_NODE resource (which is a Front) is already
+        // destroyed, and in such case we want to ignore it.
+        resource.isDestroyed()
+      ) {
         // Only handle root-node resources.
         // Note that we could replace this with DOCUMENT_EVENT resources, since
         // the actual root-node resource is not used here.
@@ -1883,12 +1905,11 @@ class HighlightersOverlay {
    */
   destroy() {
     this.inspector.off("markupmutation", this.onMarkupMutation);
-    this.resourceWatcher.unwatchResources(
-      [this.resourceWatcher.TYPES.ROOT_NODE],
+    this.resourceCommand.unwatchResources(
+      [this.resourceCommand.TYPES.ROOT_NODE],
       { onAvailable: this._onResourceAvailable }
     );
 
-    this.target.off("will-navigate", this.onWillNavigate);
     this.walkerEventListener.destroy();
     this.walkerEventListener = null;
 
@@ -1898,10 +1919,8 @@ class HighlightersOverlay {
     this._lastHovered = null;
 
     this.inspector = null;
-    this.inspectorFront = null;
     this.state = null;
     this.store = null;
-    this.target = null;
     this.telemetry = null;
 
     this.geometryEditorHighlighterShown = null;

@@ -24,6 +24,7 @@
 #include "mozilla/MaybeOneOf.h"
 #include "mozilla/MozPromise.h"
 #include "ScriptKind.h"
+#include "ModuleMapKey.h"
 
 class nsCycleCollectionTraversalCallback;
 class nsIChannel;
@@ -402,12 +403,12 @@ class ScriptLoader final : public nsISupports {
    *
    * @param aReferencingPrivate A JS::Value which is either undefined
    *                            or contains a LoadedScript private pointer.
-   * @param aSpecifier The module specifier.
+   * @param aModuleRequest A module request object.
    * @param aModuleOut This is set to the module found.
    */
   static void ResolveImportedModule(JSContext* aCx,
                                     JS::Handle<JS::Value> aReferencingPrivate,
-                                    JS::Handle<JSString*> aSpecifier,
+                                    JS::Handle<JSObject*> aModuleRequest,
                                     JS::MutableHandle<JSObject*> aModuleOut);
 
   void StartDynamicImport(ModuleLoadRequest* aRequest);
@@ -425,23 +426,6 @@ class ScriptLoader final : public nsISupports {
    */
   void FinishDynamicImportAndReject(ModuleLoadRequest* aRequest,
                                     nsresult aResult);
-
-  /**
-   * Wrapper for JSAPI FinishDynamicImport function. Takes an optional argument
-   * `aEvaluationPromise` which, if null, exits early.
-   *
-   * This is the non-tla version, which works with modules which return
-   * completion records.
-   *
-   * @param aCX
-   *        The JSContext for the module.
-   * @param aRequest
-   *        The module load request for the dynamic module.
-   * @param aResult
-   *        The result of running ModuleEvaluate
-   */
-  void FinishDynamicImport_NoTLA(JSContext* aCx, ModuleLoadRequest* aRequest,
-                                 nsresult aResult);
 
   /**
    * Wrapper for JSAPI FinishDynamicImport function. Takes an optional argument
@@ -473,11 +457,6 @@ class ScriptLoader final : public nsISupports {
   static LoadedScript* GetActiveScript(JSContext* aCx);
 
   Document* GetDocument() const { return mDocument; }
-
-  /**
-   *   Called by shutdown observer.
-   */
-  void Shutdown();
 
  private:
   virtual ~ScriptLoader();
@@ -626,11 +605,22 @@ class ScriptLoader final : public nsISupports {
 
   void GiveUpBytecodeEncoding();
 
-  already_AddRefed<nsIScriptGlobalObject> GetScriptGlobalObject();
-  nsresult FillCompileOptionsForRequest(const mozilla::dom::AutoJSAPI& jsapi,
-                                        ScriptLoadRequest* aRequest,
-                                        JS::Handle<JSObject*> aScopeChain,
-                                        JS::CompileOptions* aOptions);
+  already_AddRefed<nsIGlobalObject> GetGlobalForRequest(
+      ScriptLoadRequest* aRequest);
+
+  // This is a marker class to ensure proper handling of requests with a
+  // WebExtGlobal.
+  enum class WebExtGlobal { Ignore, Handled };
+
+  already_AddRefed<nsIScriptGlobalObject> GetScriptGlobalObject(
+      WebExtGlobal aWebExtGlobal);
+
+  // Fill in CompileOptions, as well as produce the introducer script for
+  // subsequent calls to UpdateDebuggerMetadata
+  nsresult FillCompileOptionsForRequest(
+      const mozilla::dom::AutoJSAPI& jsapi, ScriptLoadRequest* aRequest,
+      JS::Handle<JSObject*> aScopeChain, JS::CompileOptions* aOptions,
+      JS::MutableHandle<JSScript*> aIntroductionScript);
 
   uint32_t NumberOfProcessors();
   nsresult PrepareLoadedRequest(ScriptLoadRequest* aRequest,
@@ -650,19 +640,18 @@ class ScriptLoader final : public nsISupports {
 
   // Get source text.  On success |aMaybeSource| will contain either UTF-8 or
   // UTF-16 source; on failure it will remain in its initial state.
-  MOZ_MUST_USE nsresult GetScriptSource(JSContext* aCx,
-                                        ScriptLoadRequest* aRequest,
-                                        MaybeSourceText* aMaybeSource);
+  [[nodiscard]] nsresult GetScriptSource(JSContext* aCx,
+                                         ScriptLoadRequest* aRequest,
+                                         MaybeSourceText* aMaybeSource);
 
   void SetModuleFetchStarted(ModuleLoadRequest* aRequest);
   void SetModuleFetchFinishedAndResumeWaitingRequests(
       ModuleLoadRequest* aRequest, nsresult aResult);
 
-  bool IsFetchingModule(ModuleLoadRequest* aRequest) const;
-
-  bool ModuleMapContainsURL(nsIURI* aURL) const;
-  RefPtr<mozilla::GenericNonExclusivePromise> WaitForModuleFetch(nsIURI* aURL);
-  ModuleScript* GetFetchedModule(nsIURI* aURL) const;
+  bool ModuleMapContainsURL(nsIURI* aURL, nsIGlobalObject* aGlobal) const;
+  RefPtr<mozilla::GenericNonExclusivePromise> WaitForModuleFetch(
+      nsIURI* aURL, nsIGlobalObject* aGlobal);
+  ModuleScript* GetFetchedModule(nsIURI* aURL, nsIGlobalObject* aGlobal) const;
 
   friend JSObject* HostResolveImportedModule(
       JSContext* aCx, JS::Handle<JS::Value> aReferencingPrivate,
@@ -705,6 +694,7 @@ class ScriptLoader final : public nsISupports {
   ScriptLoadRequestList mXSLTRequests;
   ScriptLoadRequestList mDynamicImportRequests;
   RefPtr<ScriptLoadRequest> mParserBlockingRequest;
+  ScriptLoadRequestList mOffThreadCompilingRequests;
 
   // List of script load request that are holding a buffer which has to be saved
   // on the cache.
@@ -748,10 +738,12 @@ class ScriptLoader final : public nsISupports {
   bool mLoadEventFired;
   bool mGiveUpEncoding;
 
+  TimeDuration mMainThreadParseTime;
+
   // Module map
-  nsRefPtrHashtable<nsURIHashKey, mozilla::GenericNonExclusivePromise::Private>
+  nsRefPtrHashtable<ModuleMapKey, mozilla::GenericNonExclusivePromise::Private>
       mFetchingModules;
-  nsRefPtrHashtable<nsURIHashKey, ModuleScript> mFetchedModules;
+  nsRefPtrHashtable<ModuleMapKey, ModuleScript> mFetchedModules;
 
   nsCOMPtr<nsIConsoleReportCollector> mReporter;
 

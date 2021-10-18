@@ -101,7 +101,8 @@ void nsFileCopyEvent::DoCopy() {
     rv = mSource->ReadSegments(NS_CopySegmentToStream, mDest, num, &result);
     if (NS_FAILED(rv)) break;
     if (result != (uint32_t)num) {
-      rv = NS_ERROR_FILE_DISK_FULL;  // stopped prematurely (out of disk space)
+      // stopped prematurely (out of disk space)
+      rv = NS_ERROR_FILE_NO_DEVICE_SPACE;
       break;
     }
 
@@ -294,6 +295,10 @@ nsresult nsFileChannel::MakeFileInputStream(nsIFile* file,
     // canonicalize error message
     if (rv == NS_ERROR_FILE_TARGET_DOES_NOT_EXIST) rv = NS_ERROR_FILE_NOT_FOUND;
 
+    if (rv == NS_ERROR_FILE_NOT_FOUND) {
+      CheckForBrokenChromeURL(mLoadInfo, OriginalURI());
+    }
+
     if (async && (NS_ERROR_FILE_NOT_FOUND == rv)) {
       // We don't return "Not Found" errors here. Since we could not find
       // the file, it's not a directory anyway.
@@ -305,8 +310,9 @@ nsresult nsFileChannel::MakeFileInputStream(nsIFile* file,
 
   if (isDir) {
     rv = nsDirectoryIndexStream::Create(file, getter_AddRefs(stream));
-    if (NS_SUCCEEDED(rv) && !HasContentTypeHint())
+    if (NS_SUCCEEDED(rv) && !HasContentTypeHint()) {
       contentType.AssignLiteral(APPLICATION_HTTP_INDEX_FORMAT);
+    }
   } else {
     rv = NS_NewLocalFileInputStream(getter_AddRefs(stream), file, -1, -1,
                                     async ? nsIFileInputStream::DEFER_OPEN : 0);
@@ -376,8 +382,9 @@ nsresult nsFileChannel::OpenContentStream(bool async, nsIInputStream** result,
     // to something other than "unknown" to avoid triggering the content-type
     // sniffer code in nsBaseChannel.
     // However, don't override explicitly set types.
-    if (!HasContentTypeHint())
+    if (!HasContentTypeHint()) {
       SetContentType(nsLiteralCString(APPLICATION_OCTET_STREAM));
+    }
   } else {
     nsAutoCString contentType;
     rv = MakeFileInputStream(file, stream, contentType, async);

@@ -14,7 +14,6 @@
 #include "nsContentCreatorFunctions.h"
 #include "nsCSSPseudoElements.h"
 #include "nsCSSRendering.h"
-#include "nsCheckboxRadioFrame.h"
 #include "nsIContent.h"
 #include "mozilla/dom/Document.h"
 #include "nsNameSpaceManager.h"
@@ -61,7 +60,6 @@ void nsRangeFrame::DestroyFrom(nsIFrame* aDestructRoot,
                "nsRangeFrame should not have continuations; if it does we "
                "need to call RegUnregAccessKey only for the first.");
 
-  nsCheckboxRadioFrame::RegUnRegAccessKey(static_cast<nsIFrame*>(this), false);
   aPostDestroyData.AddAnonymousContent(mTrackDiv.forget());
   aPostDestroyData.AddAnonymousContent(mProgressDiv.forget());
   aPostDestroyData.AddAnonymousContent(mThumbDiv.forget());
@@ -157,10 +155,6 @@ void nsRangeFrame::Reflow(nsPresContext* aPresContext,
   NS_ASSERTION(!GetPrevContinuation() && !GetNextContinuation(),
                "nsRangeFrame should not have continuations; if it does we "
                "need to call RegUnregAccessKey only for the first.");
-
-  if (mState & NS_FRAME_FIRST_REFLOW) {
-    nsCheckboxRadioFrame::RegUnRegAccessKey(this, true);
-  }
 
   WritingMode wm = aReflowInput.GetWritingMode();
   nscoord computedBSize = aReflowInput.ComputedBSize();
@@ -315,10 +309,8 @@ a11y::AccType nsRangeFrame::AccessibleType() { return a11y::eHTMLRangeType; }
 
 double nsRangeFrame::GetValueAsFractionOfRange() {
   MOZ_ASSERT(mContent->IsHTMLElement(nsGkAtoms::input), "bad cast");
-  dom::HTMLInputElement* input =
-      static_cast<dom::HTMLInputElement*>(GetContent());
-
-  MOZ_ASSERT(input->ControlType() == NS_FORM_INPUT_RANGE);
+  auto* input = static_cast<dom::HTMLInputElement*>(GetContent());
+  MOZ_ASSERT(input->ControlType() == FormControlType::InputRange);
 
   Decimal value = input->GetValueAsDecimal();
   Decimal minimum = input->GetMinimum();
@@ -349,7 +341,7 @@ Decimal nsRangeFrame::GetValueAtEventPoint(WidgetGUIEvent* aEvent) {
   dom::HTMLInputElement* input =
       static_cast<dom::HTMLInputElement*>(GetContent());
 
-  MOZ_ASSERT(input->ControlType() == NS_FORM_INPUT_RANGE);
+  MOZ_ASSERT(input->ControlType() == FormControlType::InputRange);
 
   Decimal minimum = input->GetMinimum();
   Decimal maximum = input->GetMaximum();
@@ -573,7 +565,7 @@ nsresult nsRangeFrame::AttributeChanged(int32_t aNameSpaceID,
       MOZ_ASSERT(mContent->IsHTMLElement(nsGkAtoms::input), "bad cast");
       bool typeIsRange =
           static_cast<dom::HTMLInputElement*>(GetContent())->ControlType() ==
-          NS_FORM_INPUT_RANGE;
+          FormControlType::InputRange;
       // If script changed the <input>'s type before setting these attributes
       // then we don't need to do anything since we are going to be reframed.
       if (typeIsRange) {
@@ -678,9 +670,6 @@ double nsRangeFrame::GetValue() const {
       .toDouble();
 }
 
-#define STYLES_DISABLING_NATIVE_THEMING \
-  NS_AUTHOR_SPECIFIED_BORDER_OR_BACKGROUND | NS_AUTHOR_SPECIFIED_PADDING
-
 bool nsRangeFrame::ShouldUseNativeStyle() const {
   nsIFrame* trackFrame = mTrackDiv->GetPrimaryFrame();
   nsIFrame* progressFrame = mProgressDiv->GetPrimaryFrame();
@@ -688,12 +677,9 @@ bool nsRangeFrame::ShouldUseNativeStyle() const {
 
   return StyleDisplay()->EffectiveAppearance() == StyleAppearance::Range &&
          trackFrame &&
-         !PresContext()->HasAuthorSpecifiedRules(
-             trackFrame, STYLES_DISABLING_NATIVE_THEMING) &&
+         !trackFrame->Style()->HasAuthorSpecifiedBorderOrBackground() &&
          progressFrame &&
-         !PresContext()->HasAuthorSpecifiedRules(
-             progressFrame, STYLES_DISABLING_NATIVE_THEMING) &&
+         !progressFrame->Style()->HasAuthorSpecifiedBorderOrBackground() &&
          thumbFrame &&
-         !PresContext()->HasAuthorSpecifiedRules(
-             thumbFrame, STYLES_DISABLING_NATIVE_THEMING);
+         !thumbFrame->Style()->HasAuthorSpecifiedBorderOrBackground();
 }

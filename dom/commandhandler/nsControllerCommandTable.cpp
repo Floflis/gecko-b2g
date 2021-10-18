@@ -33,7 +33,7 @@ nsControllerCommandTable::RegisterCommand(const char* aCommandName,
                                           nsIControllerCommand* aCommand) {
   NS_ENSURE_TRUE(mMutable, NS_ERROR_FAILURE);
 
-  mCommandsTable.Put(nsDependentCString(aCommandName), aCommand);
+  mCommandsTable.InsertOrUpdate(nsDependentCString(aCommandName), aCommand);
 
   return NS_OK;
 }
@@ -171,15 +171,12 @@ nsControllerCommandTable::GetCommandState(const char* aCommandName,
 
 NS_IMETHODIMP
 nsControllerCommandTable::GetSupportedCommands(nsTArray<nsCString>& aCommands) {
-  aCommands.SetCapacity(mCommandsTable.Count());
+  mozilla::AppendToArray(aCommands, mCommandsTable.Keys());
 
-  for (auto iter = mCommandsTable.Iter(); !iter.Done(); iter.Next()) {
-    aCommands.AppendElement(iter.Key());
-  }
   return NS_OK;
 }
 
-typedef nsresult (*CommandTableRegistrar)(nsControllerCommandTable*);
+using CommandTableRegistrar = nsresult (*)(nsControllerCommandTable*);
 
 static already_AddRefed<nsControllerCommandTable>
 CreateCommandTableWithCommands(CommandTableRegistrar aRegistrar) {

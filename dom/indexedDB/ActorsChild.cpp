@@ -9,7 +9,6 @@
 #include <type_traits>
 
 #include "BackgroundChildImpl.h"
-#include "GeckoProfiler.h"
 #include "IDBDatabase.h"
 #include "IDBEvents.h"
 #include "IDBFactory.h"
@@ -22,8 +21,9 @@
 #include "IndexedDatabase.h"
 #include "IndexedDatabaseInlines.h"
 #include "IndexedDBCommon.h"
-#include "js/Array.h"  // JS::NewArrayObject, JS::SetArrayLength
-#include "js/Date.h"   // JS::NewDateObject, JS::TimeClip
+#include "js/Array.h"               // JS::NewArrayObject, JS::SetArrayLength
+#include "js/Date.h"                // JS::NewDateObject, JS::TimeClip
+#include "js/PropertyAndElement.h"  // JS_DefineElement, JS_DefineProperty
 #include <mozIRemoteLazyInputStream.h>
 #include "mozilla/ArrayAlgorithm.h"
 #include "mozilla/BasicEvents.h"
@@ -41,6 +41,7 @@
 #include "mozilla/dom/WorkerRunnable.h"
 #include "mozilla/Encoding.h"
 #include "mozilla/ipc/BackgroundUtils.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/TaskQueue.h"
 #include "nsCOMPtr.h"
 #include "nsContentUtils.h"
@@ -78,16 +79,6 @@ namespace mozilla {
 using ipc::PrincipalInfo;
 
 namespace dom::indexedDB {
-
-namespace {
-
-/*******************************************************************************
- * Constants
- ******************************************************************************/
-
-const uint32_t kFileCopyBufferSize = 32768;
-
-}  // namespace
 
 /*******************************************************************************
  * ThreadLocal
@@ -139,12 +130,12 @@ void MaybeCollectGarbageOnIPCMessage() {
   }
 
   nsJSContext::GarbageCollectNow(JS::GCReason::DOM_IPC);
-  nsJSContext::CycleCollectNow();
+  nsJSContext::CycleCollectNow(CCReason::API);
 #endif  // BUILD_GC_ON_IPC_MESSAGES
 }
 
 class MOZ_STACK_CLASS AutoSetCurrentTransaction final {
-  typedef mozilla::ipc::BackgroundChildImpl BackgroundChildImpl;
+  using BackgroundChildImpl = mozilla::ipc::BackgroundChildImpl;
 
   Maybe<IDBTransaction&> const mTransaction;
   Maybe<IDBTransaction&> mPreviousTransaction;
@@ -783,9 +774,8 @@ class WorkerPermissionChallenge final : public Runnable {
       return true;
     }
 
-    IDB_TRY_UNWRAP(auto principal,
-                   mozilla::ipc::PrincipalInfoToPrincipal(mPrincipalInfo),
-                   true);
+    QM_TRY_UNWRAP(auto principal,
+                  mozilla::ipc::PrincipalInfoToPrincipal(mPrincipalInfo), true);
 
     if (XRE_IsParentProcess()) {
       const nsCOMPtr<Element> ownerElement =
@@ -797,8 +787,8 @@ class WorkerPermissionChallenge final : public Runnable {
       RefPtr<WorkerPermissionRequest> helper =
           new WorkerPermissionRequest(ownerElement, principal, this);
 
-      IDB_TRY_INSPECT(const PermissionRequestBase::PermissionValue& permission,
-                      helper->PromptIfNeeded(), true);
+      QM_TRY_INSPECT(const PermissionRequestBase::PermissionValue& permission,
+                     helper->PromptIfNeeded(), true);
 
       MOZ_ASSERT(permission == PermissionRequestBase::kPermissionAllowed ||
                  permission == PermissionRequestBase::kPermissionDenied ||
@@ -839,7 +829,7 @@ bool WorkerPermissionOperationCompleted::WorkerRun(
 }
 
 class MOZ_STACK_CLASS AutoSetCurrentFileHandle final {
-  typedef mozilla::ipc::BackgroundChildImpl BackgroundChildImpl;
+  using BackgroundChildImpl = mozilla::ipc::BackgroundChildImpl;
 
   IDBFileHandle* const mFileHandle;
   IDBFileHandle* mPreviousFileHandle;
@@ -1470,9 +1460,9 @@ mozilla::ipc::IPCResult BackgroundFactoryRequestChild::RecvPermissionChallenge(
     return IPC_OK();
   }
 
-  IDB_TRY_UNWRAP(auto principal,
-                 mozilla::ipc::PrincipalInfoToPrincipal(aPrincipalInfo),
-                 IPC_FAIL_NO_REASON(this));
+  QM_TRY_UNWRAP(auto principal,
+                mozilla::ipc::PrincipalInfoToPrincipal(aPrincipalInfo),
+                IPC_FAIL_NO_REASON(this));
 
   if (XRE_IsParentProcess()) {
     nsCOMPtr<nsIGlobalObject> global = mFactory->GetParentObject();
@@ -1494,8 +1484,8 @@ mozilla::ipc::IPCResult BackgroundFactoryRequestChild::RecvPermissionChallenge(
         new PermissionRequestMainProcessHelper(this, mFactory.clonePtr(),
                                                ownerElement, principal);
 
-    IDB_TRY_INSPECT(const PermissionRequestBase::PermissionValue& permission,
-                    helper->PromptIfNeeded(), IPC_FAIL_NO_REASON(this));
+    QM_TRY_INSPECT(const PermissionRequestBase::PermissionValue& permission,
+                   helper->PromptIfNeeded(), IPC_FAIL_NO_REASON(this));
 
     MOZ_ASSERT(permission == PermissionRequestBase::kPermissionAllowed ||
                permission == PermissionRequestBase::kPermissionDenied ||
@@ -2440,16 +2430,16 @@ void BackgroundRequestChild::HandleResponse(
 
   nsTArray<StructuredCloneReadInfoChild> cloneReadInfos;
 
-  IDB_TRY(OkIf(cloneReadInfos.SetCapacity(aResponse.Length(), fallible)),
-          QM_VOID, ([&aResponse, this](const auto) {
-            // Since we are under memory pressure, release aResponse early.
-            aResponse.Clear();
+  QM_TRY(OkIf(cloneReadInfos.SetCapacity(aResponse.Length(), fallible)),
+         QM_VOID, ([&aResponse, this](const auto) {
+           // Since we are under memory pressure, release aResponse early.
+           aResponse.Clear();
 
-            DispatchErrorEvent(mRequest, NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR,
-                               AcquireTransaction());
+           DispatchErrorEvent(mRequest, NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR,
+                              AcquireTransaction());
 
-            MOZ_ASSERT(mTransaction->IsAborted());
-          }));
+           MOZ_ASSERT(mTransaction->IsAborted());
+         }));
 
   std::transform(std::make_move_iterator(aResponse.begin()),
                  std::make_move_iterator(aResponse.end()),
@@ -2794,12 +2784,12 @@ nsresult BackgroundRequestChild::PreprocessHelper::ProcessStream() {
       blobInputStream->GetInternalStream();
   MOZ_ASSERT(internalInputStream);
 
-  IDB_TRY(
-      SnappyUncompressStructuredCloneData(*internalInputStream, *mCloneData));
+  QM_TRY(MOZ_TO_RESULT(
+      SnappyUncompressStructuredCloneData(*internalInputStream, *mCloneData)));
 
   mState = State::Finishing;
 
-  IDB_TRY(mOwningEventTarget->Dispatch(this, NS_DISPATCH_NORMAL));
+  QM_TRY(MOZ_TO_RESULT(mOwningEventTarget->Dispatch(this, NS_DISPATCH_NORMAL)));
 
   return NS_OK;
 }

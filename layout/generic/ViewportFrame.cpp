@@ -13,6 +13,7 @@
 
 #include "mozilla/ComputedStyleInlines.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/RestyleManager.h"
 #include "nsGkAtoms.h"
 #include "nsIScrollableFrame.h"
@@ -20,7 +21,6 @@
 #include "nsCanvasFrame.h"
 #include "nsLayoutUtils.h"
 #include "nsSubDocumentFrame.h"
-#include "GeckoProfiler.h"
 #include "nsIMozBrowserFrame.h"
 #include "nsPlaceholderFrame.h"
 #include "MobileViewportManager.h"
@@ -44,7 +44,7 @@ void ViewportFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
   // No need to call CreateView() here - the frame ctor will call SetView()
   // with the ViewManager's root view, so we'll assign it in SetViewInternal().
 
-  nsIFrame* parent = nsLayoutUtils::GetCrossDocParentFrame(this);
+  nsIFrame* parent = nsLayoutUtils::GetCrossDocParentFrameInProcess(this);
   if (parent) {
     nsFrameState state = parent->GetStateBits();
 
@@ -229,11 +229,13 @@ nsDisplayWrapList* ViewportFrame::BuildDisplayListForTopLayer(
   if (topLayerList.IsEmpty()) {
     return nullptr;
   }
-  nsDisplayListBuilder::AutoBuildingDisplayList buildingDisplayList(aBuilder,
-                                                                    this);
+  nsPoint offset = aBuilder->GetCurrentFrame()->GetOffsetTo(this);
+  nsDisplayListBuilder::AutoBuildingDisplayList buildingDisplayList(
+      aBuilder, this, aBuilder->GetVisibleRect() + offset,
+      aBuilder->GetDirtyRect() + offset);
   // Wrap the whole top layer in a single item with maximum z-index,
   // and append it at the very end, so that it stays at the topmost.
-  nsDisplayWrapList* wrapList = MakeDisplayItemWithIndex<nsDisplayWrapList>(
+  nsDisplayWrapList* wrapList = MakeDisplayItemWithIndex<nsDisplayWrapper>(
       aBuilder, this, 2, &topLayerList, aBuilder->CurrentActiveScrolledRoot(),
       false);
   if (!wrapList) {

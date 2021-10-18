@@ -11,7 +11,7 @@
 #include <string.h>
 #include <utility>
 #include "ErrorList.h"
-#include "js/RootingAPI.h"
+#include "js/experimental/JSStencil.h"
 #include "js/TypeDecls.h"
 #include "js/Value.h"
 #include "mozilla/AlreadyAddRefed.h"
@@ -25,7 +25,7 @@
 #include "nsCOMPtr.h"
 #include "nsClassHashtable.h"
 #include "nsCycleCollectionParticipant.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsHashKeys.h"
 #include "nsIMessageManager.h"
 #include "nsIObserver.h"
@@ -99,10 +99,10 @@ struct nsMessageListenerInfo {
 
 class nsFrameMessageManager : public nsIMessageSender {
   friend class mozilla::dom::MessageManagerReporter;
-  typedef mozilla::dom::ipc::StructuredCloneData StructuredCloneData;
+  using StructuredCloneData = mozilla::dom::ipc::StructuredCloneData;
 
  protected:
-  typedef mozilla::dom::ipc::MessageManagerFlags MessageManagerFlags;
+  using MessageManagerFlags = mozilla::dom::ipc::MessageManagerFlags;
 
   nsFrameMessageManager(mozilla::dom::ipc::MessageManagerCallback* aCallback,
                         MessageManagerFlags aFlags);
@@ -132,6 +132,8 @@ class nsFrameMessageManager : public nsIMessageSender {
   void RemoveWeakMessageListener(const nsAString& aMessageName,
                                  mozilla::dom::MessageListener& aListener,
                                  mozilla::ErrorResult& aError);
+  void RemoveMessageListenerHashEntry(const nsAString& aMessageName,
+                                      mozilla::ErrorResult& aError);
 
   // MessageSender
   void SendAsyncMessage(JSContext* aCx, const nsAString& aMessageName,
@@ -287,7 +289,7 @@ class nsFrameMessageManager : public nsIMessageSender {
 */
 class nsSameProcessAsyncMessageBase {
  public:
-  typedef mozilla::dom::ipc::StructuredCloneData StructuredCloneData;
+  using StructuredCloneData = mozilla::dom::ipc::StructuredCloneData;
 
   nsSameProcessAsyncMessageBase();
   nsresult Init(const nsAString& aMessage, StructuredCloneData& aData);
@@ -308,14 +310,14 @@ class nsSameProcessAsyncMessageBase {
 class nsScriptCacheCleaner;
 
 struct nsMessageManagerScriptHolder {
-  nsMessageManagerScriptHolder(JSContext* aCx, JSScript* aScript)
-      : mScript(aCx, aScript) {
+  explicit nsMessageManagerScriptHolder(JS::Stencil* aStencil)
+      : mStencil(aStencil) {
     MOZ_COUNT_CTOR(nsMessageManagerScriptHolder);
   }
 
   MOZ_COUNTED_DTOR(nsMessageManagerScriptHolder)
 
-  JS::PersistentRooted<JSScript*> mScript;
+  RefPtr<JS::Stencil> mStencil;
 };
 
 class nsMessageManagerScriptExecutor {
@@ -335,10 +337,9 @@ class nsMessageManagerScriptExecutor {
   void DidCreateScriptLoader();
   void LoadScriptInternal(JS::Handle<JSObject*> aMessageManager,
                           const nsAString& aURL, bool aRunInUniqueScope);
-  void TryCacheLoadAndCompileScript(const nsAString& aURL,
-                                    bool aRunInUniqueScope, bool aShouldCache,
-                                    JS::Handle<JSObject*> aMessageManager,
-                                    JS::MutableHandle<JSScript*> aScriptp);
+  already_AddRefed<JS::Stencil> TryCacheLoadAndCompileScript(
+      const nsAString& aURL, bool aRunInUniqueScope,
+      JS::Handle<JSObject*> aMessageManager);
   bool Init();
   void Trace(const TraceCallbacks& aCallbacks, void* aClosure);
   void Unlink();
@@ -349,7 +350,7 @@ class nsMessageManagerScriptExecutor {
   // optimize their script loading to avoid unnecessary duplication.
   virtual bool IsProcessScoped() const { return false; }
 
-  static nsDataHashtable<nsStringHashKey, nsMessageManagerScriptHolder*>*
+  static nsTHashMap<nsStringHashKey, nsMessageManagerScriptHolder*>*
       sCachedScripts;
   static mozilla::StaticRefPtr<nsScriptCacheCleaner> sScriptCacheCleaner;
 };

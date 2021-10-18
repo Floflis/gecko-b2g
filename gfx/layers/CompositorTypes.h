@@ -56,7 +56,6 @@ enum class TextureFlags : uint32_t {
   // The default behaviour is to deallocate on the host side.
   DEALLOCATE_CLIENT = 1 << 6,
   DEALLOCATE_SYNC = 1 << 6,  // XXX - make it a separate flag.
-  DEALLOCATE_MAIN_THREAD = 1 << 8,
   // After being shared ith the compositor side, an immutable texture is never
   // modified, it can only be read. It is safe to not Lock/Unlock immutable
   // textures.
@@ -114,41 +113,13 @@ enum class DiagnosticTypes : uint8_t {
 };
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(DiagnosticTypes)
 
-#define DIAGNOSTIC_FLASH_COUNTER_MAX 100
-
-/**
- * Information about the object that is being diagnosed.
- */
-enum class DiagnosticFlags : uint16_t {
-  NO_DIAGNOSTIC = 0,
-  IMAGE = 1 << 0,
-  CONTENT = 1 << 1,
-  CANVAS = 1 << 2,
-  COLOR = 1 << 3,
-  CONTAINER = 1 << 4,
-  TILE = 1 << 5,
-  BIGIMAGE = 1 << 6,
-  COMPONENT_ALPHA = 1 << 7,
-  REGION_RECT = 1 << 8,
-  NV12 = 1 << 9,
-  YCBCR = 1 << 10
-};
-MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(DiagnosticFlags)
-
 /**
  * See gfx/layers/Effects.h
  */
 enum class EffectTypes : uint8_t {
-  MASK,
-  BLEND_MODE,
-  COLOR_MATRIX,
-  MAX_SECONDARY,  // sentinel for the count of secondary effect types
   RGB,
   YCBCR,
   NV12,
-  COMPONENT_ALPHA,
-  SOLID_COLOR,
-  RENDER_TARGET,
   MAX  // sentinel for the count of all effect types
 };
 
@@ -157,11 +128,7 @@ enum class EffectTypes : uint8_t {
  */
 enum class CompositableType : uint8_t {
   UNKNOWN,
-  CONTENT_TILED,   // tiled painted layer
-  IMAGE,           // image with single buffering
-  IMAGE_BRIDGE,    // ImageBridge protocol
-  CONTENT_SINGLE,  // painted layer interface, single buffering
-  CONTENT_DOUBLE,  // painted layer interface, double buffering
+  IMAGE,  // image with single buffering
   COUNT
 };
 

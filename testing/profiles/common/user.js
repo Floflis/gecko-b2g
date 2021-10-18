@@ -11,7 +11,6 @@ user_pref("browser.dom.window.dump.enabled", true);
 user_pref("devtools.console.stdout.chrome", true);
 // asrouter expects a plain object or null
 user_pref("browser.newtabpage.activity-stream.asrouter.providers.cfr", "null");
-user_pref("browser.newtabpage.activity-stream.asrouter.providers.cfr-fxa", "null");
 user_pref("browser.newtabpage.activity-stream.asrouter.providers.snippets", "null");
 user_pref("browser.newtabpage.activity-stream.asrouter.providers.message-groups", "null");
 user_pref("browser.newtabpage.activity-stream.asrouter.providers.whats-new-panel", "null");
@@ -76,3 +75,5 @@ user_pref("geo.provider.network.compare.url", "");
 user_pref("browser.region.network.url", "");
 // Do not unload tabs on low memory when testing
 user_pref("browser.tabs.unloadOnLowMemory", false);
+// Don't pull Top Sites content from the network
+user_pref("browser.topsites.contile.enabled", false);

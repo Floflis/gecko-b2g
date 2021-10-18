@@ -10,19 +10,21 @@ const {
   FrontClassWithSpec,
   registerFront,
 } = require("devtools/shared/protocol");
+const {
+  DescriptorMixin,
+} = require("devtools/client/fronts/descriptors/descriptor-mixin");
 loader.lazyRequireGetter(
   this,
-  "BrowsingContextTargetFront",
-  "devtools/client/fronts/targets/browsing-context",
+  "WindowGlobalTargetFront",
+  "devtools/client/fronts/targets/window-global",
   true
 );
 
-class WebExtensionDescriptorFront extends FrontClassWithSpec(
-  webExtensionDescriptorSpec
+class WebExtensionDescriptorFront extends DescriptorMixin(
+  FrontClassWithSpec(webExtensionDescriptorSpec)
 ) {
   constructor(client, targetFront, parentFront) {
     super(client, targetFront, parentFront);
-    this.client = client;
     this.traits = {};
   }
 
@@ -58,6 +60,10 @@ class WebExtensionDescriptorFront extends FrontClassWithSpec(
     return this._form.isSystem;
   }
 
+  get isWebExtensionDescriptor() {
+    return true;
+  }
+
   get isWebExtension() {
     return this._form.isWebExtension;
   }
@@ -83,14 +89,14 @@ class WebExtensionDescriptorFront extends FrontClassWithSpec(
   }
 
   _createWebExtensionTarget(form) {
-    const front = new BrowsingContextTargetFront(this.conn, null, this);
+    const front = new WindowGlobalTargetFront(this.conn, null, this);
     front.form(form);
     this.manage(front);
     return front;
   }
 
   /**
-   * Retrieve the BrowsingContextTargetFront representing a
+   * Retrieve the WindowGlobalTargetFront representing a
    * WebExtensionTargetActor if this addon is a webextension.
    *
    * WebExtensionDescriptors will be created for any type of addon type

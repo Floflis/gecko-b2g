@@ -10,13 +10,6 @@ const { XPCOMUtils } = ChromeUtils.import(
 
 var EXPORTED_SYMBOLS = ["EventDispatcher"];
 
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "UUIDGen",
-  "@mozilla.org/uuid-generator;1",
-  "nsIUUIDGenerator"
-);
-
 const IS_PARENT_PROCESS =
   Services.appinfo.processType == Services.appinfo.PROCESS_TYPE_DEFAULT;
 
@@ -85,7 +78,7 @@ DispatcherDelegate.prototype = {
     };
 
     if (aCallback) {
-      const uuid = UUIDGen.generateUUID().toString();
+      const uuid = Services.uuid.generateUUID().toString();
       this._replies.set(uuid, {
         callback: aCallback,
         finalizer: aFinalizer,
@@ -263,19 +256,24 @@ var EventDispatcher = {
       };
     }
 
-    if (aMsg.data.global) {
-      this.instance.dispatch(
-        aMsg.data.event,
-        aMsg.data.data,
-        callback,
-        callback
-      );
-      return;
-    }
+    try {
+      if (aMsg.data.global) {
+        this.instance.dispatch(
+          aMsg.data.event,
+          aMsg.data.data,
+          callback,
+          callback
+        );
+        return;
+      }
 
-    const win = aMsg.target.ownerGlobal;
-    const dispatcher = win.WindowEventDispatcher || this.for(win);
-    dispatcher.dispatch(aMsg.data.event, aMsg.data.data, callback, callback);
+      const win = aMsg.target.ownerGlobal;
+      const dispatcher = win.WindowEventDispatcher || this.for(win);
+      dispatcher.dispatch(aMsg.data.event, aMsg.data.data, callback, callback);
+    } catch (e) {
+      callback?.onError(`Error getting dispatcher: ${e}`);
+      throw e;
+    }
   },
 };
 

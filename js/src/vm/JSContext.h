@@ -9,6 +9,7 @@
 #ifndef vm_JSContext_h
 #define vm_JSContext_h
 
+#include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
 
 #include "jstypes.h"  // JS_PUBLIC_API
@@ -18,7 +19,9 @@
 #include "irregexp/RegExpTypes.h"
 #include "js/CharacterEncoding.h"
 #include "js/ContextOptions.h"  // JS::ContextOptions
+#include "js/Exception.h"
 #include "js/GCVector.h"
+#include "js/Interrupt.h"
 #include "js/Promise.h"
 #include "js/Result.h"
 #include "js/Utility.h"
@@ -105,6 +108,10 @@ class InternalJobQueue : public JS::JobQueue {
   // This is only used by shell testing functions.
   JSObject* maybeFront() const;
 
+#ifdef DEBUG
+  JSObject* copyJobs(JSContext* cx);
+#endif
+
  private:
   using Queue = js::TraceableFifo<JSObject*, 0, SystemAllocPolicy>;
 
@@ -122,8 +129,6 @@ class InternalJobQueue : public JS::JobQueue {
 };
 
 class AutoLockScriptData;
-
-void ReportOverRecursed(JSContext* cx, unsigned errorNumber);
 
 /* Thread Local Storage slot for storing the context for a thread. */
 extern MOZ_THREAD_LOCAL(JSContext*) TlsContext;
@@ -149,6 +154,8 @@ enum class InterruptReason : uint32_t {
   CallbackUrgent = 1 << 2,
   CallbackCanWait = 1 << 3,
 };
+
+enum class ShouldCaptureStack { Maybe, Always };
 
 } /* namespace js */
 
@@ -282,9 +289,6 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
 
   // Accessors for immutable runtime data.
   JSAtomState& names() { return *runtime_->commonNames; }
-  js::frontend::WellKnownParserAtoms& parserNames() {
-    return *runtime_->commonParserNames;
-  }
   js::StaticStrings& staticStrings() { return *runtime_->staticStrings; }
   js::SharedImmutableStringsCache& sharedImmutableStrings() {
     return runtime_->sharedImmutableStrings();
@@ -332,7 +336,7 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
  public:
   inline void enterRealmOf(JSObject* target);
   inline void enterRealmOf(JSScript* target);
-  inline void enterRealmOf(js::ObjectGroup* target);
+  inline void enterRealmOf(js::Shape* target);
   inline void enterNullRealm();
 
   inline void setRealmForJitExceptionHandler(JS::Realm* realm);
@@ -409,7 +413,8 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
 
   friend class JS::AutoSaveExceptionState;
   friend class js::jit::DebugModeOSRVolatileJitFrameIter;
-  friend void js::ReportOverRecursed(JSContext*, unsigned errorNumber);
+  friend void js::ReportOutOfMemory(JSContext*);
+  friend void js::ReportOverRecursed(JSContext*);
 
  public:
   inline JS::Result<> boolToResult(bool ok);
@@ -424,7 +429,7 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
   }
 
   template <typename V, typename E>
-  V* resultToPtr(const JS::Result<V*, E>& result) {
+  V* resultToPtr(JS::Result<V*, E>& result) {
     return result.isOk() ? result.unwrap() : nullptr;
   }
 
@@ -482,8 +487,12 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
     return runtime()->interpreterStack();
   }
 
-  /* Base address of the native stack for the current thread. */
-  uintptr_t nativeStackBase;
+ private:
+  // Base address of the native stack for the current thread.
+  mozilla::Maybe<uintptr_t> nativeStackBase_;
+
+ public:
+  uintptr_t nativeStackBase() const { return *nativeStackBase_; }
 
  public:
   /* If non-null, report JavaScript entry points to this monitor. */
@@ -589,6 +598,10 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
   js::ContextData<bool> runningOOMTest;
 #endif
 
+#ifdef DEBUG
+  js::ContextData<bool> disableCompartmentCheckTracer;
+#endif
+
   /*
    * Some regions of code are hard for the static rooting hazard analysis to
    * understand. In those cases, we trade the static analysis for a dynamic
@@ -659,8 +672,8 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
   js::ContextData<js::UniquePtr<js::jit::PcScriptCache>> ionPcScriptCache;
 
  private:
-  /* Exception state -- the exception member is a GC root by definition. */
-  js::ContextData<bool> throwing; /* is there a pending exception? */
+  // Indicates if an exception is pending and the reason for it.
+  js::ContextData<JS::ExceptionStatus> status;
   js::ContextData<JS::PersistentRooted<JS::Value>>
       unwrappedException_; /* most-recently-thrown exception */
   js::ContextData<JS::PersistentRooted<js::SavedFrame*>>
@@ -680,24 +693,16 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
     return unwrappedExceptionStack_.ref().get();
   }
 
-  // True if the exception currently being thrown is by result of
-  // ReportOverRecursed. See Debugger::slowPathOnExceptionUnwind.
-  js::ContextData<bool> overRecursed_;
-
 #ifdef DEBUG
   // True if this context has ever called ReportOverRecursed.
   js::ContextData<bool> hadOverRecursed_;
 
  public:
   bool hadNondeterministicException() const {
-    return hadOverRecursed_ || runtime()->hadOutOfMemory;
+    return hadOverRecursed_ || runtime()->hadOutOfMemory ||
+           js::oom::simulator.isThreadSimulatingAny();
   }
 #endif
-
- private:
-  // True if propagating a forced return from an interrupt handler during
-  // debug mode.
-  js::ContextData<bool> propagatingForcedReturn_;
 
  public:
   js::ContextData<int32_t> reportGranularity; /* see vm/Probes.h */
@@ -792,31 +797,44 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
   inline void minorGC(JS::GCReason reason);
 
  public:
-  bool isExceptionPending() const { return throwing; }
+  bool isExceptionPending() const {
+    return JS::IsCatchableExceptionStatus(status);
+  }
 
-  MOZ_MUST_USE
-  bool getPendingException(JS::MutableHandleValue rval);
+  [[nodiscard]] bool getPendingException(JS::MutableHandleValue rval);
 
   js::SavedFrame* getPendingExceptionStack();
 
-  bool isThrowingOutOfMemory();
   bool isThrowingDebuggeeWouldRun();
   bool isClosingGenerator();
 
   void setPendingException(JS::HandleValue v, js::HandleSavedFrame stack);
-  void setPendingExceptionAndCaptureStack(JS::HandleValue v);
+  void setPendingException(JS::HandleValue v,
+                           js::ShouldCaptureStack captureStack);
 
   void clearPendingException() {
-    throwing = false;
-    overRecursed_ = false;
+    status = JS::ExceptionStatus::None;
     unwrappedException().setUndefined();
     unwrappedExceptionStack() = nullptr;
   }
 
-  bool isThrowingOverRecursed() const { return throwing && overRecursed_; }
-  bool isPropagatingForcedReturn() const { return propagatingForcedReturn_; }
-  void setPropagatingForcedReturn() { propagatingForcedReturn_ = true; }
-  void clearPropagatingForcedReturn() { propagatingForcedReturn_ = false; }
+  bool isThrowingOutOfMemory() const {
+    return status == JS::ExceptionStatus::OutOfMemory;
+  }
+  bool isThrowingOverRecursed() const {
+    return status == JS::ExceptionStatus::OverRecursed;
+  }
+  bool isPropagatingForcedReturn() const {
+    return status == JS::ExceptionStatus::ForcedReturn;
+  }
+  void setPropagatingForcedReturn() {
+    MOZ_ASSERT(status == JS::ExceptionStatus::None);
+    status = JS::ExceptionStatus::ForcedReturn;
+  }
+  void clearPropagatingForcedReturn() {
+    MOZ_ASSERT(status == JS::ExceptionStatus::ForcedReturn);
+    status = JS::ExceptionStatus::None;
+  }
 
   /*
    * See JS_SetTrustedPrincipals in jsapi.h.

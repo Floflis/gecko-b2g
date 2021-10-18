@@ -38,16 +38,28 @@ already_AddRefed<VirtualCursorProxy> VirtualCursorService::GetOrCreateCursor(
     nsPIDOMWindowOuter* aWindow) {
   MOZ_ASSERT(NS_IsMainThread());
   RefPtr<VirtualCursorService> service = GetService();
-  RefPtr<VirtualCursorProxy> cursor;
-  cursor = service->mCursorMap.LookupForAdd(aWindow).OrInsert([&]() {
-    RefPtr<dom::BrowserChild> browser = BrowserChild::GetFrom(aWindow);
-    LayoutDeviceIntPoint offset(browser->GetChromeOffset());
-    if (XRE_GetProcessType() == GeckoProcessType_Content) {
-      return new VirtualCursorProxy(aWindow, new CursorRemote(aWindow), offset);
-    }
-    return new VirtualCursorProxy(aWindow, service, offset);
-  });
-  return cursor.forget();
+
+  return service->mCursorMap
+      .WithEntryHandle(
+          aWindow,
+          [&](auto&& entry) {
+            return entry.OrInsertWith([&] {
+              RefPtr<dom::BrowserChild> browser =
+                  BrowserChild::GetFrom(aWindow);
+              LayoutDeviceIntPoint offset(browser->GetChromeOffset());
+              VirtualCursorProxy* proxy;
+              if (XRE_GetProcessType() == GeckoProcessType_Content) {
+                proxy = new VirtualCursorProxy(
+                    aWindow, new CursorRemote(aWindow), offset);
+              } else {
+                proxy = new VirtualCursorProxy(aWindow, service, offset);
+              }
+              ScreenIntSize size = browser->GetInnerSize();
+              proxy->UpdateScreenSize(size.width, size.height);
+              return proxy;
+            });
+          })
+      .forget();
 }
 
 /* static */
@@ -55,22 +67,24 @@ already_AddRefed<VirtualCursorProxy> VirtualCursorService::GetCursor(
     nsPIDOMWindowOuter* aWindow) {
   MOZ_ASSERT(NS_IsMainThread());
   RefPtr<VirtualCursorService> service = GetService();
-  RefPtr<VirtualCursorProxy> cursor;
   auto entry = service->mCursorMap.Lookup(aWindow);
   if (!entry) {
     return nullptr;
   }
-  return entry.Data().forget();
+  RefPtr<VirtualCursorProxy> cursor = entry.Data();
+  return cursor.forget();
 }
 
 /* static */
 void VirtualCursorService::RemoveCursor(nsPIDOMWindowOuter* aWindow) {
   MOZ_ASSERT(NS_IsMainThread());
-  RefPtr<VirtualCursorService> service = GetService();
-  service->mCursorMap.Remove(aWindow);
-  MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
-          ("VirtualCursorProxy RemoveCursor, remains %d",
-           service->mCursorMap.Count()));
+  if (aWindow) {
+    RefPtr<VirtualCursorService> service = GetService();
+    service->mCursorMap.Remove(aWindow);
+    MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
+            ("VirtualCursorProxy RemoveCursor, remains %d",
+            service->mCursorMap.Count()));
+  }
 }
 
 NS_IMETHODIMP VirtualCursorService::Init(nsIDOMWindow* aWindow) {
@@ -93,6 +107,13 @@ NS_IMETHODIMP VirtualCursorService::Init(nsIDOMWindow* aWindow) {
   return NS_OK;
 }
 
+NS_IMETHODIMP VirtualCursorService::RemoveCursor(nsFrameLoader* aFrameLoader) {
+  if (mCurFrameLoader == aFrameLoader) {
+    CursorOut();
+  }
+  return NS_OK;
+}
+
 /* static */
 void VirtualCursorService::Shutdown() {
   if (!sSingleton) {
@@ -103,12 +124,13 @@ void VirtualCursorService::Shutdown() {
           ("VirtualCursorService::Shutdown"));
 }
 
-void VirtualCursorService::SendCursorEvent(const nsAString& aType) {
+void VirtualCursorService::SendCursorEvent(const nsAString& aType,
+                                           int32_t aButton, int32_t aButtons) {
   NS_ENSURE_TRUE_VOID(mWindowUtils);
   bool preventDefault;
-  mWindowUtils->SendMouseEvent(aType, mCSSCursorPoint.x, mCSSCursorPoint.y, 0,
-                               1, 0, false, 0.0, 0, false, false, 0, 0, 6,
-                               &preventDefault);
+  mWindowUtils->SendMouseEvent(aType, mCSSCursorPoint.x, mCSSCursorPoint.y,
+                               aButton, 1, 0, false, 0.0, 0, false, false,
+                               aButtons, 0, 6, &preventDefault);
 }
 
 void VirtualCursorService::UpdatePos(const LayoutDeviceIntPoint& aPoint) {
@@ -149,13 +171,13 @@ void VirtualCursorService::CursorClick() {
 void VirtualCursorService::CursorDown() {
   MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
           ("VirtualCursorService::CursorDown"));
-  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mousedown"));
+  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mousedown"), 0, 1);
 }
 
 void VirtualCursorService::CursorUp() {
   MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
           ("VirtualCursorService::CursorUp"));
-  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mouseup"));
+  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mouseup"), 0, 0);
 }
 
 void VirtualCursorService::CursorMove() {
@@ -166,13 +188,14 @@ void VirtualCursorService::CursorMove() {
     // then receive the move requests from content. Ignore the request.
     return;
   }
-  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mousemove"));
+  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mousemove"), 0, 0);
 }
 
 void VirtualCursorService::CursorOut(bool aCheckActive) {
   MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
           ("VirtualCursorService::CursorOut"));
-  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mouseout"));
+  mCurFrameLoader = nullptr;
+  SendCursorEvent(NS_LITERAL_STRING_FROM_CSTRING("mouseout"), 0, 0);
 }
 
 void VirtualCursorService::ShowContextMenu() {
@@ -184,6 +207,10 @@ void VirtualCursorService::ShowContextMenu() {
                                &preventDefault);
 }
 
+void VirtualCursorService::SetCurFrameLoader(nsFrameLoader* aFrameLoader) {
+  mCurFrameLoader = aFrameLoader;
+}
+
 void VirtualCursorService::StartPanning() {
   if (mPanSimulator) {
     if (mPanSimulator->IsPanning()) {
@@ -191,6 +218,19 @@ void VirtualCursorService::StartPanning() {
               ("Try to start panning while already in panning state"));
       mPanSimulator->Finish();
     }
+
+    // Bring the cursor to the center of the screen when the user starts
+    // panning outside of the window.
+    if (mCSSCursorPoint.x == -1 || mCSSCursorPoint.y == -1) {
+      double width, height;
+      mWindow->GetInnerWidth(&width);
+      mWindow->GetInnerHeight(&height);
+
+      CSSPoint centerPos(width, height);
+      mCSSCursorPoint.x = centerPos.x / 2;
+      mCSSCursorPoint.y = centerPos.y / 2;
+    }
+
     nsIntPoint point((int)mCSSCursorPoint.x, (int)mCSSCursorPoint.y);
     mPanSimulator->Start(point);
     CursorOut();

@@ -10,7 +10,9 @@
 #include "HttpConnectionMgrParent.h"
 #include "AltSvcTransactionParent.h"
 #include "mozilla/net/HttpTransactionParent.h"
+#include "mozilla/net/WebSocketConnectionParent.h"
 #include "nsHttpConnectionInfo.h"
+#include "nsIHttpChannelInternal.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsISpeculativeConnect.h"
@@ -20,9 +22,34 @@
 namespace mozilla {
 namespace net {
 
-NS_IMPL_ISUPPORTS0(HttpConnectionMgrParent)
+nsTHashMap<uint32_t, nsCOMPtr<nsIHttpUpgradeListener>>
+    HttpConnectionMgrParent::sHttpUpgradeListenerMap;
+uint32_t HttpConnectionMgrParent::sListenerId = 0;
+StaticMutex HttpConnectionMgrParent::sLock;
 
-HttpConnectionMgrParent::HttpConnectionMgrParent() : mShutDown(false) {}
+// static
+uint32_t HttpConnectionMgrParent::AddHttpUpgradeListenerToMap(
+    nsIHttpUpgradeListener* aListener) {
+  StaticMutexAutoLock lock(sLock);
+  uint32_t id = sListenerId++;
+  sHttpUpgradeListenerMap.InsertOrUpdate(id, nsCOMPtr{aListener});
+  return id;
+}
+
+// static
+void HttpConnectionMgrParent::RemoveHttpUpgradeListenerFromMap(uint32_t aId) {
+  StaticMutexAutoLock lock(sLock);
+  sHttpUpgradeListenerMap.Remove(aId);
+}
+
+// static
+Maybe<nsCOMPtr<nsIHttpUpgradeListener>>
+HttpConnectionMgrParent::GetAndRemoveHttpUpgradeListener(uint32_t aId) {
+  StaticMutexAutoLock lock(sLock);
+  return sHttpUpgradeListenerMap.Extract(aId);
+}
+
+NS_IMPL_ISUPPORTS0(HttpConnectionMgrParent)
 
 nsresult HttpConnectionMgrParent::Init(
     uint16_t maxUrgentExcessiveConns, uint16_t maxConnections,
@@ -105,11 +132,11 @@ void HttpConnectionMgrParent::PrintDiagnostics() {
   // socket process.
 }
 
-nsresult HttpConnectionMgrParent::UpdateCurrentTopLevelOuterContentWindowId(
-    uint64_t aWindowId) {
+nsresult HttpConnectionMgrParent::UpdateCurrentTopBrowsingContextId(
+    uint64_t aId) {
   RefPtr<HttpConnectionMgrParent> self = this;
-  auto task = [self, aWindowId]() {
-    Unused << self->SendUpdateCurrentTopLevelOuterContentWindowId(aWindowId);
+  auto task = [self, aId]() {
+    Unused << self->SendUpdateCurrentTopBrowsingContextId(aId);
   };
   gIOService->CallOrWaitForSocketProcess(std::move(task));
   return NS_OK;
@@ -242,11 +269,11 @@ nsresult HttpConnectionMgrParent::VerifyTraffic() {
 }
 
 void HttpConnectionMgrParent::ExcludeHttp2(const nsHttpConnectionInfo* ci) {
-  MOZ_ASSERT_UNREACHABLE("ExcludeHttp2 should not be called");
+  // Do nothing.
 }
 
 void HttpConnectionMgrParent::ExcludeHttp3(const nsHttpConnectionInfo* ci) {
-  MOZ_ASSERT_UNREACHABLE("ExcludeHttp3 should not be called");
+  // Do nothing.
 }
 
 nsresult HttpConnectionMgrParent::ClearConnectionHistory() {
@@ -257,8 +284,27 @@ nsresult HttpConnectionMgrParent::ClearConnectionHistory() {
 
 nsresult HttpConnectionMgrParent::CompleteUpgrade(
     HttpTransactionShell* aTrans, nsIHttpUpgradeListener* aUpgradeListener) {
-  // TODO: fix this in bug 1497249
-  return NS_ERROR_NOT_IMPLEMENTED;
+  MOZ_ASSERT(aTrans->AsHttpTransactionParent());
+
+  if (!CanSend()) {
+    // OnUpgradeFailed is expected to be called on socket thread.
+    nsCOMPtr<nsIEventTarget> target =
+        do_GetService(NS_SOCKETTRANSPORTSERVICE_CONTRACTID);
+    if (target) {
+      nsCOMPtr<nsIHttpUpgradeListener> listener = aUpgradeListener;
+      target->Dispatch(NS_NewRunnableFunction(
+          "HttpConnectionMgrParent::CompleteUpgrade", [listener]() {
+            Unused << listener->OnUpgradeFailed(NS_ERROR_NOT_AVAILABLE);
+          }));
+    }
+    return NS_OK;
+  }
+
+  // We need to link the id and the upgrade listener here, so
+  // WebSocketConnectionParent can connect to the listener correctly later.
+  uint32_t id = AddHttpUpgradeListenerToMap(aUpgradeListener);
+  Unused << SendStartWebSocketConnection(aTrans->AsHttpTransactionParent(), id);
+  return NS_OK;
 }
 
 nsHttpConnectionMgr* HttpConnectionMgrParent::AsHttpConnectionMgr() {

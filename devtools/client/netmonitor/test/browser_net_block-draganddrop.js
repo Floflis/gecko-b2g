@@ -11,7 +11,7 @@ add_task(async function() {
   class DataTransfer {
     constructor() {
       this.BLOCKING_URL =
-        "http://example.com/browser/devtools/client/netmonitor/test/html_simple-test-page.html";
+        "https://example.com/browser/devtools/client/netmonitor/test/html_simple-test-page.html";
       this.getDataTrigger = false;
       this.setDataTrigger = false;
       this.data = "";
@@ -41,7 +41,7 @@ add_task(async function() {
 
   const dataTransfer = new DataTransfer();
 
-  const { tab, monitor } = await initNetMonitor(SIMPLE_URL, {
+  const { tab, monitor } = await initNetMonitor(HTTPS_SIMPLE_URL, {
     requestCount: 1,
   });
   info("Starting test... ");
@@ -58,7 +58,7 @@ add_task(async function() {
 
   // Reload to have one request in the list
   let waitForEvents = waitForNetworkEvents(monitor, 1);
-  await navigateTo(SIMPLE_URL);
+  await navigateTo(HTTPS_SIMPLE_URL);
   await waitForEvents;
 
   // Capture normal request
@@ -72,7 +72,7 @@ add_task(async function() {
     const waitForHeaders = waitUntil(() =>
       document.querySelector(".headers-overview")
     );
-    await EventUtils.sendMouseEvent({ type: "mousedown" }, firstRequest);
+    EventUtils.sendMouseEvent({ type: "mousedown" }, firstRequest);
     await waitForHeaders;
     normalRequestState = getSelectedRequest(store.getState());
     normalRequestSize = firstRequest.querySelector(".requests-list-transferred")
@@ -140,7 +140,7 @@ add_task(async function() {
     blockedRequestSize = firstRequest.querySelector(
       ".requests-list-transferred"
     ).textContent;
-    await EventUtils.sendMouseEvent({ type: "mousedown" }, firstRequest);
+    EventUtils.sendMouseEvent({ type: "mousedown" }, firstRequest);
     blockedRequestState = getSelectedRequest(store.getState());
     info("Captured blocked request");
   }

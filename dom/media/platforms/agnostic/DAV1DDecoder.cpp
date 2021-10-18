@@ -6,6 +6,7 @@
 
 #include "DAV1DDecoder.h"
 
+#include "gfxUtils.h"
 #include "ImageContainer.h"
 #include "mozilla/TaskQueue.h"
 #include "mozilla/gfx/gfxVars.h"
@@ -102,7 +103,7 @@ RefPtr<MediaDataDecoder::DecodePromise> DAV1DDecoder::InvokeDecode(
   // release callback are not coming in the same order that the
   // buffers have been added in the decoder (threading ordering
   // inside decoder)
-  mDecodingBuffers.Put(aSample->Data(), RefPtr{aSample});
+  mDecodingBuffers.InsertOrUpdate(aSample->Data(), RefPtr{aSample});
   Dav1dData data;
   int res = dav1d_data_wrap(&data, aSample->Data(), aSample->Size(),
                             ReleaseDataBuffer_s, this);
@@ -188,6 +189,18 @@ int DAV1DDecoder::GetPicture(DecodedData& aData, MediaResult& aResult) {
   return 0;
 }
 
+// When returning Nothing(), the caller chooses the appropriate default
+/* static */ Maybe<gfx::YUVColorSpace> DAV1DDecoder::GetColorSpace(
+    const Dav1dPicture& aPicture, LazyLogModule& aLogger) {
+  if (!aPicture.seq_hdr || !aPicture.seq_hdr->color_description_present) {
+    return Nothing();
+  }
+
+  return gfxUtils::CicpToColorSpace(
+      static_cast<gfx::CICP::MatrixCoefficients>(aPicture.seq_hdr->mtrx),
+      static_cast<gfx::CICP::ColourPrimaries>(aPicture.seq_hdr->pri), aLogger);
+}
+
 already_AddRefed<VideoData> DAV1DDecoder::ConstructImage(
     const Dav1dPicture& aPicture) {
   VideoData::YCbCrBuffer b;
@@ -195,50 +208,13 @@ already_AddRefed<VideoData> DAV1DDecoder::ConstructImage(
     b.mColorDepth = gfx::ColorDepth::COLOR_10;
   } else if (aPicture.p.bpc == 12) {
     b.mColorDepth = gfx::ColorDepth::COLOR_12;
+  } else {
+    b.mColorDepth = gfx::ColorDepth::COLOR_8;
   }
 
-  // On every other case use the default (BT601).
-  if (aPicture.seq_hdr->color_description_present) {
-    switch (aPicture.seq_hdr->mtrx) {
-      case DAV1D_MC_BT2020_NCL:
-      case DAV1D_MC_BT2020_CL:
-        b.mYUVColorSpace = gfx::YUVColorSpace::BT2020;
-        break;
-      case DAV1D_MC_BT601:
-        b.mYUVColorSpace = gfx::YUVColorSpace::BT601;
-        break;
-      case DAV1D_MC_BT709:
-        b.mYUVColorSpace = gfx::YUVColorSpace::BT709;
-        break;
-      case DAV1D_MC_IDENTITY:
-        b.mYUVColorSpace = gfx::YUVColorSpace::Identity;
-        break;
-      case DAV1D_MC_CHROMAT_NCL:
-      case DAV1D_MC_CHROMAT_CL:
-      case DAV1D_MC_UNKNOWN:  // MIAF specific
-        switch (aPicture.seq_hdr->pri) {
-          case DAV1D_COLOR_PRI_BT601:
-            b.mYUVColorSpace = gfx::YUVColorSpace::BT601;
-            break;
-          case DAV1D_COLOR_PRI_BT709:
-            b.mYUVColorSpace = gfx::YUVColorSpace::BT709;
-            break;
-          case DAV1D_COLOR_PRI_BT2020:
-            b.mYUVColorSpace = gfx::YUVColorSpace::BT2020;
-            break;
-          default:
-            b.mYUVColorSpace = gfx::YUVColorSpace::UNKNOWN;
-            break;
-        }
-        break;
-      default:
-        LOG("Unsupported color matrix value: %u", aPicture.seq_hdr->mtrx);
-        b.mYUVColorSpace = gfx::YUVColorSpace::UNKNOWN;
-    }
-  }
-  if (b.mYUVColorSpace == gfx::YUVColorSpace::UNKNOWN) {
-    b.mYUVColorSpace = DefaultColorSpace({aPicture.p.w, aPicture.p.h});
-  }
+  b.mYUVColorSpace =
+      DAV1DDecoder::GetColorSpace(aPicture, sPDMLog)
+          .valueOr(DefaultColorSpace({aPicture.p.w, aPicture.p.h}));
   b.mColorRange = aPicture.seq_hdr->color_range ? gfx::ColorRange::FULL
                                                 : gfx::ColorRange::LIMITED;
 

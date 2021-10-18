@@ -16,6 +16,7 @@
 #include "nsXULPopupManager.h"
 #include "nsIScriptContext.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
 #include "nsServiceManagerUtils.h"
 #include "nsLayoutUtils.h"
 #include "mozilla/ReflowInput.h"
@@ -121,15 +122,6 @@ nsresult nsXULPopupListener::HandleEvent(Event* aEvent) {
     bool eventEnabled =
         Preferences::GetBool("dom.event.contextmenu.enabled", true);
     if (!eventEnabled) {
-      // If the target node is for plug-in, we should not open XUL context
-      // menu on windowless plug-ins.
-      nsCOMPtr<nsIObjectLoadingContent> olc = do_QueryInterface(targetContent);
-      uint32_t type;
-      if (olc && NS_SUCCEEDED(olc->GetDisplayedType(&type)) &&
-          type == nsIObjectLoadingContent::TYPE_PLUGIN) {
-        return NS_OK;
-      }
-
       // The user wants his contextmenus.  Let's make sure that this is a
       // website and not chrome since there could be places in chrome which
       // don't want contextmenus.
@@ -193,8 +185,8 @@ nsresult nsXULPopupListener::FireFocusOnTargetContent(
   nsIFrame* targetFrame = aTargetContent->GetPrimaryFrame();
   if (!targetFrame) return NS_ERROR_FAILURE;
 
-  const nsStyleUI* ui = targetFrame->StyleUI();
-  bool suppressBlur = (ui->mUserFocus == StyleUserFocus::Ignore);
+  const bool suppressBlur =
+      targetFrame->StyleUI()->UserFocus() == StyleUserFocus::Ignore;
 
   RefPtr<Element> newFocusElement;
 

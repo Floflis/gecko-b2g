@@ -20,11 +20,28 @@ interface WindowContext {
 
   readonly attribute WindowContext topWindowContext;
 
+  // True if this WindowContext is currently frozen in the BFCache.
+  readonly attribute boolean isInBFCache;
+
   // True if this window has registered a "beforeunload" event handler.
   readonly attribute boolean hasBeforeUnload;
 
   // True if the principal of this window is for a local ip address.
   readonly attribute boolean isLocalIP;
+
+  // True if the corresponding document has `loading='lazy'` images;
+  // It won't become false if the image becomes non-lazy.
+  readonly attribute boolean hadLazyLoadImage;
+
+  /**
+   * Partially determines whether script execution is allowed in this
+   * BrowsingContext. Script execution will be permitted only if this
+   * attribute is true and script execution is allowed in the owner
+   * BrowsingContext.
+   *
+   * May only be set in the context's owning process.
+   */
+  [SetterThrows] attribute boolean allowJavascript;
 };
 
 // Keep this in sync with nsIContentViewer::PermitUnloadAction.
@@ -76,6 +93,7 @@ interface WindowGlobalParent : WindowContext {
 
   // Information about the currently loaded document.
   readonly attribute Principal documentPrincipal;
+  readonly attribute Principal documentStoragePrincipal;
   readonly attribute Principal? contentBlockingAllowListPrincipal;
   readonly attribute URI? documentURI;
   readonly attribute DOMString documentTitle;
@@ -103,6 +121,7 @@ interface WindowGlobalParent : WindowContext {
    */
   [Throws]
   JSWindowActorParent getActor(UTF8String name);
+  JSWindowActorParent getExistingActor(UTF8String name);
 
   /**
    * Renders a region of the frame into an image bitmap.
@@ -112,6 +131,10 @@ interface WindowGlobalParent : WindowContext {
    * @param scale The scale to render the window at. Use devicePixelRatio
    * to have comparable rendering to the OS.
    * @param backgroundColor The background color to use.
+   * @param resetScrollPosition If true, temporarily resets the scroll position
+   * of the root scroll frame to 0, such that position:fixed elements are drawn
+   * at their initial position. This parameter only takes effect when passing a
+   * non-null rect.
    *
    * This API can only be used in the parent process, as content processes
    * cannot access the rendering of out of process iframes. This API works
@@ -120,7 +143,8 @@ interface WindowGlobalParent : WindowContext {
   [Throws]
   Promise<ImageBitmap> drawSnapshot(DOMRect? rect,
                                     double scale,
-                                    UTF8String backgroundColor);
+                                    UTF8String backgroundColor,
+                                    optional boolean resetScrollPosition = false);
 
   /**
    * Fetches the securityInfo object for this window. This function will
@@ -167,4 +191,5 @@ interface WindowGlobalChild {
    */
   [Throws]
   JSWindowActorChild getActor(UTF8String name);
+  JSWindowActorChild getExistingActor(UTF8String name);
 };

@@ -31,10 +31,12 @@ module.exports = {
         ],
       ],
       plugins: [
-        "@babel/plugin-transform-flow-strip-types",
+        "@babel/plugin-proposal-class-static-block",
         "@babel/plugin-proposal-class-properties",
         "@babel/plugin-proposal-optional-chaining",
         "@babel/plugin-proposal-nullish-coalescing-operator",
+        "@babel/plugin-proposal-private-methods",
+        "@babel/plugin-proposal-private-property-in-object",
         [
           "module-resolver",
           {
@@ -69,9 +71,12 @@ module.exports = {
     {
       test: ["../shared/components"],
       plugins: [
+        "@babel/plugin-proposal-class-static-block",
         "@babel/plugin-proposal-class-properties",
         "@babel/plugin-proposal-optional-chaining",
         "@babel/plugin-proposal-nullish-coalescing-operator",
+        "@babel/plugin-proposal-private-methods",
+        "@babel/plugin-proposal-private-property-in-object",
         "transform-amd-to-commonjs",
       ],
     },

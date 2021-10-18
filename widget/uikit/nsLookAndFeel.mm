@@ -13,7 +13,7 @@
 #include "gfxFont.h"
 #include "gfxFontConstants.h"
 
-nsLookAndFeel::nsLookAndFeel(LookAndFeelCache* aCache) : nsXPLookAndFeel(), mInitialized(false) {}
+nsLookAndFeel::nsLookAndFeel() : mInitialized(false) {}
 
 nsLookAndFeel::~nsLookAndFeel() {}
 
@@ -40,7 +40,7 @@ void nsLookAndFeel::RefreshImpl() {
   mInitialized = false;
 }
 
-nsresult nsLookAndFeel::NativeGetColor(const ColorID aID, nscolor& aResult) {
+nsresult nsLookAndFeel::NativeGetColor(ColorID, ColorScheme, nscolor& aResult) {
   EnsureInit();
 
   nsresult res = NS_OK;
@@ -76,15 +76,13 @@ nsresult nsLookAndFeel::NativeGetColor(const ColorID aID, nscolor& aResult) {
     case ColorID::TextForeground:
       aResult = NS_RGB(0x00, 0x00, 0x00);
       break;
-    case ColorID::TextSelectBackground:
-    case ColorID::Highlight:  // CSS2 color
+    case ColorID::Highlight:
       aResult = NS_RGB(0xaa, 0xaa, 0xaa);
       break;
     case ColorID::MozMenuhover:
       aResult = NS_RGB(0xee, 0xee, 0xee);
       break;
-    case ColorID::TextSelectForeground:
-    case ColorID::Highlighttext:  // CSS2 color
+    case ColorID::Highlighttext:
     case ColorID::MozMenuhovertext:
       aResult = mColorTextSelectForeground;
       break;
@@ -199,7 +197,7 @@ nsresult nsLookAndFeel::NativeGetColor(const ColorID aID, nscolor& aResult) {
       break;
     case ColorID::MozDialogtext:
     case ColorID::MozCellhighlighttext:
-    case ColorID::MozHtmlCellhighlighttext:
+    case ColorID::Selecteditemtext:
     case ColorID::MozColheadertext:
     case ColorID::MozColheaderhovertext:
       aResult = mColorDarkText;
@@ -231,7 +229,7 @@ nsresult nsLookAndFeel::NativeGetColor(const ColorID aID, nscolor& aResult) {
       aResult = NS_RGB(0xDC, 0xDC, 0xDC);
       break;
     case ColorID::MozCellhighlight:
-    case ColorID::MozHtmlCellhighlight:
+    case ColorID::Selecteditem:
     case ColorID::MozMacSecondaryhighlight:
       // For inactive list selection
       aResult = NS_RGB(0xaa, 0xaa, 0xaa);
@@ -247,6 +245,11 @@ nsresult nsLookAndFeel::NativeGetColor(const ColorID aID, nscolor& aResult) {
     case ColorID::MozNativehyperlinktext:
       // There appears to be no available system defined color. HARDCODING to the appropriate color.
       aResult = NS_RGB(0x14, 0x4F, 0xAE);
+      break;
+    case ColorID::MozNativevisitedhyperlinktext:
+      // Safari defaults to the MacOS color implementation for visited links, which in turn uses
+      // systemPurpleColor, so we do the same here.
+      aResult = GetColorFromUIColor([UIColor systemPurpleColor]);
       break;
     default:
       NS_WARNING("Someone asked nsILookAndFeel for a color I don't know about");
@@ -322,7 +325,6 @@ nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
     case IntID::DWMCompositor:
     case IntID::WindowsClassic:
     case IntID::WindowsDefaultTheme:
-    case IntID::TouchEnabled:
       aResult = 0;
       res = NS_ERROR_NOT_IMPLEMENTED;
       break;
@@ -405,7 +407,7 @@ void nsLookAndFeel::EnsureInit() {
   if (color == 0x000000) {
     mColorTextSelectForeground = NS_RGB(0xff, 0xff, 0xff);
   } else {
-    mColorTextSelectForeground = NS_DONT_CHANGE_COLOR;
+    mColorTextSelectForeground = NS_SAME_AS_FOREGROUND_COLOR;
   }
 
   mColorDarkText = GetColorFromUIColor([UIColor darkTextColor]);

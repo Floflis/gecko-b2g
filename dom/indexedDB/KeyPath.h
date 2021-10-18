@@ -7,13 +7,28 @@
 #ifndef mozilla_dom_indexeddb_keypath_h__
 #define mozilla_dom_indexeddb_keypath_h__
 
-#include "mozilla/dom/BindingDeclarations.h"
-#include "mozilla/dom/Nullable.h"
+#include <new>
+#include <utility>
+#include "js/TypeDecls.h"
+#include "mozilla/Result.h"
+#include "nsISupports.h"
+#include "nsError.h"
+#include "nsString.h"
+#include "nsTArray.h"
+
+namespace JS {
+template <class T>
+class Heap;
+}
 
 namespace mozilla {
 namespace dom {
 
 class OwningStringOrStringSequence;
+template <typename T>
+class Sequence;
+template <typename T>
+struct Nullable;
 
 namespace indexedDB {
 
@@ -26,16 +41,18 @@ class KeyPath {
   friend class IndexMetadata;
   friend class ObjectStoreMetadata;
 
-  KeyPath() : mType(NONEXISTENT) { MOZ_COUNT_CTOR(KeyPath); }
+  KeyPath() : mType(KeyPathType::NonExistent) { MOZ_COUNT_CTOR(KeyPath); }
 
  public:
-  enum KeyPathType { NONEXISTENT, STRING, ARRAY, ENDGUARD };
+  enum class KeyPathType { NonExistent, String, Array, EndGuard };
 
   void SetType(KeyPathType aType);
 
   bool AppendStringWithValidation(const nsAString& aString);
 
-  explicit KeyPath(int aDummy) : mType(NONEXISTENT) { MOZ_COUNT_CTOR(KeyPath); }
+  explicit KeyPath(int aDummy) : mType(KeyPathType::NonExistent) {
+    MOZ_COUNT_CTOR(KeyPath);
+  }
 
   KeyPath(KeyPath&& aOther) {
     MOZ_COUNT_CTOR(KeyPath);
@@ -63,21 +80,20 @@ class KeyPath {
   nsresult ExtractKeyAsJSVal(JSContext* aCx, const JS::Value& aValue,
                              JS::Value* aOutVal) const;
 
-  typedef nsresult (*ExtractOrCreateKeyCallback)(JSContext* aCx,
-                                                 void* aClosure);
+  using ExtractOrCreateKeyCallback = nsresult (*)(JSContext*, void*);
 
   nsresult ExtractOrCreateKey(JSContext* aCx, const JS::Value& aValue,
                               Key& aKey, ExtractOrCreateKeyCallback aCallback,
                               void* aClosure) const;
 
-  inline bool IsValid() const { return mType != NONEXISTENT; }
+  inline bool IsValid() const { return mType != KeyPathType::NonExistent; }
 
-  inline bool IsArray() const { return mType == ARRAY; }
+  inline bool IsArray() const { return mType == KeyPathType::Array; }
 
-  inline bool IsString() const { return mType == STRING; }
+  inline bool IsString() const { return mType == KeyPathType::String; }
 
   inline bool IsEmpty() const {
-    return mType == STRING && mStrings[0].IsEmpty();
+    return mType == KeyPathType::String && mStrings[0].IsEmpty();
   }
 
   bool operator==(const KeyPath& aOther) const {

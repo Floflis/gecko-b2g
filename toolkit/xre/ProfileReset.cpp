@@ -19,7 +19,6 @@
 #include "mozilla/Components.h"
 #include "mozilla/XREAppData.h"
 
-#include "mozilla/Services.h"
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/Unused.h"
 #include "prtime.h"
@@ -31,13 +30,7 @@ extern const XREAppData* gAppData;
 static const char kProfileProperties[] =
     "chrome://mozapps/locale/profile/profileSelection.properties";
 
-/**
- * Spin up a thread to backup the old profile's main directory and delete the
- * profile's local directory. Once complete have the profile service remove the
- * old profile and if necessary make the new profile the default.
- */
-nsresult ProfileResetCleanup(nsToolkitProfileService* aService,
-                             nsIToolkitProfile* aOldProfile) {
+static nsresult ProfileResetCreateBackup(nsIToolkitProfile* aOldProfile) {
   nsresult rv;
   nsCOMPtr<nsIFile> profileDir;
   rv = aOldProfile->GetRootDir(getter_AddRefs(profileDir));
@@ -49,7 +42,7 @@ nsresult ProfileResetCleanup(nsToolkitProfileService* aService,
 
   // Get the friendly name for the backup directory.
   nsCOMPtr<nsIStringBundleService> sbs =
-      mozilla::services::GetStringBundleService();
+      mozilla::components::StringBundle::Service();
   if (!sbs) return NS_ERROR_FAILURE;
 
   nsCOMPtr<nsIStringBundle> sb;
@@ -125,9 +118,8 @@ nsresult ProfileResetCleanup(nsToolkitProfileService* aService,
   if (NS_FAILED(rv)) return rv;
 
   // Create a new thread to do the bulk of profile cleanup to stay responsive.
-  nsCOMPtr<nsIThreadManager> tm = do_GetService(NS_THREADMANAGER_CONTRACTID);
   nsCOMPtr<nsIThread> cleanupThread;
-  rv = tm->NewThread(0, 0, getter_AddRefs(cleanupThread));
+  rv = NS_NewNamedThread("ResetCleanup", getter_AddRefs(cleanupThread));
   if (NS_SUCCEEDED(rv)) {
     nsCOMPtr<nsIRunnable> runnable = new ProfileResetCleanupAsyncTask(
         profileDir, profileLocalDir, containerDest, leafName);
@@ -135,7 +127,8 @@ nsresult ProfileResetCleanup(nsToolkitProfileService* aService,
     // The result callback will shut down the worker thread.
 
     // Wait for the cleanup thread to complete.
-    SpinEventLoopUntil([&]() { return gProfileResetCleanupCompleted; });
+    SpinEventLoopUntil("xre:ProfileResetCreateBackup"_ns,
+                       [&]() { return gProfileResetCleanupCompleted; });
   } else {
     gProfileResetCleanupCompleted = true;
     NS_WARNING("Cleanup thread creation failed");
@@ -145,5 +138,22 @@ nsresult ProfileResetCleanup(nsToolkitProfileService* aService,
   auto* piWindow = nsPIDOMWindowOuter::From(progressWindow);
   piWindow->Close();
 
-  return aService->ApplyResetProfile(aOldProfile);
+  return rv;
+}
+
+/**
+ * Spin up a thread to backup the old profile's main directory and delete the
+ * profile's local directory. Once complete have the profile service remove the
+ * old profile and if necessary make the new profile the default.
+ */
+nsresult ProfileResetCleanup(nsToolkitProfileService* aService,
+                             nsIToolkitProfile* aOldProfile,
+                             bool aDeleteOldProfile) {
+  // If we're leaving the old profile in place, then there's nothing to back up.
+  if (aDeleteOldProfile) {
+    nsresult rv = ProfileResetCreateBackup(aOldProfile);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  return aService->ApplyResetProfile(aOldProfile, aDeleteOldProfile);
 }

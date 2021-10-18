@@ -9,6 +9,7 @@
 #include "mozilla/MemoryReporting.h"
 #include "gfxFT2FontBase.h"
 #include "gfxPlatformFontList.h"
+#include "nsTHashSet.h"
 
 namespace mozilla {
 namespace dom {
@@ -111,7 +112,7 @@ class FT2FontEntry final : public gfxFT2FontEntryBase {
 
   mozilla::ThreadSafeWeakPtr<mozilla::gfx::UnscaledFontFreeType> mUnscaledFont;
 
-  nsTHashtable<nsUint32HashKey> mAvailableTables;
+  nsTHashSet<uint32_t> mAvailableTables;
 
   bool mHasVariations = false;
   bool mHasVariationsInitialized = false;
@@ -140,7 +141,8 @@ class gfxFT2FontList final : public gfxPlatformFontList {
       mozilla::fontlist::Face* aFace,
       const mozilla::fontlist::Family* aFamily) override;
 
-  gfxFontEntry* LookupLocalFont(const nsACString& aFontName,
+  gfxFontEntry* LookupLocalFont(nsPresContext* aPresContext,
+                                const nsACString& aFontName,
                                 WeightRange aWeightForEntry,
                                 StretchRange aStretchForEntry,
                                 SlantStyleRange aStyleForEntry) override;
@@ -154,7 +156,7 @@ class gfxFT2FontList final : public gfxPlatformFontList {
 
   void WriteCache();
 
-  void ReadSystemFontList(nsTArray<FontListEntry>* aList);
+  void ReadSystemFontList(mozilla::dom::SystemFontList*);
 
   static gfxFT2FontList* PlatformFontList() {
     return static_cast<gfxFT2FontList*>(
@@ -222,10 +224,11 @@ class gfxFT2FontList final : public gfxPlatformFontList {
 
   void FindFontsInDir(const nsCString& aDir, FontNameCache* aFNC);
 
-  FontFamily GetDefaultFontForPlatform(const gfxFontStyle* aStyle,
+  FontFamily GetDefaultFontForPlatform(nsPresContext* aPresContext,
+                                       const gfxFontStyle* aStyle,
                                        nsAtom* aLanguage = nullptr) override;
 
-  nsTHashtable<nsCStringHashKey> mSkipSpaceLookupCheckFamilies;
+  nsTHashSet<nsCString> mSkipSpaceLookupCheckFamilies;
 
  private:
   mozilla::UniquePtr<FontNameCache> mFontNameCache;

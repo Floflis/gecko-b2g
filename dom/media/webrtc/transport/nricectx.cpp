@@ -213,17 +213,16 @@ nsresult NrIceStunServer::ToNicerStunStruct(nr_ice_stun_server* server) const {
     protocol = IPPROTO_TCP;
   } else if (transport_ == kNrIceTransportTls) {
     protocol = IPPROTO_TCP;
-    if (has_addr_) {
-      // Refuse to try TLS without an FQDN
-      return NS_ERROR_INVALID_ARG;
-    }
-    server->addr.tls = 1;
   } else {
     MOZ_MTLOG(ML_ERROR, "Unsupported STUN server transport: " << transport_);
     return NS_ERROR_FAILURE;
   }
 
   if (has_addr_) {
+    if (transport_ == kNrIceTransportTls) {
+      // Refuse to try TLS without an FQDN
+      return NS_ERROR_INVALID_ARG;
+    }
     r = nr_praddr_to_transport_addr(&addr_, &server->addr, protocol, 0);
     if (r) {
       return NS_ERROR_FAILURE;
@@ -237,7 +236,12 @@ nsresult NrIceStunServer::ToNicerStunStruct(nr_ice_stun_server* server) const {
       nr_str_port_to_transport_addr("0.0.0.0", port_, protocol, &server->addr);
     }
     PL_strncpyz(server->addr.fqdn, host_.c_str(), sizeof(server->addr.fqdn));
+    if (transport_ == kNrIceTransportTls) {
+      server->addr.tls = 1;
+    }
   }
+
+  nr_transport_addr_fmt_addr_string(&server->addr);
 
   return NS_OK;
 }
@@ -619,8 +623,14 @@ bool NrIceCtx::Initialize() {
         TestNat::ToNatBehavior(config_.mNatSimulatorConfig->mMappingType.get());
     test_nat->block_udp_ = config_.mNatSimulatorConfig->mBlockUdp;
     test_nat->block_tcp_ = config_.mNatSimulatorConfig->mBlockTcp;
+    test_nat->block_tls_ = config_.mNatSimulatorConfig->mBlockTls;
     test_nat->error_code_for_drop_ =
         config_.mNatSimulatorConfig->mErrorCodeForDrop;
+    if (config_.mNatSimulatorConfig->mRedirectAddress.Length()) {
+      test_nat
+          ->stun_redirect_map_[config_.mNatSimulatorConfig->mRedirectAddress] =
+          config_.mNatSimulatorConfig->mRedirectTargets;
+    }
     test_nat->enabled_ = true;
     SetNat(test_nat);
   }
@@ -746,19 +756,23 @@ nsresult NrIceCtx::SetStunServers(
     const std::vector<NrIceStunServer>& stun_servers) {
   if (stun_servers.empty()) return NS_OK;
 
-  auto servers = MakeUnique<nr_ice_stun_server[]>(stun_servers.size());
+  // We assume nr_ice_stun_server is memmoveable. That's true right now.
+  std::vector<nr_ice_stun_server> servers;
 
   for (size_t i = 0; i < stun_servers.size(); ++i) {
-    nsresult rv = stun_servers[i].ToNicerStunStruct(&servers[i]);
-    if (NS_FAILED(rv)) {
-      MOZ_MTLOG(ML_ERROR, "Couldn't set STUN server for '" << name_ << "'");
-      return NS_ERROR_FAILURE;
+    nr_ice_stun_server server;
+    nsresult rv = stun_servers[i].ToNicerStunStruct(&server);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      MOZ_MTLOG(ML_ERROR, "Couldn't convert STUN server for '" << name_ << "'");
+    } else {
+      servers.push_back(server);
     }
   }
 
-  int r = nr_ice_ctx_set_stun_servers(ctx_, servers.get(), stun_servers.size());
+  int r = nr_ice_ctx_set_stun_servers(ctx_, &servers[0],
+                                      static_cast<int>(servers.size()));
   if (r) {
-    MOZ_MTLOG(ML_ERROR, "Couldn't set STUN server for '" << name_ << "'");
+    MOZ_MTLOG(ML_ERROR, "Couldn't set STUN servers for '" << name_ << "'");
     return NS_ERROR_FAILURE;
   }
 
@@ -771,23 +785,26 @@ nsresult NrIceCtx::SetTurnServers(
     const std::vector<NrIceTurnServer>& turn_servers) {
   if (turn_servers.empty()) return NS_OK;
 
-  auto servers = MakeUnique<nr_ice_turn_server[]>(turn_servers.size());
+  // We assume nr_ice_turn_server is memmoveable. That's true right now.
+  std::vector<nr_ice_turn_server> servers;
 
   for (size_t i = 0; i < turn_servers.size(); ++i) {
-    nsresult rv = turn_servers[i].ToNicerTurnStruct(&servers[i]);
-    if (NS_FAILED(rv)) {
-      MOZ_MTLOG(ML_ERROR, "Couldn't set TURN server for '" << name_ << "'");
-      return NS_ERROR_FAILURE;
+    nr_ice_turn_server server;
+    nsresult rv = turn_servers[i].ToNicerTurnStruct(&server);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      MOZ_MTLOG(ML_ERROR, "Couldn't convert TURN server for '" << name_ << "'");
+    } else {
+      servers.push_back(server);
     }
   }
 
-  int r = nr_ice_ctx_set_turn_servers(ctx_, servers.get(), turn_servers.size());
+  int r = nr_ice_ctx_set_turn_servers(ctx_, &servers[0],
+                                      static_cast<int>(servers.size()));
   if (r) {
-    MOZ_MTLOG(ML_ERROR, "Couldn't set TURN server for '" << name_ << "'");
+    MOZ_MTLOG(ML_ERROR, "Couldn't set TURN servers for '" << name_ << "'");
+    // TODO(ekr@rtfm.com): This leaks the username/password. Need to free that.
     return NS_ERROR_FAILURE;
   }
-
-  // TODO(ekr@rtfm.com): This leaks the username/password. Need to free that.
 
   return NS_OK;
 }
@@ -805,6 +822,9 @@ nsresult NrIceCtx::SetResolver(nr_resolver* resolver) {
 
 nsresult NrIceCtx::SetProxyConfig(NrSocketProxyConfig&& config) {
   proxy_config_.reset(new NrSocketProxyConfig(std::move(config)));
+  if (nat_) {
+    nat_->set_proxy_config(proxy_config_);
+  }
   return NS_OK;
 }
 

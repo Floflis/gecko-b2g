@@ -484,14 +484,16 @@ this.AntiTracking = {
     await BrowserTestUtils.closeWindow(win);
   },
 
-  async _setupTest(win, cookieBehavior, extraPrefs) {
+  async _setupTest(win, cookieBehavior, runInPrivateWindow, extraPrefs) {
     await SpecialPowers.flushPrefEnv();
+
+    await setCookieBehaviorPref(cookieBehavior, runInPrivateWindow);
     await SpecialPowers.pushPrefEnv({
       set: [
         ["dom.storage_access.enabled", true],
-        ["network.cookie.cookieBehavior", cookieBehavior],
         ["privacy.trackingprotection.enabled", false],
         ["privacy.trackingprotection.pbmode.enabled", false],
+        ["dom.security.https_first_pbm", false],
         [
           "privacy.trackingprotection.annotate_channels",
           cookieBehavior != BEHAVIOR_ACCEPT,
@@ -508,25 +510,33 @@ this.AntiTracking = {
     if (extraPrefs && Array.isArray(extraPrefs) && extraPrefs.length) {
       await SpecialPowers.pushPrefEnv({ set: extraPrefs });
 
-      for (let item of extraPrefs) {
-        // When setting up exception URLs, we need to wait to ensure our prefs
-        // actually take effect.  In order to do this, we set up a exception
-        // list observer and wait until it calls us back.
-        if (item[0] == "urlclassifier.trackingAnnotationSkipURLs") {
-          info("Waiting for the exception list service to initialize...");
-          let classifier = Cc[
-            "@mozilla.org/url-classifier/dbservice;1"
-          ].getService(Ci.nsIURIClassifier);
-          let feature = classifier.getFeatureByName("tracking-annotation");
-          await TestUtils.waitForCondition(() => {
-            for (let x of item[1].toLowerCase().split(",")) {
-              if (feature.exceptionHostList.split(",").includes(x)) {
-                return true;
+      let enableWebcompat = Services.prefs.getBoolPref(
+        "privacy.antitracking.enableWebcompat"
+      );
+
+      // If the skip list is disabled by pref, it will always return an empty
+      // list.
+      if (enableWebcompat) {
+        for (let item of extraPrefs) {
+          // When setting up exception URLs, we need to wait to ensure our prefs
+          // actually take effect.  In order to do this, we set up a exception
+          // list observer and wait until it calls us back.
+          if (item[0] == "urlclassifier.trackingAnnotationSkipURLs") {
+            info("Waiting for the exception list service to initialize...");
+            let classifier = Cc[
+              "@mozilla.org/url-classifier/dbservice;1"
+            ].getService(Ci.nsIURIClassifier);
+            let feature = classifier.getFeatureByName("tracking-annotation");
+            await TestUtils.waitForCondition(() => {
+              for (let x of item[1].toLowerCase().split(",")) {
+                if (feature.exceptionHostList.split(",").includes(x)) {
+                  return true;
+                }
               }
-            }
-            return false;
-          }, "Exception list service initialized");
-          break;
+              return false;
+            }, "Exception list service initialized");
+            break;
+          }
         }
       }
     }
@@ -587,6 +597,7 @@ this.AntiTracking = {
       await AntiTracking._setupTest(
         win,
         options.cookieBehavior,
+        options.runInPrivateWindow,
         options.extraPrefs
       );
 
@@ -987,7 +998,12 @@ this.AntiTracking = {
         await TestUtils.topicObserved("browser-delayed-startup-finished");
       }
 
-      await AntiTracking._setupTest(win, cookieBehavior, extraPrefs);
+      await AntiTracking._setupTest(
+        win,
+        cookieBehavior,
+        runInPrivateWindow,
+        extraPrefs
+      );
 
       info("Creating a new tab");
       let tab = BrowserTestUtils.addTab(win.gBrowser, TEST_TOP_PAGE);
@@ -1103,7 +1119,12 @@ this.AntiTracking = {
         await TestUtils.topicObserved("browser-delayed-startup-finished");
       }
 
-      await AntiTracking._setupTest(win, cookieBehavior, extraPrefs);
+      await AntiTracking._setupTest(
+        win,
+        cookieBehavior,
+        runInPrivateWindow,
+        extraPrefs
+      );
 
       info("Creating a new tab");
       let tab = BrowserTestUtils.addTab(win.gBrowser, TEST_TOP_PAGE);

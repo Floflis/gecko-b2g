@@ -34,12 +34,22 @@ nsresult BrowserBridgeParent::InitWithProcess(
     const WindowGlobalInit& aWindowInit, uint32_t aChromeFlags, TabId aTabId) {
   MOZ_ASSERT(!CanSend(),
              "This should be called before the object is connected to IPC");
+  MOZ_DIAGNOSTIC_ASSERT(!aContentParent->IsLaunching());
+  MOZ_DIAGNOSTIC_ASSERT(!aContentParent->IsDead());
 
   RefPtr<CanonicalBrowsingContext> browsingContext =
       CanonicalBrowsingContext::Get(aWindowInit.context().mBrowsingContextId);
   if (!browsingContext || browsingContext->IsDiscarded()) {
     return NS_ERROR_UNEXPECTED;
   }
+
+  MOZ_DIAGNOSTIC_ASSERT(
+      !browsingContext->GetBrowserParent(),
+      "BrowsingContext must have had previous BrowserParent cleared");
+
+  MOZ_DIAGNOSTIC_ASSERT(
+      aParentBrowser->Manager() != aContentParent,
+      "Cannot create OOP iframe in the same process as its parent document");
 
   // Unfortunately, due to the current racy destruction of BrowsingContext
   // instances when Fission is enabled, while `browsingContext` may not be
@@ -50,12 +60,8 @@ nsresult BrowserBridgeParent::InitWithProcess(
   //
   // FIXME: We should never have a non-discarded BrowsingContext with discarded
   // ancestors. (bug 1634759)
-  CanonicalBrowsingContext* ancestor = browsingContext->GetParent();
-  while (ancestor) {
-    if (NS_WARN_IF(ancestor->IsDiscarded())) {
-      return NS_ERROR_UNEXPECTED;
-    }
-    ancestor = ancestor->GetParent();
+  if (NS_WARN_IF(!browsingContext->AncestorsAreCurrent())) {
+    return NS_ERROR_UNEXPECTED;
   }
 
   // Ensure that our content process is subscribed to our newly created
@@ -92,6 +98,9 @@ nsresult BrowserBridgeParent::InitWithProcess(
     return NS_ERROR_FAILURE;
   }
 
+  MOZ_DIAGNOSTIC_ASSERT(!browsingContext->IsDiscarded(),
+                        "bc cannot have become discarded");
+
   // Tell the content process to set up its PBrowserChild.
   bool ok = aContentParent->SendConstructBrowser(
       std::move(childEp), std::move(windowChildEp), aTabId,
@@ -108,6 +117,8 @@ nsresult BrowserBridgeParent::InitWithProcess(
   mBrowserParent->SetOwnerElement(aParentBrowser->GetOwnerElement());
   mBrowserParent->InitRendering();
 
+  GetBrowsingContext()->SetCurrentBrowserParent(mBrowserParent);
+
   windowParent->Init();
   return NS_OK;
 }
@@ -123,14 +134,22 @@ BrowserParent* BrowserBridgeParent::Manager() {
 
 void BrowserBridgeParent::Destroy() {
   if (mBrowserParent) {
+#ifdef ACCESSIBILITY
+    if (mEmbedderAccessibleDoc && !mEmbedderAccessibleDoc->IsShutdown()) {
+      mEmbedderAccessibleDoc->RemovePendingOOPChildDoc(this);
+    }
+#endif
     mBrowserParent->Destroy();
     mBrowserParent->SetBrowserBridgeParent(nullptr);
     mBrowserParent = nullptr;
   }
+  if (CanSend()) {
+    Unused << Send__delete__(this);
+  }
 }
 
 IPCResult BrowserBridgeParent::RecvShow(const OwnerShowInfo& aOwnerInfo) {
-  mBrowserParent->AttachLayerManager();
+  mBrowserParent->AttachWindowRenderer();
   Unused << mBrowserParent->SendShow(mBrowserParent->GetShowInfo(), aOwnerInfo);
   return IPC_OK();
 }
@@ -163,6 +182,12 @@ IPCResult BrowserBridgeParent::RecvUpdateEffects(const EffectsInfo& aEffects) {
   return IPC_OK();
 }
 
+IPCResult BrowserBridgeParent::RecvUpdateRemotePrintSettings(
+    const embedding::PrintData& aPrintData) {
+  Unused << mBrowserParent->SendUpdateRemotePrintSettings(aPrintData);
+  return IPC_OK();
+}
+
 IPCResult BrowserBridgeParent::RecvRenderLayers(
     const bool& aEnabled, const layers::LayersObserverEpoch& aEpoch) {
   Unused << mBrowserParent->SendRenderLayers(aEnabled, aEpoch);
@@ -172,6 +197,11 @@ IPCResult BrowserBridgeParent::RecvRenderLayers(
 IPCResult BrowserBridgeParent::RecvNavigateByKey(
     const bool& aForward, const bool& aForDocumentNavigation) {
   Unused << mBrowserParent->SendNavigateByKey(aForward, aForDocumentNavigation);
+  return IPC_OK();
+}
+
+IPCResult BrowserBridgeParent::RecvBeginDestroy() {
+  Destroy();
   return IPC_OK();
 }
 
@@ -223,22 +253,48 @@ IPCResult BrowserBridgeParent::RecvSetIsUnderHiddenEmbedderElement(
 }
 
 #ifdef ACCESSIBILITY
+a11y::DocAccessibleParent* BrowserBridgeParent::GetDocAccessibleParent() {
+  auto* embeddedBrowser = GetBrowserParent();
+  if (!embeddedBrowser) {
+    return nullptr;
+  }
+  a11y::DocAccessibleParent* docAcc =
+      embeddedBrowser->GetTopLevelDocAccessible();
+  return docAcc && !docAcc->IsShutdown() ? docAcc : nullptr;
+}
+
 IPCResult BrowserBridgeParent::RecvSetEmbedderAccessible(
     PDocAccessibleParent* aDoc, uint64_t aID) {
+  MOZ_ASSERT(aDoc || mEmbedderAccessibleDoc,
+             "Embedder doc shouldn't be cleared if it wasn't set");
+  MOZ_ASSERT(!mEmbedderAccessibleDoc || !aDoc || mEmbedderAccessibleDoc == aDoc,
+             "Embedder doc shouldn't change from one doc to another");
+  if (!aDoc && mEmbedderAccessibleDoc &&
+      !mEmbedderAccessibleDoc->IsShutdown()) {
+    // We're clearing the embedder doc, so remove the pending child doc addition
+    // (if any).
+    mEmbedderAccessibleDoc->RemovePendingOOPChildDoc(this);
+  }
   mEmbedderAccessibleDoc = static_cast<a11y::DocAccessibleParent*>(aDoc);
   mEmbedderAccessibleID = aID;
-  if (auto embeddedBrowser = GetBrowserParent()) {
-    a11y::DocAccessibleParent* childDocAcc =
-        embeddedBrowser->GetTopLevelDocAccessible();
-    if (childDocAcc && !childDocAcc->IsShutdown()) {
-      // The embedded DocAccessibleParent has already been created. This can
-      // happen if, for example, an iframe is hidden and then shown or
-      // an iframe is reflowed by layout.
-      mEmbedderAccessibleDoc->AddChildDoc(childDocAcc, aID,
-                                          /* aCreating */ false);
-    }
+  if (!aDoc) {
+    MOZ_ASSERT(!aID);
+    return IPC_OK();
+  }
+  MOZ_ASSERT(aID);
+  if (GetDocAccessibleParent()) {
+    // The embedded DocAccessibleParent has already been created. This can
+    // happen if, for example, an iframe is hidden and then shown or
+    // an iframe is reflowed by layout.
+    mEmbedderAccessibleDoc->AddChildDoc(this);
   }
   return IPC_OK();
+}
+
+a11y::DocAccessibleParent* BrowserBridgeParent::GetEmbedderAccessibleDoc() {
+  return mEmbedderAccessibleDoc && !mEmbedderAccessibleDoc->IsShutdown()
+             ? mEmbedderAccessibleDoc.get()
+             : nullptr;
 }
 #endif
 

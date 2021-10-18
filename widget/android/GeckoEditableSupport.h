@@ -46,26 +46,6 @@ class GeckoEditableSupport final
   using EditableClient = java::SessionTextInput::EditableClient;
   using EditableListener = java::SessionTextInput::EditableListener;
 
-  struct IMETextChange final {
-    int32_t mStart, mOldEnd, mNewEnd;
-
-    IMETextChange() : mStart(-1), mOldEnd(-1), mNewEnd(-1) {}
-
-    explicit IMETextChange(const IMENotification& aIMENotification)
-        : mStart(aIMENotification.mTextChangeData.mStartOffset),
-          mOldEnd(aIMENotification.mTextChangeData.mRemovedEndOffset),
-          mNewEnd(aIMENotification.mTextChangeData.mAddedEndOffset) {
-      MOZ_ASSERT(aIMENotification.mMessage == NOTIFY_IME_OF_TEXT_CHANGE,
-                 "IMETextChange initialized with wrong notification");
-      MOZ_ASSERT(aIMENotification.mTextChangeData.IsValid(),
-                 "The text change notification isn't initialized");
-      MOZ_ASSERT(aIMENotification.mTextChangeData.IsInInt32Range(),
-                 "The text change notification is out of range");
-    }
-
-    bool IsEmpty() const { return mStart < 0; }
-  };
-
   enum FlushChangesFlag {
     // Not retrying.
     FLUSH_FLAG_NONE,
@@ -84,16 +64,33 @@ class GeckoEditableSupport final
   bool mEditableAttached;
   InputContext mInputContext;
   AutoTArray<UniquePtr<mozilla::WidgetEvent>, 4> mIMEKeyEvents;
-  AutoTArray<IMETextChange, 4> mIMETextChanges;
+  IMENotification::TextChangeData mIMEPendingTextChange;
   RefPtr<TextRangeArray> mIMERanges;
+  RefPtr<Runnable> mDisposeRunnable;
   int32_t mIMEMaskEventsCount;         // Mask events when > 0.
   int32_t mIMEFocusCount;              // We are focused when > 0.
   bool mIMEDelaySynchronizeReply;      // We reply asynchronously when true.
   int32_t mIMEActiveSynchronizeCount;  // The number of replies being delayed.
   int32_t mIMEActiveCompositionCount;  // The number of compositions expected.
+  uint32_t mDisposeBlockCount;
   bool mIMESelectionChanged;
   bool mIMETextChangedDuringFlush;
   bool mIMEMonitorCursor;
+
+  // The cached selection data
+  struct Selection {
+    Selection() : mStartOffset(-1), mEndOffset(-1) {}
+
+    void Reset() {
+      mStartOffset = -1;
+      mEndOffset = -1;
+    }
+
+    bool IsValid() const { return mStartOffset >= 0 && mEndOffset >= 0; }
+
+    int32_t mStartOffset;
+    int32_t mEndOffset;
+  } mCachedSelection;
 
   nsIWidget* GetWidget() const;
   nsWindow* GetNsWindow() const;
@@ -111,7 +108,7 @@ class GeckoEditableSupport final
   RefPtr<TextComposition> GetComposition() const;
   bool RemoveComposition(RemoveCompositionFlag aFlag = COMMIT_IME_COMPOSITION);
   void SendIMEDummyKeyEvent(nsIWidget* aWidget, EventMessage msg);
-  void AddIMETextChange(const IMETextChange& aChange);
+  void AddIMETextChange(const IMENotification::TextChangeDataBase& aChange);
   void PostFlushIMEChanges();
   void FlushIMEChanges(FlushChangesFlag aFlags = FLUSH_FLAG_NONE);
   void FlushIMEText(FlushChangesFlag aFlags = FLUSH_FLAG_NONE);
@@ -166,6 +163,7 @@ class GeckoEditableSupport final
         mIMEFocusCount(0),
         mIMEDelaySynchronizeReply(false),
         mIMEActiveSynchronizeCount(0),
+        mDisposeBlockCount(0),
         mIMESelectionChanged(false),
         mIMETextChangedDuringFlush(false),
         mIMEMonitorCursor(false) {}
@@ -195,6 +193,34 @@ class GeckoEditableSupport final
 
   InputContext GetInputContext();
 
+  bool HasIMEFocus() const { return mIMEFocusCount != 0; }
+
+  void AddBlocker() { mDisposeBlockCount++; }
+
+  void ReleaseBlocker() {
+    mDisposeBlockCount--;
+
+    if (!mDisposeBlockCount && mDisposeRunnable) {
+      if (HasIMEFocus()) {
+        // If we have IME focus, GeckoEditableChild is already attached again.
+        // So disposer is unnecessary.
+        mDisposeRunnable = nullptr;
+        return;
+      }
+
+      RefPtr<GeckoEditableSupport> self(this);
+      RefPtr<Runnable> disposer = std::move(mDisposeRunnable);
+
+      nsAppShell::PostEvent(
+          [self = std::move(self), disposer = std::move(disposer)] {
+            self->mEditableAttached = false;
+            disposer->Run();
+          });
+    }
+  }
+
+  bool IsGeckoEditableUsed() const { return mDisposeBlockCount != 0; }
+
   // GeckoEditableChild methods
   using EditableBase::AttachNative;
   using EditableBase::DisposeNative;
@@ -205,6 +231,12 @@ class GeckoEditableSupport final
     RefPtr<GeckoEditableSupport> self(this);
     nsAppShell::PostEvent(
         [self = std::move(self), disposer = RefPtr<Runnable>(aDisposer)] {
+          if (self->IsGeckoEditableUsed()) {
+            // Current calling stack uses GeckoEditableChild, so we should
+            // not dispose it now.
+            self->mDisposeRunnable = disposer;
+            return;
+          }
           self->mEditableAttached = false;
           disposer->Run();
         });

@@ -312,8 +312,8 @@ class nsDisplaymtdBorder final : public nsDisplayBorder {
                                  : PaintBorderFlags();
 
     ImgDrawResult result = nsCSSRendering::PaintBorderWithStyleBorder(
-        mFrame->PresContext(), *aCtx, mFrame, GetPaintRect(), bounds,
-        styleBorder, mFrame->Style(), flags, mFrame->GetSkipSides());
+        mFrame->PresContext(), *aCtx, mFrame, GetPaintRect(aBuilder, aCtx),
+        bounds, styleBorder, mFrame->Style(), flags, mFrame->GetSkipSides());
 
     nsDisplayItemGenericImageGeometry::UpdateDrawResult(this, result);
   }
@@ -324,6 +324,10 @@ class nsDisplaymtdBorder final : public nsDisplayBorder {
       const StackingContextHelper& aSc,
       mozilla::layers::RenderRootStateManager* aManager,
       nsDisplayListBuilder* aDisplayListBuilder) override {
+    return false;
+  }
+
+  virtual bool IsInvisibleInRect(const nsRect& aRect) const override {
     return false;
   }
 };

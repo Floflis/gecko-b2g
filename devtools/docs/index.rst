@@ -12,7 +12,6 @@ Getting Started
 
    Getting Started <getting-started/README.md>
    Get a Bugzilla account <getting-started/bugzilla.md>
-   Get and build the code <getting-started/build.md>
    Create a development profile <getting-started/development-profiles.md>
 
 
@@ -43,9 +42,11 @@ Automated tests
    Chrome mochitests <tests/mochitest-chrome.md>
    DevTools mochitests <tests/mochitest-devtools.md>
    Node tests <tests/node-tests.md>
+   Memory Allocation tests </devtools/tests/memory/index.md>
    Writing tests <tests/writing-tests.md>
    Debugging intermittent failures <tests/debugging-intermittents.md>
-   Performance tests (DAMP) <tests/performance-tests.md>
+   Performance tests overview<tests/performance-tests-overview.md>
+   DAMP Performance tests <tests/performance-tests-damp.md>
    Writing a new test <tests/writing-perf-tests.md>
    Example <tests/writing-perf-tests-example.md>
    Advanced tips <tests/writing-perf-tests-tips.md>
@@ -71,6 +72,7 @@ Tool Architectures
    Responsive Design Mode <tools/responsive-design-mode.md>
    Console <tools/console-panel.md>
    Network </devtools/netmonitor/architecture.md>
+   Storage <tools/storage.md>
 
 
 Frontend
@@ -108,11 +110,3 @@ Preferences
    :maxdepth: 1
 
    Preferences <preferences.md>
-
-
-About this documentation
-========================
-.. toctree::
-   :maxdepth: 1
-
-   About this documentation <about-documentation.md>

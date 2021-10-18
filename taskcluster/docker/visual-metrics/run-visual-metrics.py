@@ -43,8 +43,14 @@ class Job:
     #: A unique number for the job.
     count = attr.ib(type=int)
 
+    #: The tags for this job.
+    tags = attr.ib(type=str)
+
     #: The extra options for this job.
     extra_options = attr.ib(type=str)
+
+    #: If true, we allow 0's in the vismet results
+    accept_zero_vismet = attr.ib(type=bool)
 
     #: json_path: The path to the ``browsertime.json`` file on disk.
     json_path = attr.ib(type=Path)
@@ -60,7 +66,9 @@ JOB_SCHEMA = Schema(
             {
                 Required("test_name"): str,
                 Required("browsertime_json_path"): str,
+                Required("tags"): [str],
                 Required("extra_options"): [str],
+                Required("accept_zero_vismet"): bool,
             }
         ],
         Required("application"): {Required("name"): str, "version": str},
@@ -145,7 +153,7 @@ def run_command(log, cmd, job_count):
     return rc, res
 
 
-def append_result(log, suites, test_name, name, result, extra_options):
+def append_result(log, suites, test_name, name, result, tags, extra_options):
     """Appends a ``name`` metrics result in the ``test_name`` suite.
 
     Args:
@@ -171,7 +179,12 @@ def append_result(log, suites, test_name, name, result, extra_options):
 
     subtests = suites.setdefault(
         test_name,
-        {"name": orig_test_name, "subtests": {}, "extraOptions": extra_options},
+        {
+            "name": orig_test_name,
+            "tags": extra_options + tags + ["visual"],
+            "subtests": {},
+            "extraOptions": extra_options,
+        },
     )["subtests"]
 
     if name not in subtests:
@@ -180,7 +193,7 @@ def append_result(log, suites, test_name, name, result, extra_options):
             "replicates": [result],
             "lowerIsBetter": True,
             "unit": "ms",
-            "shouldAlert": SHOULD_ALERT[name],
+            "shouldAlert": SHOULD_ALERT.get(name, False),
         }
     else:
         subtests[name]["replicates"].append(result)
@@ -311,12 +324,17 @@ def main(log, args):
         for site in browsertime_json:
             for video in site["files"]["video"]:
                 count += 1
+                name = job["test_name"]
+                if "alias" in site["info"] and site["info"]["alias"].strip() != "":
+                    name = "%s.%s" % (name, site["info"]["alias"])
                 jobs.append(
                     Job(
-                        test_name=job["test_name"],
+                        test_name=name,
+                        tags=job["tags"],
                         extra_options=len(job["extra_options"]) > 0
                         and job["extra_options"]
                         or jobs_json["extra_options"],
+                        accept_zero_vismet=job["accept_zero_vismet"],
                         json_path=browsertime_json_path,
                         video_path=browsertime_json_path.parent / video,
                         count=count,
@@ -349,7 +367,13 @@ def main(log, args):
             else:
                 for name, value in res.items():
                     append_result(
-                        log, suites, job.test_name, name, value, job.extra_options
+                        log,
+                        suites,
+                        job.test_name,
+                        name,
+                        value,
+                        job.tags,
+                        job.extra_options,
                     )
 
     suites = [get_suite(suite) for suite in suites.values()]
@@ -415,18 +439,20 @@ def run_visual_metrics(job, visualmetrics_path, options):
         # Python 3.5 requires a str object (not 3.6+)
         res = json.loads(res.decode("utf8"))
 
-        # Ensure that none of these values are at 0 which
-        # is indicative of a failling test
-        monitored_tests = [
-            "contentfulspeedindex",
-            "lastvisualchange",
-            "perceptualspeedindex",
-            "speedindex",
-        ]
         failed_tests = []
-        for metric, val in res.items():
-            if metric.lower() in monitored_tests and val == 0:
-                failed_tests.append(metric)
+        if not job.accept_zero_vismet:
+            # Ensure that none of these values are at 0 which
+            # is indicative of a failling test
+            monitored_tests = [
+                "contentfulspeedindex",
+                "lastvisualchange",
+                "perceptualspeedindex",
+                "speedindex",
+            ]
+            for metric, val in res.items():
+                if metric.lower() in monitored_tests and val == 0:
+                    failed_tests.append(metric)
+
         if failed_tests:
             log.error(
                 "TEST-UNEXPECTED-FAIL | Some visual metrics have an erroneous value of 0."

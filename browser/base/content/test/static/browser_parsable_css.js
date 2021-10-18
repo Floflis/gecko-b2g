@@ -35,7 +35,7 @@ let whitelist = [
     isFromDevTools: false,
   },
   {
-    sourceName: /\b(minimal-xul|html|mathml|ua|forms|svg)\.css$/i,
+    sourceName: /\b(minimal-xul|html|mathml|ua|forms|svg|manageDialog|autocomplete-item-shared|formautofill)\.css$/i,
     errorMessage: /Unknown property.*-moz-/i,
     isFromDevTools: false,
   },
@@ -60,6 +60,16 @@ let whitelist = [
     isFromDevTools: true,
   },
 ];
+
+if (!Services.prefs.getBoolPref("layout.css.color-mix.enabled")) {
+  // Reserved to UA sheets unless layout.css.color-mix.enabled flipped to true.
+  whitelist.push({
+    sourceName: /\b(autocomplete-item)\.css$/,
+    errorMessage: /Expected color but found \u2018color-mix\u2019./i,
+    isFromDevTools: false,
+    platforms: ["windows"],
+  });
+}
 
 if (!Services.prefs.getBoolPref("layout.css.math-depth.enabled")) {
   // mathml.css UA sheet rule for math-depth.
@@ -87,6 +97,14 @@ if (!Services.prefs.getBoolPref("layout.css.scroll-anchoring.enabled")) {
   });
 }
 
+if (!Services.prefs.getBoolPref("layout.css.forced-colors.enabled")) {
+  whitelist.push({
+    sourceName: /pdf\.js\/web\/viewer\.css$/,
+    errorMessage: /Expected media feature name but found ‘forced-colors’*/i,
+    isFromDevTools: false,
+  });
+}
+
 let propNameWhitelist = [
   // These custom properties are retrieved directly from CSSOM
   // in videocontrols.xml to get pre-defined style instead of computed
@@ -106,6 +124,13 @@ let propNameWhitelist = [
   // when expanding the shorthands. See https://github.com/w3c/csswg-drafts/issues/2515
   { propName: "--bezier-diagonal-color", isFromDevTools: true },
   { propName: "--bezier-grid-color", isFromDevTools: true },
+  { propName: "--page-border", isFromDevTools: false },
+
+  // This variable is used from CSS embedded in JS in adjustableTitle.js
+  { propName: "--icon-url", isFromDevTools: false },
+
+  // This variable is used from CSS embedded in JS in pdf.js
+  { propName: "--zoom-factor", isFromDevTools: false },
 ];
 
 // Add suffix to stylesheets' URI so that we always load them here and

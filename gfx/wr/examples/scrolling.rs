@@ -54,14 +54,18 @@ impl Example for App {
                 PrimitiveFlags::IS_BACKFACE_VISIBLE,
             );
             // set the scrolling clip
-            let space_and_clip1 = builder.define_scroll_frame(
-                &root_space_and_clip,
+            let space1 = builder.define_scroll_frame(
+                root_space_and_clip.spatial_id,
                 ExternalScrollId(EXT_SCROLL_ID_ROOT, PipelineId::dummy()),
                 (0, 0).by(1000, 1000),
                 scrollbox,
-                ScrollSensitivity::ScriptAndInputEvents,
                 LayoutVector2D::zero(),
+                SpatialTreeItemKey::new(0, 0),
             );
+            let space_and_clip1 = SpaceAndClipInfo {
+                spatial_id: space1,
+                clip_id: root_space_and_clip.clip_id,
+            };
 
             // now put some content into it.
             // start with a white background
@@ -86,14 +90,18 @@ impl Example for App {
             // Below the above rectangles, set up a nested scrollbox. It's still in
             // the same stacking context, so note that the rects passed in need to
             // be relative to the stacking context.
-            let space_and_clip2 = builder.define_scroll_frame(
-                &space_and_clip1,
+            let space2 = builder.define_scroll_frame(
+                space1,
                 ExternalScrollId(EXT_SCROLL_ID_CONTENT, PipelineId::dummy()),
                 (0, 100).to(300, 1000),
                 (0, 100).to(200, 300),
-                ScrollSensitivity::ScriptAndInputEvents,
                 LayoutVector2D::zero(),
+                SpatialTreeItemKey::new(0, 1),
             );
+            let space_and_clip2 = SpaceAndClipInfo {
+                spatial_id: space2,
+                clip_id: root_space_and_clip.clip_id,
+            };
 
             // give it a giant gray background just to distinguish it and to easily
             // visually identify the nested scrollbox
@@ -120,7 +128,8 @@ impl Example for App {
                 SideOffsets2D::new(Some(10.0), None, Some(10.0), None),
                 StickyOffsetBounds::new(-40.0, 60.0),
                 StickyOffsetBounds::new(0.0, 0.0),
-                LayoutVector2D::new(0.0, 0.0)
+                LayoutVector2D::new(0.0, 0.0),
+                SpatialTreeItemKey::new(0, 2),
             );
 
             let info = CommonItemProperties::new(
@@ -170,12 +179,6 @@ impl Example for App {
                     winit::VirtualKeyCode::Left => Some(LayoutVector2D::new(10.0, 0.0)),
                     _ => None,
                 };
-                let zoom = match key {
-                    winit::VirtualKeyCode::Key0 => Some(1.0),
-                    winit::VirtualKeyCode::Minus => Some(0.8),
-                    winit::VirtualKeyCode::Equals => Some(1.25),
-                    _ => None,
-                };
 
                 if let Some(offset) = offset {
                     self.scroll_origin += offset;
@@ -185,11 +188,7 @@ impl Example for App {
                         ExternalScrollId(EXT_SCROLL_ID_CONTENT, PipelineId::dummy()),
                         ScrollClamping::ToContentBounds,
                     );
-                    txn.generate_frame(0);
-                }
-                if let Some(zoom) = zoom {
-                    txn.set_pinch_zoom(ZoomFactor::new(zoom));
-                    txn.generate_frame(0);
+                    txn.generate_frame(0, RenderReasons::empty());
                 }
             }
             winit::WindowEvent::CursorMoved { position: LogicalPosition { x, y }, .. } => {
@@ -210,12 +209,11 @@ impl Example for App {
                     ScrollClamping::ToContentBounds,
                 );
 
-                txn.generate_frame(0);
+                txn.generate_frame(0, RenderReasons::empty());
             }
             winit::WindowEvent::MouseInput { .. } => {
                 let results = api.hit_test(
                     document_id,
-                    None,
                     self.cursor_position,
                 );
 

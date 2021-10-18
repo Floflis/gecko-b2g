@@ -144,13 +144,6 @@ interface MobileConnection : EventTarget
 
   /**
    * Array of network types that are supported by this radio.
-   *
-   * Plan to deprecated.
-   */
-  [Cached, Pure, Func="B2G::HasMobileConnectionSupport"] readonly attribute sequence<MobileNetworkType> supportedNetworkTypes;
-
-  /**
-   * Array of network types that are supported by this radio.
    */
   [Throws, Func="B2G::HasMobileConnectionSupport"]
   Promise<sequence<MobileNetworkType>> getSupportedNetworkTypes();
@@ -165,7 +158,7 @@ interface MobileConnection : EventTarget
    * Signal strength information.
    */
   [Func="B2G::HasMobileConnectionSupport"]
-  readonly attribute MobileSignalStrength signalStrength;
+  readonly attribute DOMMobileSignalStrength signalStrength;
 
   /**
    * IMS registration handler.
@@ -534,6 +527,20 @@ interface MobileConnection : EventTarget
    */
   [Throws, Func="B2G::HasMobileConnectionSupport"]
   DOMRequest setRadioEnabled(boolean enabled);
+
+  /**
+   * Stop network scan.
+   *
+   * @return a DOMRequest.
+   *
+   * If successful, the request's onsuccess will be called.
+   *
+   * Otherwise, the request's onerror will be called, and the request's error
+   * will be either 'RadioNotAvailable', 'RequestNotSupported',
+   * 'IllegalSIMorME', or 'GenericFailure'.
+   */
+  [Throws, Func="B2G::HasMobileConnectionSupport"]
+  DOMRequest stopNetworkScan();
 
   /**
    * The 'voicechange' event is notified whenever the voice connection object

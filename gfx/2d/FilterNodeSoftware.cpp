@@ -1015,10 +1015,9 @@ static CompositionOp ToBlendOp(BlendMode aOp) {
       return CompositionOp::OP_COLOR;
     case BLEND_MODE_LUMINOSITY:
       return CompositionOp::OP_LUMINOSITY;
-    default:
-      return CompositionOp::OP_OVER;
   }
 
+  MOZ_ASSERT_UNREACHABLE("Unexpected BlendMode");
   return CompositionOp::OP_OVER;
 }
 
@@ -1065,7 +1064,7 @@ already_AddRefed<DataSourceSurface> FilterNodeBlendSoftware::Render(
   }
 
   RefPtr<DrawTarget> dt = Factory::CreateDrawTargetForData(
-      BackendType::CAIRO, targetMap.GetData(), target->GetSize(),
+      BackendType::SKIA, targetMap.GetData(), target->GetSize(),
       targetMap.GetStride(), target->GetFormat());
 
   if (!dt) {
@@ -1200,7 +1199,7 @@ already_AddRefed<DataSourceSurface> FilterNodeTransformSoftware::Render(
   }
 
   RefPtr<DrawTarget> dt = Factory::CreateDrawTargetForData(
-      BackendType::CAIRO, mapping.mData, surf->GetSize(), mapping.mStride,
+      BackendType::SKIA, mapping.mData, surf->GetSize(), mapping.mStride,
       surf->GetFormat());
   if (!dt) {
     gfxWarning() << "FilterNodeTransformSoftware::Render failed in "
@@ -1771,15 +1770,9 @@ void FilterNodeComponentTransferSoftware::SetAttribute(uint32_t aIndex,
 void FilterNodeComponentTransferSoftware::GenerateLookupTable(
     ptrdiff_t aComponent, uint8_t aTables[4][256], bool aDisabled) {
   if (aDisabled) {
-    static uint8_t sIdentityLookupTable[256];
-    static bool sInitializedIdentityLookupTable = false;
-    if (!sInitializedIdentityLookupTable) {
-      for (int32_t i = 0; i < 256; i++) {
-        sIdentityLookupTable[i] = i;
-      }
-      sInitializedIdentityLookupTable = true;
+    for (int32_t i = 0; i < 256; ++i) {
+      aTables[aComponent][i] = i;
     }
-    memcpy(aTables[aComponent], sIdentityLookupTable, 256);
   } else {
     FillLookupTable(aComponent, aTables[aComponent]);
   }

@@ -4,11 +4,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "vm/Runtime.h"
+
 #include "mozilla/Atomics.h"
 #include "mozilla/DebugOnly.h"
+#if JS_HAS_INTL_API
+#  include "mozilla/intl/Locale.h"
+#endif
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/ThreadLocal.h"
-#include "mozilla/Unused.h"
 
 #if defined(XP_DARWIN)
 #  include <mach/mach.h>
@@ -24,6 +28,7 @@
 #include "jsfriendapi.h"
 #include "jsmath.h"
 
+#include "frontend/CompilationStencil.h"
 #include "gc/FreeOp.h"
 #include "gc/PublicIterators.h"
 #include "jit/IonCompileTask.h"
@@ -32,13 +37,11 @@
 #include "js/AllocationLogging.h"  // JS_COUNT_CTOR, JS_COUNT_DTOR
 #include "js/Date.h"
 #include "js/friend/ErrorMessages.h"  // JSMSG_*
+#include "js/Interrupt.h"
 #include "js/MemoryMetrics.h"
 #include "js/SliceBudget.h"
 #include "js/Wrapper.h"
-#if JS_HAS_INTL_API
-#  include "unicode/uloc.h"
-#endif
-#include "util/Windows.h"
+#include "util/WindowsWrapper.h"
 #include "vm/DateTime.h"
 #include "vm/JSAtom.h"
 #include "vm/JSObject.h"
@@ -69,9 +72,12 @@ Atomic<JS::LargeAllocationFailureCallback> js::OnLargeAllocationFailure;
 JS::FilenameValidationCallback js::gFilenameValidationCallback = nullptr;
 
 namespace js {
-bool (*HelperThreadTaskCallback)(js::UniquePtr<RunnableTask>);
 
+#ifndef __wasi__
 bool gCanUseExtraThreads = true;
+#else
+bool gCanUseExtraThreads = false;
+#endif
 }  // namespace js
 
 void js::DisableExtraThreads() { gCanUseExtraThreads = false; }
@@ -128,7 +134,6 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
       scriptAndCountsVector(nullptr),
       lcovOutput_(),
       jitRuntime_(nullptr),
-      selfHostingGlobal_(nullptr),
       gc(thisFromCtor()),
       gcInitialized(false),
       emptyString(nullptr),
@@ -169,8 +174,10 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
   JS_COUNT_CTOR(JSRuntime);
   liveRuntimesCount++;
 
+#ifndef __wasi__
   // See function comment for why we call this now, not in JS_Init().
   wasm::EnsureEagerProcessSignalHandlers();
+#endif  // __wasi__
 }
 
 JSRuntime::~JSRuntime() {
@@ -283,7 +290,7 @@ void JSRuntime::destroyRuntime() {
     profilingScripts = false;
 
     JS::PrepareForFullGC(cx);
-    gc.gc(GC_NORMAL, JS::GCReason::DESTROY_RUNTIME);
+    gc.gc(JS::GCOptions::Normal, JS::GCReason::DESTROY_RUNTIME);
   }
 
   AutoNoteSingleThreadedRegion anstr;
@@ -326,9 +333,9 @@ void JSRuntime::setTelemetryCallback(
   rt->telemetryCallback = callback;
 }
 
-void JSRuntime::setElementCallback(JSRuntime* rt,
-                                   JSGetElementCallback callback) {
-  rt->getElementCallback = callback;
+void JSRuntime::setSourceElementCallback(JSRuntime* rt,
+                                         JSSourceElementCallback callback) {
+  rt->sourceElementCallback = callback;
 }
 
 void JSRuntime::setUseCounter(JSObject* obj, JSUseCounter counter) {
@@ -353,6 +360,13 @@ void JSRuntime::addSizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf,
     rtSizes->atomsTable += mallocSizeOf(staticStrings);
     rtSizes->atomsTable += mallocSizeOf(commonNames);
     rtSizes->atomsTable += permanentAtoms()->sizeOfIncludingThis(mallocSizeOf);
+    rtSizes->atomsTable +=
+        commonParserNames.ref()->sizeOfIncludingThis(mallocSizeOf);
+
+    rtSizes->selfHostStencil =
+        selfHostStencilInput_->sizeOfIncludingThis(mallocSizeOf) +
+        selfHostStencil_->sizeOfIncludingThis(mallocSizeOf) +
+        selfHostScriptMap.ref().shallowSizeOfExcludingThis(mallocSizeOf);
   }
 
   JSContext* cx = mainContextFromAnyThread();
@@ -525,7 +539,7 @@ const char* JSRuntime::getDefaultLocale() {
   // Use ICU if available to retrieve the default locale, this ensures ICU's
   // default locale matches our default locale.
 #if JS_HAS_INTL_API
-  const char* locale = uloc_getDefault();
+  const char* locale = mozilla::intl::Locale::GetDefaultLocale();
 #else
   const char* locale = setlocale(LC_ALL, nullptr);
 #endif
@@ -678,7 +692,7 @@ js::HashNumber JSRuntime::randomHashCode() {
   return HashNumber(randomHashCodeGenerator_->next());
 }
 
-JS_FRIEND_API void* JSRuntime::onOutOfMemory(AllocFunction allocFunc,
+JS_PUBLIC_API void* JSRuntime::onOutOfMemory(AllocFunction allocFunc,
                                              arena_id_t arena, size_t nbytes,
                                              void* reallocPtr,
                                              JSContext* maybecx) {
@@ -824,24 +838,24 @@ bool js::CurrentThreadIsPerformingGC() {
 }
 #endif
 
-JS_FRIEND_API void JS::SetJSContextProfilerSampleBufferRangeStart(
+JS_PUBLIC_API void JS::SetJSContextProfilerSampleBufferRangeStart(
     JSContext* cx, uint64_t rangeStart) {
   cx->runtime()->setProfilerSampleBufferRangeStart(rangeStart);
 }
 
-JS_FRIEND_API bool JS::IsProfilingEnabledForContext(JSContext* cx) {
+JS_PUBLIC_API bool JS::IsProfilingEnabledForContext(JSContext* cx) {
   MOZ_ASSERT(cx);
   return cx->runtime()->geckoProfiler().enabled();
 }
 
-JS_FRIEND_API void JS::EnableRecordingAllocations(
+JS_PUBLIC_API void JS::EnableRecordingAllocations(
     JSContext* cx, JS::RecordAllocationsCallback callback, double probability) {
   MOZ_ASSERT(cx);
   MOZ_ASSERT(cx->isMainThreadContext());
   cx->runtime()->startRecordingAllocations(probability, callback);
 }
 
-JS_FRIEND_API void JS::DisableRecordingAllocations(JSContext* cx) {
+JS_PUBLIC_API void JS::DisableRecordingAllocations(JSContext* cx) {
   MOZ_ASSERT(cx);
   MOZ_ASSERT(cx->isMainThreadContext());
   cx->runtime()->stopRecordingAllocations();

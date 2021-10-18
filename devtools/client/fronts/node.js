@@ -4,7 +4,6 @@
 
 "use strict";
 
-const promise = require("promise");
 const {
   FrontClassWithSpec,
   types,
@@ -122,6 +121,8 @@ class NodeFront extends FrontClassWithSpec(nodeSpec) {
     this._next = null;
     // The previous sibling of this node.
     this._prev = null;
+    // Store the flag to use it after destroy, where targetFront is set to null.
+    this._hasParentProcessTarget = targetFront.isParentProcess;
   }
 
   /**
@@ -280,8 +281,15 @@ class NodeFront extends FrontClassWithSpec(nodeSpec) {
   get numChildren() {
     return this._form.numChildren;
   }
-  get remoteFrame() {
-    return BROWSER_TOOLBOX_FISSION_ENABLED && this._form.remoteFrame;
+  get useChildTargetToFetchChildren() {
+    if (!BROWSER_TOOLBOX_FISSION_ENABLED && this._hasParentProcessTarget) {
+      return false;
+    }
+
+    // @backward-compat { version 94 } useChildTargetToFetchChildren was added in 94, so
+    // we still need to check for `remoteFrame` when connecting to older server.
+    // When 94 is in release, we can check useChildTargetToFetchChildren only
+    return this._form.useChildTargetToFetchChildren || this._form.remoteFrame;
   }
   get hasEventListeners() {
     return this._form.hasEventListeners;
@@ -424,7 +432,7 @@ class NodeFront extends FrontClassWithSpec(nodeSpec) {
     }
 
     const str = this._form.nodeValue || "";
-    return promise.resolve(new SimpleStringFront(str));
+    return Promise.resolve(new SimpleStringFront(str));
   }
 
   /**
@@ -524,20 +532,23 @@ class NodeFront extends FrontClassWithSpec(nodeSpec) {
     return actor.rawNode;
   }
 
-  async connectToRemoteFrame() {
-    if (!this.remoteFrame) {
-      console.warn("Tried to open remote connection to an invalid frame.");
+  async connectToFrame() {
+    if (!this.useChildTargetToFetchChildren) {
+      console.warn("Tried to open connection to an invalid frame.");
       return null;
     }
-    if (this._remoteFrameTarget && !this._remoteFrameTarget.isDestroyed()) {
-      return this._remoteFrameTarget;
+    if (
+      this._childBrowsingContextTarget &&
+      !this._childBrowsingContextTarget.isDestroyed()
+    ) {
+      return this._childBrowsingContextTarget;
     }
 
-    // Get the target for this remote frame element
-    this._remoteFrameTarget = await this.targetFront.getBrowsingContextTarget(
+    // Get the target for this frame element
+    this._childBrowsingContextTarget = await this.targetFront.getWindowGlobalTarget(
       this._form.browsingContextID
     );
-    return this._remoteFrameTarget;
+    return this._childBrowsingContextTarget;
   }
 }
 

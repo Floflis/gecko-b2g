@@ -38,6 +38,7 @@
 #include "mozilla/Services.h"
 #include "jsapi.h"
 #include "js/Date.h"
+#include "js/PropertyAndElement.h"  // JS_DefineProperty
 #include "prenv.h"
 #include "nsAppDirectoryServiceDefs.h"
 
@@ -64,6 +65,8 @@ static NS_DEFINE_CID(kAppShellCID, NS_APPSHELL_CID);
 #define kNanosecondsPerSecond 1000000000.0
 
 #if defined(XP_WIN)
+#  include "mozilla/PreXULSkeletonUI.h"
+
 #  include "mozilla/perfprobe.h"
 /**
  * Events sent to the system for profiling purposes
@@ -157,7 +160,24 @@ nsAppStartup::nsAppStartup()
       mAttemptingQuit(false),
       mInterrupted(false),
       mIsSafeModeNecessary(false),
-      mStartupCrashTrackingEnded(false) {}
+      mStartupCrashTrackingEnded(false) {
+  char* mozAppSilentStart = PR_GetEnv("MOZ_APP_SILENT_START");
+
+  /* When calling PR_SetEnv() with an empty value the existing variable may
+   * be unset or set to the empty string depending on the underlying platform
+   * thus we have to check if the variable is present and not empty. */
+  mWasSilentlyStarted =
+      mozAppSilentStart && (strcmp(mozAppSilentStart, "") != 0);
+
+  // Make sure to clear this in case we restart again non-silently.
+  PR_SetEnv("MOZ_APP_SILENT_START=");
+
+#ifdef XP_WIN
+  char* mozAppAllowWindowless = PR_GetEnv("MOZ_APP_ALLOW_WINDOWLESS");
+  mAllowWindowless =
+      mozAppAllowWindowless && (strcmp(mozAppAllowWindowless, "") != 0);
+#endif
+}
 
 nsresult nsAppStartup::Init() {
   nsresult rv;
@@ -264,6 +284,10 @@ nsAppStartup::Run(void) {
   if (!mShuttingDown && mConsiderQuitStopper != 0) {
 #ifdef XP_MACOSX
     EnterLastWindowClosingSurvivalArea();
+#elif defined(XP_WIN)
+    if (mAllowWindowless) {
+      EnterLastWindowClosingSurvivalArea();
+    }
 #endif
 
     mRunning = true;
@@ -288,6 +312,11 @@ nsAppStartup::Run(void) {
 
 NS_IMETHODIMP
 nsAppStartup::Quit(uint32_t aMode, int aExitCode, bool* aUserAllowedQuit) {
+  if ((aMode & eSilently) != 0 && (aMode & eRestart) == 0) {
+    // eSilently is only valid when combined with eRestart.
+    return NS_ERROR_INVALID_ARG;
+  }
+
   uint32_t ferocity = (aMode & 0xF);
 
   // If the shutdown was cancelled due to a hidden window or
@@ -383,6 +412,12 @@ nsAppStartup::Quit(uint32_t aMode, int aExitCode, bool* aUserAllowedQuit) {
       TimeStamp::RecordProcessRestart();
     }
 
+    if ((aMode & eSilently) != 0) {
+      // Mark the next startup as a silent restart.
+      // See the eSilently definition for details.
+      PR_SetEnv("MOZ_APP_SILENT_START=1");
+    }
+
     obsService = mozilla::services::GetObserverService();
 
     if (!mAttemptingQuit) {
@@ -390,6 +425,10 @@ nsAppStartup::Quit(uint32_t aMode, int aExitCode, bool* aUserAllowedQuit) {
 #ifdef XP_MACOSX
       // now even the Mac wants to quit when the last window is closed
       ExitLastWindowClosingSurvivalArea();
+#elif defined(XP_WIN)
+      if (mAllowWindowless) {
+        ExitLastWindowClosingSurvivalArea();
+      }
 #endif
       if (obsService)
         obsService->NotifyObservers(nullptr, "quit-application-granted",
@@ -441,11 +480,10 @@ nsAppStartup::Quit(uint32_t aMode, int aExitCode, bool* aUserAllowedQuit) {
 
     // No chance of the shutdown being cancelled from here on; tell people
     // we're shutting down for sure while all services are still available.
-    if (obsService) {
-      bool isRestarting = mozilla::AppShutdown::IsRestarting();
-      obsService->NotifyObservers(nullptr, "quit-application",
-                                  isRestarting ? u"restart" : u"shutdown");
-    }
+    bool isRestarting = mozilla::AppShutdown::IsRestarting();
+    mozilla::AppShutdown::AdvanceShutdownPhase(
+        mozilla::ShutdownPhase::AppShutdownConfirmed,
+        isRestarting ? u"restart" : u"shutdown");
 
     if (!mRunning) {
       postedExitEvent = true;
@@ -469,6 +507,53 @@ nsAppStartup::Quit(uint32_t aMode, int aExitCode, bool* aUserAllowedQuit) {
     mShuttingDown = false;
   }
   return rv;
+}
+
+// Ensure ShutdownPhase.h and nsIAppStartup.idl are in sync.
+static_assert(int(nsIAppStartup::SHUTDOWN_PHASE_NOTINSHUTDOWN) ==
+                      int(mozilla::ShutdownPhase::NotInShutdown) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_APPSHUTDOWNCONFIRMED) ==
+                      int(mozilla::ShutdownPhase::AppShutdownConfirmed) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_APPSHUTDOWNNETTEARDOWN) ==
+                      int(mozilla::ShutdownPhase::AppShutdownNetTeardown) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_APPSHUTDOWNTEARDOWN) ==
+                      int(mozilla::ShutdownPhase::AppShutdownTeardown) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_APPSHUTDOWN) ==
+                      int(mozilla::ShutdownPhase::AppShutdown) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_APPSHUTDOWNQM) ==
+                      int(mozilla::ShutdownPhase::AppShutdownQM) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_APPSHUTDOWNRELEMETRY) ==
+                      int(mozilla::ShutdownPhase::AppShutdownTelemetry) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_XPCOMWILLSHUTDOWN) ==
+                      int(mozilla::ShutdownPhase::XPCOMWillShutdown) &&
+                  int(nsIAppStartup::SHUTDOWN_PHASE_XPCOMSHUTDOWN) ==
+                      int(mozilla::ShutdownPhase::XPCOMShutdown),
+              "IDLShutdownPhase values are as expected");
+
+// Helper for safe conversion to native shutdown phases.
+Result<ShutdownPhase, nsresult> IDLShutdownPhaseToNative(
+    nsAppStartup::IDLShutdownPhase aPhase) {
+  if (uint8_t(aPhase) <= nsIAppStartup::SHUTDOWN_PHASE_XPCOMSHUTDOWN) {
+    return ShutdownPhase(aPhase);
+  }
+  return Err(NS_ERROR_ILLEGAL_VALUE);
+}
+
+NS_IMETHODIMP
+nsAppStartup::AdvanceShutdownPhase(IDLShutdownPhase aPhase) {
+  ShutdownPhase nativePhase;
+  MOZ_TRY_VAR(nativePhase, IDLShutdownPhaseToNative(aPhase));
+  AppShutdown::AdvanceShutdownPhase(nativePhase);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsAppStartup::IsInOrBeyondShutdownPhase(IDLShutdownPhase aPhase,
+                                        bool* aIsInOrBeyond) {
+  ShutdownPhase nativePhase;
+  MOZ_TRY_VAR(nativePhase, IDLShutdownPhaseToNative(aPhase));
+  *aIsInOrBeyond = AppShutdown::IsInOrBeyond(nativePhase);
+  return NS_OK;
 }
 
 void nsAppStartup::CloseAllWindows() {
@@ -562,6 +647,12 @@ nsAppStartup::GetWasRestarted(bool* aResult) {
 }
 
 NS_IMETHODIMP
+nsAppStartup::GetWasSilentlyStarted(bool* aResult) {
+  *aResult = mWasSilentlyStarted;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsAppStartup::GetSecondsSinceLastOSRestart(int64_t* aResult) {
 #if defined(XP_WIN)
   *aResult = int64_t(GetTickCount64() / 1000ull);
@@ -578,6 +669,16 @@ nsAppStartup::GetSecondsSinceLastOSRestart(int64_t* aResult) {
 #else
   return NS_ERROR_NOT_IMPLEMENTED;
 #endif
+}
+
+NS_IMETHODIMP
+nsAppStartup::GetShowedPreXULSkeletonUI(bool* aResult) {
+#if defined(XP_WIN)
+  *aResult = GetPreXULSkeletonUIWasShown();
+#else
+  *aResult = false;
+#endif
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -1032,8 +1133,8 @@ nsAppStartup::CreateInstanceWithProfile(nsIToolkitProfile* aProfile) {
 
   NS_ConvertUTF8toUTF16 wideName(profileName);
 
-  const char16_t* args[] = {u"-no-remote", u"-P", wideName.get()};
-  rv = process->Runw(false, args, 3);
+  const char16_t* args[] = {u"-P", wideName.get()};
+  rv = process->Runw(false, args, 2);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }

@@ -26,13 +26,6 @@ const SEARCH_DATA_TRANSFERRED_SCALAR = "browser.search.data_transferred";
 const SEARCH_TELEMETRY_KEY_PREFIX = "sggt";
 const SEARCH_TELEMETRY_PRIVATE_BROWSING_KEY_SUFFIX = "pb";
 
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "UUIDGenerator",
-  "@mozilla.org/uuid-generator;1",
-  "nsIUUIDGenerator"
-);
-
 /**
  * Generates an UUID.
  *
@@ -40,7 +33,7 @@ XPCOMUtils.defineLazyServiceGetter(
  *   An UUID string, without leading or trailing braces.
  */
 function uuid() {
-  let uuid = UUIDGenerator.generateUUID().toString();
+  let uuid = Services.uuid.generateUUID().toString();
   return uuid.slice(1, uuid.length - 1);
 }
 
@@ -521,16 +514,35 @@ SearchSuggestionController.prototype = {
       return;
     }
 
-    if (
-      !Array.isArray(serverResults) ||
-      !serverResults[0] ||
-      this._searchString.localeCompare(serverResults[0], undefined, {
-        sensitivity: "base",
-      })
-    ) {
-      // something is wrong here so drop remote results
+    try {
+      if (
+        !Array.isArray(serverResults) ||
+        !serverResults[0] ||
+        (this._searchString.localeCompare(serverResults[0], undefined, {
+          sensitivity: "base",
+        }) &&
+          // Some engines (e.g. Amazon) return a search string containing
+          // escaped Unicode sequences. Try decoding the remote search string
+          // and compare that with our typed search string.
+          this._searchString.localeCompare(
+            decodeURIComponent(
+              JSON.parse('"' + serverResults[0].replace(/\"/g, '\\"') + '"')
+            ),
+            undefined,
+            {
+              sensitivity: "base",
+            }
+          ))
+      ) {
+        // something is wrong here so drop remote results
+        deferredResponse.resolve(
+          "Unexpected response, this._searchString does not match remote response"
+        );
+        return;
+      }
+    } catch (ex) {
       deferredResponse.resolve(
-        "Unexpected response, this._searchString does not match remote response"
+        `Failed to parse the remote response string: ${ex}`
       );
       return;
     }
@@ -629,10 +641,11 @@ SearchSuggestionController.prototype = {
     }
 
     // Trim the number of results to the maximum requested (now that we've pruned dupes).
-    results.remote = results.remote.slice(
-      0,
-      this.maxRemoteResults - results.local.length
-    );
+    let maxRemoteCount = this.maxRemoteResults;
+    if (dedupeRemoteAndLocal) {
+      maxRemoteCount -= results.local.length;
+    }
+    results.remote = results.remote.slice(0, maxRemoteCount);
 
     if (this._callback) {
       this._callback(results);

@@ -27,8 +27,9 @@
 #include "js/CharacterEncoding.h"
 #include "js/experimental/TypedData.h"  // JS_GetArrayBufferViewType, JS_GetArrayBufferViewData, JS_GetTypedArrayLength, JS_IsTypedArrayObject
 #include "js/MemoryFunctions.h"
-#include "js/Object.h"  // JS::GetClass
-#include "js/String.h"  // JS::StringHasLatin1Chars
+#include "js/Object.h"              // JS::GetClass
+#include "js/PropertyAndElement.h"  // JS_DefineElement, JS_GetElement
+#include "js/String.h"              // JS::StringHasLatin1Chars
 
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/DOMException.h"
@@ -53,11 +54,8 @@ using namespace JS;
 
 // static
 bool XPCConvert::GetISupportsFromJSObject(JSObject* obj, nsISupports** iface) {
-  const JSClass* jsclass = JS::GetClass(obj);
-  MOZ_ASSERT(jsclass, "obj has no class");
-  if (jsclass && (jsclass->flags & JSCLASS_HAS_PRIVATE) &&
-      (jsclass->flags & JSCLASS_PRIVATE_IS_NSISUPPORTS)) {
-    *iface = (nsISupports*)xpc_GetJSPrivate(obj);
+  if (JS::GetClass(obj)->slot0IsISupports()) {
+    *iface = JS::GetObjectISupports<nsISupports>(obj);
     return true;
   }
   *iface = UnwrapDOMObjectToISupports(obj);
@@ -1444,7 +1442,16 @@ bool XPCConvert::JSArray2Native(JSContext* cx, JS::HandleValue aJSVal,
 
     // Allocate the backing buffer before getting the view data in case
     // allocFixupLen can cause GCs.
-    uint32_t length = JS_GetTypedArrayLength(jsarray);
+    uint32_t length;
+    {
+      // nsTArray and code below uses uint32_t lengths, so reject large typed
+      // arrays.
+      size_t fullLength = JS_GetTypedArrayLength(jsarray);
+      if (fullLength > UINT32_MAX) {
+        return false;
+      }
+      length = uint32_t(fullLength);
+    }
     void* buf = allocFixupLen(&length);
     if (!buf) {
       return false;

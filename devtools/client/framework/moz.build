@@ -5,7 +5,6 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 BROWSER_CHROME_MANIFESTS += [
-    "test/allocations/browser_allocations_target.ini",
     "test/browser-enable-popup-devtools-user.ini",
     "test/browser-enable-popup-new-user.ini",
     "test/browser-telemetry-startup.ini",
@@ -23,10 +22,12 @@ DIRS += [
     "browser-toolbox",
     "components",
     "reducers",
+    "test/allocations",
 ]
 
 DevToolsModules(
     "browser-menus.js",
+    "descriptor-from-url.js",
     "devtools-browser.js",
     "devtools.js",
     "enable-devtools-popup.js",
@@ -36,15 +37,17 @@ DevToolsModules(
     "source-map-url-service.js",
     "store-provider.js",
     "store.js",
-    "target-from-url.js",
-    "target.js",
+    "tab-descriptor-factory.js",
     "toolbox-context-menu.js",
     "toolbox-host-manager.js",
     "toolbox-hosts.js",
     "toolbox-options.js",
     "toolbox-tabs-order-manager.js",
+    "toolbox-window.js",
     "toolbox.js",
 )
 
 with Files("**"):
     BUG_COMPONENT = ("DevTools", "Framework")
+
+SPHINX_TREES["/devtools/tests/memory"] = "test/allocations/docs"

@@ -14,17 +14,8 @@ createHTML({
 
 let getOutputDeviceId = async () => {
   let devices = await navigator.mediaDevices.enumerateDevices();
-  if (devices.length > 3) {
-    // Temporary code to debug an intermitten failure.
-    let s = await navigator.mediaDevices.getUserMedia({audio: true});
-    let d = await navigator.mediaDevices.enumerateDevices();
-    d.forEach(e => info(e.kind + ": " + e.label));
-    s.getTracks()[0].stop();
-  }
-  is(devices.length, 3, "Three fake devices found (mic, video, speaker).");
   let audios = devices.filter(d => d.kind == "audiooutput");
-  is(audios.length, 1, "One output device found.");
-
+  ok(audios.length > 0, "One or more output devices found.");
   return audios[0].deviceId;
 }
 
@@ -71,6 +62,12 @@ runTest(async () => {
 
   await pushPrefs(["media.setsinkid.enabled", true]);
 
+  // Implicitly expose the loopback device sink by opening the source in the
+  // same group.
+  const verifyStream = await getUserMedia({audio: true});
+  // We gonna test our tone, stop the auto created one.
+  DefaultLoopbackTone.stop();
+
   let sinkId = await getOutputDeviceId();
   isnot(sinkId, "", "SinkId is not null");
 
@@ -88,10 +85,7 @@ runTest(async () => {
   audioElement.srcObject = stream;
   audioElement.play();
 
-  // Verify the stream by calling a gUM and using the loopack devices.
-  let verifyStream = await getUserMedia({audio: true});
-  // We gonna test our tone, stop the auto created one.
-  DefaultLoopbackTone.stop();
+  // Verify the silent output using the loopback device.
   await verifyNoAudioTone(ac, verifyStream, frequency);
   info("output is muted");
 

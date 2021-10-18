@@ -4,7 +4,7 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-[Exposed=Window, Pref="dom.inputmethod.enabled"]
+[Exposed=Window, Pref="dom.inputmethod.enabled", Func="B2G::HasInputPermission"]
 interface InputMethod {
 
   Promise<boolean> setComposition(DOMString text);
@@ -37,7 +37,7 @@ interface InputMethod {
   /**
    * Set the value on the currently focused element. This has to be used
    * for special situations where the value had to be chosen amongst a
-   * list (type=month) or a widget (type=date, time, etc.).
+   * list (type=month) or a widget (type=date, time, etc.) or contenteditable.
    * If the value passed in parameter isn't valid (in the term of HTML5
    * Forms Validation), the value will simply be ignored by the element.
    */

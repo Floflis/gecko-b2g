@@ -435,6 +435,13 @@ function setupEnvironment() {
       ["media.getusermedia.screensharing.enabled", true],
       ["media.getusermedia.window.focus_source.enabled", false],
       ["media.recorder.audio_node.enabled", true],
+      ["media.peerconnection.ice.obfuscate_host_addresses", false],
+      ["media.peerconnection.nat_simulator.filtering_type", ""],
+      ["media.peerconnection.nat_simulator.mapping_type", ""],
+      ["media.peerconnection.nat_simulator.block_tcp", false],
+      ["media.peerconnection.nat_simulator.block_udp", false],
+      ["media.peerconnection.nat_simulator.redirect_address", ""],
+      ["media.peerconnection.nat_simulator.redirect_targets", ""],
     ],
   };
 
@@ -447,15 +454,19 @@ function setupEnvironment() {
       ["media.navigator.video.max_fr", 10],
       ["media.autoplay.default", Ci.nsIAutoplay.ALLOWED]
     );
-  } else {
-    // For platforms other than Android, the tests use Fake H.264 GMP encoder.
-    // We can't use that with a real decoder until bug 1509012 is done.
-    // So force using the Fake H.264 GMP decoder for now.
-    defaultMochitestPrefs.set.push([
-      "media.navigator.mediadatadecoder_h264_enabled",
-      false,
-    ]);
   }
+
+  // All platforms but Linux support MediaDataEncoder and the tryserver Windows
+  // machine doesn't have HW H.264 encoder. In these cases, Fake GMP encoder is
+  // used so the pref needs to stay disabled.
+  // [TODO] re-enable after bug 1509012 is done or platform encoder available.
+  const alwaysHasHW264 =
+    !!navigator.userAgent.includes("Android") ||
+    !!navigator.userAgent.includes("Mac OS X");
+  defaultMochitestPrefs.set.push([
+    "media.navigator.mediadatadecoder_h264_enabled",
+    alwaysHasHW264,
+  ]);
 
   // Running as a Mochitest.
   SimpleTest.requestFlakyTimeout("WebRTC inherently depends on timeouts");
@@ -467,21 +478,20 @@ function setupEnvironment() {
   SpecialPowers.exactGC();
 }
 
-function runTestWhenReady(testFunc) {
+async function runTestWhenReady(testFunc) {
   setupEnvironment();
-  return testConfigured
-    .then(options => testFunc(options))
-    .catch(e => {
-      ok(
-        false,
-        "Error executing test: " +
-          e +
-          (typeof e.stack === "string"
-            ? " " + e.stack.split("\n").join(" ... ")
-            : "")
-      );
-      SimpleTest.finish();
-    });
+  const options = await testConfigured;
+  try {
+    await testFunc(options);
+  } catch (e) {
+    ok(
+      false,
+      `Error executing test: ${e}
+${e.stack ? e.stack : ""}`
+    );
+  } finally {
+    SimpleTest.finish();
+  }
 }
 
 /**
@@ -891,6 +901,78 @@ function haveEventsButNoMore(target, name, count, cancel) {
     haveNoEvent(target, name).then(() => e)
   );
 }
+
+/*
+ * Resolves the returned promise with an object with usage and reportCount
+ * properties.  `usage` is in the same units as reported by the reporter for
+ * `path`.
+ */
+const collectMemoryUsage = async path => {
+  const MemoryReporterManager = Cc[
+    "@mozilla.org/memory-reporter-manager;1"
+  ].getService(Ci.nsIMemoryReporterManager);
+
+  let usage = 0;
+  let reportCount = 0;
+  await new Promise(resolve =>
+    MemoryReporterManager.getReports(
+      (aProcess, aPath, aKind, aUnits, aAmount, aDesc) => {
+        if (aPath != path) {
+          return;
+        }
+        ++reportCount;
+        usage += aAmount;
+      },
+      null,
+      resolve,
+      null,
+      /* anonymized = */ false
+    )
+  );
+  return { usage, reportCount };
+};
+
+// Some DNS helper functions
+const dnsLookup = async hostname => {
+  // Convenience API for various networking related stuff. _Almost_ convenient
+  // enough.
+  const neckoDashboard = SpecialPowers.Cc[
+    "@mozilla.org/network/dashboard;1"
+  ].getService(Ci.nsIDashboard);
+
+  const results = await new Promise(r => {
+    neckoDashboard.requestDNSLookup(hostname, results => {
+      r(SpecialPowers.wrap(results));
+    });
+  });
+
+  // |address| is an array-like dictionary (ie; keys are all integers).
+  // We convert to an array to make it less unwieldy.
+  const addresses = [...results.address];
+  info(`DNS results for ${hostname}: ${JSON.stringify(addresses)}`);
+  return addresses;
+};
+
+const dnsLookupV4 = async hostname => {
+  const addresses = await dnsLookup(hostname);
+  return addresses.filter(address => !address.includes(":"));
+};
+
+const dnsLookupV6 = async hostname => {
+  const addresses = await dnsLookup(hostname);
+  return addresses.filter(address => address.includes(":"));
+};
+
+const getTurnHostname = turnUrl => {
+  const urlNoParams = turnUrl.split("?")[0];
+  // Strip off scheme
+  const hostAndMaybePort = urlNoParams.split(":", 2)[1];
+  if (hostAndMaybePort[0] == "[") {
+    // IPV6 literal, strip out '[', and split at closing ']'
+    return hostAndMaybePort.substring(1).split("]")[0];
+  }
+  return hostAndMaybePort.split(":")[0];
+};
 
 /**
  * This class executes a series of functions in a continuous sequence.

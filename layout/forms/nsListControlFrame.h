@@ -18,6 +18,7 @@
 #endif
 
 #include "mozilla/Attributes.h"
+#include "mozilla/StaticPtr.h"
 #include "nsGfxScrollFrame.h"
 #include "nsIFormControlFrame.h"
 #include "nsISelectControlFrame.h"
@@ -52,7 +53,7 @@ class nsListControlFrame final : public nsHTMLScrollFrame,
  public:
   typedef mozilla::dom::HTMLOptionElement HTMLOptionElement;
 
-  friend nsContainerFrame* NS_NewListControlFrame(
+  friend nsListControlFrame* NS_NewListControlFrame(
       mozilla::PresShell* aPresShell, ComputedStyle* aStyle);
 
   NS_DECL_QUERYFRAME
@@ -450,7 +451,7 @@ class nsListControlFrame final : public nsHTMLScrollFrame,
   RefPtr<nsListEventListener> mEventListener;
 
   static nsListControlFrame* mFocused;
-  static nsString* sIncrementalString;
+  static mozilla::StaticAutoPtr<nsString> sIncrementalString;
 
 #ifdef DO_REFLOW_COUNTER
   int32_t mReflowId;

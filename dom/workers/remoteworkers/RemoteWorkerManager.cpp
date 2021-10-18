@@ -30,6 +30,7 @@
 #include "nsTArray.h"
 #include "nsThreadUtils.h"
 #include "RemoteWorkerServiceParent.h"
+#include "RemoteWorkerControllerParent.h"
 
 mozilla::LazyLogModule gRemoteWorkerManagerLog("RemoteWorkerManager");
 
@@ -104,21 +105,21 @@ bool RemoteWorkerManager::MatchRemoteType(const nsACString& processRemoteType,
 
 // static
 Result<nsCString, nsresult> RemoteWorkerManager::GetRemoteType(
-    const nsCOMPtr<nsIPrincipal>& aPrincipal, WorkerType aWorkerType) {
+    const nsCOMPtr<nsIPrincipal>& aPrincipal, WorkerKind aWorkerKind) {
   AssertIsOnMainThread();
 
-  MOZ_ASSERT_IF(aWorkerType == WorkerType::WorkerTypeService,
+  MOZ_ASSERT_IF(aWorkerKind == WorkerKind::WorkerKindService,
                 aPrincipal->GetIsContentPrincipal());
 
-  nsCOMPtr<nsIE10SUtils> e10sUtils =
-      do_ImportModule("resource://gre/modules/E10SUtils.jsm", "E10SUtils");
+  nsCOMPtr<nsIE10SUtils> e10sUtils = do_ImportModule(
+      "resource://gre/modules/E10SUtils.jsm", "E10SUtils", fallible);
   if (NS_WARN_IF(!e10sUtils)) {
     LOG(("GetRemoteType Abort: could not import E10SUtils"));
     return Err(NS_ERROR_DOM_ABORT_ERR);
   }
 
   nsCString preferredRemoteType = DEFAULT_REMOTE_TYPE;
-  if (aWorkerType == WorkerType::WorkerTypeShared) {
+  if (aWorkerKind == WorkerKind::WorkerKindShared) {
     if (auto* contentChild = ContentChild::GetSingleton()) {
       // For a shared worker set the preferred remote type to the content
       // child process remote type.
@@ -130,11 +131,11 @@ Result<nsCString, nsresult> RemoteWorkerManager::GetRemoteType(
 
   nsIE10SUtils::RemoteWorkerType workerType;
 
-  switch (aWorkerType) {
-    case WorkerType::WorkerTypeService:
+  switch (aWorkerKind) {
+    case WorkerKind::WorkerKindService:
       workerType = nsIE10SUtils::REMOTE_WORKER_TYPE_SERVICE;
       break;
-    case WorkerType::WorkerTypeShared:
+    case WorkerKind::WorkerKindShared:
       workerType = nsIE10SUtils::REMOTE_WORKER_TYPE_SHARED;
       break;
     default:
@@ -227,7 +228,7 @@ Result<nsCString, nsresult> RemoteWorkerManager::GetRemoteType(
         buf,
         "workerType=%s, principal=%s, preferredRemoteType=%s, "
         "processRemoteType=%s, errorName=%s, errorLocation=%s:%d",
-        aWorkerType == WorkerType::WorkerTypeService ? "service" : "shared",
+        aWorkerKind == WorkerKind::WorkerKindService ? "service" : "shared",
         principalTypeOrScheme.get(),
         PromiseFlatCString(RemoteTypePrefix(preferredRemoteType)).get(),
         processRemoteType.get(), errorName.get(), errorFilename.get(),
@@ -245,7 +246,7 @@ Result<nsCString, nsresult> RemoteWorkerManager::GetRemoteType(
     LOG(
         ("GetRemoteType workerType=%s, principal=%s, "
          "preferredRemoteType=%s, selectedRemoteType=%s",
-         aWorkerType == WorkerType::WorkerTypeService ? "service" : "shared",
+         aWorkerKind == WorkerKind::WorkerKindService ? "service" : "shared",
          principalOrigin.get(), preferredRemoteType.get(), remoteType.get()));
   }
 
@@ -300,7 +301,7 @@ bool RemoteWorkerManager::IsRemoteTypeAllowed(const RemoteWorkerData& aData) {
   bool isServiceWorker = aData.serviceWorkerData().type() ==
                          OptionalServiceWorkerData::TServiceWorkerData;
   auto remoteType = GetRemoteType(
-      principal, isServiceWorker ? WorkerTypeService : WorkerTypeShared);
+      principal, isServiceWorker ? WorkerKindService : WorkerKindShared);
   if (NS_WARN_IF(remoteType.isErr())) {
     LOG(("IsRemoteTypeAllowed: Error to retrieve remote type"));
     return false;
@@ -472,7 +473,8 @@ void RemoteWorkerManager::LaunchInternal(
     return;
   }
 
-  workerActor->Initialize(aRemoteWorkerAlreadyRegistered);
+  workerActor->Initialize(aController->GetScriptURI().get(),
+                          aRemoteWorkerAlreadyRegistered);
 
   // This makes the link better the 2 actors.
   aController->SetWorkerActor(workerActor);
@@ -496,6 +498,9 @@ void RemoteWorkerManager::ForEachActor(
   AssertIsOnBackgroundThread();
 
   const auto length = mChildActors.Length();
+  if (length == 0) {
+    return;
+  }
 
   auto end = static_cast<uint32_t>(rand()) % length;
   if (aProcessId) {
@@ -575,6 +580,20 @@ RemoteWorkerServiceParent* RemoteWorkerManager::SelectTargetActorInternal(
 
   const auto& workerRemoteType = aData.remoteType();
 
+  bool isServiceWorkerWithoutActorSuggestion = IsServiceWorker(aData);
+  if (isServiceWorkerWithoutActorSuggestion) {
+    // aProcessId is always 0 for ServiceWorker, assert for future changes so
+    // that we shall consider both valid aProcessId and suggestedPid.
+    MOZ_ASSERT(!aProcessId);
+
+    auto suggestedPid =
+        aData.serviceWorkerData().get_ServiceWorkerData().suggestedPid();
+    if (suggestedPid) {
+      aProcessId = suggestedPid;
+    }
+    isServiceWorkerWithoutActorSuggestion = !suggestedPid;
+  }
+
   ForEachActor(
       [&](RemoteWorkerServiceParent* aActor,
           RefPtr<ContentParent>&& aContentParent) {
@@ -593,13 +612,18 @@ RemoteWorkerServiceParent* RemoteWorkerManager::SelectTargetActorInternal(
           ++lock->mCount;
 
           actor = aActor;
+          RefPtr<nsIURI> scripturi;
+          NS_NewURI(getter_AddRefs(scripturi),
+                    NS_ConvertUTF16toUTF8(aData.originalScriptURL()).get());
+          lock->mScriptURLs.EmplaceBack(scripturi);
           return false;
         }
 
         MOZ_ASSERT(!actor);
         return true;
       },
-      workerRemoteType, IsServiceWorker(aData) ? Nothing() : Some(aProcessId));
+      workerRemoteType,
+      isServiceWorkerWithoutActorSuggestion ? Nothing() : Some(aProcessId));
 
   return actor;
 }
@@ -727,6 +751,41 @@ void RemoteWorkerManager::LaunchNewContentProcess(
       });
 
   SchedulerGroup::Dispatch(TaskCategory::Other, r.forget());
+}
+
+/* static */ nsTArray<RefPtr<nsIURI>>
+RemoteWorkerManager::GetScriptURIsInternal(base::ProcessId aProcessId,
+                                           const nsACString& aRemoteType) {
+  AssertIsInMainProcess();
+  AssertIsOnMainThread();
+
+  ContentParent* contentparent = nullptr;
+  for (auto cpp = ContentParent::AllProcesses(ContentParent::eLive);
+       cpp != cpp.end();
+       ++cpp) {
+    if ((*cpp)->OtherPid() == aProcessId && (*cpp)->GetRemoteType() == aRemoteType) {
+      contentparent = *cpp;
+      break;
+    }
+  }
+
+  AutoTArray<RefPtr<nsIURI>, 16> scripts;
+  if (!contentparent) {
+    return std::move(scripts);
+  }
+
+  auto lock = contentparent->mRemoteWorkerActorData.Lock();
+  for (auto uri : lock->mScriptURLs) {
+    scripts.AppendElement(uri);
+  }
+
+  return std::move(scripts);
+}
+
+nsTArray<RefPtr<nsIURI>>
+RemoteWorkerManager::GetScriptURIs(base::ProcessId aProcessId,
+                                         const nsACString& aRemoteType) {
+  return GetScriptURIsInternal(aProcessId, aRemoteType);
 }
 
 }  // namespace dom

@@ -20,19 +20,19 @@
 #include "nsCanvasFrame.h"
 #include "nsDisplayList.h"
 #include "nsIFrameInlines.h"
-#include "FrameLayerBuilder.h"
 #include "imgIContainer.h"
 #include "imgINotificationObserver.h"
 #include "Image.h"
-#include "GeckoProfiler.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ProfilerLabels.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/SVGObserverUtils.h"
 #include "mozilla/layers/WebRenderUserData.h"
+#include "nsTHashSet.h"
 
 using namespace mozilla::dom;
 
-namespace mozilla {
-namespace css {
+namespace mozilla::css {
 
 // This is a singleton observer which looks in the `GlobalRequestTable` to look
 // at which loaders to notify.
@@ -57,7 +57,7 @@ NS_INTERFACE_MAP_END
 struct ImageTableEntry {
   // Set of all ImageLoaders that have registered this URL and care for updates
   // for it.
-  nsTHashtable<nsPtrHashKey<ImageLoader>> mImageLoaders;
+  nsTHashSet<ImageLoader*> mImageLoaders;
 
   // The amount of style values that are sharing this image.
   uint32_t mSharedCount = 1;
@@ -73,7 +73,7 @@ using GlobalRequestTable =
 // We use the load id as the key since we can only access sImages on the
 // main thread, but LoadData objects might be destroyed from other threads,
 // and we don't want to leave dangling pointers around.
-static GlobalRequestTable* sImages = nullptr;
+static StaticAutoPtr<GlobalRequestTable> sImages;
 static StaticRefPtr<GlobalImageObserver> sImageObserver;
 
 /* static */
@@ -84,7 +84,10 @@ void ImageLoader::Init() {
 
 /* static */
 void ImageLoader::Shutdown() {
-  delete sImages;
+  for (const auto& entry : *sImages) {
+    entry.GetKey()->CancelAndForgetObserver(NS_BINDING_ABORTED);
+  }
+
   sImages = nullptr;
   sImageObserver = nullptr;
 }
@@ -169,31 +172,38 @@ void ImageLoader::AssociateRequestToFrame(imgIRequest* aRequest,
     MOZ_ASSERT(observer == sImageObserver);
   }
 
-  const auto& frameSet =
-      mRequestToFrameMap.LookupForAdd(aRequest).OrInsert([=]() {
-        mDocument->ImageTracker()->Add(aRequest);
+  auto* const frameSet =
+      mRequestToFrameMap
+          .LookupOrInsertWith(
+              aRequest,
+              [&] {
+                mDocument->ImageTracker()->Add(aRequest);
 
-        if (auto entry = sImages->Lookup(aRequest)) {
-          DebugOnly<bool> inserted =
-              entry.Data()->mImageLoaders.EnsureInserted(this);
-          MOZ_ASSERT(inserted);
-        } else {
-          MOZ_ASSERT_UNREACHABLE(
-              "Shouldn't be associating images not in sImages");
-        }
+                if (auto entry = sImages->Lookup(aRequest)) {
+                  DebugOnly<bool> inserted =
+                      entry.Data()->mImageLoaders.EnsureInserted(this);
+                  MOZ_ASSERT(inserted);
+                } else {
+                  MOZ_ASSERT_UNREACHABLE(
+                      "Shouldn't be associating images not in sImages");
+                }
 
-        if (nsPresContext* presContext = GetPresContext()) {
-          nsLayoutUtils::RegisterImageRequestIfAnimated(presContext, aRequest,
-                                                        nullptr);
-        }
-        return new FrameSet();
-      });
+                if (nsPresContext* presContext = GetPresContext()) {
+                  nsLayoutUtils::RegisterImageRequestIfAnimated(
+                      presContext, aRequest, nullptr);
+                }
+                return MakeUnique<FrameSet>();
+              })
+          .get();
 
-  const auto& requestSet =
-      mFrameToRequestMap.LookupForAdd(aFrame).OrInsert([=]() {
-        aFrame->SetHasImageRequest(true);
-        return new RequestSet();
-      });
+  auto* const requestSet =
+      mFrameToRequestMap
+          .LookupOrInsertWith(aFrame,
+                              [=]() {
+                                aFrame->SetHasImageRequest(true);
+                                return MakeUnique<RequestSet>();
+                              })
+          .get();
 
   // Add frame to the frameSet, and handle any special processing the
   // frame might require.
@@ -346,8 +356,8 @@ void ImageLoader::SetAnimationMode(uint16_t aMode) {
                    aMode == imgIContainer::kLoopOnceAnimMode,
                "Wrong Animation Mode is being set!");
 
-  for (auto iter = mRequestToFrameMap.ConstIter(); !iter.Done(); iter.Next()) {
-    auto request = static_cast<imgIRequest*>(iter.Key());
+  for (nsISupports* key : mRequestToFrameMap.Keys()) {
+    auto* request = static_cast<imgIRequest*>(key);
 
 #ifdef DEBUG
     {
@@ -370,8 +380,8 @@ void ImageLoader::SetAnimationMode(uint16_t aMode) {
 void ImageLoader::ClearFrames(nsPresContext* aPresContext) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  for (auto iter = mRequestToFrameMap.ConstIter(); !iter.Done(); iter.Next()) {
-    auto request = static_cast<imgIRequest*>(iter.Key());
+  for (const auto& key : mRequestToFrameMap.Keys()) {
+    auto* request = static_cast<imgIRequest*>(key);
 
 #ifdef DEBUG
     {
@@ -410,6 +420,16 @@ already_AddRefed<imgRequestProxy> ImageLoader::LoadImage(
     return nullptr;
   }
 
+  if (aImage.HasRef()) {
+    bool isEqualExceptRef = false;
+    nsIURI* docURI = aDocument.GetDocumentURI();
+    if (NS_SUCCEEDED(uri->EqualsExceptRef(docURI, &isEqualExceptRef)) &&
+        isEqualExceptRef) {
+      // Prevent loading an internal resource.
+      return nullptr;
+    }
+  }
+
   int32_t loadFlags =
       nsIRequest::LOAD_NORMAL |
       nsContentUtils::CORSModeToLoadImageFlags(EffectiveCorsMode(uri, aImage));
@@ -424,13 +444,17 @@ already_AddRefed<imgRequestProxy> ImageLoader::LoadImage(
   if (NS_FAILED(rv) || !request) {
     return nullptr;
   }
-  sImages->LookupForAdd(request).OrInsert([] { return new ImageTableEntry(); });
+  sImages->GetOrInsertNew(request);
   return request.forget();
 }
 
 void ImageLoader::UnloadImage(imgRequestProxy* aImage) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aImage);
+
+  if (MOZ_UNLIKELY(!sImages)) {
+    return;  // Shutdown() takes care of it.
+  }
 
   auto lookup = sImages->Lookup(aImage);
   MOZ_DIAGNOSTIC_ASSERT(lookup, "Unregistered image?");
@@ -499,28 +523,10 @@ static void InvalidateImages(nsIFrame* aFrame, imgIRequest* aRequest,
   }
 
   bool invalidateFrame = aForcePaint;
-  const SmallPointerArray<DisplayItemData>& array = aFrame->DisplayItemData();
-  for (uint32_t i = 0; i < array.Length(); i++) {
-    DisplayItemData* data =
-        DisplayItemData::AssertDisplayItemData(array.ElementAt(i));
-    uint32_t displayItemKey = data->GetDisplayItemKey();
-    if (displayItemKey != 0 && !IsRenderNoImages(displayItemKey)) {
-      if (nsLayoutUtils::InvalidationDebuggingIsEnabled()) {
-        DisplayItemType type = GetDisplayItemTypeFromKey(displayItemKey);
-        printf_stderr(
-            "Invalidating display item(type=%d) based on frame %p \
-                       because it might contain an invalidated image\n",
-            static_cast<uint32_t>(type), aFrame);
-      }
 
-      data->Invalidate();
-      invalidateFrame = true;
-    }
-  }
   if (auto userDataTable =
           aFrame->GetProperty(layers::WebRenderUserDataProperty::Key())) {
-    for (auto iter = userDataTable->Iter(); !iter.Done(); iter.Next()) {
-      RefPtr<layers::WebRenderUserData> data = iter.UserData();
+    for (RefPtr<layers::WebRenderUserData> data : userDataTable->Values()) {
       switch (data->GetType()) {
         case layers::WebRenderUserData::UserDataType::eFallback:
           if (!IsRenderNoImages(data->GetDisplayItemKey())) {
@@ -528,6 +534,10 @@ static void InvalidateImages(nsIFrame* aFrame, imgIRequest* aRequest,
                 ->SetInvalid(true);
           }
           // XXX: handle Blob data
+          invalidateFrame = true;
+          break;
+        case layers::WebRenderUserData::UserDataType::eMask:
+          static_cast<layers::WebRenderMaskData*>(data.get())->Invalidate();
           invalidateFrame = true;
           break;
         case layers::WebRenderUserData::UserDataType::eImage:
@@ -550,7 +560,7 @@ static void InvalidateImages(nsIFrame* aFrame, imgIRequest* aRequest,
     nsIFrame* f = aFrame;
     while (f && !f->HasAnyStateBits(NS_FRAME_DESCENDANT_NEEDS_PAINT)) {
       SVGObserverUtils::InvalidateDirectRenderingObservers(f);
-      f = nsLayoutUtils::GetCrossDocParentFrame(f);
+      f = nsLayoutUtils::GetCrossDocParentFrameInProcess(f);
     }
   }
 
@@ -633,19 +643,15 @@ void GlobalImageObserver::Notify(imgIRequest* aRequest, int32_t aType,
     return;
   }
 
-  auto& loaders = entry.Data()->mImageLoaders;
-  nsTArray<RefPtr<ImageLoader>> loadersToNotify(loaders.Count());
-  for (auto iter = loaders.Iter(); !iter.Done(); iter.Next()) {
-    loadersToNotify.AppendElement(iter.Get()->GetKey());
-  }
-  for (auto& loader : loadersToNotify) {
+  const auto loadersToNotify =
+      ToTArray<nsTArray<RefPtr<ImageLoader>>>(entry.Data()->mImageLoaders);
+  for (const auto& loader : loadersToNotify) {
     loader->Notify(aRequest, aType, aData);
   }
 }
 
 void ImageLoader::Notify(imgIRequest* aRequest, int32_t aType,
                          const nsIntRect* aData) {
-#ifdef MOZ_GECKO_PROFILER
   nsCString uriString;
   if (profiler_is_active()) {
     nsCOMPtr<nsIURI> uri;
@@ -657,7 +663,6 @@ void ImageLoader::Notify(imgIRequest* aRequest, int32_t aType,
 
   AUTO_PROFILER_LABEL_DYNAMIC_NSCSTRING("ImageLoader::Notify", OTHER,
                                         uriString);
-#endif
 
   if (aType == imgINotificationObserver::SIZE_AVAILABLE) {
     nsCOMPtr<imgIContainer> image;
@@ -708,9 +713,6 @@ void ImageLoader::OnSizeAvailable(imgIRequest* aRequest,
     if (fwf.mFlags & Flags::RequiresReflowOnSizeAvailable) {
       fwf.mFrame->PresShell()->FrameNeedsReflow(
           fwf.mFrame, IntrinsicDirty::StyleChange, NS_FRAME_IS_DIRTY);
-    }
-    if (fwf.mFrame->StyleVisibility()->IsVisible()) {
-      fwf.mFrame->SchedulePaint();
     }
   }
 }
@@ -784,23 +786,28 @@ void ImageLoader::OnLoadComplete(imgIRequest* aRequest) {
     return;
   }
 
+  uint32_t status = 0;
+  if (NS_FAILED(aRequest->GetImageStatus(&status))) {
+    return;
+  }
+
   FrameSet* frameSet = mRequestToFrameMap.Get(aRequest);
   if (!frameSet) {
     return;
   }
 
-  // Check if aRequest has an error state. If it does, we need to unblock
-  // Document onload for all the frames associated with this request that
-  // have blocked onload. This is what happens in a CORS mode violation, and
-  // may happen during other network events.
-  uint32_t status = 0;
-  if (NS_SUCCEEDED(aRequest->GetImageStatus(&status)) &&
-      status & imgIRequest::STATUS_ERROR) {
-    for (FrameWithFlags& fwf : *frameSet) {
+  for (FrameWithFlags& fwf : *frameSet) {
+    if (status & imgIRequest::STATUS_ERROR) {
+      // Check if aRequest has an error state. If it does, we need to unblock
+      // Document onload for all the frames associated with this request that
+      // have blocked onload. This is what happens in a CORS mode violation, and
+      // may happen during other network events.
       UnblockOnloadIfNeeded(fwf);
+    }
+    if (fwf.mFrame->StyleVisibility()->IsVisible()) {
+      fwf.mFrame->SchedulePaint();
     }
   }
 }
 
-}  // namespace css
-}  // namespace mozilla
+}  // namespace mozilla::css

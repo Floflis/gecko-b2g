@@ -53,10 +53,6 @@ function DevToolsLoader({
     // ⚠ DISCUSSION ON DEV-DEVELOPER-TOOLS REQUIRED BEFORE MODIFYING ⚠
     devtools: "resource://devtools",
     // ⚠ DISCUSSION ON DEV-DEVELOPER-TOOLS REQUIRED BEFORE MODIFYING ⚠
-    acorn: "resource://devtools/shared/acorn",
-    // ⚠ DISCUSSION ON DEV-DEVELOPER-TOOLS REQUIRED BEFORE MODIFYING ⚠
-    "acorn/util/walk": "resource://devtools/shared/acorn/walk.js",
-    // ⚠ DISCUSSION ON DEV-DEVELOPER-TOOLS REQUIRED BEFORE MODIFYING ⚠
     // Allow access to xpcshell test items from the loader.
     "xpcshell-test": "resource://test",
 
@@ -68,15 +64,6 @@ function DevToolsLoader({
     "devtools/startup/locales": "chrome://devtools-startup/locale",
     "toolkit/locales": "chrome://global/locale",
   };
-
-  // When creating a Loader invisible to the Debugger, we have to ensure
-  // using only modules and not depend on any JSM. As everything that is
-  // not loaded with Loader isn't going to respect `invisibleToDebugger`.
-  // But we have to keep using Promise.jsm for other loader to prevent
-  // breaking unhandled promise rejection in tests.
-  if (invisibleToDebugger) {
-    paths.promise = "resource://gre/modules/Promise-backend.js";
-  }
 
   // DAMP tests use a dynamic path. If DEBUG_DEVTOOLS_DAMP_TEST_PATH was set as
   // a custom preference, add a corresponding path mapping entry.
@@ -121,13 +108,6 @@ function DevToolsLoader({
 
   // Fetch custom pseudo modules and globals
   const { modules, globals } = this.require("devtools/shared/builtin-modules");
-
-  // When creating a Loader for the browser toolbox, we have to use
-  // Promise-backend.js, as a Loader module. Instead of Promise.jsm which
-  // can't be flagged as invisible to debugger.
-  if (invisibleToDebugger) {
-    delete modules.promise;
-  }
 
   // Register custom pseudo modules to the current loader instance
   for (const id in modules) {

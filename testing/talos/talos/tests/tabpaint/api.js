@@ -22,11 +22,6 @@
 
 ChromeUtils.defineModuleGetter(
   this,
-  "Services",
-  "resource://gre/modules/Services.jsm"
-);
-ChromeUtils.defineModuleGetter(
-  this,
   "TalosParentProfiler",
   "resource://talos-powers/TalosParentProfiler.jsm"
 );
@@ -40,6 +35,8 @@ const REDUCE_MOTION_PREF = "ui.prefersReducedMotion";
 const MULTI_OPT_OUT_PREF = "dom.ipc.multiOptOut";
 
 const MESSAGES = ["TabPaint:Go", "TabPaint:Painted"];
+
+const BROWSER_FLUSH_TOPIC = "sessionstore-browser-shutdown-flush";
 
 /* globals ExtensionAPI */
 this.tabpaint = class extends ExtensionAPI {
@@ -206,18 +203,14 @@ this.tabpaint = class extends ExtensionAPI {
   removeTab(tab) {
     TalosParentProfiler.mark("Tabpaint: Remove Tab");
     return new Promise(resolve => {
-      let { messageManager: mm, frameLoader } = tab.linkedBrowser;
-      mm.addMessageListener(
-        "SessionStore:update",
-        function onMessage(msg) {
-          if (msg.targetFrameLoader == frameLoader && msg.data.isFinal) {
-            mm.removeMessageListener("SessionStore:update", onMessage);
-            resolve();
-          }
-        },
-        true
-      );
-
+      let browser = tab.linkedBrowser;
+      let observer = (subject, topic, data) => {
+        if (subject === browser) {
+          Services.obs.removeObserver(observer, BROWSER_FLUSH_TOPIC);
+          resolve();
+        }
+      };
+      Services.obs.addObserver(observer, BROWSER_FLUSH_TOPIC);
       tab.ownerGlobal.gBrowser.removeTab(tab);
     });
   }

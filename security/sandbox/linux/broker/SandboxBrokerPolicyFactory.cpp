@@ -29,6 +29,7 @@
 #include "nsReadableUtils.h"
 #include "nsIFileStreams.h"
 #include "nsILineInputStream.h"
+#include "nsIFile.h"
 
 #include "nsNetCID.h"
 
@@ -37,11 +38,8 @@
 #endif
 
 #ifdef MOZ_WIDGET_GTK
+#  include "mozilla/WidgetUtilsGtk.h"
 #  include <glib.h>
-#  ifdef MOZ_WAYLAND
-#    include <gdk/gdk.h>
-#    include <gdk/gdkx.h>
-#  endif
 #endif
 
 #include <dirent.h>
@@ -60,6 +58,7 @@ static const int wronly = SandboxBroker::MAY_WRITE;
 static const int rdwr = rdonly | wronly;
 static const int rdwrcr = rdwr | SandboxBroker::MAY_CREATE;
 static const int access = SandboxBroker::MAY_ACCESS;
+static const int deny = SandboxBroker::FORCE_DENY;
 }  // namespace
 
 static void AddMesaSysfsPaths(SandboxBroker::Policy* aPolicy) {
@@ -284,6 +283,13 @@ static void AddSharedMemoryPaths(SandboxBroker::Policy* aPolicy, pid_t aPid) {
   }
 }
 
+static void AddMemoryReporting(SandboxBroker::Policy* aPolicy, pid_t aPid) {
+  // Bug 1198552: memory reporting.
+  // Bug 1647957: memory reporting.
+  aPolicy->AddPath(rdonly, nsPrintfCString("/proc/%d/statm", aPid).get());
+  aPolicy->AddPath(rdonly, nsPrintfCString("/proc/%d/smaps", aPid).get());
+}
+
 static void AddDynamicPathList(SandboxBroker::Policy* policy,
                                const char* aPathListPref, int perms) {
   nsAutoCString pathList;
@@ -334,8 +340,10 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
   // Various places where fonts reside
   policy->AddDir(rdonly, "/usr/X11R6/lib/X11/fonts");
   policy->AddDir(rdonly, "/nix/store");
+  // https://gitlab.com/freedesktop-sdk/freedesktop-sdk/-/blob/e434e680d22260f277f4a30ec4660ed32b591d16/files/fontconfig-flatpak.conf
   policy->AddDir(rdonly, "/run/host/fonts");
   policy->AddDir(rdonly, "/run/host/user-fonts");
+  policy->AddDir(rdonly, "/run/host/local-fonts");
   policy->AddDir(rdonly, "/var/cache/fontconfig");
 
   if (!headless) {
@@ -349,14 +357,25 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
     policy->AddPath(rdonly, "/proc/modules");
   }
 
-  // Allow access to XDG_CONFIG_PATH and XDG_CONFIG_DIRS
-  if (const auto xdgConfigPath = PR_GetEnv("XDG_CONFIG_PATH")) {
-    policy->AddDir(rdonly, xdgConfigPath);
+  // XDG directories might be non existent according to specs:
+  // https://specifications.freedesktop.org/basedir-spec/0.8/ar01s04.html
+  //
+  // > If, when attempting to write a file, the destination directory is
+  // > non-existent an attempt should be made to create it with permission 0700.
+  //
+  // For that we use AddPath(, SandboxBroker::Policy::AddCondition::AddAlways).
+  //
+  // Allow access to XDG_CONFIG_HOME and XDG_CONFIG_DIRS
+  nsAutoCString xdgConfigHome(PR_GetEnv("XDG_CONFIG_HOME"));
+  if (!xdgConfigHome.IsEmpty()) {  // AddPath will fail on empty strings
+    policy->AddFutureDir(rdonly, xdgConfigHome.get());
   }
 
   nsAutoCString xdgConfigDirs(PR_GetEnv("XDG_CONFIG_DIRS"));
   for (const auto& path : xdgConfigDirs.Split(':')) {
-    policy->AddDir(rdonly, PromiseFlatCString(path).get());
+    if (!path.IsEmpty()) {  // AddPath will fail on empty strings
+      policy->AddFutureDir(rdonly, PromiseFlatCString(path).get());
+    }
   }
 
   // Allow fonts subdir in XDG_DATA_HOME
@@ -364,7 +383,7 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
   if (!xdgDataHome.IsEmpty()) {
     nsAutoCString fontPath(xdgDataHome);
     fontPath.Append("/fonts");
-    policy->AddDir(rdonly, PromiseFlatCString(fontPath).get());
+    policy->AddFutureDir(rdonly, PromiseFlatCString(fontPath).get());
   }
 
   // Any font subdirs in XDG_DATA_DIRS
@@ -372,17 +391,21 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
   for (const auto& path : xdgDataDirs.Split(':')) {
     nsAutoCString fontPath(path);
     fontPath.Append("/fonts");
-    policy->AddDir(rdonly, PromiseFlatCString(fontPath).get());
+    policy->AddFutureDir(rdonly, PromiseFlatCString(fontPath).get());
   }
 
   // Extra configuration/cache dirs in the homedir that we want to allow read
   // access to.
-  mozilla::Array<const char*, 4> extraConfDirs = {
-      ".config",  // Fallback if XDG_CONFIG_PATH isn't set
+  std::vector<const char*> extraConfDirsAllow = {
       ".themes",
       ".fonts",
       ".cache/fontconfig",
   };
+
+  // Fallback if XDG_CONFIG_HOME isn't set
+  if (xdgConfigHome.IsEmpty()) {
+    extraConfDirsAllow.emplace_back(".config");
+  }
 
   nsCOMPtr<nsIFile> homeDir;
   nsresult rv =
@@ -390,15 +413,48 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
   if (NS_SUCCEEDED(rv)) {
     nsCOMPtr<nsIFile> confDir;
 
-    for (const auto& dir : extraConfDirs) {
+    for (const auto& dir : extraConfDirsAllow) {
       rv = homeDir->Clone(getter_AddRefs(confDir));
       if (NS_SUCCEEDED(rv)) {
-        rv = confDir->AppendNative(nsDependentCString(dir));
+        rv = confDir->AppendRelativeNativePath(nsDependentCString(dir));
         if (NS_SUCCEEDED(rv)) {
           nsAutoCString tmpPath;
           rv = confDir->GetNativePath(tmpPath);
           if (NS_SUCCEEDED(rv)) {
             policy->AddDir(rdonly, tmpPath.get());
+          }
+        }
+      }
+    }
+
+    // ~/.config/mozilla/ needs to be manually blocked, because the previous
+    // loop will allow for ~/.config/ access.
+    {
+      // If $XDG_CONFIG_HOME is set, we need to account for it.
+      // FIXME: Bug 1722272: Maybe this should just be handled with
+      // GetSpecialSystemDirectory(Unix_XDG_ConfigHome) ?
+      nsCOMPtr<nsIFile> confDirOrXDGConfigHomeDir;
+      if (!xdgConfigHome.IsEmpty()) {
+        rv = NS_NewNativeLocalFile(xdgConfigHome, true,
+                                   getter_AddRefs(confDirOrXDGConfigHomeDir));
+        // confDirOrXDGConfigHomeDir = nsIFile($XDG_CONFIG_HOME)
+      } else {
+        rv = homeDir->Clone(getter_AddRefs(confDirOrXDGConfigHomeDir));
+        if (NS_SUCCEEDED(rv)) {
+          // since we will use that later, we dont need to care about trailing
+          // slash
+          rv = confDirOrXDGConfigHomeDir->AppendNative(".config"_ns);
+          // confDirOrXDGConfigHomeDir = nsIFile($HOME/.config/)
+        }
+      }
+
+      if (NS_SUCCEEDED(rv)) {
+        rv = confDirOrXDGConfigHomeDir->AppendNative("mozilla"_ns);
+        if (NS_SUCCEEDED(rv)) {
+          nsAutoCString tmpPath;
+          rv = confDirOrXDGConfigHomeDir->GetNativePath(tmpPath);
+          if (NS_SUCCEEDED(rv)) {
+            policy->AddFutureDir(deny, tmpPath.get());
           }
         }
       }
@@ -462,18 +518,6 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
     }
   }
 
-  // ~/.mozilla/systemextensionsdev (bug 1393805)
-  nsCOMPtr<nsIFile> sysExtDevDir;
-  rv = NS_GetSpecialDirectory(XRE_USER_SYS_EXTENSION_DEV_DIR,
-                              getter_AddRefs(sysExtDevDir));
-  if (NS_SUCCEEDED(rv)) {
-    nsAutoCString tmpPath;
-    rv = sysExtDevDir->GetNativePath(tmpPath);
-    if (NS_SUCCEEDED(rv)) {
-      policy->AddDir(rdonly, tmpPath.get());
-    }
-  }
-
   if (mozilla::IsDevelopmentBuild()) {
     // If this is a developer build the resources are symlinks to outside the
     // binary dir. Therefore in non-release builds we allow reads from the whole
@@ -510,17 +554,30 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
     policy->AddPath(SandboxBroker::MAY_CONNECT, bumblebeeSocket);
 
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
-    // Allow local X11 connections, for Primus and VirtualGL to contact
-    // the secondary X server. No exception for Wayland.
-#  if defined(MOZ_WAYLAND)
-    if (GDK_IS_X11_DISPLAY(gdk_display_get_default())) {
+    // Allow local X11 connections, for several purposes:
+    //
+    // * for content processes to use WebGL when the browser is in headless
+    //   mode, by opening the X display if/when needed
+    //
+    // * if Primus or VirtualGL is used, to contact the secondary X server
+    static const bool kIsX11 =
+        !mozilla::widget::GdkIsWaylandDisplay() && PR_GetEnv("DISPLAY");
+    if (kIsX11) {
       policy->AddPrefix(SandboxBroker::MAY_CONNECT, "/tmp/.X11-unix/X");
-    }
-#  else
-    policy->AddPrefix(SandboxBroker::MAY_CONNECT, "/tmp/.X11-unix/X");
-#  endif
-    if (const auto xauth = PR_GetEnv("XAUTHORITY")) {
-      policy->AddPath(rdonly, xauth);
+      if (auto* const xauth = PR_GetEnv("XAUTHORITY")) {
+        policy->AddPath(rdonly, xauth);
+      } else if (auto* const home = PR_GetEnv("HOME")) {
+        // This follows the logic in libXau: append "/.Xauthority",
+        // even if $HOME ends in a slash, except in the special case
+        // where HOME=/ because POSIX allows implementations to treat
+        // an initial double slash specially.
+        nsAutoCString xauth(home);
+        if (xauth != "/"_ns) {
+          xauth.Append('/');
+        }
+        xauth.AppendLiteral(".Xauthority");
+        policy->AddPath(rdonly, xauth.get());
+      }
     }
 #endif
   }
@@ -537,6 +594,9 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
   // For GPU
   policy->AddPath(rdwr, "/dev/ashmem");
   policy->AddPath(rdwr, "/dev/ion");
+
+  // Android emulator GPU
+  policy->AddPath(rdwr, "/dev/goldfish_pipe");
 
 #  if MOZ_SANDBOX_GPU_NODE == GPU_NODE_adreno
   policy->AddPath(rdwr, "/dev/kgsl-3d0");
@@ -566,7 +626,20 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
   policy->AddPath(rdonly, "/dev/__properties__/u:object_r:exported_fingerprint_prop:s0");  // For ro.build.fingerprint
   policy->AddPath(rdonly, "/dev/__properties__/u:object_r:exported_system_prop:s0");  // For persist.sys.timezone
   policy->AddPath(wronly, "/dev/socket/logdw");
+
+  // To access ecc list
+  policy->AddPath(rdonly, "/dev/__properties__/u:object_r:radio_prop:s0"); // For ro.ril.ecclist, ril.ecclist, ril.ecclist1
 #endif // MOZ_WIDGET_GONK
+
+  // Bug 1732580: when packaged as a strictly confined snap, may need
+  // read-access to configuration files under $SNAP/.
+  const char* snap = PR_GetEnv("SNAP");
+  if (snap) {
+    // When running as a snap, the directory pointed to by $SNAP is guaranteed
+    // to exist before the app is launched, but unit tests need to create it
+    // dynamically, hence the use of AddFutureDir().
+    policy->AddFutureDir(rdonly, snap);
+  }
 
   // Read any extra paths that will get write permissions,
   // configured by the user or distro
@@ -614,7 +687,16 @@ void SandboxBrokerPolicyFactory::InitContentPolicy() {
         nsAutoCString tmpPath;
         rv = workDir->GetNativePath(tmpPath);
         if (NS_SUCCEEDED(rv)) {
-          policy->AddDir(rdonly, tmpPath.get());
+          bool exists;
+          rv = workDir->Exists(&exists);
+          if (NS_SUCCEEDED(rv)) {
+            if (!exists) {
+              policy->AddPrefix(rdonly, tmpPath.get());
+              policy->AddPath(rdonly, tmpPath.get());
+            } else {
+              policy->AddDir(rdonly, tmpPath.get());
+            }
+          }
         }
       }
     }
@@ -713,8 +795,7 @@ UniquePtr<SandboxBroker::Policy> SandboxBrokerPolicyFactory::GetContentPolicy(
   policy->AddPath(rdonly, nsPrintfCString("/proc/%d/maps", aPid).get());
 
   // Bug 1198552: memory reporting.
-  policy->AddPath(rdonly, nsPrintfCString("/proc/%d/statm", aPid).get());
-  policy->AddPath(rdonly, nsPrintfCString("/proc/%d/smaps", aPid).get());
+  AddMemoryReporting(policy.get(), aPid);
 
   // Bug 1384804, notably comment 15
   // Used by libnuma, included by x265/ffmpeg, who falls back
@@ -724,6 +805,8 @@ UniquePtr<SandboxBroker::Policy> SandboxBrokerPolicyFactory::GetContentPolicy(
 #ifdef MOZ_WIDGET_GONK
   policy->AddPath(rdonly, nsPrintfCString("/proc/%d/cmdline", aPid).get());
   policy->AddPath(rdonly, nsPrintfCString("/proc/%d/comm", aPid).get());
+  // debuggerd need this to find all threads in the process.
+  policy->AddPath(rdonly, nsPrintfCString("/proc/%d/task", aPid).get());
 
 #  if MOZ_SANDBOX_GPU_NODE == GPU_NODE_imagination
   policy->AddPath(rdonly,
@@ -758,6 +841,9 @@ SandboxBrokerPolicyFactory::GetRDDPolicy(int aPid) {
   policy->AddDir(rdonly, "/usr/lib");
   policy->AddDir(rdonly, "/usr/lib32");
   policy->AddDir(rdonly, "/usr/lib64");
+
+  // Bug 1647957: memory reporting.
+  AddMemoryReporting(policy.get(), aPid);
 
   // Firefox binary dir.
   // Note that unlike the previous cases, we use NS_GetSpecialDirectory
@@ -808,11 +894,19 @@ SandboxBrokerPolicyFactory::GetSocketProcessPolicy(int aPid) {
   policy->AddDir(rdonly, "/usr/local/share");
   policy->AddDir(rdonly, "/etc");
 
+  // glibc will try to stat64("/") while populating nsswitch database
+  // https://sourceware.org/git/?p=glibc.git;a=blob;f=nss/nss_database.c;h=cf0306adc47f12d9bc761ab1b013629f4482b7e6;hb=9826b03b747b841f5fc6de2054bf1ef3f5c4bdf3#l396
+  // denying will make getaddrinfo() return ENONAME
+  policy->AddDir(access, "/");
+
   AddLdconfigPaths(policy.get());
 
   // Socket process sandbox needs to allow shmem in order to support
   // profiling.  See Bug 1626385.
   AddSharedMemoryPaths(policy.get(), aPid);
+
+  // Bug 1647957: memory reporting.
+  AddMemoryReporting(policy.get(), aPid);
 
   // Firefox binary dir.
   // Note that unlike the previous cases, we use NS_GetSpecialDirectory

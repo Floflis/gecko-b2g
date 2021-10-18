@@ -19,7 +19,7 @@ use qlog::{
 use crate::Role;
 
 #[allow(clippy::module_name_repetitions)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NeqoQlog {
     inner: Rc<RefCell<Option<NeqoQlogShared>>>,
 }
@@ -51,9 +51,7 @@ impl NeqoQlog {
     /// Create a disabled `NeqoQlog` configuration.
     #[must_use]
     pub fn disabled() -> Self {
-        Self {
-            inner: Rc::new(RefCell::new(None)),
-        }
+        Self::default()
     }
 
     /// If logging enabled, closure may generate an event to be logged.
@@ -88,12 +86,6 @@ impl NeqoQlog {
     }
 }
 
-impl Default for NeqoQlog {
-    fn default() -> Self {
-        Self::disabled()
-    }
-}
-
 impl fmt::Debug for NeqoQlogShared {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "NeqoQlog writing to {}", self.qlog_path.display())
@@ -103,7 +95,7 @@ impl fmt::Debug for NeqoQlogShared {
 impl Drop for NeqoQlogShared {
     fn drop(&mut self) {
         if let Err(e) = self.streamer.finish_log() {
-            crate::do_log!(::log::Level::Error, "Error dropping NeqoQlog: {}", e)
+            crate::do_log!(::log::Level::Error, "Error dropping NeqoQlog: {}", e);
         }
     }
 }

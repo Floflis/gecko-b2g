@@ -6,12 +6,12 @@
 
 use super::messages::*;
 use crate::common::core::{BaseMessage, BaseMessageKind};
+use crate::common::sidl_task::{SidlRunnable, SidlTask};
 use crate::common::traits::TrackerId;
 use crate::common::uds_transport::{from_base_message, SessionObject, XpcomSessionObject};
 use bincode::Options;
 use log::{debug, error};
-use moz_task::{Task, TaskRunnable, ThreadPtrHandle};
-use nserror::nsresult;
+use moz_task::ThreadPtrHandle;
 use nsstring::*;
 use std::any::Any;
 use xpcom::interfaces::nsIAppsServiceDelegate;
@@ -44,7 +44,7 @@ impl AppsServiceDelegate {
             AppsServiceCommand::OnBootDone() => {
                 GeckoBridgeFromClient::AppsServiceDelegateOnBootDoneSuccess
             }
-            AppsServiceCommand::OnClear(_, _) => {
+            AppsServiceCommand::OnClear(_, _, _) => {
                 GeckoBridgeFromClient::AppsServiceDelegateOnClearSuccess
             }
             AppsServiceCommand::OnInstall(_, _) => {
@@ -64,8 +64,8 @@ impl AppsServiceDelegate {
             command,
         };
 
-        let _ = TaskRunnable::new("AppsServiceDelegate", Box::new(task))
-            .and_then(|r| TaskRunnable::dispatch(r, self.xpcom.owning_thread()));
+        let _ = SidlRunnable::new("AppsServiceDelegate", Box::new(task))
+            .and_then(|r| SidlRunnable::dispatch(r, self.xpcom.owning_thread()));
 
         // Wrap the payload in a base message and send it.
         let message = BaseMessage {
@@ -92,12 +92,14 @@ impl SessionObject for AppsServiceDelegate {
             Ok(GeckoBridgeToClient::AppsServiceDelegateOnBootDone) => {
                 Some(self.post_task(AppsServiceCommand::OnBootDone(), request_id))
             }
-            Ok(GeckoBridgeToClient::AppsServiceDelegateOnClear(manifest_url, value)) => {
-                Some(self.post_task(
-                    AppsServiceCommand::OnClear(manifest_url, value.into()),
-                    request_id,
-                ))
-            }
+            Ok(GeckoBridgeToClient::AppsServiceDelegateOnClear(
+                manifest_url,
+                clear_type,
+                value,
+            )) => Some(self.post_task(
+                AppsServiceCommand::OnClear(manifest_url, clear_type, value.into()),
+                request_id,
+            )),
             Ok(GeckoBridgeToClient::AppsServiceDelegateOnInstall(manifest_url, value)) => {
                 Some(self.post_task(
                     AppsServiceCommand::OnInstall(manifest_url, value.into()),
@@ -153,6 +155,7 @@ enum AppsServiceCommand {
     OnClear(
         String, // manifest_url
         String, // clear_type
+        String, // b2g_features
     ),
     OnInstall(
         String, // manifest_url
@@ -174,7 +177,7 @@ struct AppsServiceDelegateTask {
     command: AppsServiceCommand,
 }
 
-impl Task for AppsServiceDelegateTask {
+impl SidlTask for AppsServiceDelegateTask {
     fn run(&self) {
         // Call the method on the initial thread.
         debug!("AppsServiceDelegateTask::run");
@@ -198,11 +201,16 @@ impl Task for AppsServiceDelegateTask {
                         object.OnBootDone();
                     }
                 }
-                AppsServiceCommand::OnClear(manifest_url, value) => {
+                AppsServiceCommand::OnClear(manifest_url, clear_type, value) => {
                     let manifest_url = nsString::from(manifest_url);
+                    let clear_type = nsString::from(clear_type);
                     let value = nsString::from(value);
                     unsafe {
-                        object.OnClear(&*manifest_url as &nsAString, &*value as &nsAString);
+                        object.OnClear(
+                            &*manifest_url as &nsAString,
+                            &*clear_type as &nsAString,
+                            &*value as &nsAString,
+                        );
                     }
                 }
                 AppsServiceCommand::OnInstall(manifest_url, value) => {
@@ -227,11 +235,5 @@ impl Task for AppsServiceDelegateTask {
                 }
             }
         }
-    }
-
-    fn done(&self) -> Result<(), nsresult> {
-        debug!("AppsServiceDelegateTask::Done");
-        // We don't return a result to the calling thread, so nothing to do.
-        Ok(())
     }
 }

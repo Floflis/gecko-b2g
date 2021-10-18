@@ -38,6 +38,7 @@
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Vector.h"
 #include "mozilla/WindowsDpiAwareness.h"
+#include "mozilla/WindowsProcessMitigations.h"
 #include "mozilla/gfx/2D.h"
 
 /**
@@ -84,7 +85,7 @@ namespace mozilla {
 enum class PointerCapabilities : uint8_t;
 #if defined(ACCESSIBILITY)
 namespace a11y {
-class Accessible;
+class LocalAccessible;
 }  // namespace a11y
 #endif  // defined(ACCESSIBILITY)
 
@@ -144,10 +145,15 @@ class WinUtils {
   static EnableNonClientDpiScalingProc sEnableNonClientDpiScaling;
   static GetSystemMetricsForDpiProc sGetSystemMetricsForDpi;
 
+  // Set on Initialize().
+  static bool sHasPackageIdentity;
+
  public:
   class AutoSystemDpiAware {
    public:
     AutoSystemDpiAware() {
+      MOZ_DIAGNOSTIC_ASSERT(!IsWin32kLockedDown());
+
       if (sSetThreadDpiAwarenessContext) {
         mPrevContext =
             sSetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
@@ -192,12 +198,7 @@ class WinUtils {
    * and physical (device) pixels.
    */
   static double LogToPhysFactor(HMONITOR aMonitor);
-  static double LogToPhysFactor(HWND aWnd) {
-    // if there's an ancestor window, we want to share its DPI setting
-    HWND ancestor = ::GetAncestor(aWnd, GA_ROOTOWNER);
-    return LogToPhysFactor(::MonitorFromWindow(ancestor ? ancestor : aWnd,
-                                               MONITOR_DEFAULTTOPRIMARY));
-  }
+  static double LogToPhysFactor(HWND aWnd);
   static double LogToPhysFactor(HDC aDC) {
     return LogToPhysFactor(::WindowFromDC(aDC));
   }
@@ -214,6 +215,20 @@ class WinUtils {
    *         if aHdc is null
    */
   static gfx::MarginDouble GetUnwriteableMarginsForDeviceInInches(HDC aHdc);
+
+  static bool HasPackageIdentity() { return sHasPackageIdentity; }
+
+  /*
+   * The "family name" of a Windows app package is the full name without any of
+   * the components that might change during the life cycle of the app (such as
+   * the version number, or the architecture). This leaves only those properties
+   * which together serve to uniquely identify the app within one Windows
+   * installation, namely the base name and the publisher name. Meaning, this
+   * string is safe to use anywhere that a string uniquely identifying an app
+   * installation is called for (because multiple copies of the same app on the
+   * same system is not a supported feature in the app framework).
+   */
+  static nsString GetPackageFamilyName();
 
   /**
    * Logging helpers that dump output to prlog module 'Widget', console, and
@@ -554,12 +569,14 @@ class WinUtils {
 
   static const WhitelistVec& GetWhitelistedPaths();
 
+  static bool GetClassName(HWND aHwnd, nsAString& aName);
+
  private:
   static WhitelistVec BuildWhitelist();
 
  public:
 #ifdef ACCESSIBILITY
-  static a11y::Accessible* GetRootAccessibleForHWND(HWND aHwnd);
+  static a11y::LocalAccessible* GetRootAccessibleForHWND(HWND aHwnd);
 #endif
 };
 

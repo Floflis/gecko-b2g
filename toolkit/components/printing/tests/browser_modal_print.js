@@ -51,6 +51,7 @@ add_task(async function testPrintMultiple() {
     assertExpectedPrintPage(helper);
 
     // Make sure we clean up, ideally this would be handled by the helper.
+    await TestUtils.waitForTick();
     await helper.closeDialog();
   });
 });
@@ -244,4 +245,40 @@ add_task(async function testPrintProgressIndicator() {
       await helper.resolvePrint();
     });
   });
+});
+
+add_task(async function testPageSizePortrait() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["layout.css.page-size.enabled", true]],
+  });
+  await PrintHelper.withTestPage(async helper => {
+    await helper.startPrint();
+
+    let orientation = helper.get("orientation");
+    ok(orientation.hidden, "Orientation selector is hidden");
+
+    is(
+      helper.settings.orientation,
+      Ci.nsIPrintSettings.kPortraitOrientation,
+      "Orientation set to portrait"
+    );
+  }, "file_portrait.html");
+});
+
+add_task(async function testPageSizeLandscape() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["layout.css.page-size.enabled", true]],
+  });
+  await PrintHelper.withTestPage(async helper => {
+    await helper.startPrint();
+
+    let orientation = helper.get("orientation");
+    ok(orientation.hidden, "Orientation selector is hidden");
+
+    is(
+      helper.settings.orientation,
+      Ci.nsIPrintSettings.kLandscapeOrientation,
+      "Orientation set to landscape"
+    );
+  }, "file_landscape.html");
 });

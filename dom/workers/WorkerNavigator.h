@@ -32,14 +32,15 @@ namespace dom {
 class StorageManager;
 class MediaCapabilities;
 class B2G;
+class LockManager;
 
 namespace network {
 class Connection;
 }  // namespace network
 
 class WorkerNavigator final : public nsWrapperCache {
-  typedef struct workerinternals::RuntimeService::NavigatorProperties
-      NavigatorProperties;
+  using NavigatorProperties =
+      workerinternals::RuntimeService::NavigatorProperties;
 
   NavigatorProperties mProperties;
   RefPtr<StorageManager> mStorageManager;
@@ -47,6 +48,7 @@ class WorkerNavigator final : public nsWrapperCache {
   RefPtr<dom::MediaCapabilities> mMediaCapabilities;
   RefPtr<webgpu::Instance> mWebGpu;
   RefPtr<B2G> mB2G;
+  RefPtr<dom::LockManager> mLocks;
   bool mOnline;
 
   WorkerNavigator(const NavigatorProperties& aProperties, bool aOnline);
@@ -108,6 +110,7 @@ class WorkerNavigator final : public nsWrapperCache {
   webgpu::Instance* Gpu();
 
   B2G* B2g();
+  dom::LockManager* Locks();
 };
 
 }  // namespace dom

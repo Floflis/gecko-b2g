@@ -11,18 +11,14 @@
     title: "Basic windowshare-only peer connection"
   });
 
-  var test;
   runNetworkTest(function (options) {
-    test = new PeerConnectionTest(options);
-    var constraints = {
-      video: {
-         mozMediaSource: "window",
-         mediaSource: "window"
-      },
+    const test = new PeerConnectionTest(options);
+    const constraints = {
+      video: { mediaSource: "window" },
       fake: false
     };
     test.setMediaConstraints([constraints], []);
-    test.run();
+    return test.run();
   });
 </script>
 </pre>

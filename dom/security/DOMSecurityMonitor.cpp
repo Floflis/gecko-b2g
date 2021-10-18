@@ -13,6 +13,7 @@
 #include "nsIURI.h"
 #include "nsJSUtils.h"
 
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/StaticPrefs_dom.h"
 
 /* static */
@@ -36,7 +37,8 @@ void DOMSecurityMonitor::AuditParsingOfHTMLXMLFragments(
   uint32_t lineNum = 0;
   uint32_t columnNum = 0;
   JSContext* cx = nsContentUtils::GetCurrentJSContext();
-  if (!nsJSUtils::GetCallingLocation(cx, filename, &lineNum, &columnNum)) {
+  if (!cx ||
+      !nsJSUtils::GetCallingLocation(cx, filename, &lineNum, &columnNum)) {
     return;
   }
 
@@ -54,7 +56,7 @@ void DOMSecurityMonitor::AuditParsingOfHTMLXMLFragments(
       "chrome://global/content/elements/marquee.js"_ns,
       nsLiteralCString(
           "chrome://pocket/content/panels/js/vendor/jquery-2.1.1.min.js"),
-      "chrome://browser/content/aboutNetError.js"_ns,
+      "chrome://browser/content/certerror/aboutNetError.js"_ns,
       nsLiteralCString("chrome://devtools/content/shared/sourceeditor/"
                        "codemirror/codemirror.bundle.js"),
       nsLiteralCString(
@@ -89,7 +91,11 @@ void DOMSecurityMonitor::AuditParsingOfHTMLXMLFragments(
       //-------------------------------------------------------------------
       "chrome://b2g/content/"_ns,
       "chrome://system/content/"_ns,
+#if !defined(API_DAEMON_PORT) || API_DAEMON_PORT == 80
       "http://shared.localhost/"_ns,
+#else
+      nsLiteralCString("http://shared.localhost:" MOZ_STRINGIFY(API_DAEMON_PORT) "/"),
+#endif
   };
 
   for (const nsLiteralCString& allowlistEntry : htmlFragmentAllowlist) {

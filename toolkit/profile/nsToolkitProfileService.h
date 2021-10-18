@@ -82,7 +82,8 @@ class nsToolkitProfileService final : public nsIToolkitProfileService {
                                 nsIToolkitProfile** aProfile, bool* aDidCreate,
                                 bool* aWasDefaultSelection);
   nsresult CreateResetProfile(nsIToolkitProfile** aNewProfile);
-  nsresult ApplyResetProfile(nsIToolkitProfile* aOldProfile);
+  nsresult ApplyResetProfile(nsIToolkitProfile* aOldProfile,
+                             bool aDeleteOldProfile = true);
   void CompleteStartup();
 
  private:
@@ -106,6 +107,7 @@ class nsToolkitProfileService final : public nsIToolkitProfileService {
   nsresult MaybeMakeDefaultDedicatedProfile(nsIToolkitProfile* aProfile,
                                             bool* aResult);
   bool IsSnapEnvironment();
+  bool IsWinPackageEnvironment();
   bool UseLegacyProfiles();
   nsresult CreateDefaultProfile(nsIToolkitProfile** aResult);
   void SetNormalDefault(nsIToolkitProfile* aProfile);
@@ -151,9 +153,6 @@ class nsToolkitProfileService final : public nsIToolkitProfileService {
   bool mUseDevEditionProfile;
   // True if this install should use a dedicated default profile.
   const bool mUseDedicatedProfile;
-  // True if during startup no dedicated profile was already selected, an old
-  // default profile existed but was rejected so a new profile was created.
-  bool mCreatedAlternateProfile;
   nsString mStartupReason;
   bool mMaybeLockProfile;
   // Holds the current application update channel. This is only really held

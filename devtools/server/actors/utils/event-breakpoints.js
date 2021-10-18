@@ -4,8 +4,6 @@
 
 "use strict";
 
-const Services = require("Services");
-
 function generalEvent(groupID, eventType) {
   return {
     id: `event.${groupID}.${eventType}`,
@@ -125,6 +123,8 @@ const AVAILABLE_BREAKPOINTS = [
       generalEvent("control", "scroll"),
       generalEvent("control", "zoom"),
       generalEvent("control", "focus"),
+      generalEvent("control", "focusin"),
+      generalEvent("control", "focusout"),
       generalEvent("control", "blur"),
       generalEvent("control", "select"),
       generalEvent("control", "change"),
@@ -175,10 +175,7 @@ const AVAILABLE_BREAKPOINTS = [
   {
     name: "Keyboard",
     items: [
-      Services.prefs &&
-      Services.prefs.getBoolPref("dom.input_events.beforeinput.enabled")
-        ? generalEvent("keyboard", "beforeinput")
-        : null,
+      generalEvent("keyboard", "beforeinput"),
       generalEvent("keyboard", "input"),
       generalEvent("keyboard", "keydown"),
       generalEvent("keyboard", "keyup"),
@@ -475,4 +472,8 @@ function getAvailableEventBreakpoints() {
     });
   }
   return available;
+}
+exports.validateEventBreakpoint = validateEventBreakpoint;
+function validateEventBreakpoint(id) {
+  return !!EVENTS_BY_ID[id];
 }

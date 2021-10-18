@@ -91,8 +91,7 @@ impl Window {
         let device_pixel_ratio = context.window().get_hidpi_factor() as f32;
 
         let opts = webrender::RendererOptions {
-            device_pixel_ratio,
-            clear_color: Some(clear_color),
+            clear_color,
             ..webrender::RendererOptions::default()
         };
 
@@ -186,29 +185,30 @@ impl Window {
         let mut txn = Transaction::new();
         let mut builder = DisplayListBuilder::new(self.pipeline_id);
         let space_and_clip = SpaceAndClipInfo::root_scroll(self.pipeline_id);
+        builder.begin();
 
-        let bounds = LayoutRect::new(LayoutPoint::zero(), layout_size);
+        let bounds = LayoutRect::from_size(layout_size);
         builder.push_simple_stacking_context(
-            bounds.origin,
+            bounds.min,
             space_and_clip.spatial_id,
             PrimitiveFlags::IS_BACKFACE_VISIBLE,
         );
 
         builder.push_rect(
             &CommonItemProperties::new(
-                LayoutRect::new(
+                LayoutRect::from_origin_and_size(
                     LayoutPoint::new(100.0, 200.0),
                     LayoutSize::new(100.0, 200.0),
                 ),
                 space_and_clip,
             ),
-            LayoutRect::new(
+            LayoutRect::from_origin_and_size(
                 LayoutPoint::new(100.0, 200.0),
                 LayoutSize::new(100.0, 200.0),
             ),
             ColorF::new(0.0, 1.0, 0.0, 1.0));
 
-        let text_bounds = LayoutRect::new(
+        let text_bounds = LayoutRect::from_origin_and_size(
             LayoutPoint::new(100.0, 50.0),
             LayoutSize::new(700.0, 200.0)
         );
@@ -281,11 +281,10 @@ impl Window {
             self.epoch,
             None,
             layout_size,
-            builder.finalize(),
-            true,
+            builder.end(),
         );
         txn.set_root_pipeline(self.pipeline_id);
-        txn.generate_frame(0);
+        txn.generate_frame(0, RenderReasons::empty());
         api.send_transaction(self.document_id, txn);
 
         renderer.update();

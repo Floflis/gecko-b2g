@@ -7,7 +7,8 @@
 
 #include "MediaInfo.h"
 #include "mozilla/Maybe.h"
-#include "mozilla/TimeStamp.h"
+#include "mozilla/AwakeTimeStamp.h"
+#include "AudioChannelService.h"
 #include "nsISupportsImpl.h"
 
 namespace mozilla {
@@ -18,8 +19,17 @@ class TelemetryProbesReporterOwner {
   virtual Maybe<nsAutoString> GetKeySystem() const = 0;
   virtual MediaInfo GetMediaInfo() const = 0;
   virtual FrameStatistics* GetFrameStatistics() const = 0;
+  virtual bool IsEncrypted() const = 0;
   virtual void DispatchAsyncTestingEvent(const nsAString& aName) = 0;
 };
+
+enum class MediaContent : uint8_t {
+  MEDIA_HAS_NOTHING = (0 << 0),
+  MEDIA_HAS_VIDEO = (1 << 0),
+  MEDIA_HAS_AUDIO = (1 << 1)
+};
+
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(MediaContent)
 
 /**
  * This class is used for collecting and reporting telemetry probes for
@@ -32,29 +42,51 @@ class TelemetryProbesReporter final {
   ~TelemetryProbesReporter() = default;
 
   enum class Visibility {
+    eInitial,
     eVisible,
     eInvisible,
   };
 
-  void OnPlay(Visibility aVisibility);
+  static MediaContent MediaInfoToMediaContent(const MediaInfo& aInfo);
+
+  using AudibleState = dom::AudioChannelService::AudibleState;
+
+  // State transitions
+  void OnPlay(Visibility aVisibility, MediaContent aContent, bool aIsMuted);
   void OnPause(Visibility aVisibility);
-  void OnVisibilityChanged(Visibility aVisibility);
-  void OnDecodeSuspended();
-  void OnDecodeResumed();
   void OnShutdown();
 
-  double GetTotalPlayTimeInSeconds() const;
+  void OnVisibilityChanged(Visibility aVisibility);
+  void OnAudibleChanged(AudibleState aAudible);
+  void OnMediaContentChanged(MediaContent aContent);
+  void OnMutedChanged(bool aMuted);
+  void OnDecodeSuspended();
+  void OnDecodeResumed();
+
+  double GetTotalVideoPlayTimeInSeconds() const;
+  double GetVisibleVideoPlayTimeInSeconds() const;
   double GetInvisibleVideoPlayTimeInSeconds() const;
   double GetVideoDecodeSuspendedTimeInSeconds() const;
 
+  double GetTotalAudioPlayTimeInSeconds() const;
+  double GetInaudiblePlayTimeInSeconds() const;
+  double GetAudiblePlayTimeInSeconds() const;
+  double GetMutedPlayTimeInSeconds() const;
+
  private:
-  void StartInvisibleVideoTimeAcculator();
-  void PauseInvisibleVideoTimeAcculator();
+  void StartInvisibleVideoTimeAccumulator();
+  void PauseInvisibleVideoTimeAccumulator();
+  void StartInaudibleAudioTimeAccumulator();
+  void PauseInaudibleAudioTimeAccumulator();
+  void StartMutedAudioTimeAccumulator();
+  void PauseMutedAudioTimeAccumulator();
   bool HasOwnerHadValidVideo() const;
+  bool HasOwnerHadValidMedia() const;
   void AssertOnMainThreadAndNotShutdown() const;
 
   void ReportTelemetry();
   void ReportResultForVideo();
+  void ReportResultForAudio();
   void ReportResultForVideoFrameStatistics(double aTotalPlayTimeS,
                                            const nsCString& key);
 
@@ -66,22 +98,22 @@ class TelemetryProbesReporter final {
       if (IsStarted()) {
         return;
       }
-      mStartTime = TimeStamp::Now();
+      mStartTime = Some(AwakeTimeStamp::NowLoRes());
     }
     void Pause() {
       if (!IsStarted()) {
         return;
       }
-      mSum = (TimeStamp::Now() - mStartTime);
-      mStartTime = TimeStamp();
+      mSum = (AwakeTimeStamp::NowLoRes() - mStartTime.value());
+      mStartTime = Nothing();
     }
-    bool IsStarted() const { return !mStartTime.IsNull(); }
+    bool IsStarted() const { return mStartTime.isSome(); }
 
     double GetAndClearTotal() {
       MOZ_ASSERT(!IsStarted(), "only call this when accumulator is paused");
       double total = mSum.ToSeconds();
-      mStartTime = TimeStamp();
-      mSum = TimeDuration();
+      mStartTime = Nothing();
+      mSum = AwakeTimeDuration();
       return total;
     }
 
@@ -89,29 +121,44 @@ class TelemetryProbesReporter final {
       if (!IsStarted()) {
         return mSum.ToSeconds();
       }
-      return (TimeStamp::Now() - mStartTime).ToSeconds();
+      return (AwakeTimeStamp::NowLoRes() - mStartTime.value()).ToSeconds();
     }
 
    private:
-    TimeStamp mStartTime;
-    TimeDuration mSum;
+    Maybe<AwakeTimeStamp> mStartTime;
+    AwakeTimeDuration mSum;
   };
 
   // The owner is HTMLMediaElement that is guaranteed being always alive during
   // our whole life cycle.
   TelemetryProbesReporterOwner* mOwner;
 
-  // Total time an element has spent on playing.
-  TimeDurationAccumulator mTotalPlayTime;
+  // Total time an element has spent on playing video.
+  TimeDurationAccumulator mTotalVideoPlayTime;
+
+  // Total time an element has spent on playing audio
+  TimeDurationAccumulator mTotalAudioPlayTime;
 
   // Total time a VIDEO element has spent playing while the corresponding media
   // element is invisible.
   TimeDurationAccumulator mInvisibleVideoPlayTime;
 
+  // Total time an element has spent playing audio that was not audible
+  TimeDurationAccumulator mInaudibleAudioPlayTime;
+
+  // Total time an element with an audio track has spent muted
+  TimeDurationAccumulator mMutedAudioPlayTime;
+
   // Total time a VIDEO has spent in video-decode-suspend mode.
   TimeDurationAccumulator mVideoDecodeSuspendedTime;
 
-  Visibility mMediaElementVisibility = Visibility::eInvisible;
+  Visibility mMediaElementVisibility = Visibility::eInitial;
+
+  MediaContent mMediaContent = MediaContent::MEDIA_HAS_NOTHING;
+
+  bool mIsPlaying = false;
+
+  bool mIsMuted = false;
 };
 
 }  // namespace mozilla

@@ -98,11 +98,6 @@ static const char* kRedPayloadName = "red";
 // 32 bytes is what WebRTC CodecInst expects
 const unsigned int WebrtcVideoConduit::CODEC_PLNAME_SIZE = 32;
 
-template <typename T>
-T MinIgnoreZero(const T& a, const T& b) {
-  return std::min(a ? a : b, b ? b : a);
-}
-
 template <class t>
 static void ConstrainPreservingAspectRatioExact(uint32_t max_fs, t* width,
                                                 t* height) {
@@ -674,6 +669,15 @@ MediaConduitErrorCode WebrtcVideoConduit::CreateSendStream() {
   }
 
   mSendStreamConfig.encoder_settings.encoder = encoder.get();
+
+#ifdef MOZ_WIDGET_GONK
+  // Allow 100% encoding time utilization for HW encoders. This can avoid
+  // unnecessary image scaling down caused by incorrectly detecting CPU
+  // overusing on HW encoders.
+  if (encoder->SupportsNativeHandle()) {
+    mSendStreamConfig.encoder_settings.full_overuse_time = true;
+  }
+#endif
 
   MOZ_ASSERT(
       mSendStreamConfig.rtp.ssrcs.size() == mEncoderConfig.number_of_streams,

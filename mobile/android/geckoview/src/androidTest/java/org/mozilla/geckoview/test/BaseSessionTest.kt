@@ -36,12 +36,16 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
         const val CLICK_TO_RELOAD_HTML_PATH = "/assets/www/clickToReload.html"
         const val CONTENT_CRASH_URL = "about:crashcontent"
         const val DOWNLOAD_HTML_PATH = "/assets/www/download.html"
+        const val FORM_BLANK_HTML_PATH = "/assets/www/form_blank.html"
         const val FORMS_HTML_PATH = "/assets/www/forms.html"
         const val FORMS2_HTML_PATH = "/assets/www/forms2.html"
         const val FORMS3_HTML_PATH = "/assets/www/forms3.html"
         const val FORMS4_HTML_PATH = "/assets/www/forms4.html"
+        const val FORMS5_HTML_PATH = "/assets/www/forms5.html"
+        const val ADDRESS_FORM_HTML_PATH = "/assets/www/address_form.html"
         const val FORMS_AUTOCOMPLETE_HTML_PATH = "/assets/www/forms_autocomplete.html"
         const val FORMS_ID_VALUE_HTML_PATH = "/assets/www/forms_id_value.html"
+        const val CC_FORM_HTML_PATH = "/assets/www/cc_form.html"
         const val HELLO_HTML_PATH = "/assets/www/hello.html"
         const val HELLO2_HTML_PATH = "/assets/www/hello2.html"
         const val HELLO_IFRAME_HTML_PATH = "/assets/www/iframe_hello.html"
@@ -49,6 +53,7 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
         const val INVALID_URI = "not a valid uri"
         const val LINKS_HTML_PATH = "/assets/www/links.html"
         const val LOREM_IPSUM_HTML_PATH = "/assets/www/loremIpsum.html"
+        const val MOUSE_TO_RELOAD_HTML_PATH = "/assets/www/mouseToReload.html"
         const val NEW_SESSION_CHILD_HTML_PATH = "/assets/www/newSession_child.html"
         const val NEW_SESSION_HTML_PATH = "/assets/www/newSession.html"
         const val POPUP_HTML_PATH = "/assets/www/popup.html"
@@ -91,11 +96,21 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
         const val IFRAME_98VH_SCROLLABLE_HTML_PATH = "/assets/www/iframe_98vh_scrollable.html"
         const val IFRAME_98VH_NO_SCROLLABLE_HTML_PATH = "/assets/www/iframe_98vh_no_scrollable.html"
         const val TOUCHSTART_HTML_PATH = "/assets/www/touchstart.html"
+        const val TOUCH_ACTION_HTML_PATH = "/assets/www/touch-action.html"
+        const val OVERSCROLL_BEHAVIOR_AUTO_HTML_PATH = "/assets/www/overscroll-behavior-auto.html"
+        const val OVERSCROLL_BEHAVIOR_AUTO_NONE_HTML_PATH = "/assets/www/overscroll-behavior-auto-none.html"
+        const val OVERSCROLL_BEHAVIOR_NONE_AUTO_HTML_PATH = "/assets/www/overscroll-behavior-none-auto.html"
+        const val OVERSCROLL_BEHAVIOR_NONE_NON_ROOT_HTML_PATH = "/assets/www/overscroll-behavior-none-on-non-root.html"
+        const val SCROLL_HANDOFF_HTML_PATH = "/assets/www/scroll-handoff.html"
+        const val SHOW_DYNAMIC_TOOLBAR_HTML_PATH = "/assets/www/showDynamicToolbar.html"
 
         const val TEST_ENDPOINT = GeckoSessionTestRule.TEST_ENDPOINT
+        const val TEST_HOST = GeckoSessionTestRule.TEST_HOST
     }
 
     @get:Rule val sessionRule = GeckoSessionTestRule()
+
+    @get:Rule var temporaryProfile = TemporaryProfileRule()
 
     @get:Rule val errors = ErrorCollector()
 
@@ -173,6 +188,9 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
     fun GeckoSession.synthesizeTap(x: Int, y: Int) =
             sessionRule.synthesizeTap(this, x, y)
 
+    fun GeckoSession.synthesizeMouseMove(x: Int, y: Int) =
+            sessionRule.synthesizeMouseMove(this, x, y)
+
     fun GeckoSession.evaluateJS(js: String): Any? =
             sessionRule.evaluateJS(this, js)
 
@@ -198,6 +216,8 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
     }
 
     fun GeckoSession.flushApzRepaints() = sessionRule.flushApzRepaints(this)
+
+    fun GeckoSession.promiseAllPaintsDone() = sessionRule.promiseAllPaintsDone(this)
 
     var GeckoSession.active: Boolean
             get() = sessionRule.getActive(this)

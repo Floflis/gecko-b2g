@@ -50,8 +50,8 @@ ChromeUtils.defineModuleGetter(
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "RecommendationProviderSwitcher",
-  "resource://activity-stream/lib/RecommendationProviderSwitcher.jsm"
+  "RecommendationProvider",
+  "resource://activity-stream/lib/RecommendationProvider.jsm"
 );
 ChromeUtils.defineModuleGetter(
   this,
@@ -145,7 +145,7 @@ const PREFS_CONFIG = new Map([
           api_key_pref: "extensions.pocket.oAuthConsumerKey",
           // Use the opposite value as what default value the feed would have used
           hidden: !PREFS_CONFIG.get("feeds.system.topstories").getValue(args),
-          provider_icon: "pocket",
+          provider_icon: "chrome://global/skin/icons/pocket.svg",
           provider_name: "Pocket",
           read_more_endpoint:
             "https://getpocket.com/explore/trending?src=fx_new_tab",
@@ -156,67 +156,7 @@ const PREFS_CONFIG = new Map([
           }`,
           stories_referrer: "https://getpocket.com/recommendations",
           topics_endpoint: `https://getpocket.cdn.mozilla.net/v3/firefox/trending-topics?version=2&consumer_key=$apiKey&locale_lang=${args.locale}`,
-          model_keys: [
-            "nmf_model_animals",
-            "nmf_model_business",
-            "nmf_model_career",
-            "nmf_model_datascience",
-            "nmf_model_design",
-            "nmf_model_education",
-            "nmf_model_entertainment",
-            "nmf_model_environment",
-            "nmf_model_fashion",
-            "nmf_model_finance",
-            "nmf_model_food",
-            "nmf_model_health",
-            "nmf_model_home",
-            "nmf_model_life",
-            "nmf_model_marketing",
-            "nmf_model_politics",
-            "nmf_model_programming",
-            "nmf_model_science",
-            "nmf_model_shopping",
-            "nmf_model_sports",
-            "nmf_model_tech",
-            "nmf_model_travel",
-            "nb_model_animals",
-            "nb_model_books",
-            "nb_model_business",
-            "nb_model_career",
-            "nb_model_datascience",
-            "nb_model_design",
-            "nb_model_economics",
-            "nb_model_education",
-            "nb_model_entertainment",
-            "nb_model_environment",
-            "nb_model_fashion",
-            "nb_model_finance",
-            "nb_model_food",
-            "nb_model_game",
-            "nb_model_health",
-            "nb_model_history",
-            "nb_model_home",
-            "nb_model_life",
-            "nb_model_marketing",
-            "nb_model_military",
-            "nb_model_philosophy",
-            "nb_model_photography",
-            "nb_model_politics",
-            "nb_model_productivity",
-            "nb_model_programming",
-            "nb_model_psychology",
-            "nb_model_science",
-            "nb_model_shopping",
-            "nb_model_society",
-            "nb_model_space",
-            "nb_model_sports",
-            "nb_model_tech",
-            "nb_model_travel",
-            "nb_model_writing",
-          ],
           show_spocs: showSpocs(args),
-          personalized: true,
-          version: 1,
         }),
     },
   ],
@@ -263,13 +203,6 @@ const PREFS_CONFIG = new Map([
     },
   ],
   [
-    "filterAdult",
-    {
-      title: "Remove adult pages from sites, highlights, etc.",
-      value: true,
-    },
-  ],
-  [
     "showSearch",
     {
       title: "Show the Search bar",
@@ -280,7 +213,7 @@ const PREFS_CONFIG = new Map([
     "feeds.snippets",
     {
       title: "Show snippets on activity stream",
-      value: true,
+      value: false,
     },
   ],
   [
@@ -427,19 +360,6 @@ const PREFS_CONFIG = new Map([
       }),
     },
   ],
-  [
-    "asrouter.providers.cfr-fxa",
-    {
-      title: "Configuration for CFR FxA Messages provider",
-      value: JSON.stringify({
-        id: "cfr-fxa",
-        enabled: true,
-        type: "remote-settings",
-        bucket: "cfr-fxa",
-        updateCycleInMs: 3600000,
-      }),
-    },
-  ],
   // See browser/app/profile/firefox.js for other ASR preferences. They must be defined there to enable roll-outs.
   [
     "discoverystream.flight.blocks",
@@ -460,7 +380,6 @@ const PREFS_CONFIG = new Map([
           enabled: true,
           show_spocs: showSpocs({ geo }),
           hardcoded_layout: true,
-          personalized: true,
           // This is currently an exmple layout used for dev purposes.
           layout_endpoint:
             "https://getpocket.cdn.mozilla.net/v3/newtab/layout?version=1&consumer_key=$apiKey&layout_variant=basic",
@@ -575,7 +494,7 @@ const FEEDS_DATA = [
     name: "section.highlights",
     factory: () => new HighlightsFeed(),
     title: "Fetches content recommendations from places db",
-    value: true,
+    value: false,
   },
   {
     name: "system.topstories",
@@ -655,9 +574,9 @@ const FEEDS_DATA = [
     value: true,
   },
   {
-    name: "recommendationproviderswitcher",
-    factory: () => new RecommendationProviderSwitcher(),
-    title: "Handles switching between two types of personality providers",
+    name: "recommendationprovider",
+    factory: () => new RecommendationProvider(),
+    title: "Handles setup and interaction for the personality provider",
     value: true,
   },
   {

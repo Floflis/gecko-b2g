@@ -5,8 +5,9 @@
 "use strict";
 
 /**
- * This module exports the UrlbarPrefs singleton, which manages
- * preferences for the urlbar.
+ * This module exports the UrlbarPrefs singleton, which manages preferences for
+ * the urlbar. It also provides access to urlbar Nimbus variables as if they are
+ * preferences, but only for variables with fallback prefs.
  */
 
 var EXPORTED_SYMBOLS = ["UrlbarPrefs", "UrlbarPrefsObserver"];
@@ -17,20 +18,23 @@ const { XPCOMUtils } = ChromeUtils.import(
 );
 
 XPCOMUtils.defineLazyModuleGetters(this, {
-  PlacesUtils: "resource://gre/modules/PlacesUtils.jsm",
+  NimbusFeatures: "resource://nimbus/ExperimentAPI.jsm",
+  Region: "resource://gre/modules/Region.jsm",
   UrlbarUtils: "resource:///modules/UrlbarUtils.jsm",
 });
 
 const PREF_URLBAR_BRANCH = "browser.urlbar.";
 
-// The two possible default values for matchBuckets, depending on whether
-// suggestions come before general.
-const MATCH_BUCKETS_SUGGESTIONS_FIRST = "suggestion:4,general:Infinity";
-const MATCH_BUCKETS_GENERAL_FIRST = "general:5,suggestion:Infinity";
+const FIREFOX_SUGGEST_UPDATE_TOPIC = "firefox-suggest-update";
 
 // Prefs are defined as [pref name, default value] or [pref name, [default
 // value, type]].  In the former case, the getter method name is inferred from
 // the typeof the default value.
+//
+// NOTE: Don't name prefs (relative to the `browser.urlbar` branch) the same as
+// Nimbus urlbar features. Doing so would cause a name collision because pref
+// names and Nimbus feature names are both kept as keys in UrlbarPref's map. For
+// a list of Nimbus features, see: toolkit/components/nimbus/FeatureManifest.js
 const PREF_URLBAR_DEFAULTS = new Map([
   // Whether we announce to screen readers when tab-to-search results are
   // inserted.
@@ -47,7 +51,7 @@ const PREF_URLBAR_DEFAULTS = new Map([
 
   // Affects the frecency threshold of the autofill algorithm.  The threshold is
   // the mean of all origin frecencies plus one standard deviation multiplied by
-  // this value.  See UnifiedComplete.
+  // this value.  See UrlbarProviderPlaces.
   ["autoFill.stddevMultiplier", [0.0, "float"]],
 
   // Whether using `ctrl` when hitting return/enter in the URL bar
@@ -70,6 +74,10 @@ const PREF_URLBAR_DEFAULTS = new Map([
   // but this would mean flushing layout.)
   ["disableExtendForTests", false],
 
+  // Ensure we use trailing dots for DNS lookups for single words that could
+  // be hosts.
+  ["dnsResolveFullyQualifiedNames", true],
+
   // Controls when to DNS resolve single word search strings, after they were
   // searched for. If the string is resolved as a valid host, show a
   // "Did you mean to go to 'host'" prompt.
@@ -83,11 +91,11 @@ const PREF_URLBAR_DEFAULTS = new Map([
   // focused.
   ["experimental.expandTextOnFocus", false],
 
+  // Whether the heuristic result is hidden.
+  ["experimental.hideHeuristic", false],
+
   // Whether the urlbar displays a permanent search button.
   ["experimental.searchButton", false],
-
-  // Whether we style the search mode indicator's close button on hover.
-  ["experimental.searchModeIndicatorHover", false],
 
   // When we send events to extensions, we wait this amount of time in
   // milliseconds for them to respond before timing out.
@@ -99,27 +107,30 @@ const PREF_URLBAR_DEFAULTS = new Map([
   // Applies URL highlighting and other styling to the text in the urlbar input.
   ["formatting.enabled", true],
 
+  // Whether Firefox Suggest group labels are shown in the urlbar view in en-*
+  // locales. Labels are not shown in other locales but likely will be in the
+  // future.
+  ["groupLabels.enabled", true],
+
   // Whether the results panel should be kept open during IME composition.
   ["keepPanelOpenDuringImeComposition", false],
 
-  // Controls the composition of search results.  The relative ordering of the
-  // `suggestion` and `general` buckets should match the default value of
-  // `showSearchSuggestionsFirst`.
-  ["matchBuckets", MATCH_BUCKETS_SUGGESTIONS_FIRST],
-
-  // If the heuristic result is a search engine result, we use this instead of
-  // matchBuckets.
-  ["matchBucketsSearch", ""],
-
-  // For search suggestion results, we truncate the user's search string to this
-  // number of characters before fetching results.
-  ["maxCharsForSearchSuggestions", 20],
+  // As a user privacy measure, don't fetch results from remote services for
+  // searches that start by pasting a string longer than this. The pref name
+  // indicates search suggestions, but this is used for all remote results.
+  ["maxCharsForSearchSuggestions", 100],
 
   // The maximum number of form history results to include.
   ["maxHistoricalSearchSuggestions", 0],
 
   // The maximum number of results in the urlbar popup.
   ["maxRichResults", 10],
+
+  // Whether Merino is enabled as a quick suggest source.
+  ["merino.enabled", false],
+
+  // The Merino endpoint URL, not including parameters.
+  ["merino.endpointURL", "https://merino.services.mozilla.com/api/v1/suggest"],
 
   // Whether addresses and search results typed into the address bar
   // should be opened in new tabs by default.
@@ -129,6 +140,16 @@ const PREF_URLBAR_DEFAULTS = new Map([
   // are styled to look like search engine results instead of the usual history
   // results.
   ["restyleSearches", false],
+
+  // Controls the composition of results.  The default value is computed by
+  // calling:
+  //   makeResultGroups({
+  //     showSearchSuggestionsFirst: UrlbarPrefs.get(
+  //       "showSearchSuggestionsFirst"
+  //     ),
+  //   });
+  // The value of this pref is a JSON string of the root group.  See below.
+  ["resultGroups", ""],
 
   // If true, we show tail suggestions when available.
   ["richSuggestions.tail", true],
@@ -143,9 +164,7 @@ const PREF_URLBAR_DEFAULTS = new Map([
   ["shortcuts.tabs", true],
   ["shortcuts.history", true],
 
-  // Whether to show search suggestions before general results.  This default
-  // value should match the relative ordering of the `suggestion` and `general`
-  // buckets in `matchBuckets`.
+  // Whether to show search suggestions before general results.
   ["showSearchSuggestionsFirst", true],
 
   // Whether speculative connections should be enabled.
@@ -154,20 +173,55 @@ const PREF_URLBAR_DEFAULTS = new Map([
   // Whether results will include the user's bookmarks.
   ["suggest.bookmark", true],
 
+  // Whether results will include a calculator.
+  ["suggest.calculator", false],
+
+  // Whether results will include search engines (e.g. tab-to-search).
+  ["suggest.engines", true],
+
   // Whether results will include the user's history.
   ["suggest.history", true],
 
   // Whether results will include switch-to-tab results.
   ["suggest.openpage", true],
 
+  // Whether results will include quick suggest suggestions.
+  ["suggest.quicksuggest", false],
+
+  // Whether results will include sponsored quick suggest suggestions.
+  ["suggest.quicksuggest.sponsored", false],
+
   // Whether results will include search suggestions.
   ["suggest.searches", false],
 
-  // Whether results will include search engines (e.g. tab-to-search).
-  ["suggest.engines", true],
-
   // Whether results will include top sites and the view will open on focus.
   ["suggest.topsites", true],
+
+  // Global toggle for whether the quick suggest feature is enabled, i.e.,
+  // sponsored and recommended results related to the user's search string.
+  ["quicksuggest.enabled", false],
+
+  // Whether to show QuickSuggest related logs.
+  ["quicksuggest.log", false],
+
+  // The user's response to the Firefox Suggest online opt-in dialog.
+  ["quicksuggest.onboardingDialogChoice", ""],
+
+  // Whether Remote Settings is enabled as a quick suggest source.
+  ["quicksuggest.remoteSettings.enabled", true],
+
+  // The Firefox Suggest scenario in which the user is enrolled, one of:
+  // "history", "offline", "online"
+  ["quicksuggest.scenario", "history"],
+
+  // Whether to show the quick suggest onboarding dialog.
+  ["quicksuggest.shouldShowOnboardingDialog", true],
+
+  // Whether the user has seen the onboarding dialog.
+  ["quicksuggest.showedOnboardingDialog", false],
+
+  // Count the restarts before showing the onboarding dialog.
+  ["quicksuggest.seenRestarts", 0],
 
   // When using switch to tabs, if set to true this will move the tab into the
   // active window.
@@ -186,6 +240,15 @@ const PREF_URLBAR_DEFAULTS = new Map([
   // Remove redundant portions from URLs.
   ["trimURLs", true],
 
+  // If true, top sites may include sponsored ones.
+  ["sponsoredTopSites", false],
+
+  // Whether unit conversion is enabled.
+  ["unitConversion.enabled", false],
+
+  // The index where we show unit conversion results.
+  ["unitConversion.suggestedIndex", 1],
+
   // Results will include a built-in set of popular domains when this is true.
   ["usepreloadedtopurls.enabled", false],
 
@@ -200,11 +263,11 @@ const PREF_URLBAR_DEFAULTS = new Map([
   ["update2.emptySearchBehavior", 0],
 ]);
 const PREF_OTHER_DEFAULTS = new Map([
-  ["keyword.enabled", true],
+  ["browser.fixup.dns_first_for_single_words", false],
   ["browser.search.suggest.enabled", true],
   ["browser.search.suggest.enabled.private", false],
+  ["keyword.enabled", true],
   ["ui.popup.disable_autohide", false],
-  ["browser.fixup.dns_first_for_single_words", false],
 ]);
 
 // Maps preferences under browser.urlbar.suggest to behavior names, as defined
@@ -223,30 +286,145 @@ const PREF_TYPES = new Map([
   ["string", "Char"],
 ]);
 
-// Buckets for result insertion.
-// Every time a new result is returned, we go through each bucket in array order,
-// and look for the first one having available space for the given result type.
-// Each bucket is an array containing the following indices:
-//   0: The result type of the acceptable entries.
-//   1: available number of slots in this bucket.
-// There are different matchBuckets definition for different contexts, currently
-// a general one (matchBuckets) and a search one (matchBucketsSearch).
-//
-// First buckets. Anything with an Infinity frecency ends up here.
-const DEFAULT_BUCKETS_BEFORE = [
-  [UrlbarUtils.RESULT_GROUP.HEURISTIC, 1],
-  [
-    UrlbarUtils.RESULT_GROUP.EXTENSION,
-    UrlbarUtils.MAXIMUM_ALLOWED_EXTENSION_MATCHES - 1,
-  ],
-];
-// => USER DEFINED BUCKETS WILL BE INSERTED HERE <=
-//
-// Catch-all buckets. Anything remaining ends up here.
-const DEFAULT_BUCKETS_AFTER = [
-  [UrlbarUtils.RESULT_GROUP.SUGGESTION, Infinity],
-  [UrlbarUtils.RESULT_GROUP.GENERAL, Infinity],
-];
+/**
+ * Builds the standard result groups and returns the root group.  Result
+ * groups determine the composition of results in the muxer, i.e., how they're
+ * grouped and sorted.  Each group is an object that looks like this:
+ *
+ * {
+ *   {UrlbarUtils.RESULT_GROUP} [group]
+ *     This is defined only on groups without children, and it determines the
+ *     result group that the group will contain.
+ *   {number} [maxResultCount]
+ *     An optional maximum number of results the group can contain.  If it's
+ *     not defined and the parent group does not define `flexChildren: true`,
+ *     then the max is the parent's max.  If the parent group defines
+ *     `flexChildren: true`, then `maxResultCount` is ignored.
+ *   {boolean} [flexChildren]
+ *     If true, then child groups are "flexed", similar to flex in HTML.  Each
+ *     child group should define the `flex` property (or, if they don't, `flex`
+ *     is assumed to be zero).  `flex` is a number that defines the ratio of a
+ *     child's result count to the total result count of all children.  More
+ *     specifically, `flex: X` on a child means that the initial maximum result
+ *     count of the child is `parentMaxResultCount * (X / N)`, where `N` is the
+ *     sum of the `flex` values of all children.  If there are any child groups
+ *     that cannot be completely filled, then the muxer will attempt to overfill
+ *     the children that were completely filled, while still respecting their
+ *     relative `flex` values.
+ *   {number} [flex]
+ *     The flex value of the group.  This should be defined only on groups
+ *     where the parent defines `flexChildren: true`.  See `flexChildren` for a
+ *     discussion of flex.
+ *   {array} [children]
+ *     An array of child group objects.
+ * }
+ *
+ * @param {boolean} showSearchSuggestionsFirst
+ *   If true, the suggestions group will come before the general group.
+ * @returns {object}
+ *   The root group.
+ */
+function makeResultGroups({ showSearchSuggestionsFirst }) {
+  let rootGroup = {
+    children: [
+      // heuristic
+      {
+        maxResultCount: 1,
+        children: [
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_TEST },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_EXTENSION },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_SEARCH_TIP },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_OMNIBOX },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_ENGINE_ALIAS },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_BOOKMARK_KEYWORD },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_AUTOFILL },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_PRELOADED },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_TOKEN_ALIAS_ENGINE },
+          { group: UrlbarUtils.RESULT_GROUP.HEURISTIC_FALLBACK },
+        ],
+      },
+      // extensions using the omnibox API
+      {
+        group: UrlbarUtils.RESULT_GROUP.OMNIBOX,
+        availableSpan: UrlbarUtils.MAX_OMNIBOX_RESULT_COUNT - 1,
+      },
+    ],
+  };
+
+  // Prepare the parent group for suggestions and general.
+  let mainGroup = {
+    flexChildren: true,
+    children: [
+      // suggestions
+      {
+        children: [
+          {
+            flexChildren: true,
+            children: [
+              {
+                // If `maxHistoricalSearchSuggestions` == 0, the muxer forces
+                // `maxResultCount` to be zero and flex is ignored, per query.
+                flex: 2,
+                group: UrlbarUtils.RESULT_GROUP.FORM_HISTORY,
+              },
+              {
+                flex: 4,
+                group: UrlbarUtils.RESULT_GROUP.REMOTE_SUGGESTION,
+              },
+            ],
+          },
+          {
+            group: UrlbarUtils.RESULT_GROUP.TAIL_SUGGESTION,
+          },
+        ],
+      },
+      // general
+      {
+        group: UrlbarUtils.RESULT_GROUP.GENERAL_PARENT,
+        children: [
+          {
+            availableSpan: 3,
+            group: UrlbarUtils.RESULT_GROUP.INPUT_HISTORY,
+          },
+          {
+            flexChildren: true,
+            children: [
+              {
+                flex: 1,
+                group: UrlbarUtils.RESULT_GROUP.REMOTE_TAB,
+              },
+              {
+                flex: 2,
+                group: UrlbarUtils.RESULT_GROUP.GENERAL,
+              },
+              {
+                // We show relatively many about-page results because they're
+                // only added for queries starting with "about:".
+                flex: 2,
+                group: UrlbarUtils.RESULT_GROUP.ABOUT_PAGES,
+              },
+              {
+                flex: 1,
+                group: UrlbarUtils.RESULT_GROUP.PRELOADED,
+              },
+            ],
+          },
+          {
+            group: UrlbarUtils.RESULT_GROUP.INPUT_HISTORY,
+          },
+        ],
+      },
+    ],
+  };
+  if (!showSearchSuggestionsFirst) {
+    mainGroup.children.reverse();
+  }
+  mainGroup.children[0].flex = 2;
+  mainGroup.children[1].flex = 1;
+  rootGroup.children.push(mainGroup);
+
+  return rootGroup;
+}
 
 /**
  * Preferences class.  The exported object is a singleton instance.
@@ -267,6 +445,15 @@ class Preferences {
     }
     this._observerWeakRefs = [];
     this.addObserver(this);
+    // These prefs control the value of the shouldHandOffToSearchMode pref. They
+    // are exposed as a class variable so UrlbarPrefs observers can watch for
+    // changes in these prefs.
+    this.shouldHandOffToSearchModePrefs = [
+      "keyword.enabled",
+      "suggest.searches",
+    ];
+    this._updatingFirefoxSuggestScenario = false;
+    NimbusFeatures.urlbar.onUpdate(() => this._onNimbusUpdate());
   }
 
   /**
@@ -299,11 +486,186 @@ class Preferences {
    * @param {*} value The preference value.
    */
   set(pref, value) {
-    let { defaultValue, setter } = this._getPrefDescriptor(pref);
+    let { defaultValue, set } = this._getPrefDescriptor(pref);
     if (typeof value != typeof defaultValue) {
       throw new Error(`Invalid value type ${typeof value} for pref ${pref}`);
     }
-    setter(pref, value);
+    set(pref, value);
+  }
+
+  /**
+   * Clears the value for the preference with the given name.
+   *
+   * @param {string} pref
+   *        The name of the preference to clear.
+   */
+  clear(pref) {
+    let { clear } = this._getPrefDescriptor(pref);
+    clear(pref);
+  }
+
+  /**
+   * Builds the standard result groups.  See makeResultGroups.
+   *
+   * @param {object} options
+   *   See makeResultGroups.
+   * @returns {object}
+   *   The root group.
+   */
+  makeResultGroups(options) {
+    return makeResultGroups(options);
+  }
+
+  /**
+   * Sets the value of the resultGroups pref to the current default groups.
+   * This should be called from BrowserGlue._migrateUI when the default groups
+   * are modified.
+   */
+  migrateResultGroups() {
+    this.set(
+      "resultGroups",
+      JSON.stringify(
+        makeResultGroups({
+          showSearchSuggestionsFirst: this.get("showSearchSuggestionsFirst"),
+        })
+      )
+    );
+  }
+
+  /**
+   * Sets the appropriate Firefox Suggest scenario based on the current Nimbus
+   * rollout (if any) and "hardcoded" rollouts (if any). The possible scenarios
+   * are:
+   *
+   * history
+   *   This is the scenario when the user is not in any rollouts. Firefox
+   *   Suggest suggestions are disabled.
+   * offline
+   *   This is the scenario for the "offline" rollout. Firefox Suggest
+   *   suggestions are enabled by default. Search strings and matching keywords
+   *   are not included in related telemetry. The onboarding dialog is not
+   *   shown.
+   * online
+   *   This is the scenario for the "online" rollout. The onboarding dialog will
+   *   be shown and the user must opt in to enable Firefox Suggest suggestions
+   *   and related telemetry, which will include search strings and matching
+   *   keywords.
+   */
+  async updateFirefoxSuggestScenario() {
+    // Make sure we don't re-enter this method while updating prefs. (Updates to
+    // prefs that are fallbacks for Nimbus variables trigger the pref observer
+    // in Nimbus, which triggers our Nimbus `onUpdate` callback, which calls
+    // this method again.) We also want to avoid event telemetry that's recorded
+    // on updates to the `suggest` prefs since that telemetry is intended to
+    // capture toggles made by the user on about:preferences.
+    if (this._updatingFirefoxSuggestScenario) {
+      return;
+    }
+    try {
+      this._updatingFirefoxSuggestScenario = true;
+      await this._updateFirefoxSuggestScenarioHelper();
+    } finally {
+      this._updatingFirefoxSuggestScenario = false;
+    }
+  }
+
+  async _updateFirefoxSuggestScenarioHelper() {
+    // We need to pick a scenario. If the user is in a Nimbus rollout, then
+    // Nimbus will define it. Otherwise the user may be in a "hardcoded" rollout
+    // depending on their region and locale. Finally, if the user is not in any
+    // rollouts, then the scenario is "history", which means no Firefox Suggest
+    // suggestions should appear.
+    //
+    // IMPORTANT: This relies on the `quickSuggestScenario` variable not having
+    // a `fallbackPref`. If it did, and if there were no Nimbus override, then
+    // Nimbus would just return the pref's value. The logic here would
+    // incorrectly assume that the user is in a Nimbus rollout when in fact it
+    // would only be fetching the pref value. You might think, But wait, I can
+    // define a fallback as long as there's no default value for it in
+    // firefox.js. That would work initially, but if the user is ever unenrolled
+    // from a Nimbus rollout, the default value set here would persist until
+    // restart, meaning Firefox would effectively ignore the unenrollment until
+    // then.
+    let scenario = this._nimbus.quickSuggestScenario;
+    if (!scenario) {
+      await Region.init();
+      if (
+        Region.home == "US" &&
+        Services.locale.appLocaleAsBCP47.substring(0, 2) == "en"
+      ) {
+        // offline rollout for en locales in the US region
+        scenario = "offline";
+      } else {
+        // no rollout
+        scenario = "history";
+      }
+    }
+
+    let defaults = Services.prefs.getDefaultBranch("browser.urlbar.");
+    defaults.setCharPref("quicksuggest.scenario", scenario);
+    // At this point, `onPrefChange` fires for the `quicksuggest.scenario`
+    // change and it calls `_syncFirefoxSuggestPrefsFromScenario`.
+  }
+
+  _syncFirefoxSuggestPrefsFromScenario() {
+    // Note: Setting a pref that's listed as a fallback for a Nimbus variable
+    // will trigger the pref observer inside Nimbus and cause all
+    // `Nimbus.urlbar.onUpdate` callbacks to be called. Inside this class we
+    // guard against that by using `_updatingFirefoxSuggestScenario`, but keep
+    // it in mind.
+
+    let scenario = this.get("quicksuggest.scenario");
+    let defaults = Services.prefs.getDefaultBranch("browser.urlbar.");
+
+    let enabled = false;
+    switch (scenario) {
+      case "history":
+        defaults.setBoolPref("quicksuggest.shouldShowOnboardingDialog", true);
+        defaults.setBoolPref("suggest.quicksuggest", false);
+        defaults.setBoolPref("suggest.quicksuggest.sponsored", false);
+        break;
+      case "offline":
+        enabled = true;
+        defaults.setBoolPref("quicksuggest.shouldShowOnboardingDialog", false);
+        defaults.setBoolPref("suggest.quicksuggest", true);
+        defaults.setBoolPref("suggest.quicksuggest.sponsored", true);
+        break;
+      case "online":
+        enabled = true;
+        defaults.setBoolPref("quicksuggest.shouldShowOnboardingDialog", true);
+        defaults.setBoolPref("suggest.quicksuggest", false);
+        defaults.setBoolPref("suggest.quicksuggest.sponsored", false);
+        break;
+      default:
+        Cu.reportError(`Unrecognized Firefox Suggest scenario "${scenario}"`);
+        break;
+    }
+
+    // Set `quicksuggest.enabled` last so that if any observers depend on it
+    // specifically, all prefs will have been updated when they're called.
+    defaults.setBoolPref("quicksuggest.enabled", enabled);
+
+    // Update the pref cache in TelemetryEnvironment. This is only necessary
+    // when we're initializing the scenario on startup, but the scenario will
+    // rarely if ever change after that, so there's no harm in always doing it.
+    // See bug 1731373.
+    //
+    // IMPORTANT: Send the notification only after setting the prefs above.
+    // TelemetryEnvironment updates its cache by fetching the prefs from the
+    // pref service, so the new values need to be set beforehand. See also the
+    // comments in D126017.
+    Services.obs.notifyObservers(null, FIREFOX_SUGGEST_UPDATE_TOPIC);
+  }
+
+  /**
+   * @returns {boolean}
+   *   Whether the Firefox Suggest scenario is being updated. While true,
+   *   changes to related prefs should be ignored, depending on the observer.
+   *   Telemetry intended to capture user changes to the prefs should not be
+   *   recorded, for example.
+   */
+  get updatingFirefoxSuggestScenario() {
+    return this._updatingFirefoxSuggestScenario;
   }
 
   /**
@@ -356,15 +718,15 @@ class Preferences {
 
     // Some prefs may influence others.
     switch (pref) {
-      case "matchBuckets":
-        this._map.delete("matchBucketsSearch");
+      case "quicksuggest.scenario":
+        this._syncFirefoxSuggestPrefsFromScenario();
         return;
       case "showSearchSuggestionsFirst":
         this.set(
-          "matchBuckets",
-          this.get(pref)
-            ? MATCH_BUCKETS_SUGGESTIONS_FIRST
-            : MATCH_BUCKETS_GENERAL_FIRST
+          "resultGroups",
+          JSON.stringify(
+            makeResultGroups({ showSearchSuggestionsFirst: this.get(pref) })
+          )
         );
         return;
     }
@@ -372,6 +734,29 @@ class Preferences {
     if (pref.startsWith("suggest.")) {
       this._map.delete("defaultBehavior");
     }
+
+    if (this.shouldHandOffToSearchModePrefs.includes(pref)) {
+      this._map.delete("shouldHandOffToSearchMode");
+    }
+  }
+
+  /**
+   * Called when the `NimbusFeatures.urlbar` value changes.
+   */
+  _onNimbusUpdate() {
+    for (let key of Object.keys(this._nimbus)) {
+      this._map.delete(key);
+    }
+    this.__nimbus = null;
+
+    this.updateFirefoxSuggestScenario();
+  }
+
+  get _nimbus() {
+    if (!this.__nimbus) {
+      this.__nimbus = NimbusFeatures.urlbar.getAllVariables();
+    }
+    return this.__nimbus;
   }
 
   /**
@@ -382,8 +767,8 @@ class Preferences {
    * @returns {*} The raw preference value.
    */
   _readPref(pref) {
-    let { defaultValue, getter } = this._getPrefDescriptor(pref);
-    return getter(pref, defaultValue);
+    let { defaultValue, get } = this._getPrefDescriptor(pref);
+    return get(pref, defaultValue);
   }
 
   /**
@@ -401,39 +786,6 @@ class Preferences {
    */
   _getPrefValue(pref) {
     switch (pref) {
-      case "matchBuckets": {
-        // Convert from pref char format to an array and add the default
-        // buckets.
-        let val = this._readPref(pref);
-        try {
-          val = PlacesUtils.convertMatchBucketsStringToArray(val);
-        } catch (ex) {
-          val = PlacesUtils.convertMatchBucketsStringToArray(
-            PREF_URLBAR_DEFAULTS.get(pref)
-          );
-        }
-        return [...DEFAULT_BUCKETS_BEFORE, ...val, ...DEFAULT_BUCKETS_AFTER];
-      }
-      case "matchBucketsSearch": {
-        // Convert from pref char format to an array and add the default
-        // buckets.
-        let val = this._readPref(pref);
-        if (val) {
-          // Convert from pref char format to an array and add the default
-          // buckets.
-          try {
-            val = PlacesUtils.convertMatchBucketsStringToArray(val);
-            return [
-              ...DEFAULT_BUCKETS_BEFORE,
-              ...val,
-              ...DEFAULT_BUCKETS_AFTER,
-            ];
-          } catch (ex) {
-            /* invalid format, will just return matchBuckets */
-          }
-        }
-        return this.get("matchBuckets");
-      }
       case "defaultBehavior": {
         let val = 0;
         for (let type of Object.keys(SUGGEST_PREF_TO_BEHAVIOR)) {
@@ -445,6 +797,17 @@ class Preferences {
         }
         return val;
       }
+      case "resultGroups":
+        try {
+          return JSON.parse(this._readPref(pref));
+        } catch (ex) {}
+        return makeResultGroups({
+          showSearchSuggestionsFirst: this.get("showSearchSuggestionsFirst"),
+        });
+      case "shouldHandOffToSearchMode":
+        return this.shouldHandOffToSearchModePrefs.some(
+          prefName => !this.get(prefName)
+        );
     }
     return this._readPref(pref);
   }
@@ -453,7 +816,7 @@ class Preferences {
    * Returns a descriptor of the given preference.
    * @param {string} pref The preference to examine.
    * @returns {object} An object describing the pref with the following shape:
-   *          { defaultValue, getter, setter }
+   *          { defaultValue, get, set, clear }
    */
   _getPrefDescriptor(pref) {
     let branch = Services.prefs.getBranch(PREF_URLBAR_BRANCH);
@@ -461,9 +824,13 @@ class Preferences {
     if (defaultValue === undefined) {
       branch = Services.prefs;
       defaultValue = PREF_OTHER_DEFAULTS.get(pref);
-    }
-    if (defaultValue === undefined) {
-      throw new Error("Trying to access an unknown pref " + pref);
+      if (defaultValue === undefined) {
+        let nimbus = this._getNimbusDescriptor(pref);
+        if (nimbus) {
+          return nimbus;
+        }
+        throw new Error("Trying to access an unknown pref " + pref);
+      }
     }
 
     let type;
@@ -481,26 +848,58 @@ class Preferences {
     }
     return {
       defaultValue,
-      getter: branch[`get${type}Pref`],
+      get: branch[`get${type}Pref`],
       // Float prefs are stored as Char.
-      setter: branch[`set${type == "Float" ? "Char" : type}Pref`],
+      set: branch[`set${type == "Float" ? "Char" : type}Pref`],
+      clear: branch.clearUserPref,
     };
   }
 
   /**
-   * Initializes the showSearchSuggestionsFirst pref based on the matchBuckets
+   * Returns a descriptor for the given Nimbus property, if it exists.
+   *
+   * @param {string} name
+   *   The name of the desired property in the object returned from
+   *   NimbusFeatures.urlbar.getAllVariables().
+   * @returns {object}
+   *   An object describing the property's value with the following shape (same
+   *   as _getPrefDescriptor()):
+   *     { defaultValue, get, set, clear }
+   *   If the property doesn't exist, null is returned.
+   */
+  _getNimbusDescriptor(name) {
+    if (!this._nimbus.hasOwnProperty(name)) {
+      return null;
+    }
+    return {
+      defaultValue: this._nimbus[name],
+      get: () => this._nimbus[name],
+      set() {
+        throw new Error(`'${name}' is a Nimbus value and cannot be set`);
+      },
+      clear() {
+        throw new Error(`'${name}' is a Nimbus value and cannot be cleared`);
+      },
+    };
+  }
+
+  /**
+   * Initializes the showSearchSuggestionsFirst pref based on the matchGroups
    * pref.  This function can be removed when the corresponding UI migration in
    * BrowserGlue.jsm is no longer needed.
    */
   initializeShowSearchSuggestionsFirstPref() {
-    let matchBuckets = [];
-    let pref = Services.prefs.getCharPref("browser.urlbar.matchBuckets", "");
+    let matchGroups = [];
+    let pref = Services.prefs.getCharPref("browser.urlbar.matchGroups", "");
     try {
-      matchBuckets = PlacesUtils.convertMatchBucketsStringToArray(pref);
+      matchGroups = pref.split(",").map(v => {
+        let group = v.split(":");
+        return [group[0].trim().toLowerCase(), Number(group[1])];
+      });
     } catch (ex) {}
-    let bucketNames = matchBuckets.map(bucket => bucket[0]);
-    let suggestionIndex = bucketNames.indexOf("suggestion");
-    let generalIndex = bucketNames.indexOf("general");
+    let groupNames = matchGroups.map(group => group[0]);
+    let suggestionIndex = groupNames.indexOf("suggestion");
+    let generalIndex = groupNames.indexOf("general");
     let showSearchSuggestionsFirst =
       generalIndex < 0 ||
       (suggestionIndex >= 0 && suggestionIndex < generalIndex);
@@ -513,7 +912,7 @@ class Preferences {
     );
 
     // Pref observers aren't called when a pref is set to its current value, but
-    // we always want to set matchBuckets to the appropriate default value via
+    // we always want to set matchGroups to the appropriate default value via
     // onPrefChanged, so call it now if necessary.  This is really only
     // necessary for tests since the only time this function is called outside
     // of tests is by a UI migration in BrowserGlue.

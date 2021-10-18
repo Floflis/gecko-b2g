@@ -25,7 +25,7 @@ toolkit.jar:
    content/global/aboutwebrtc/aboutWebrtc.html (aboutwebrtc/aboutWebrtc.html)
    content/global/aboutSupport.js
 *  content/global/aboutSupport.xhtml
-#ifdef MOZ_GLEAN
+#ifndef MOZ_GLEAN_ANDROID
    content/global/aboutGlean.js
    content/global/aboutGlean.html
    content/global/aboutGlean.css
@@ -39,7 +39,6 @@ toolkit.jar:
    content/global/plugins.html
    content/global/plugins.css
    content/global/plugins.js
-   content/global/browser-child.js
 *   content/global/buildconfig.html
    content/global/buildconfig.css
    content/global/contentAreaUtils.js
@@ -65,6 +64,7 @@ toolkit.jar:
 #ifndef MOZ_FENNEC
    content/global/viewZoomOverlay.js
 #endif
+   content/global/webview-child.js
    content/global/widgets.css
    content/global/bindings/calendar.js         (widgets/calendar.js)
    content/global/bindings/datekeeper.js       (widgets/datekeeper.js)
@@ -84,9 +84,12 @@ toolkit.jar:
    content/global/elements/findbar.js          (widgets/findbar.js)
    content/global/elements/editor.js           (widgets/editor.js)
    content/global/elements/general.js          (widgets/general.js)
+   content/global/elements/message-bar.css     (widgets/message-bar.css)
+   content/global/elements/message-bar.js      (widgets/message-bar.js)
    content/global/elements/menu.js             (widgets/menu.js)
    content/global/elements/menupopup.js        (widgets/menupopup.js)
    content/global/elements/moz-input-box.js    (widgets/moz-input-box.js)
+   content/global/elements/named-deck.js       (widgets/named-deck.js)
    content/global/elements/notificationbox.js  (widgets/notificationbox.js)
    content/global/elements/panel.js            (widgets/panel.js)
    content/global/elements/radio.js            (widgets/radio.js)

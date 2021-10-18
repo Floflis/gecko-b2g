@@ -20,15 +20,16 @@
 #include "mozilla/Hal.h"
 #include "nsIDOMWakeLockListener.h"
 #include "nsIPowerManagerService.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/StaticPtr.h"
 #include "nsTHashtable.h"
 #include "nsHashKeys.h"
-#include "GeckoProfiler.h"
 #include "nsComponentManagerUtils.h"
 #include "ScreenHelperWin.h"
 #include "HeadlessScreenHelper.h"
 #include "mozilla/widget/ScreenManager.h"
 #include "mozilla/Atomics.h"
+#include "mozilla/WindowsProcessMitigations.h"
 
 #if defined(ACCESSIBILITY)
 #  include "mozilla/a11y/Compatibility.h"
@@ -539,7 +540,7 @@ nsresult nsAppShell::Init() {
     mEventWnd = CreateWindowW(kWindowClass, L"nsAppShell:EventWindow", 0, 0, 0,
                               10, 10, HWND_MESSAGE, nullptr, module, nullptr);
     NS_ENSURE_STATE(mEventWnd);
-  } else if (XRE_IsContentProcess()) {
+  } else if (XRE_IsContentProcess() && !IsWin32kLockedDown()) {
     // We're not generally processing native events, but still using GDI and we
     // still have some internal windows, e.g. from calling CoInitializeEx.
     // So we use a class that will do a single event pump where previously we
@@ -681,7 +682,6 @@ bool nsAppShell::ProcessNextNativeEvent(bool mayWait) {
 
   do {
     MSG msg;
-    bool uiMessage = false;
 
     // For avoiding deadlock between our process and plugin process by
     // mouse wheel messages, we're handling actually when we receive one of
@@ -695,15 +695,10 @@ bool nsAppShell::ProcessNextNativeEvent(bool mayWait) {
                                          MOZ_WM_MOUSEWHEEL_LAST, PM_REMOVE);
       NS_ASSERTION(gotMessage,
                    "waiting internal wheel message, but it has not come");
-      uiMessage = gotMessage;
     }
 
     if (!gotMessage) {
       gotMessage = WinUtils::PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE);
-      uiMessage =
-          (msg.message >= WM_KEYFIRST && msg.message <= WM_IME_KEYLAST) ||
-          (msg.message >= NS_WM_IMEFIRST && msg.message <= NS_WM_IMELAST) ||
-          (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST);
     }
 
     if (gotMessage) {

@@ -9,7 +9,7 @@
 const LINUX = AppConstants.platform == "linux";
 const WIN = AppConstants.platform == "win";
 const MAC = AppConstants.platform == "macosx";
-const WEBRENDER = window.windowUtils.layerManagerType == "WebRender";
+const WEBRENDER = window.windowUtils.layerManagerType.startsWith("WebRender");
 const SKELETONUI = Services.prefs.getBoolPref(
   "browser.startup.preXulSkeletonUI",
   false
@@ -31,7 +31,7 @@ const startupPhases = {
   "before first paint": [
     {
       name: "PLayerTransaction::Msg_GetTextureFactoryIdentifier",
-      condition: (MAC && !WEBRENDER) || LINUX,
+      condition: (MAC || LINUX) && !WEBRENDER,
       maxCount: 1,
     },
     {
@@ -46,7 +46,7 @@ const startupPhases = {
     },
     {
       name: "PWebRenderBridge::Msg_EnsureConnected",
-      condition: MAC && WEBRENDER,
+      condition: (MAC || LINUX) && WEBRENDER,
       maxCount: 1,
     },
     {
@@ -242,7 +242,7 @@ const startupPhases = {
     },
     {
       name: "PWebRenderBridge::Msg_EnsureConnected",
-      condition: WIN && WEBRENDER,
+      condition: (WIN || LINUX) && WEBRENDER,
       ignoreIfUnused: true,
       maxCount: 1,
     },
@@ -316,6 +316,7 @@ add_task(async function() {
   {
     const nameCol = profile.markers.schema.name;
     const dataCol = profile.markers.schema.data;
+    const startTimeCol = profile.markers.schema.startTime;
 
     let markersForCurrentPhase = [];
     for (let m of profile.markers.data) {
@@ -331,14 +332,13 @@ add_task(async function() {
       let markerData = m[dataCol];
       if (
         !markerData ||
-        markerData.type != "IPC" ||
-        !markerData.sync ||
-        markerData.direction != "sending"
+        markerData.category != "Sync IPC" ||
+        !m[startTimeCol]
       ) {
         continue;
       }
 
-      markersForCurrentPhase.push(markerData.messageType);
+      markersForCurrentPhase.push(markerName);
     }
   }
 
@@ -365,8 +365,7 @@ add_task(async function() {
       let expected = false;
       for (let entry of knownIPCList) {
         if (marker == entry.name) {
-          entry.maxCount = (entry.maxCount || 0) - 1;
-          entry._used = true;
+          entry.useCount = (entry.useCount || 0) + 1;
           expected = true;
           break;
         }
@@ -378,18 +377,20 @@ add_task(async function() {
     }
 
     for (let entry of knownIPCList) {
+      // Make sure useCount has been defined.
+      entry.useCount = entry.useCount || 0;
       let message = `sync IPC ${entry.name} `;
-      if (entry.maxCount == 0) {
+      if (entry.useCount == entry.maxCount) {
         message += "happened as many times as expected";
-      } else if (entry.maxCount > 0) {
-        message += `allowed ${entry.maxCount} more times`;
+      } else if (entry.useCount < entry.maxCount) {
+        message += `allowed ${entry.maxCount} but only happened ${entry.useCount} times`;
       } else {
-        message += `${entry.maxCount * -1} more times than expected`;
+        message += `happened ${entry.useCount} but max is ${entry.maxCount}`;
         shouldPass = false;
       }
-      ok(entry.maxCount >= 0, `${message} ${phase}`);
+      ok(entry.useCount <= entry.maxCount, `${message} ${phase}`);
 
-      if (!("_used" in entry) && !entry.ignoreIfUnused) {
+      if (entry.useCount == 0 && !entry.ignoreIfUnused) {
         ok(false, `unused known IPC entry ${phase}: ${entry.name}`);
         shouldPass = false;
       }

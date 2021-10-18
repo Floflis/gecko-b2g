@@ -309,6 +309,52 @@ class SpecialPowersChild extends JSWindowActorChild {
         let { task, args, caller, taskId, imports } = message.data;
         return this._spawnTask(task, args, caller, taskId, imports);
 
+      case "EnsureFocus":
+        // Ensure that the focus is in this child document. Returns a browsing
+        // context of a child frame if a subframe should be focused or undefined
+        // otherwise.
+
+        // If a subframe node is focused, then the focus will actually
+        // be within that subframe's document. If blurSubframe is true,
+        // then blur the subframe so that this parent document is focused
+        // instead. If blurSubframe is false, then return the browsing
+        // context for that subframe. The parent process will then call back
+        // into this same code but in the process for that subframe.
+        let focusedNode = this.document.activeElement;
+        let subframeFocused =
+          ChromeUtils.getClassName(focusedNode) == "HTMLIFrameElement" ||
+          ChromeUtils.getClassName(focusedNode) == "HTMLFrameElement" ||
+          ChromeUtils.getClassName(focusedNode) == "XULFrameElement";
+        if (subframeFocused) {
+          if (message.data.blurSubframe) {
+            Services.focus.clearFocus(this.contentWindow);
+          } else {
+            if (!this.document.hasFocus()) {
+              this.contentWindow.focus();
+            }
+            return Promise.resolve(focusedNode.browsingContext);
+          }
+        }
+
+        // A subframe is not focused, so if this document is
+        // not focused, focus it and wait for the focus event.
+        if (!this.document.hasFocus()) {
+          return new Promise(resolve => {
+            this.document.addEventListener(
+              "focus",
+              () => {
+                resolve();
+              },
+              {
+                capture: true,
+                once: true,
+              }
+            );
+            this.contentWindow.focus();
+          });
+        }
+        break;
+
       case "Assert":
         {
           if ("info" in message.data) {
@@ -473,30 +519,6 @@ class SpecialPowersChild extends JSWindowActorChild {
   }
 
   async registeredServiceWorkers() {
-    // For the time being, if parent_intercept is false, we can assume that
-    // ServiceWorkers registered by the current test are all known to the SWM in
-    // this process.
-    if (
-      !Services.prefs.getBoolPref("dom.serviceWorkers.parent_intercept", false)
-    ) {
-      let swm = Cc["@mozilla.org/serviceworkers/manager;1"].getService(
-        Ci.nsIServiceWorkerManager
-      );
-      let regs = swm.getAllRegistrations();
-
-      // XXX This is shared with SpecialPowersAPIParent.jsm
-      let workers = new Array(regs.length);
-      for (let i = 0; i < workers.length; ++i) {
-        let { scope, scriptSpec } = regs.queryElementAt(
-          i,
-          Ci.nsIServiceWorkerRegistrationInfo
-        );
-        workers[i] = { scope, scriptSpec };
-      }
-
-      return workers;
-    }
-
     // Please see the comment in SpecialPowersObserver.jsm above
     // this._serviceWorkerListener's assignment for what this returns.
     if (this._serviceWorkerRegistered) {
@@ -572,10 +594,7 @@ class SpecialPowersChild extends JSWindowActorChild {
 
   loadChromeScript(urlOrFunction, sandboxOptions) {
     // Create a unique id for this chrome script
-    let uuidGenerator = Cc["@mozilla.org/uuid-generator;1"].getService(
-      Ci.nsIUUIDGenerator
-    );
-    let id = uuidGenerator.generateUUID().toString();
+    let id = Services.uuid.generateUUID().toString();
 
     // Tells chrome code to evaluate this chrome script
     let scriptArgs = { id, sandboxOptions };
@@ -688,6 +707,10 @@ class SpecialPowersChild extends JSWindowActorChild {
   }
   get Cr() {
     return Cr;
+  }
+
+  get isHeadless() {
+    return Cc["@mozilla.org/gfx/info;1"].getService(Ci.nsIGfxInfo).isHeadless;
   }
 
   get addProfilerMarker() {
@@ -870,26 +893,47 @@ class SpecialPowersChild extends JSWindowActorChild {
     return this.sendQuery("SPObserverService", msg);
   }
 
-  setTestPluginEnabledState(newEnabledState, pluginName) {
-    return this.sendQuery("SPSetTestPluginEnabledState", {
-      newEnabledState,
-      pluginName,
-    });
-  }
-
   async pushPrefEnv(inPrefs, callback = null) {
-    await this.sendQuery("PushPrefEnv", inPrefs).then(callback);
-    await this.promiseTimeout(0);
+    let { requiresRefresh } = await this.sendQuery("PushPrefEnv", inPrefs);
+    if (callback) {
+      await callback();
+    }
+    if (requiresRefresh) {
+      await this._promiseEarlyRefresh();
+    }
   }
 
   async popPrefEnv(callback = null) {
-    await this.sendQuery("PopPrefEnv").then(callback);
-    await this.promiseTimeout(0);
+    let { popped, requiresRefresh } = await this.sendQuery("PopPrefEnv");
+    if (callback) {
+      await callback(popped);
+    }
+    if (requiresRefresh) {
+      await this._promiseEarlyRefresh();
+    }
   }
 
   async flushPrefEnv(callback = null) {
-    await this.sendQuery("FlushPrefEnv").then(callback);
-    await this.promiseTimeout(0);
+    let { requiresRefresh } = await this.sendQuery("FlushPrefEnv");
+    if (callback) {
+      await callback();
+    }
+    if (requiresRefresh) {
+      await this._promiseEarlyRefresh();
+    }
+  }
+
+  _promiseEarlyRefresh() {
+    return new Promise(r => {
+      // for mochitest-browser
+      if (typeof this.chromeWindow != "undefined") {
+        this.chromeWindow.requestAnimationFrame(r);
+      }
+      // for mochitest-plain
+      else {
+        this.contentWindow.requestAnimationFrame(r);
+      }
+    });
   }
 
   _addObserverProxy(notification) {
@@ -1182,18 +1226,12 @@ class SpecialPowersChild extends JSWindowActorChild {
     BrowsingContext.getFromWindow(window).textZoom = zoom;
   }
 
-  getOverrideDPPX(window) {
-    return this._getMUDV(window).overrideDPPX;
-  }
-  setOverrideDPPX(window, dppx) {
-    this._getMUDV(window).overrideDPPX = dppx;
+  emulateMedium(window, mediaType) {
+    BrowsingContext.getFromWindow(window).top.mediumOverride = mediaType;
   }
 
-  emulateMedium(window, mediaType) {
-    this._getMUDV(window).emulateMedium(mediaType);
-  }
   stopEmulatingMedium(window) {
-    this._getMUDV(window).stopEmulatingMedium();
+    BrowsingContext.getFromWindow(window).top.mediumOverride = "";
   }
 
   // Takes a snapshot of the given window and returns a <canvas>
@@ -1571,13 +1609,14 @@ class SpecialPowersChild extends JSWindowActorChild {
     });
   }
 
-  snapshotContext(target, rect, background) {
+  snapshotContext(target, rect, background, resetScrollPosition = false) {
     let browsingContext = this._browsingContextForTarget(target);
 
     return this.sendQuery("Snapshot", {
       browsingContext,
       rect,
       background,
+      resetScrollPosition,
     }).then(imageData => {
       return this.contentWindow.createImageBitmap(imageData);
     });
@@ -1632,6 +1671,14 @@ class SpecialPowersChild extends JSWindowActorChild {
     this._SimpleTest = val;
   }
 
+  async evictAllContentViewers() {
+    if (Services.appinfo.sessionHistoryInParent) {
+      await this.sendQuery("EvictAllContentViewers");
+    } else {
+      this.browsingContext.top.childSessionHistory.legacySHistory.evictAllContentViewers();
+    }
+  }
+
   /**
    * Sets this actor as the default assertion result handler for tasks
    * which originate in a window without a test harness.
@@ -1658,6 +1705,10 @@ class SpecialPowersChild extends JSWindowActorChild {
     return Services.focus.focusedWindow;
   }
 
+  clearFocus(aWindow) {
+    Services.focus.clearFocus(aWindow);
+  }
+
   focus(aWindow) {
     // This is called inside TestRunner._makeIframe without aWindow, because of assertions in oop mochitests
     // With aWindow, it is called in SimpleTest.waitForFocus to allow popup window opener focus switching
@@ -1673,6 +1724,13 @@ class SpecialPowersChild extends JSWindowActorChild {
     } catch (e) {
       Cu.reportError(e);
     }
+  }
+
+  ensureFocus(aBrowsingContext, aBlurSubframe) {
+    return this.sendQuery("EnsureFocus", {
+      browsingContext: aBrowsingContext,
+      blurSubframe: aBlurSubframe,
+    });
   }
 
   getClipboardData(flavor, whichClipboard) {
@@ -1723,10 +1781,7 @@ class SpecialPowersChild extends JSWindowActorChild {
     if (cid) {
       componentRegistrar.unregisterFactory(currentCID, currentFactory);
     } else {
-      let uuidGenerator = Cc["@mozilla.org/uuid-generator;1"].getService(
-        Ci.nsIUUIDGenerator
-      );
-      cid = uuidGenerator.generateUUID();
+      cid = Services.uuid.generateUUID();
     }
 
     // Restore the original factory.
@@ -2094,6 +2149,11 @@ class SpecialPowersChild extends JSWindowActorChild {
     });
   }
 
+  /**
+   * Which commands are available can be determined by checking which commands
+   * are registered. See \ref
+   * nsIControllerCommandTable.registerCommand(in String, in nsIControllerCommand).
+   */
   doCommand(window, cmd, param) {
     switch (cmd) {
       case "cmd_align":
@@ -2117,6 +2177,9 @@ class SpecialPowersChild extends JSWindowActorChild {
     return window.docShell.isCommandEnabled(cmd);
   }
 
+  /**
+   * See \ref nsIContentViewerEdit.setCommandNode(in Node).
+   */
   setCommandNode(window, node) {
     return window.docShell.contentViewer
       .QueryInterface(Ci.nsIContentViewerEdit)

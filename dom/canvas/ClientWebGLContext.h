@@ -15,12 +15,12 @@
 #include "mozilla/dom/WebGLRenderingContextBinding.h"
 #include "mozilla/dom/WebGL2RenderingContextBinding.h"
 #include "mozilla/layers/LayersSurfaces.h"
+#include "mozilla/StaticPrefs_webgl.h"
 #include "WebGLFormats.h"
 #include "WebGLStrongTypes.h"
 #include "WebGLTypes.h"
 
 #include "mozilla/Logging.h"
-#include "WebGLCrossProcessCommandQueue.h"
 #include "WebGLCommandQueue.h"
 
 #include <memory>
@@ -28,19 +28,10 @@
 #include <unordered_set>
 #include <vector>
 
-#ifndef WEBGL_BRIDGE_LOG_
-#  define WEBGL_BRIDGE_LOG_(lvl, ...) \
-    MOZ_LOG(mozilla::gWebGLBridgeLog, lvl, (__VA_ARGS__))
-#  define WEBGL_BRIDGE_LOGV(...) \
-    WEBGL_BRIDGE_LOG_(LogLevel::Verbose, __VA_ARGS__)
-#  define WEBGL_BRIDGE_LOGD(...) WEBGL_BRIDGE_LOG_(LogLevel::Debug, __VA_ARGS__)
-#  define WEBGL_BRIDGE_LOGI(...) WEBGL_BRIDGE_LOG_(LogLevel::Info, __VA_ARGS__)
-#  define WEBGL_BRIDGE_LOGE(...) WEBGL_BRIDGE_LOG_(LogLevel::Error, __VA_ARGS__)
-#endif  // WEBGL_BRIDGE_LOG_
-
 namespace mozilla {
 
 class ClientWebGLExtensionBase;
+class HostWebGLContext;
 
 namespace dom {
 class WebGLChild;
@@ -168,7 +159,6 @@ class ContextGenerationInfo final {
 
   std::vector<TypedQuad> mGenericVertexAttribs;
 
-  std::array<bool, 4> mColorWriteMask = {{true, true, true, true}};
   std::array<int32_t, 4> mScissor = {};
   std::array<int32_t, 4> mViewport = {};
   std::array<float, 4> mClearColor = {{0, 0, 0, 0}};
@@ -186,24 +176,19 @@ class ContextGenerationInfo final {
 
 // -
 
-struct RemotingData final {
-  // In the cross process case, the WebGL actor's ownership relationship looks
-  // like this:
-  // ---------------------------------------------------------------------
-  // | ClientWebGLContext -> WebGLChild -> WebGLParent -> HostWebGLContext
-  // ---------------------------------------------------------------------
-  //
-  // where 'A -> B' means "A owns B"
-  RefPtr<mozilla::dom::WebGLChild> mWebGLChild;
-  UniquePtr<ClientWebGLCommandSourceP> mCommandSourcePcq;
-  UniquePtr<ClientWebGLCommandSourceI> mCommandSourceIpdl;
-};
+// In the cross process case, the WebGL actor's ownership relationship looks
+// like this:
+// ---------------------------------------------------------------------
+// | ClientWebGLContext -> WebGLChild -> WebGLParent -> HostWebGLContext
+// ---------------------------------------------------------------------
+//
+// where 'A -> B' means "A owns B"
 
 struct NotLostData final {
   ClientWebGLContext& context;
   webgl::InitContextResult info;
 
-  Maybe<RemotingData> outOfProcess;
+  RefPtr<mozilla::dom::WebGLChild> outOfProcess;
   UniquePtr<HostWebGLContext> inProcess;
 
   webgl::ContextGenerationInfo state;
@@ -613,9 +598,9 @@ class WebGLVertexArrayJS final : public nsWrapperCache, public webgl::ObjectJS {
 
 ////////////////////////////////////
 
-typedef dom::MaybeSharedFloat32ArrayOrUnrestrictedFloatSequence Float32ListU;
-typedef dom::MaybeSharedInt32ArrayOrLongSequence Int32ListU;
-typedef dom::MaybeSharedUint32ArrayOrUnsignedLongSequence Uint32ListU;
+using Float32ListU = dom::MaybeSharedFloat32ArrayOrUnrestrictedFloatSequence;
+using Int32ListU = dom::MaybeSharedInt32ArrayOrLongSequence;
+using Uint32ListU = dom::MaybeSharedUint32ArrayOrUnsignedLongSequence;
 
 inline Range<const float> MakeRange(const Float32ListU& list) {
   if (list.IsFloat32Array()) return MakeRangeAbv(list.GetAsFloat32Array());
@@ -793,7 +778,7 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
   mozilla::dom::WebGLChild* GetChild() const {
     if (!mNotLost) return nullptr;
     if (!mNotLost->outOfProcess) return nullptr;
-    return mNotLost->outOfProcess->mWebGLChild.get();
+    return mNotLost->outOfProcess.get();
   }
 
   // -------------------------------------------------------------------------
@@ -924,9 +909,6 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
   // nsICanvasRenderingContextInternal / nsAPostRefreshObserver
   // -------------------------------------------------------------------------
  public:
-  already_AddRefed<layers::Layer> GetCanvasLayer(
-      nsDisplayListBuilder* builder, layers::Layer* oldLayer,
-      layers::LayerManager* manager) override;
   bool InitializeCanvasRenderer(nsDisplayListBuilder* aBuilder,
                                 layers::CanvasRenderer* aRenderer) override;
   // Note that 'clean' here refers to its invalidation state, not the
@@ -1027,12 +1009,43 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
   void DoReadPixels(const webgl::ReadPixelsDesc&, Range<uint8_t>) const;
   uvec2 DrawingBufferSize();
 
+  // -
+
+  bool mAutoFlushPending = false;
+
+  void AutoEnqueueFlush() {
+    if (MOZ_LIKELY(mAutoFlushPending)) return;
+    mAutoFlushPending = true;
+
+    const auto weak = WeakPtr<ClientWebGLContext>(this);
+    const auto DeferredFlush = [weak]() {
+      const auto strong = RefPtr<ClientWebGLContext>(weak);
+      if (!strong) return;
+      if (!strong->mAutoFlushPending) return;
+      strong->mAutoFlushPending = false;
+
+      if (!StaticPrefs::webgl_auto_flush()) return;
+      const bool flushGl = StaticPrefs::webgl_auto_flush_gl();
+      strong->Flush(flushGl);
+    };
+
+    already_AddRefed<mozilla::Runnable> runnable = NS_NewRunnableFunction(
+        "enqueue Event_webglcontextrestored", DeferredFlush);
+    NS_DispatchToCurrentThread(std::move(runnable));
+  }
+
+  void CancelAutoFlush() { mAutoFlushPending = false; }
+
+  // -
+
   void AfterDrawCall() {
     if (!mNotLost) return;
     const auto& state = State();
     if (!state.mBoundDrawFb) {
       MarkCanvasDirty();
     }
+
+    AutoEnqueueFlush();
   }
 
   // -------------------------------------------------------------------------
@@ -1043,8 +1056,9 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
  public:
   bool IsContextLost() const { return !mNotLost; }
 
-  void Disable(GLenum cap) const;
-  void Enable(GLenum cap) const;
+  void Disable(GLenum cap) const { SetEnabledI(cap, {}, false); }
+  void Enable(GLenum cap) const { SetEnabledI(cap, {}, true); }
+  void SetEnabledI(GLenum cap, Maybe<GLuint> i, bool val) const;
   bool IsEnabled(GLenum cap) const;
 
  private:
@@ -1211,9 +1225,18 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
     BlendFuncSeparate(sfactor, dfactor, sfactor, dfactor);
   }
 
-  void BlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha);
+  void BlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
+    BlendEquationSeparateI({}, modeRGB, modeAlpha);
+  }
   void BlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha,
-                         GLenum dstAlpha);
+                         GLenum dstAlpha) {
+    BlendFuncSeparateI({}, srcRGB, dstRGB, srcAlpha, dstAlpha);
+  }
+
+  void BlendEquationSeparateI(Maybe<GLuint> buf, GLenum modeRGB,
+                              GLenum modeAlpha);
+  void BlendFuncSeparateI(Maybe<GLuint> buf, GLenum srcRGB, GLenum dstRGB,
+                          GLenum srcAlpha, GLenum dstAlpha);
 
   // -
 
@@ -1255,8 +1278,10 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
 
   void ClearStencil(GLint v);
 
-  void ColorMask(WebGLboolean r, WebGLboolean g, WebGLboolean b,
-                 WebGLboolean a);
+  void ColorMask(bool r, bool g, bool b, bool a) const {
+    ColorMaskI({}, r, g, b, a);
+  }
+  void ColorMaskI(Maybe<GLuint> buf, bool r, bool g, bool b, bool a) const;
 
   void CullFace(GLenum face);
 
@@ -1266,7 +1291,7 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
 
   void DepthRange(GLclampf zNear, GLclampf zFar);
 
-  void Flush();
+  void Flush(bool flushGl = true);
 
   void Finish();
 

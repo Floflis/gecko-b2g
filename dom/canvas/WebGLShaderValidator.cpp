@@ -80,7 +80,6 @@ static ShCompileOptions ChooseValidatorCompileOptions(
     options ^= SH_EXPAND_SELECT_HLSL_INTEGER_POW_EXPRESSIONS;
     options ^= SH_HLSL_GET_DIMENSIONS_IGNORES_BASE_LEVEL;
 
-    options ^= SH_DONT_REMOVE_INVARIANT_FOR_FRAGMENT_INPUT;
     options ^= SH_REMOVE_INVARIANT_AND_CENTROID_FOR_ESSL3;
   }
 
@@ -182,6 +181,7 @@ std::unique_ptr<webgl::ShaderValidator> WebGLContext::CreateShaderValidator(
     resources.EXT_shader_texture_lod = 1;
 
   if (IsExtensionEnabled(WebGLExtensionID::OVR_multiview2)) {
+    resources.OVR_multiview = 1;
     resources.OVR_multiview2 = 1;
     resources.MaxViewsOVR = limits.maxMultiviewLayers;
   }

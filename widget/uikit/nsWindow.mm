@@ -32,11 +32,10 @@
 #include "nsTArray.h"
 
 #include "mozilla/BasicEvents.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/TouchEvents.h"
 #include "mozilla/Unused.h"
 #include "mozilla/dom/MouseEventBinding.h"
-
-#include "GeckoProfiler.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -332,7 +331,6 @@ class nsAutoRetainUIKitObject {
           << "Window context problem 2 " << backingSize;
       return;
     }
-    dt->AddUserData(&gfxContext::sDontUseAsSourceKey, dt, nullptr);
     targetContext = gfxContext::CreateOrNull(dt);
   } else {
     MOZ_ASSERT_UNREACHABLE("COREGRAPHICS is the only supported backend");

@@ -110,11 +110,6 @@ NS_IMETHODIMP
 CancelChannelRunnable::Run() {
   MOZ_ASSERT(NS_IsMainThread());
 
-  // TODO: When bug 1204254 is implemented, this time marker should be moved to
-  // the point where the body of the network request is complete.
-  mChannel->SetHandleFetchEventEnd(TimeStamp::Now());
-  mChannel->SaveTimeStamps();
-
   mChannel->CancelInterception(mStatus);
   mRegistration->MaybeScheduleUpdate();
   return NS_OK;
@@ -210,11 +205,6 @@ class FinishResponse final : public Runnable {
       mChannel->CancelInterception(NS_ERROR_INTERCEPTION_FAILED);
       return NS_OK;
     }
-
-    TimeStamp timeStamp = TimeStamp::Now();
-    mChannel->SetHandleFetchEventEnd(timeStamp);
-    mChannel->SetFinishSynthesizedResponseEnd(timeStamp);
-    mChannel->SaveTimeStamps();
 
     return rv;
   }
@@ -573,7 +563,6 @@ NS_IMPL_ISUPPORTS0(RespondWithHandler)
 void RespondWithHandler::ResolvedCallback(JSContext* aCx,
                                           JS::Handle<JS::Value> aValue) {
   AutoCancel autoCancel(this, mRequestURL);
-  mInterceptedChannel->SetFinishResponseStart(TimeStamp::Now());
 
   if (!aValue.isObject()) {
     NS_WARNING(
@@ -753,8 +742,6 @@ void RespondWithHandler::RejectedCallback(JSContext* aCx,
   uint32_t line = mRespondWithLineNumber;
   uint32_t column = mRespondWithColumnNumber;
   nsString valueString;
-
-  mInterceptedChannel->SetFinishResponseStart(TimeStamp::Now());
 
   nsContentUtils::ExtractErrorValues(aCx, aValue, sourceSpec, &line, &column,
                                      valueString);
@@ -1249,6 +1236,10 @@ SystemMessageData::WebActivityRequestHandler(ErrorResult& aRv) {
 
   RefPtr<mozilla::dom::WebActivityRequestHandler> handler =
       mozilla::dom::WebActivityRequestHandler::Create(mOwner, mData);
+  if (!handler) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
   return handler.forget();
 }
 
@@ -1289,10 +1280,7 @@ ExtendableMessageEvent::ExtendableMessageEvent(EventTarget* aOwner)
   mozilla::HoldJSObjects(this);
 }
 
-ExtendableMessageEvent::~ExtendableMessageEvent() {
-  mData.setUndefined();
-  DropJSObjects(this);
-}
+ExtendableMessageEvent::~ExtendableMessageEvent() { DropJSObjects(this); }
 
 void ExtendableMessageEvent::GetData(JSContext* aCx,
                                      JS::MutableHandle<JS::Value> aData,

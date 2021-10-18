@@ -236,8 +236,18 @@ Action for configuring the user homepage and restoring defaults.
 }
 ```
 
+### `PIN_FIREFOX_TO_TASKBAR`
+
+Action for pinning Firefox to the user's taskbar.
+
+* args: (none)
+
 ### `SET_DEFAULT_BROWSER`
 
 Action for configuring the default browser to Firefox on the user's system.
 
 * args: (none)
+
+### `ENABLE_TOTAL_COOKIE_PROTECTION`
+
+Action for enabling the Total Cookie Protection feature.

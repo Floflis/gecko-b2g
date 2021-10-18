@@ -9,6 +9,7 @@
 #include "mozilla/EventStates.h"
 #include "mozilla/SVGObserverUtils.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/BindContext.h"
 #include "mozilla/dom/SVGFEImageElementBinding.h"
 #include "mozilla/dom/SVGFilterElement.h"
 #include "mozilla/dom/UserActivation.h"
@@ -153,6 +154,10 @@ nsresult SVGFEImageElement::BindToTree(BindContext& aContext,
                           &SVGFEImageElement::MaybeLoadSVGImage));
   }
 
+  if (aContext.InComposedDoc()) {
+    aContext.OwnerDoc().SetUseCounter(eUseCounter_custom_feImage);
+  }
+
   return rv;
 }
 
@@ -267,7 +272,7 @@ bool SVGFEImageElement::OutputIsTainted(const nsTArray<bool>& aInputsAreTainted,
 
   int32_t corsmode;
   if (NS_SUCCEEDED(currentRequest->GetCORSMode(&corsmode)) &&
-      corsmode != imgIRequest::CORS_NONE) {
+      corsmode != CORS_NONE) {
     // If CORS was used to load the image, the page is allowed to read from it.
     return false;
   }

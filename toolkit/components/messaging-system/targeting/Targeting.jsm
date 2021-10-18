@@ -15,14 +15,17 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   FilterExpressions:
     "resource://gre/modules/components-utils/FilterExpressions.jsm",
   ClientEnvironment: "resource://normandy/lib/ClientEnvironment.jsm",
+  ClientEnvironmentBase:
+    "resource://gre/modules/components-utils/ClientEnvironment.jsm",
   AppConstants: "resource://gre/modules/AppConstants.jsm",
+  TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.jsm",
 });
 
 var EXPORTED_SYMBOLS = ["TargetingContext"];
 
 const TARGETING_EVENT_CATEGORY = "messaging_experiments";
 const TARGETING_EVENT_METHOD = "targeting";
-const DEFAULT_TIMEOUT = 3000;
+const DEFAULT_TIMEOUT = 5000;
 const ERROR_TYPES = {
   ATTRIBUTE_ERROR: "attribute_error",
   TIMEOUT: "attribute_timeout",
@@ -50,16 +53,23 @@ const TargetingEnvironment = {
   },
 
   get channel() {
-    return AppConstants.MOZ_UPDATE_CHANNEL;
+    const { settings } = TelemetryEnvironment.currentEnvironment;
+    return settings.update.channel;
   },
 
   get platform() {
     return AppConstants.platform;
   },
+
+  get os() {
+    return ClientEnvironmentBase.os;
+  },
 };
 
 class TargetingContext {
-  constructor(customContext) {
+  #telemetrySource = null;
+
+  constructor(customContext, options = { source: null }) {
     if (customContext) {
       this.ctx = new Proxy(customContext, {
         get: (customCtx, prop) => {
@@ -73,17 +83,36 @@ class TargetingContext {
       this.ctx = TargetingEnvironment;
     }
 
+    // Used in telemetry to report where the targeting expression is coming from
+    this.#telemetrySource = options.source;
+
     // Enable event recording
     Services.telemetry.setEventRecordingEnabled(TARGETING_EVENT_CATEGORY, true);
   }
 
+  setTelemetrySource(source) {
+    if (source) {
+      this.#telemetrySource = source;
+    }
+  }
+
   _sendUndesiredEvent(eventData) {
-    Services.telemetry.recordEvent(
-      TARGETING_EVENT_CATEGORY,
-      TARGETING_EVENT_METHOD,
-      eventData.event,
-      eventData.value
-    );
+    if (this.#telemetrySource) {
+      Services.telemetry.recordEvent(
+        TARGETING_EVENT_CATEGORY,
+        TARGETING_EVENT_METHOD,
+        eventData.event,
+        eventData.value,
+        { source: this.#telemetrySource }
+      );
+    } else {
+      Services.telemetry.recordEvent(
+        TARGETING_EVENT_CATEGORY,
+        TARGETING_EVENT_METHOD,
+        eventData.event,
+        eventData.value
+      );
+    }
   }
 
   /**

@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "mozilla/Components.h"
 #include "mozilla/dom/PopupBlocker.h"
 #include "mozilla/dom/UserActivation.h"
 #include "mozilla/BasePrincipal.h"
@@ -117,7 +118,7 @@ PopupBlocker::GetPopupControlState() {
 uint32_t PopupBlocker::GetPopupPermission(nsIPrincipal* aPrincipal) {
   uint32_t permit = nsIPermissionManager::UNKNOWN_ACTION;
   nsCOMPtr<nsIPermissionManager> permissionManager =
-      services::GetPermissionManager();
+      components::PermissionManager::Service();
 
   if (permissionManager) {
     permissionManager->TestPermissionFromPrincipal(aPrincipal, "popup"_ns,
@@ -141,7 +142,7 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
     WidgetEvent* aEvent, Event* aDOMEvent) {
   // generally if an event handler is running, new windows are disallowed.
   // check for exceptions:
-  PopupBlocker::PopupControlState abuse = PopupBlocker::openAbused;
+  PopupBlocker::PopupControlState abuse = PopupBlocker::openBlocked;
 
   if (aDOMEvent && aDOMEvent->GetWantsPopupControlCheck()) {
     nsAutoString type;
@@ -157,7 +158,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
       // triggered while handling user input. See
       // UserActivation::IsUserInteractionEvent() for details.
       if (UserActivation::IsHandlingUserInput()) {
-        abuse = PopupBlocker::openBlocked;
         switch (aEvent->mMessage) {
           case eFormSelect:
             if (PopupAllowedForEvent("select")) {
@@ -179,7 +179,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
       // while handling user input. See
       // UserActivation::IsUserInteractionEvent() for details.
       if (UserActivation::IsHandlingUserInput()) {
-        abuse = PopupBlocker::openBlocked;
         switch (aEvent->mMessage) {
           case eEditorInput:
             if (PopupAllowedForEvent("input")) {
@@ -196,7 +195,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
       // while handling user input. See
       // UserActivation::IsUserInteractionEvent() for details.
       if (UserActivation::IsHandlingUserInput()) {
-        abuse = PopupBlocker::openBlocked;
         switch (aEvent->mMessage) {
           case eFormChange:
             if (PopupAllowedForEvent("change")) {
@@ -213,7 +211,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
       break;
     case eKeyboardEventClass:
       if (aEvent->IsTrusted()) {
-        abuse = PopupBlocker::openBlocked;
         uint32_t key = aEvent->AsKeyboardEvent()->mKeyCode;
         switch (aEvent->mMessage) {
           case eKeyPress:
@@ -244,7 +241,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
       break;
     case eTouchEventClass:
       if (aEvent->IsTrusted()) {
-        abuse = PopupBlocker::openBlocked;
         switch (aEvent->mMessage) {
           case eTouchStart:
             if (PopupAllowedForEvent("touchstart")) {
@@ -267,7 +263,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
         // context menu.
         if (aEvent->AsMouseEvent()->mButton == MouseButton::ePrimary ||
             aEvent->AsMouseEvent()->mButton == MouseButton::eMiddle) {
-          abuse = PopupBlocker::openBlocked;
           switch (aEvent->mMessage) {
             case eMouseUp:
               if (PopupAllowedForEvent("mouseup")) {
@@ -303,8 +298,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
           // it becomes a compat issue
           if (PopupAllowedForEvent("auxclick")) {
             abuse = PopupBlocker::openControlled;
-          } else {
-            abuse = PopupBlocker::openBlocked;
           }
         }
 
@@ -312,8 +305,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
           case eContextMenu:
             if (PopupAllowedForEvent("contextmenu")) {
               abuse = PopupBlocker::openControlled;
-            } else {
-              abuse = PopupBlocker::openBlocked;
             }
             break;
           default:
@@ -346,7 +337,6 @@ PopupBlocker::PopupControlState PopupBlocker::GetEventPopupControlState(
       // triggered while handling user input. See
       // UserActivation::IsUserInteractionEvent() for details.
       if (UserActivation::IsHandlingUserInput()) {
-        abuse = PopupBlocker::openBlocked;
         switch (aEvent->mMessage) {
           case eFormSubmit:
             if (PopupAllowedForEvent("submit")) {

@@ -7,7 +7,9 @@
 EXPORTS += ["AccEvent.h", "nsAccessibilityService.h"]
 
 EXPORTS.mozilla.a11y += [
+    "AccAttributes.h",
     "AccTypes.h",
+    "CacheConstants.h",
     "DocManager.h",
     "FocusManager.h",
     "IDSet.h",
@@ -24,7 +26,7 @@ if CONFIG["MOZ_DEBUG"]:
     ]
 
 UNIFIED_SOURCES += [
-    "AccessibleOrProxy.cpp",
+    "AccAttributes.cpp",
     "AccEvent.cpp",
     "AccGroupInfo.cpp",
     "AccIterator.cpp",
@@ -48,6 +50,7 @@ UNIFIED_SOURCES += [
     "SelectionManager.cpp",
     "StyleInfo.cpp",
     "TextAttrs.cpp",
+    "TextLeafRange.cpp",
     "TextRange.cpp",
     "TextUpdater.cpp",
     "TreeWalker.cpp",
@@ -89,8 +92,8 @@ LOCAL_INCLUDES += [
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     LOCAL_INCLUDES += [
         "/accessible/atk",
+        "/gfx/cairo/cairo/src",
     ]
-    CXXFLAGS += CONFIG["MOZ_CAIRO_CFLAGS"]
 elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
     LOCAL_INCLUDES += [
         "/accessible/windows/ia2",

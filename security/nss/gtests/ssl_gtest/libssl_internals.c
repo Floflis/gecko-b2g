@@ -498,23 +498,4 @@ SECStatus SSLInt_SetRawEchConfigForRetry(PRFileDesc *fd, const uint8_t *buf,
   return SECSuccess;
 }
 
-// Zero the echConfig.config_id for all configured echConfigs.
-// This mimics a collision on the 8B config ID so that we can
-// test trial decryption.
-SECStatus SSLInt_ZeroEchConfigIds(PRFileDesc *fd) {
-  if (!fd) {
-    return SECFailure;
-  }
-  sslSocket *ss = ssl_FindSocket(fd);
-  if (!ss) {
-    return SECFailure;
-  }
-
-  for (PRCList *cur_p = PR_LIST_HEAD(&ss->echConfigs); cur_p != &ss->echConfigs;
-       cur_p = PR_NEXT_LINK(cur_p)) {
-    PORT_Memset(((sslEchConfig *)cur_p)->configId, 0,
-                sizeof(((sslEchConfig *)cur_p)->configId));
-  }
-
-  return SECSuccess;
-}
+PRBool SSLInt_IsIp(PRUint8 *s, unsigned int len) { return tls13_IsIp(s, len); }

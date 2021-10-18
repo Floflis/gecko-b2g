@@ -12,11 +12,9 @@
 // Enable logging all platform events this module listen to
 const DEBUG_PLATFORM_EVENTS = false;
 
-const { Cc, Ci, Cr, Cu } = require("chrome");
+const { Cc, Ci, Cu } = require("chrome");
 const Services = require("Services");
-const {
-  wildcardToRegExp,
-} = require("devtools/server/actors/network-monitor/utils/wildcard-to-regexp");
+
 loader.lazyRequireGetter(
   this,
   "ChannelMap",
@@ -25,11 +23,9 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
-  "getErrorCodeString",
-  "devtools/server/actors/network-monitor/utils/error-codes",
-  true
+  "NetworkUtils",
+  "devtools/server/actors/network-monitor/utils/network-utils"
 );
-
 loader.lazyRequireGetter(
   this,
   "NetworkHelper",
@@ -110,9 +106,13 @@ function matchRequest(channel, filters) {
   }
 
   if (filters.window) {
+    let win = NetworkHelper.getWindowForRequest(channel);
+    if (filters.matchExactWindow) {
+      return win == filters.window;
+    }
+
     // Since frames support, this.window may not be the top level content
     // frame, so that we can't only compare with win.top.
-    let win = NetworkHelper.getWindowForRequest(channel);
     while (win) {
       if (win == filters.window) {
         return true;
@@ -122,12 +122,15 @@ function matchRequest(channel, filters) {
       }
       win = win.parent;
     }
+    return false;
   }
 
   if (filters.browserId) {
     const topFrame = NetworkHelper.getTopFrameForRequest(channel);
-    // topFrame is typically null for some chrome requests like favicons
-    if (topFrame && topFrame.browsingContext.browserId == filters.browserId) {
+    // `topFrame` is typically null for some chrome requests like favicons
+    // And its `browsingContext` attribute might be null if the request happened
+    // while the tab is being closed.
+    if (topFrame?.browsingContext?.browserId == filters.browserId) {
       return true;
     }
 
@@ -157,6 +160,9 @@ exports.matchRequest = matchRequest;
  *        Object with the filters to use for network requests:
  *        - window (nsIDOMWindow): filter network requests by the associated
  *          window object.
+ *        - matchExactWindow (Boolean): only has effect when `window` is provided too.
+ *        When set to true, only requests associated with this specific window will be returned.
+ *        When false, the requests from parent windows will be retrieved.
  *        - browserId (number): filter requests by their top frame's Browser Element.
  *        Filters are optional. If any of these filters match the request is
  *        logged (OR is applied). If no filter is provided then all requests are
@@ -194,6 +200,9 @@ function NetworkObserver(filters, owner) {
 
   this._throttleData = null;
   this._throttler = null;
+  // This is ultimately used by NetworkHelper.parseSecurityInfo to avoid
+  // repeatedly decoding already-seen certificates.
+  this._decodedCertificateCache = new Map();
 }
 
 exports.NetworkObserver = NetworkObserver;
@@ -304,6 +313,8 @@ NetworkObserver.prototype = {
     return this._throttler;
   },
 
+  _decodedCertificateCache: null,
+
   _serviceWorkerRequest: function(subject, topic, data) {
     const channel = subject.QueryInterface(Ci.nsIHttpChannel);
 
@@ -343,14 +354,7 @@ NetworkObserver.prototype = {
     // Ignore preload requests to avoid duplicity request entries in
     // the Network panel. If a preload fails (for whatever reason)
     // then the platform kicks off another 'real' request.
-    const type = channel.loadInfo.internalContentPolicyType;
-    if (
-      type == Ci.nsIContentPolicy.TYPE_INTERNAL_SCRIPT_PRELOAD ||
-      type == Ci.nsIContentPolicy.TYPE_INTERNAL_MODULE_PRELOAD ||
-      type == Ci.nsIContentPolicy.TYPE_INTERNAL_IMAGE_PRELOAD ||
-      type == Ci.nsIContentPolicy.TYPE_INTERNAL_STYLESHEET_PRELOAD ||
-      type == Ci.nsIContentPolicy.TYPE_INTERNAL_FONT_PRELOAD
-    ) {
+    if (NetworkUtils.isPreloadRequest(channel)) {
       return;
     }
 
@@ -413,7 +417,7 @@ NetworkObserver.prototype = {
         if (reason == 0) {
           // If we get there, we have a non-zero status, but no clear blocking reason
           // This is most likely a request that failed for some reason, so try to pass this reason
-          reason = getErrorCodeString(status);
+          reason = NetworkUtils.getErrorCodeString(status);
         }
         this._createNetworkEvent(subject, {
           blockedReason: reason,
@@ -773,9 +777,6 @@ NetworkObserver.prototype = {
   ) {
     const httpActivity = this.createOrGetActivityObject(channel);
 
-    channel.QueryInterface(Ci.nsIPrivateBrowsingChannel);
-    httpActivity.private = channel.isChannelPrivate;
-
     if (timestamp) {
       httpActivity.timings.REQUEST_HEADER = {
         first: timestamp,
@@ -783,121 +784,20 @@ NetworkObserver.prototype = {
       };
     }
 
-    const trackingProtectionLevel2Enabled = Services.prefs
-      .getStringPref("urlclassifier.trackingTable")
-      .includes("content-track-digest256");
-    const tpFlagsMask = trackingProtectionLevel2Enabled
-      ? ~Ci.nsIClassifiedChannel.CLASSIFIED_ANY_BASIC_TRACKING &
-        ~Ci.nsIClassifiedChannel.CLASSIFIED_ANY_STRICT_TRACKING
-      : ~Ci.nsIClassifiedChannel.CLASSIFIED_ANY_BASIC_TRACKING &
-        Ci.nsIClassifiedChannel.CLASSIFIED_ANY_STRICT_TRACKING;
-    const event = {};
-    event.method = channel.requestMethod;
-    event.channelId = channel.channelId;
-    event.url = channel.URI.spec;
-    event.private = httpActivity.private;
-    event.headersSize = 0;
-    event.startedDateTime = (timestamp
-      ? new Date(Math.round(timestamp / 1000))
-      : new Date()
-    ).toISOString();
-    event.fromCache = fromCache;
-    event.fromServiceWorker = fromServiceWorker;
-    // Only consider channels classified as level-1 to be trackers if our preferences
-    // would not cause such channels to be blocked in strict content blocking mode.
-    // Make sure the value produced here is a boolean.
-    if (channel instanceof Ci.nsIClassifiedChannel) {
-      event.isThirdPartyTrackingResource = !!(
-        channel.isThirdPartyTrackingResource() &&
-        (channel.thirdPartyClassificationFlags & tpFlagsMask) == 0
-      );
-    }
-    const referrerInfo = channel.referrerInfo;
-    event.referrerPolicy = referrerInfo
-      ? referrerInfo.getReferrerPolicyString()
-      : "";
+    const event = NetworkUtils.createNetworkEvent(channel, {
+      timestamp,
+      fromCache,
+      fromServiceWorker,
+      extraStringData,
+      blockedReason,
+      blockingExtension,
+      blockedURLs: this.blockedURLs,
+      saveRequestAndResponseBodies: this.saveRequestAndResponseBodies,
+    });
+
+    httpActivity.isXHR = event.isXHR;
+    httpActivity.private = event.private;
     httpActivity.fromServiceWorker = fromServiceWorker;
-
-    if (extraStringData) {
-      event.headersSize = extraStringData.length;
-    }
-
-    // Determine the cause and if this is an XHR request.
-    let causeType = Ci.nsIContentPolicy.TYPE_OTHER;
-    let causeUri = null;
-    let stacktrace;
-
-    if (channel.loadInfo) {
-      causeType = channel.loadInfo.externalContentPolicyType;
-      const { loadingPrincipal } = channel.loadInfo;
-      if (loadingPrincipal) {
-        causeUri = loadingPrincipal.spec;
-      }
-    }
-
-    // Show the right WebSocket URL in case of WS channel.
-    if (channel.notificationCallbacks) {
-      let wsChannel = null;
-      try {
-        wsChannel = channel.notificationCallbacks.QueryInterface(
-          Ci.nsIWebSocketChannel
-        );
-      } catch (e) {
-        // Not all channels implement nsIWebSocketChannel.
-      }
-      if (wsChannel) {
-        event.url = wsChannel.URI.spec;
-        event.serial = wsChannel.serial;
-      }
-    }
-
-    event.cause = {
-      type: causeTypeToString(
-        causeType,
-        channel.loadFlags,
-        channel.loadInfo.internalContentPolicyType
-      ),
-      loadingDocumentUri: causeUri,
-      stacktrace,
-    };
-
-    httpActivity.isXHR = event.isXHR =
-      causeType === Ci.nsIContentPolicy.TYPE_XMLHTTPREQUEST ||
-      causeType === Ci.nsIContentPolicy.TYPE_FETCH;
-
-    // Determine the HTTP version.
-    const httpVersionMaj = {};
-    const httpVersionMin = {};
-    channel.QueryInterface(Ci.nsIHttpChannelInternal);
-    channel.getRequestVersion(httpVersionMaj, httpVersionMin);
-
-    event.httpVersion =
-      "HTTP/" + httpVersionMaj.value + "." + httpVersionMin.value;
-
-    event.discardRequestBody = !this.saveRequestAndResponseBodies;
-    event.discardResponseBody = !this.saveRequestAndResponseBodies;
-
-    // Check the request URL with ones manually blocked by the user in DevTools.
-    // If it's meant to be blocked, we cancel the request and annotate the event.
-    if (!blockedReason) {
-      if (blockedReason !== undefined) {
-        // We were definitely blocked, but the blocker didn't say why.
-        event.blockedReason = "unknown";
-      } else if (
-        this.blockedURLs.some(url =>
-          wildcardToRegExp(url).test(httpActivity.url)
-        )
-      ) {
-        channel.cancel(Cr.NS_BINDING_ABORTED);
-        event.blockedReason = "devtools";
-      }
-    } else {
-      event.blockedReason = blockedReason;
-      if (blockingExtension) {
-        event.blockingExtension = blockingExtension;
-      }
-    }
-
     httpActivity.owner = this.owner.onNetworkEvent(event);
 
     // Bug 1489217 - Avoid watching for response content for blocked or in-progress requests
@@ -907,38 +807,10 @@ NetworkObserver.prototype = {
       this._setupResponseListener(httpActivity, fromCache);
     }
 
-    this.fetchRequestHeadersAndCookies(channel, httpActivity, extraStringData);
-
-    return httpActivity;
-  },
-
-  /**
-   * For a given channel, with its associated http activity object,
-   * fetch the request's headers and cookies.
-   * This data is passed to the owner, i.e. the NetworkEventActor,
-   * so that the frontend can later fetch it via getRequestHeaders/getRequestCookies.
-   */
-  fetchRequestHeadersAndCookies(channel, httpActivity, extraStringData) {
-    const headers = [];
-    let cookies = [];
-    let cookieHeader = null;
-
-    // Copy the request header data.
-    channel.visitRequestHeaders({
-      visitHeader: function(name, value) {
-        if (name == "Cookie") {
-          cookieHeader = value;
-        }
-        headers.push({ name: name, value: value });
-      },
+    NetworkUtils.fetchRequestHeadersAndCookies(channel, httpActivity.owner, {
+      extraStringData,
     });
-
-    if (cookieHeader) {
-      cookies = NetworkHelper.parseCookieHeader(cookieHeader);
-    }
-
-    httpActivity.owner.addRequestHeaders(headers, extraStringData);
-    httpActivity.owner.addRequestCookies(cookies);
+    return httpActivity;
   },
 
   /**
@@ -1096,7 +968,11 @@ NetworkObserver.prototype = {
     sink.init(false, false, this.responsePipeSegmentSize, PR_UINT32_MAX, null);
 
     // Add listener for the response body.
-    const newListener = new NetworkResponseListener(this, httpActivity);
+    const newListener = new NetworkResponseListener(
+      this,
+      httpActivity,
+      this._decodedCertificateCache
+    );
 
     // Remember the input stream, so it isn't released by GC.
     newListener.inputStream = sink.inputStream;
@@ -1665,57 +1541,12 @@ NetworkObserver.prototype = {
     this.owner = null;
     this.filters = null;
     this._throttler = null;
+    this._decodedCertificateCache.clear();
   },
 };
 
 function gSequenceId() {
   return gSequenceId.n++;
 }
+
 gSequenceId.n = 1;
-
-/**
- * Convert a nsIContentPolicy constant to a display string
- */
-const LOAD_CAUSE_STRINGS = {
-  [Ci.nsIContentPolicy.TYPE_INVALID]: "invalid",
-  [Ci.nsIContentPolicy.TYPE_OTHER]: "other",
-  [Ci.nsIContentPolicy.TYPE_SCRIPT]: "script",
-  [Ci.nsIContentPolicy.TYPE_IMAGE]: "img",
-  [Ci.nsIContentPolicy.TYPE_STYLESHEET]: "stylesheet",
-  [Ci.nsIContentPolicy.TYPE_OBJECT]: "object",
-  [Ci.nsIContentPolicy.TYPE_DOCUMENT]: "document",
-  [Ci.nsIContentPolicy.TYPE_SUBDOCUMENT]: "subdocument",
-  [Ci.nsIContentPolicy.TYPE_PING]: "ping",
-  [Ci.nsIContentPolicy.TYPE_XMLHTTPREQUEST]: "xhr",
-  [Ci.nsIContentPolicy.TYPE_OBJECT_SUBREQUEST]: "objectSubdoc",
-  [Ci.nsIContentPolicy.TYPE_DTD]: "dtd",
-  [Ci.nsIContentPolicy.TYPE_FONT]: "font",
-  [Ci.nsIContentPolicy.TYPE_MEDIA]: "media",
-  [Ci.nsIContentPolicy.TYPE_WEBSOCKET]: "websocket",
-  [Ci.nsIContentPolicy.TYPE_CSP_REPORT]: "csp",
-  [Ci.nsIContentPolicy.TYPE_XSLT]: "xslt",
-  [Ci.nsIContentPolicy.TYPE_BEACON]: "beacon",
-  [Ci.nsIContentPolicy.TYPE_FETCH]: "fetch",
-  [Ci.nsIContentPolicy.TYPE_IMAGESET]: "imageset",
-  [Ci.nsIContentPolicy.TYPE_WEB_MANIFEST]: "webManifest",
-};
-
-function causeTypeToString(causeType, loadFlags, internalContentPolicyType) {
-  let prefix = "";
-  if (
-    (causeType == Ci.nsIContentPolicy.TYPE_IMAGESET ||
-      internalContentPolicyType == Ci.nsIContentPolicy.TYPE_INTERNAL_IMAGE) &&
-    loadFlags & Ci.nsIRequest.LOAD_BACKGROUND
-  ) {
-    prefix = "lazy-";
-  }
-
-  return prefix + LOAD_CAUSE_STRINGS[causeType] || "unknown";
-}
-
-function stringToCauseType(value) {
-  return Object.keys(LOAD_CAUSE_STRINGS).find(
-    key => LOAD_CAUSE_STRINGS[key] === value
-  );
-}
-exports.stringToCauseType = stringToCauseType;

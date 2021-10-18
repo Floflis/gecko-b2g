@@ -15,6 +15,7 @@
 #include "mozilla/OriginAttributes.h"
 #include "mozilla/RefPtr.h"
 #include "nsAtom.h"
+#include "nsIObjectOutputStream.h"
 #include "nsIPrincipal.h"
 #include "nsJSPrincipals.h"
 #include "nsStringFwd.h"
@@ -89,8 +90,6 @@ class BasePrincipal : public nsJSPrincipals {
     eKindMax = eSystemPrincipal
   };
 
-  explicit BasePrincipal(PrincipalKind aKind);
-
   template <typename T>
   bool Is() const {
     return mKind == T::Kind();
@@ -126,7 +125,7 @@ class BasePrincipal : public nsJSPrincipals {
   NS_IMETHOD CheckMayLoadWithReporting(nsIURI* uri,
                                        bool allowIfInheritsPrincipal,
                                        uint64_t innerWindowID) final;
-  NS_IMETHOD GetAddonPolicy(nsISupports** aResult) final;
+  NS_IMETHOD GetAddonPolicy(extensions::WebExtensionPolicy** aResult) final;
   NS_IMETHOD GetIsNullPrincipal(bool* aResult) override;
   NS_IMETHOD GetIsContentPrincipal(bool* aResult) override;
   NS_IMETHOD GetIsExpandedPrincipal(bool* aResult) override;
@@ -134,6 +133,7 @@ class BasePrincipal : public nsJSPrincipals {
   NS_IMETHOD GetScheme(nsACString& aScheme) override;
   NS_IMETHOD SchemeIs(const char* aScheme, bool* aResult) override;
   NS_IMETHOD IsURIInPrefList(const char* aPref, bool* aResult) override;
+  NS_IMETHOD IsURIInList(const nsACString& aList, bool* aResult) override;
   NS_IMETHOD IsL10nAllowed(nsIURI* aURI, bool* aResult) override;
   NS_IMETHOD GetAboutModuleFlags(uint32_t* flags) override;
   NS_IMETHOD GetIsAddonOrExpandedAddonPrincipal(bool* aResult) override;
@@ -145,7 +145,7 @@ class BasePrincipal : public nsJSPrincipals {
   NS_IMETHOD GetExposableSpec(nsACString& aSpec) override;
   NS_IMETHOD GetHostPort(nsACString& aRes) override;
   NS_IMETHOD GetHost(nsACString& aRes) override;
-  NS_IMETHOD GetPrepath(nsACString& aResult) override;
+  NS_IMETHOD GetPrePath(nsACString& aResult) override;
   NS_IMETHOD GetFilePath(nsACString& aResult) override;
   NS_IMETHOD GetOriginSuffix(nsACString& aOriginSuffix) final;
   NS_IMETHOD GetIsIpAddress(bool* aIsIpAddress) override;
@@ -181,6 +181,9 @@ class BasePrincipal : public nsJSPrincipals {
 
   NS_IMETHOD GetNextSubDomainPrincipal(
       nsIPrincipal** aNextSubDomainPrincipal) override;
+
+  NS_IMETHOD GetPrecursorPrincipal(nsIPrincipal** aPrecursor) override;
+
   nsresult ToJSON(nsACString& aJSON);
   static already_AddRefed<BasePrincipal> FromJSON(const nsACString& aJSON);
   // Method populates a passed Json::Value with serializable fields
@@ -288,6 +291,11 @@ class BasePrincipal : public nsJSPrincipals {
   virtual nsresult GetSiteIdentifier(SiteIdentifier& aSite) = 0;
 
  protected:
+  BasePrincipal(PrincipalKind aKind, const nsACString& aOriginNoSuffix,
+                const OriginAttributes& aOriginAttributes);
+  BasePrincipal(BasePrincipal* aOther,
+                const OriginAttributes& aOriginAttributes);
+
   virtual ~BasePrincipal();
 
   // Note that this does not check OriginAttributes. Callers that depend on
@@ -307,14 +315,6 @@ class BasePrincipal : public nsJSPrincipals {
 
   void SetHasExplicitDomain() { mHasExplicitDomain = true; }
 
-  // Either of these functions should be called as the last step of the
-  // initialization of the principal objects.  It's typically called as the
-  // last step from the Init() method of the child classes.
-  void FinishInit(const nsACString& aOriginNoSuffix,
-                  const OriginAttributes& aOriginAttributes);
-  void FinishInit(BasePrincipal* aOther,
-                  const OriginAttributes& aOriginAttributes);
-
   // KeyValT holds a principal subtype-specific key value and the associated
   // parsed value after JSON parsing.
   template <typename SerializedKey>
@@ -326,6 +326,19 @@ class BasePrincipal : public nsJSPrincipals {
     nsCString value;
   };
 
+  // Common base class for all Deserializer implementations in concrete
+  // subclasses. Subclasses will initialize `mPrincipal` in `Read`, and then
+  // calls to `QueryInterface` will QI on the target object.
+  class Deserializer : public nsISerializable {
+   public:
+    NS_DECL_ISUPPORTS
+    NS_IMETHOD Write(nsIObjectOutputStream* aStream) override;
+
+   protected:
+    virtual ~Deserializer() = default;
+    RefPtr<BasePrincipal> mPrincipal;
+  };
+
  private:
   static already_AddRefed<BasePrincipal> CreateContentPrincipal(
       nsIURI* aURI, const OriginAttributes& aAttrs,
@@ -334,13 +347,12 @@ class BasePrincipal : public nsJSPrincipals {
   bool FastSubsumesIgnoringFPD(nsIPrincipal* aOther,
                                DocumentDomainConsideration aConsideration);
 
-  RefPtr<nsAtom> mOriginNoSuffix;
-  RefPtr<nsAtom> mOriginSuffix;
+  const RefPtr<nsAtom> mOriginNoSuffix;
+  const RefPtr<nsAtom> mOriginSuffix;
 
-  OriginAttributes mOriginAttributes;
-  PrincipalKind mKind;
+  const OriginAttributes mOriginAttributes;
+  const PrincipalKind mKind;
   bool mHasExplicitDomain;
-  bool mInitialized;
 };
 
 inline bool BasePrincipal::FastEquals(nsIPrincipal* aOther) {

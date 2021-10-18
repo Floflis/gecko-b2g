@@ -19,6 +19,7 @@ GeckoCppUnitTests(
 CppUnitTests(
     [
         "TestBaseProfiler",
+        "TestIntegerPrintfMacros",
         "TestPrintf",
     ]
 )
@@ -35,10 +36,6 @@ if CONFIG["OS_ARCH"] == "WINNT":
         ],
         linkage=None,
     )
-    TEST_DIRS += [
-        "interceptor",
-        "gtest",
-    ]
     OS_LIBS += [
         "ntdll",
         "version",
@@ -49,3 +46,7 @@ if CONFIG["OS_TARGET"] == "WINNT" and CONFIG["CC_TYPE"] in ("gcc", "clang"):
     LDFLAGS += [
         "-municode",
     ]
+
+TEST_DIRS += [
+    "gtest",
+]

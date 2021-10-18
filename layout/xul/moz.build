@@ -33,7 +33,6 @@ UNIFIED_SOURCES += [
     "nsScrollbarFrame.cpp",
     "nsSliderFrame.cpp",
     "nsSprocketLayout.cpp",
-    "nsStackFrame.cpp",
     "nsStackLayout.cpp",
     "nsXULTooltipListener.cpp",
 ]
@@ -53,7 +52,6 @@ if CONFIG["MOZ_XUL"]:
         "nsSplitterFrame.cpp",
         "nsTextBoxFrame.cpp",
         "nsTitleBarFrame.cpp",
-        "nsXULLabelFrame.cpp",
         "nsXULPopupManager.cpp",
     ]
 
@@ -77,3 +75,5 @@ LOCAL_INCLUDES += [
 
 if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     CXXFLAGS += ["-Wno-error=shadow"]
+
+REQUIRES_UNIFIED_BUILD = True

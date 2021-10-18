@@ -7,7 +7,7 @@ use std::sync::RwLock;
 
 use super::{DispatchError, DispatchGuard, Dispatcher};
 
-const GLOBAL_DISPATCHER_LIMIT: usize = 100;
+pub const GLOBAL_DISPATCHER_LIMIT: usize = 100;
 static GLOBAL_DISPATCHER: Lazy<RwLock<Option<Dispatcher>>> =
     Lazy::new(|| RwLock::new(Some(Dispatcher::new(GLOBAL_DISPATCHER_LIMIT))));
 
@@ -47,15 +47,20 @@ pub fn launch(task: impl FnOnce() + Send + 'static) {
 }
 
 /// Block until all tasks prior to this call are processed.
-pub fn block_on_queue() {
-    guard().block_on_queue();
+pub fn block_on_queue() -> Result<(), DispatchError> {
+    guard().block_on_queue()
 }
 
 /// Starts processing queued tasks in the global dispatch queue.
 ///
 /// This function blocks until queued tasks prior to this call are finished.
 /// Once the initial queue is empty the dispatcher will wait for new tasks to be launched.
-pub fn flush_init() -> Result<(), DispatchError> {
+///
+/// # Returns
+///
+/// Returns the total number of items that were added to the queue before being flushed,
+/// or an error if the queue couldn't be flushed.
+pub fn flush_init() -> Result<usize, DispatchError> {
     guard().flush_init()
 }
 
@@ -95,7 +100,8 @@ pub fn shutdown() -> Result<(), DispatchError> {
 /// Resets the Glean state and triggers init again.
 pub(crate) fn reset_dispatcher() {
     // We don't care about shutdown errors, since they will
-    // definitely happen if this
+    // definitely happen if this is run concurrently.
+    // We will still replace the global dispatcher.
     let _ = shutdown();
 
     // Now that the dispatcher is shut down, replace it.
@@ -144,7 +150,7 @@ mod test {
             });
         }
 
-        block_on_queue();
+        block_on_queue().unwrap();
 
         let mut expected = (1..=GLOBAL_DISPATCHER_LIMIT).collect::<Vec<_>>();
         expected.push(200);
@@ -183,7 +189,7 @@ mod test {
             });
         }
 
-        block_on_queue();
+        block_on_queue().unwrap();
 
         let expected = vec![1, 21, 22, 3];
         assert_eq!(&*result.lock().unwrap(), &expected);

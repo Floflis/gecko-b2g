@@ -8,7 +8,6 @@ const EXPORTED_SYMBOLS = ["StyleSheetEditor"];
 
 const { require } = ChromeUtils.import("resource://devtools/shared/Loader.jsm");
 const Editor = require("devtools/client/shared/sourceeditor/editor");
-const promise = require("promise");
 const {
   shortSource,
   prettifyCSS,
@@ -63,7 +62,7 @@ const STYLE_SHEET_UPDATE_CAUSED_BY_STYLE_EDITOR = "styleeditor";
  *   'error': An error has occured
  *
  * @param  {Resource} resource
- *         The STYLESHEET resource which is received from resource watcher.
+ *         The STYLESHEET resource which is received from resource command.
  * @param {DOMWindow}  win
  *        panel window for style editor
  * @param {Walker} walker
@@ -458,7 +457,7 @@ StyleSheetEditor.prototype = {
    */
   load: function(inputElement, cssProperties) {
     if (this._isDestroyed) {
-      return promise.reject(
+      return Promise.reject(
         "Won't load source editor as the style sheet has " +
           "already been removed from Style Editor."
       );

@@ -9,7 +9,7 @@ dictionary SocketElement {
   DOMString host = "";
   unsigned long port = 0;
   boolean active = false;
-  boolean tcp = false;
+  DOMString type = "";
   double sent = 0;
   double received = 0;
 };
@@ -27,7 +27,7 @@ dictionary HttpConnInfo {
   DOMString protocolVersion = "";
 };
 
-dictionary HalfOpenInfoDict {
+dictionary DnsAndSockInfoDict {
   boolean speculative = false;
 };
 
@@ -38,7 +38,7 @@ dictionary HttpConnectionElement {
   boolean ssl = false;
   sequence<HttpConnInfo> active;
   sequence<HttpConnInfo> idle;
-  sequence<HalfOpenInfoDict> halfOpens;
+  sequence<DnsAndSockInfoDict> dnsAndSocks;
 };
 
 [GenerateConversionToJS]

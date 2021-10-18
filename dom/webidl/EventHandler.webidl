@@ -10,15 +10,15 @@
  * Opera Software ASA. You are granted a license to use, reproduce
  * and create derivative works of this document.
  */
-[TreatNonObjectAsNull]
+[LegacyTreatNonObjectAsNull]
 callback EventHandlerNonNull = any (Event event);
 typedef EventHandlerNonNull? EventHandler;
 
-[TreatNonObjectAsNull]
+[LegacyTreatNonObjectAsNull]
 callback OnBeforeUnloadEventHandlerNonNull = DOMString? (Event event);
 typedef OnBeforeUnloadEventHandlerNonNull? OnBeforeUnloadEventHandler;
 
-[TreatNonObjectAsNull]
+[LegacyTreatNonObjectAsNull]
 callback OnErrorEventHandlerNonNull = any ((Event or DOMString) event, optional DOMString source, optional unsigned long lineno, optional unsigned long column, optional any error);
 typedef OnErrorEventHandlerNonNull? OnErrorEventHandler;
 
@@ -44,6 +44,7 @@ interface mixin GlobalEventHandlers {
            attribute EventHandler ondrag;
            attribute EventHandler ondragend;
            attribute EventHandler ondragenter;
+           [Func="Event::IsDragExitEnabled"]
            attribute EventHandler ondragexit;
            attribute EventHandler ondragleave;
            attribute EventHandler ondragover;
@@ -52,7 +53,6 @@ interface mixin GlobalEventHandlers {
            attribute EventHandler ondurationchange;
            attribute EventHandler onemptied;
            attribute EventHandler onended;
-           [Pref="dom.formdata.event.enabled"]
            attribute EventHandler onformdata;
            attribute EventHandler oninput;
            attribute EventHandler oninvalid;
@@ -65,8 +65,8 @@ interface mixin GlobalEventHandlers {
            attribute EventHandler onloadend;
            attribute EventHandler onloadstart;
            attribute EventHandler onmousedown;
-  [LenientThis] attribute EventHandler onmouseenter;
-  [LenientThis] attribute EventHandler onmouseleave;
+  [LegacyLenientThis] attribute EventHandler onmouseenter;
+  [LegacyLenientThis] attribute EventHandler onmouseleave;
            attribute EventHandler onmousemove;
            attribute EventHandler onmouseout;
            attribute EventHandler onmouseover;
@@ -80,11 +80,13 @@ interface mixin GlobalEventHandlers {
            attribute EventHandler onreset;
            attribute EventHandler onresize;
            attribute EventHandler onscroll;
+           attribute EventHandler onsecuritypolicyviolation;
            attribute EventHandler onseeked;
            attribute EventHandler onseeking;
            attribute EventHandler onselect;
            [Pref="dom.menuitem.enabled"]
            attribute EventHandler onshow;
+           attribute EventHandler onslotchange;
            //(Not implemented)attribute EventHandler onsort;
            attribute EventHandler onstalled;
            attribute EventHandler onsubmit;
@@ -93,8 +95,8 @@ interface mixin GlobalEventHandlers {
            attribute EventHandler onvolumechange;
            attribute EventHandler onwaiting;
 
-           [Pref="dom.select_events.enabled"]
            attribute EventHandler onselectstart;
+           attribute EventHandler onselectionchange;
 
            attribute EventHandler ontoggle;
 
@@ -156,6 +158,12 @@ interface mixin WindowEventHandlers {
            attribute EventHandler onstorage;
            attribute EventHandler onunhandledrejection;
            attribute EventHandler onunload;
+};
+
+// https://w3c.github.io/gamepad/#extensions-to-the-windoweventhandlers-interface-mixin
+partial interface mixin WindowEventHandlers {
+  attribute EventHandler ongamepadconnected;
+  attribute EventHandler ongamepaddisconnected;
 };
 
 interface mixin DocumentAndElementEventHandlers {

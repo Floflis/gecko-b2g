@@ -65,6 +65,7 @@ void SVGForeignObjectFrame::Init(nsIContent* aContent,
   AddStateBits(aParent->GetStateBits() & NS_STATE_SVG_CLIPPATH_CHILD);
   AddStateBits(NS_FRAME_FONT_INFLATION_CONTAINER |
                NS_FRAME_FONT_INFLATION_FLOW_ROOT);
+  AddStateBits(NS_FRAME_MAY_BE_TRANSFORMED);
   if (!(mState & NS_FRAME_IS_NONDISPLAY)) {
     SVGUtils::GetOuterSVGFrame(this)->RegisterForeignObject(this);
   }
@@ -274,7 +275,7 @@ void SVGForeignObjectFrame::PaintSVG(gfxContext& aContext,
   if (aImgParams.imageFlags & imgIContainer::FLAG_HIGH_QUALITY_SCALING) {
     flags |= PaintFrameFlags::UseHighQualityScaling;
   }
-  Unused << nsLayoutUtils::PaintFrame(
+  nsLayoutUtils::PaintFrame(
       &aContext, kid, nsRegion(kidDirtyRect), NS_RGBA(0, 0, 0, 0),
       nsDisplayListBuilderMode::Painting, flags);
 

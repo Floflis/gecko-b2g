@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-const { LocalizationHelper } = require("devtools/shared/l10n");
+const { MultiLocalizationHelper } = require("devtools/shared/l10n");
 
 loader.lazyRequireGetter(
   this,
@@ -23,8 +23,13 @@ loader.lazyRequireGetter(
   true
 );
 
-const DBG_STRINGS_URI = "devtools/client/locales/debugger.properties";
-const L10N = new LocalizationHelper(DBG_STRINGS_URI);
+const DBG_STRINGS_URI = [
+  "devtools/client/locales/debugger.properties",
+  // These are used in the AppErrorBoundary component
+  "devtools/client/locales/startup.properties",
+  "devtools/client/locales/components.properties",
+];
+const L10N = new MultiLocalizationHelper(...DBG_STRINGS_URI);
 
 async function getNodeFront(gripOrFront, toolbox) {
   // Given a NodeFront
@@ -37,10 +42,11 @@ async function getNodeFront(gripOrFront, toolbox) {
 }
 
 class DebuggerPanel {
-  constructor(iframeWindow, toolbox) {
+  constructor(iframeWindow, toolbox, commands) {
     this.panelWin = iframeWindow;
     this.panelWin.L10N = L10N;
     this.toolbox = toolbox;
+    this.commands = commands;
   }
 
   async open() {
@@ -50,9 +56,8 @@ class DebuggerPanel {
       selectors,
       client,
     } = await this.panelWin.Debugger.bootstrap({
-      targetList: this.toolbox.targetList,
-      resourceWatcher: this.toolbox.resourceWatcher,
-      devToolsClient: this.toolbox.target.client,
+      commands: this.commands,
+      resourceCommand: this.toolbox.resourceCommand,
       workers: {
         sourceMaps: this.toolbox.sourceMapService,
         evaluationsParser: this.toolbox.parserService,
@@ -64,24 +69,8 @@ class DebuggerPanel {
     this._store = store;
     this._selectors = selectors;
     this._client = client;
-    this.isReady = true;
-
-    this.panelWin.document.addEventListener(
-      "drag:start",
-      this.toolbox.toggleDragging
-    );
-    this.panelWin.document.addEventListener(
-      "drag:end",
-      this.toolbox.toggleDragging
-    );
 
     registerStoreObserver(this._store, this._onDebuggerStateChange.bind(this));
-
-    const resourceWatcher = this.toolbox.resourceWatcher;
-    await resourceWatcher.watchResources(
-      [resourceWatcher.TYPES.ERROR_MESSAGE],
-      { onAvailable: actions.addExceptionFromResources }
-    );
 
     return this;
   }
@@ -94,7 +83,7 @@ class DebuggerPanel {
       currentThreadActorID &&
       currentThreadActorID !== getCurrentThread(oldState)
     ) {
-      const threadFront = this.toolbox.target.client.getFrontByID(
+      const threadFront = this.commands.client.getFrontByID(
         currentThreadActorID
       );
       this.toolbox.selectTarget(threadFront?.targetFront.actorID);
@@ -273,11 +262,6 @@ class DebuggerPanel {
   }
 
   destroy() {
-    const resourceWatcher = this.toolbox.resourceWatcher;
-    resourceWatcher.unwatchResources([resourceWatcher.TYPES.ERROR_MESSAGE], {
-      onAvailable: this._actions.addExceptionFromResources,
-    });
-
     this.panelWin.Debugger.destroy();
     this.emit("destroyed");
   }

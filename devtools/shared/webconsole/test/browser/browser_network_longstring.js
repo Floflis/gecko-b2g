@@ -13,18 +13,9 @@ let ORIGINAL_LONG_STRING_LENGTH, ORIGINAL_LONG_STRING_INITIAL_LENGTH;
 add_task(async function() {
   const tab = await addTab(URL_ROOT + "network_requests_iframe.html");
 
-  const target = await getTargetForTab(tab);
-  const { client } = target;
-
-  // Avoid mocha to try to load these module and fail while doing it when running node tests
-  const {
-    ResourceWatcher,
-  } = require("devtools/shared/resources/resource-watcher");
-  const { TargetList } = require("devtools/shared/resources/target-list");
-
-  const targetList = new TargetList(client.mainRoot, target);
-  await targetList.startListening();
-  const resourceWatcher = new ResourceWatcher(targetList);
+  const commands = await CommandsFactory.forTab(tab);
+  await commands.targetCommand.startListening();
+  const target = commands.targetCommand.targetFront;
 
   // Override the default long string settings to lower values.
   // This is done from the parent process's DevToolsServer as the LongString
@@ -39,8 +30,8 @@ add_task(async function() {
 
   info("test network POST request");
   const networkResource = await new Promise(resolve => {
-    resourceWatcher
-      .watchResources([resourceWatcher.TYPES.NETWORK_EVENT], {
+    commands.resourceCommand
+      .watchResources([commands.resourceCommand.TYPES.NETWORK_EVENT], {
         onAvailable: () => {},
         onUpdated: resourceUpdate => {
           resolve(resourceUpdate[0].resource);
@@ -73,7 +64,7 @@ add_task(async function() {
   const eventTimings = await webConsoleFront.getEventTimings(netActor);
   assertEventTimings(eventTimings);
 
-  await target.destroy();
+  await commands.destroy();
 
   DevToolsServer.LONG_STRING_LENGTH = ORIGINAL_LONG_STRING_LENGTH;
   DevToolsServer.LONG_STRING_INITIAL_LENGTH = ORIGINAL_LONG_STRING_INITIAL_LENGTH;

@@ -11,11 +11,8 @@ import org.hamcrest.Matchers.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.geckoview.GeckoResult
-import org.mozilla.geckoview.GeckoSession
 import org.junit.Assume.assumeTrue
 import org.mozilla.geckoview.PanZoomController
-import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
-import org.mozilla.geckoview.test.util.Callbacks
 
 @RunWith(AndroidJUnit4::class)
 @MediumTest
@@ -25,11 +22,8 @@ class PanZoomControllerTest : BaseSessionTest() {
 
     private fun setupDocument(documentPath: String) {
         sessionRule.session.loadTestPath(documentPath)
-        sessionRule.waitUntilCalled(object : Callbacks.ContentDelegate {
-            @GeckoSessionTestRule.AssertCalled(count = 1)
-            override fun onFirstContentfulPaint(session: GeckoSession) {
-            }
-        })
+        sessionRule.session.waitForPageStop()
+        sessionRule.session.promiseAllPaintsDone()
         sessionRule.session.flushApzRepaints()
     }
 
@@ -251,8 +245,8 @@ class PanZoomControllerTest : BaseSessionTest() {
         val down = MotionEvent.obtain(
                 downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_DOWN, x, y, 0);
 
-        val result = mainSession.panZoomController.onTouchEventForResult(down)
-
+        val result = mainSession.panZoomController.onTouchEventForDetailResult(down)
+                .map { value -> value!!.handledResult() }
         val up = MotionEvent.obtain(
                 downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0);
 
@@ -456,7 +450,8 @@ class PanZoomControllerTest : BaseSessionTest() {
         val down = MotionEvent.obtain(
                 downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_DOWN, 50f, 90f, 0)
 
-        val result = mainSession.panZoomController.onTouchEventForResult(down)
+        val result = mainSession.panZoomController.onTouchEventForDetailResult(down)
+                .map { value -> value!!.handledResult() }
         var move = MotionEvent.obtain(
                 downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, 50f, 70f, 0)
         mainSession.panZoomController.onTouchEvent(move)

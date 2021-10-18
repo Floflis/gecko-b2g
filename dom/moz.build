@@ -71,10 +71,10 @@ DIRS += [
     "storage",
     "svg",
     "locales",
+    "locks",
     "network",
     "permission",
     "plugins/base",
-    "plugins/ipc",
     "prototype",
     "indexedDB",
     "system",
@@ -113,11 +113,6 @@ DIRS += [
     "pco",
 ]
 
-if CONFIG["OS_ARCH"] == "WINNT":
-    DIRS += ["plugins/ipc/hangui"]
-
-DIRS += ["presentation"]
-
 # MOZ_B2G_RIL
 if CONFIG["MOZ_B2G_RIL"]:
     DIRS += [
@@ -133,6 +128,9 @@ if CONFIG["MOZ_B2G_RIL"]:
         "wappush",
     ]
 # MOZ_B2G_RIL_END
+
+if CONFIG["MOZ_DOM_STREAMS"]:
+    DIRS += ["streams"]
 
 TEST_DIRS += [
     "tests",

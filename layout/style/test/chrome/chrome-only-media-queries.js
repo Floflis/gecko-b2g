@@ -18,6 +18,7 @@ const CHROME_ONLY_TOGGLES = [
   "-moz-windows-compositor",
   "-moz-windows-classic",
   "-moz-windows-glass",
+  "-moz-windows-non-native-menus",
   "-moz-swipe-animation-enabled",
   "-moz-gtk-csd-available",
   "-moz-gtk-csd-hide-titlebar-by-default",
@@ -26,6 +27,8 @@ const CHROME_ONLY_TOGGLES = [
   "-moz-gtk-csd-maximize-button",
   "-moz-gtk-csd-close-button",
   "-moz-gtk-csd-reversed-placement",
+  "-moz-proton",
+  "-moz-proton-places-tooltip",
 ];
 
 // Non-parseable queries can be tested directly in

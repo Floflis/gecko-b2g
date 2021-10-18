@@ -30,6 +30,7 @@ class GonkOffloadPlayer : public MediaOffloadPlayer,
  private:
   ~GonkOffloadPlayer() = default;
   virtual void InitInternal() override;
+  virtual void ShutdownInternal() override;
   virtual void ResetInternal() override;
   virtual void SeekInternal(const SeekTarget& aTarget, bool aVisible) override;
   virtual bool UpdateCurrentPosition() override;
@@ -47,6 +48,7 @@ class GonkOffloadPlayer : public MediaOffloadPlayer,
   void PlaybackSettingsChanged();
   // Must be called after matadata is loaded.
   bool VideoEnabled() { return mInfo.HasVideo() && mVideoFrameContainer; }
+  void UpdateAudibleState();
 
   bool mPrepared = false;
   bool mVisibleSeek = false;

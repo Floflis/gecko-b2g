@@ -43,6 +43,13 @@ XPCOMUtils.defineLazyServiceGetter(
   "nsIProtocolHandler"
 );
 
+XPCOMUtils.defineLazyServiceGetter(
+  this,
+  "fileProtocolHandler",
+  "@mozilla.org/network/protocol;1?name=file",
+  "nsIFileProtocolHandler"
+);
+
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "fixupSchemeTypos",
@@ -82,7 +89,7 @@ const {
   FIXUP_FLAG_FIX_SCHEME_TYPOS,
 } = Ci.nsIURIFixup;
 
-const COMMON_PROTOCOLS = ["http", "https", "ftp", "file"];
+const COMMON_PROTOCOLS = ["http", "https", "file"];
 
 // Regex used to identify user:password tokens in url strings.
 // This is not a strict valid characters check, because we try to fixup this
@@ -90,15 +97,11 @@ const COMMON_PROTOCOLS = ["http", "https", "ftp", "file"];
 XPCOMUtils.defineLazyGetter(
   this,
   "userPasswordRegex",
-  () => /^([a-z+.-]+:\/{0,3})*[^\/@]+@.+/i
+  () => /^([a-z+.-]+:\/{0,3})*([^\/@]+@).+/i
 );
 
-// Regex used to identify specific URI characteristics to disallow searching.
-XPCOMUtils.defineLazyGetter(
-  this,
-  "uriLikeRegex",
-  () => /(:\d{1,5}([?#/]|$)|\/.*[?#])/
-);
+// Regex used to identify the string that starts with port expression.
+XPCOMUtils.defineLazyGetter(this, "portRegex", () => /^:\d{1,5}([?#/]|$)/);
 
 // Regex used to identify numbers.
 XPCOMUtils.defineLazyGetter(this, "numberRegex", () => /^[0-9]+(\.[0-9]+)?$/);
@@ -351,6 +354,7 @@ URIFixup.prototype = {
         maybeSetAlternateFixedURI(info, fixupFlags);
         info.preferredURI = info.fixedURI;
       }
+      fixupConsecutiveDotsHost(info);
       return info;
     }
 
@@ -378,6 +382,7 @@ URIFixup.prototype = {
         // Check if it's a forced visit. The user can enforce a visit by
         // appending a slash, but the string must be in a valid uri format.
         if (uriString.endsWith("/")) {
+          fixupConsecutiveDotsHost(info);
           return info;
         }
       }
@@ -411,6 +416,7 @@ URIFixup.prototype = {
       !checkSuffix(info).suffix &&
       keywordURIFixup(uriString, info, isPrivateContext)
     ) {
+      fixupConsecutiveDotsHost(info);
       return info;
     }
 
@@ -418,6 +424,7 @@ URIFixup.prototype = {
       info.fixedURI &&
       (!info.fixupChangedProtocol || !checkSuffix(info).hasUnknownSuffix)
     ) {
+      fixupConsecutiveDotsHost(info);
       return info;
     }
 
@@ -435,6 +442,7 @@ URIFixup.prototype = {
       );
     }
 
+    fixupConsecutiveDotsHost(info);
     return info;
   },
 
@@ -752,7 +760,9 @@ function maybeSetAlternateFixedURI(info, fixupFlags) {
 
   let oldHost = uri.host;
   // Don't create an alternate uri for localhost, because it would be confusing.
-  if (oldHost == "localhost") {
+  // Ditto for 'http' and 'https' as these are frequently the result of typos, e.g.
+  // 'https//foo' (note missing : ).
+  if (oldHost == "localhost" || oldHost == "http" || oldHost == "https") {
     return false;
   }
 
@@ -822,7 +832,9 @@ function fileURIFixup(uriString) {
       // object. The URL of that is returned if successful.
       let file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
       file.initWithPath(uriString);
-      return Services.io.newFileURI(file);
+      return Services.io.newURI(
+        fileProtocolHandler.getURLSpecFromActualFile(file)
+      );
     } catch (ex) {
       // Not a file uri.
     }
@@ -874,12 +886,13 @@ function keywordURIFixup(uriString, fixupInfo, isPrivateContext) {
   // "mozilla'.org" - Things that have a quote before the first dot/colon
   // "mozilla/test" - unknown host
   // ".mozilla", "mozilla." - starts or ends with a dot ()
+  // "user@nonQualifiedHost"
 
   // These other strings should not be searched, because they could be URIs:
   // "www.blah.com" - Domain with a standard or known suffix
   // "knowndomain" - known domain
   // "nonQualifiedHost:8888?something" - has a port
-  // "user@nonQualifiedHost"
+  // "user:pass@nonQualifiedHost"
   // "blah.com."
 
   // We do keyword lookups if the input starts with a question mark.
@@ -892,12 +905,16 @@ function keywordURIFixup(uriString, fixupInfo, isPrivateContext) {
   }
 
   // Check for IPs.
-  if (IPv4LikeRegex.test(uriString) || IPv6LikeRegex.test(uriString)) {
+  const userPassword = userPasswordRegex.exec(uriString);
+  const ipString = userPassword
+    ? uriString.replace(userPassword[2], "")
+    : uriString;
+  if (IPv4LikeRegex.test(ipString) || IPv6LikeRegex.test(ipString)) {
     return false;
   }
 
-  // Avoid lookup if we can identify a host and it's known, or ends with
-  // a dot and has some path.
+  // Avoid keyword lookup if we can identify a host and it's known, or ends
+  // with a dot and has some path.
   // Note that if dnsFirstForSingleWords is true isDomainKnown will always
   // return true, so we can avoid checking dnsFirstForSingleWords after this.
   let asciiHost = fixupInfo.fixedURI?.asciiHost;
@@ -910,16 +927,17 @@ function keywordURIFixup(uriString, fixupInfo, isPrivateContext) {
     return false;
   }
 
-  // Even if the host is invalid, avoid lookup if the string has uri-like
-  // characteristics.
-  // Also avoid lookup if there's a valid userPass. We only check for spaces,
-  // the URI parser has encoded any disallowed chars at this point, but if the
-  // user typed spaces before the first @, it's unlikely a valid userPass, plus
-  // some urlbar features use the @ char and we don't want to break them.
-  let userPass = fixupInfo.fixedURI?.userPass;
+  // Avoid keyword lookup if the url seems to have password.
+  if (fixupInfo.fixedURI?.password) {
+    return false;
+  }
+
+  // Even if the host is unknown, avoid keyword lookup if the string has
+  // uri-like characteristics, unless it looks like "user@unknownHost".
+  // Note we already excluded passwords at this point.
   if (
-    !uriLikeRegex.test(uriString) &&
-    !(userPass && /^[^\s@]+@/.test(uriString))
+    !isURILike(uriString, fixupInfo.fixedURI?.displayHost) ||
+    (fixupInfo.fixedURI?.userPass && fixupInfo.fixedURI?.pathQueryRef === "/")
   ) {
     return tryKeywordFixupForURIInfo(
       fixupInfo.originalInput,
@@ -1042,4 +1060,65 @@ function fixupViewSource(uriString, fixupFlags) {
     preferredURI: Services.io.newURI("view-source:" + info.preferredURI.spec),
     postData: info.postData,
   };
+}
+
+/**
+ * Fixup the host of fixedURI if it contains consecutive dots.
+ * @param {URIFixupInfo} info an URIInfo object
+ */
+function fixupConsecutiveDotsHost(fixupInfo) {
+  const uri = fixupInfo.fixedURI;
+
+  try {
+    if (!uri?.host.includes("..")) {
+      return;
+    }
+  } catch (e) {
+    return;
+  }
+
+  try {
+    const isPreferredEqualsToFixed = fixupInfo.preferredURI?.equals(uri);
+
+    fixupInfo.fixedURI = uri
+      .mutate()
+      .setHost(uri.host.replace(/\.+/g, "."))
+      .finalize();
+
+    if (isPreferredEqualsToFixed) {
+      fixupInfo.preferredURI = fixupInfo.fixedURI;
+    }
+  } catch (e) {
+    if (e.result !== Cr.NS_ERROR_MALFORMED_URI) {
+      throw e;
+    }
+  }
+}
+
+/**
+ * Return whether or not given string is uri like.
+ * This function returns true like following strings.
+ * - ":8080"
+ * - "localhost:8080" (if given host is "localhost")
+ * - "/foo?bar"
+ * - "/foo#bar"
+ * @param {string} uriString.
+ * @param {string} host.
+ * @param {boolean} true if uri like.
+ */
+function isURILike(uriString, host) {
+  const indexOfSlash = uriString.indexOf("/");
+  if (
+    indexOfSlash >= 0 &&
+    (indexOfSlash < uriString.indexOf("?", indexOfSlash) ||
+      indexOfSlash < uriString.indexOf("#", indexOfSlash))
+  ) {
+    return true;
+  }
+
+  if (uriString.startsWith(host)) {
+    uriString = uriString.substring(host.length);
+  }
+
+  return portRegex.test(uriString);
 }

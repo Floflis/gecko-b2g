@@ -21,6 +21,7 @@ namespace layers {
 
 class APZInputBridge;
 class KeyboardMap;
+struct ZoomTarget;
 
 enum AllowedTouchBehavior {
   NONE = 0,
@@ -35,11 +36,11 @@ enum ZoomToRectBehavior : uint32_t {
   DEFAULT_BEHAVIOR = 0,
   DISABLE_ZOOM_OUT = 1 << 0,
   PAN_INTO_VIEW_ONLY = 1 << 1,
-  ONLY_ZOOM_TO_DEFAULT_SCALE = 1 << 2
+  ONLY_ZOOM_TO_DEFAULT_SCALE = 1 << 2,
 };
 
 class AsyncDragMetrics;
-enum class APZHandledResult : uint8_t;
+struct APZHandledResult;
 
 class IAPZCTreeManager {
   NS_INLINE_DECL_THREADSAFE_VIRTUAL_REFCOUNTING(IAPZCTreeManager)
@@ -57,7 +58,7 @@ class IAPZCTreeManager {
    * |aFlags| is a combination of the ZoomToRectBehavior enum values.
    */
   virtual void ZoomToRect(const ScrollableLayerGuid& aGuid,
-                          const CSSRect& aRect,
+                          const ZoomTarget& aZoomTarget,
                           const uint32_t aFlags = DEFAULT_BEHAVIOR) = 0;
 
   /**
@@ -149,7 +150,7 @@ class IAPZCTreeManager {
    * the APZCTreeManager.
    */
   using InputBlockCallback = std::function<void(
-      uint64_t aInputBlockId, APZHandledResult aHandledResult)>;
+      uint64_t aInputBlockId, const APZHandledResult& aHandledResult)>;
   virtual void AddInputBlockCallback(uint64_t aInputBlockId,
                                      InputBlockCallback&& aCallback) = 0;
 

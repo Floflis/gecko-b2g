@@ -26,9 +26,11 @@
 #include "nsCompatibility.h"
 #include "nsCoord.h"
 #include "nsCOMPtr.h"
+#include "nsFontMetrics.h"
 #include "nsHashKeys.h"
 #include "nsRect.h"
 #include "nsStringFwd.h"
+#include "nsTHashSet.h"
 #include "nsTHashtable.h"
 #include "nsAtom.h"
 #include "nsIWidgetListener.h"  // for nsSizeMode
@@ -52,21 +54,20 @@ class nsIFrame;
 class nsFrameManager;
 class nsAtom;
 class nsIRunnable;
+class gfxFontFamily;
 class gfxFontFeatureValueSet;
 class gfxUserFontEntry;
 class gfxUserFontSet;
 class gfxTextPerfMetrics;
 class nsCSSFontFeatureValuesRule;
 class nsCSSFrameConstructor;
-class nsDisplayList;
-class nsDisplayListBuilder;
+class nsFontCache;
 class nsTransitionManager;
 class nsAnimationManager;
 class nsRefreshDriver;
 class nsIWidget;
 class nsDeviceContext;
 class gfxMissingFontRecorder;
-struct FontMatchingStats;
 
 namespace mozilla {
 class AnimationEventDispatcher;
@@ -74,7 +75,7 @@ class EffectCompositor;
 class Encoding;
 class EventStateManager;
 class CounterStyleManager;
-class OneShotPostRefreshObserver;
+class ManagedPostRefreshObserver;
 class PresShell;
 class RestyleManager;
 class ServoStyleSet;
@@ -118,10 +119,6 @@ enum class nsLayoutPhase : uint8_t {
 };
 #endif
 
-/* Used by nsPresContext::HasAuthorSpecifiedRules */
-#define NS_AUTHOR_SPECIFIED_BORDER_OR_BACKGROUND (1 << 0)
-#define NS_AUTHOR_SPECIFIED_PADDING (1 << 1)
-
 class nsRootPresContext;
 
 // An interface for presentation contexts. Presentation contexts are
@@ -135,7 +132,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   template <typename T>
   using Maybe = mozilla::Maybe<T>;
   using MediaEmulationData = mozilla::MediaEmulationData;
-  using StylePrefersColorScheme = mozilla::StylePrefersColorScheme;
 
   typedef mozilla::ScrollStyles ScrollStyles;
   using TransactionId = mozilla::layers::TransactionId;
@@ -156,6 +152,39 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
    * Initialize the presentation context from a particular device.
    */
   nsresult Init(nsDeviceContext* aDeviceContext);
+
+  /*
+   * Initialize the font cache if it hasn't been initialized yet.
+   * (Needed for stylo)
+   */
+  void InitFontCache();
+
+  void UpdateFontCacheUserFonts(gfxUserFontSet* aUserFontSet);
+
+  FontVisibility GetFontVisibility() const { return mFontVisibility; }
+  void ReportBlockedFontFamily(const mozilla::fontlist::Family& aFamily);
+  void ReportBlockedFontFamily(const gfxFontFamily& aFamily);
+
+  /**
+   * Get the nsFontMetrics that describe the properties of
+   * an nsFont.
+   * @param aFont font description to obtain metrics for
+   */
+  already_AddRefed<nsFontMetrics> GetMetricsFor(
+      const nsFont& aFont, const nsFontMetrics::Params& aParams);
+
+  /**
+   * Notification when a font metrics instance created for this context is
+   * about to be deleted
+   */
+  nsresult FontMetricsDeleted(const nsFontMetrics* aFontMetrics);
+
+  /**
+   * Attempt to free up resources by flushing out any fonts no longer
+   * referenced by anything other than the font cache itself.
+   * @return error status
+   */
+  nsresult FlushFontCache();
 
   /**
    * Set and detach presentation shell that this context is bound to.
@@ -203,13 +232,13 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   /**
    * Returns the root widget for this.
    */
-  nsIWidget* GetRootWidget() const;
+  already_AddRefed<nsIWidget> GetRootWidget() const;
 
   /**
    * Returns the widget which may have native focus and handles text input
    * like keyboard input, IME, etc.
    */
-  nsIWidget* GetTextInputHandlingWidget() const {
+  already_AddRefed<nsIWidget> GetTextInputHandlingWidget() const {
     // Currently, root widget for each PresContext handles text input.
     return GetRootWidget();
   }
@@ -349,7 +378,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
     return mozilla::PreferenceSheet::PrefsFor(*mDocument);
   }
   nscolor DefaultBackgroundColor() const {
-    return PrefSheetPrefs().mDefaultBackgroundColor;
+    return PrefSheetPrefs().mColors.mDefaultBackground;
   }
 
   nsISupports* GetContainerWeak() const;
@@ -511,11 +540,10 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   mozilla::ScreenIntMargin GetSafeAreaInsets() const { return mSafeAreaInsets; }
 
-  bool RegisterOneShotPostRefreshObserver(
-      mozilla::OneShotPostRefreshObserver* aObserver);
-  void UnregisterOneShotPostRefreshObserver(
-      mozilla::OneShotPostRefreshObserver* aObserver);
-  void ClearOneShotPostRefreshObservers();
+  void RegisterManagedPostRefreshObserver(mozilla::ManagedPostRefreshObserver*);
+  void UnregisterManagedPostRefreshObserver(
+      mozilla::ManagedPostRefreshObserver*);
+  void CancelManagedPostRefreshObservers();
 
  protected:
   void UpdateEffectiveTextZoom();
@@ -532,6 +560,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
     UpdateEffectiveTextZoom();
   }
   void SetFullZoom(float aZoom);
+  void SetOverrideDPPX(float);
 
  public:
   float GetFullZoom() { return mFullZoom; }
@@ -543,7 +572,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   float GetDeviceFullZoom();
 
   float GetOverrideDPPX() const { return mMediaEmulationData.mDPPX; }
-  void SetOverrideDPPX(float);
 
   /**
    * Recomputes the data dependent on the browsing context, like zoom and text
@@ -553,11 +581,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
    * and such should also move here.
    */
   void RecomputeBrowsingContextDependentData();
-
-  Maybe<StylePrefersColorScheme> GetOverridePrefersColorScheme() const {
-    return mMediaEmulationData.mPrefersColorScheme;
-  }
-  void SetOverridePrefersColorScheme(const Maybe<StylePrefersColorScheme>&);
 
   mozilla::CSSCoord GetAutoQualityMinFontSize() const {
     return DevPixelsToFloatCSSPixels(mAutoQualityMinFontSizePixelsPref);
@@ -624,6 +647,13 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   int32_t DevPixelsToIntCSSPixels(int32_t aPixels) {
     return AppUnitsToIntCSSPixels(DevPixelsToAppUnits(aPixels));
+  }
+
+  mozilla::CSSIntPoint DevPixelsToIntCSSPixels(
+      const mozilla::LayoutDeviceIntPoint& aPoint) {
+    return mozilla::CSSIntPoint(
+        AppUnitsToIntCSSPixels(DevPixelsToAppUnits(aPoint.x)),
+        AppUnitsToIntCSSPixels(DevPixelsToAppUnits(aPoint.y)));
   }
 
   float DevPixelsToFloatCSSPixels(int32_t aPixels) const {
@@ -787,6 +817,10 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
     return EnsureTheme();
   }
 
+  void RecomputeTheme();
+
+  bool UseOverlayScrollbars() const;
+
   /*
    * Notify the pres context that the theme has changed.  An internal switch
    * means it's one of our Mozilla themes that changed (e.g., Modern to
@@ -841,7 +875,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   }
 
   gfxTextPerfMetrics* GetTextPerfMetrics() { return mTextPerf.get(); }
-  FontMatchingStats* GetFontMatchingStats() { return mFontStats.get(); }
 
   bool IsDynamic() {
     return (mType == eContext_PageLayout || mType == eContext_Galley);
@@ -856,10 +889,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   // Is this presentation in a chrome docshell?
   bool IsChrome() const;
-
-  // Public API for native theme code to get style internals.
-  bool HasAuthorSpecifiedRules(const nsIFrame* aFrame,
-                               uint32_t ruleTypeMask) const;
 
   // Explicitly enable and disable paint flashing.
   void SetPaintFlashing(bool aPaintFlashing) {
@@ -909,14 +938,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   void FireDOMPaintEvent(nsTArray<nsRect>* aList, TransactionId aTransactionId,
                          mozilla::TimeStamp aTimeStamp = mozilla::TimeStamp());
 
-  // Callback for catching invalidations in ContainerLayers
-  // Passed to LayerProperties::ComputeDifference
-  static void NotifySubDocInvalidation(
-      mozilla::layers::ContainerLayer* aContainer, const nsIntRegion* aRegion);
-  void SetNotifySubDocInvalidationData(
-      mozilla::layers::ContainerLayer* aContainer);
-  static void ClearNotifySubDocInvalidationData(
-      mozilla::layers::ContainerLayer* aContainer);
   bool IsDOMPaintEventPending();
 
   /**
@@ -1078,29 +1099,22 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   static void PreferenceChanged(const char* aPrefName, void* aSelf);
   void PreferenceChanged(const char* aPrefName);
 
-  void UpdateAfterPreferencesChanged();
-  void DispatchPrefChangedRunnableIfNeeded();
-
   void GetUserPreferences();
 
   void UpdateCharSet(NotNull<const Encoding*> aCharSet);
 
+  void DoForceReflowForFontInfoUpdateFromStyle();
+
  public:
   // Used by the PresShell to force a reflow when some aspect of font info
   // has been updated, potentially affecting font selection and layout.
-  void ForceReflowForFontInfoUpdate();
+  void ForceReflowForFontInfoUpdate(bool aNeedsReframe);
+  void ForceReflowForFontInfoUpdateFromStyle();
 
   /**
    * Checks for MozAfterPaint listeners on the document
    */
   bool MayHavePaintEventListener();
-
-  /**
-   * Checks for MozAfterPaint listeners on the document and
-   * any subdocuments, except for subdocuments that are non-top-level
-   * content documents.
-   */
-  bool MayHavePaintEventListenerInSubDocument();
 
   void InvalidatePaintedLayers();
 
@@ -1140,6 +1154,13 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   // mDynamicToolbarMaxHeight or `app units per device pixels` changes.
   void AdjustSizeForViewportUnits();
 
+  // Call in response to prefs changes that might affect what fonts should be
+  // visibile to CSS. Returns whether the current visibility value actually
+  // changed (in which case content should be reflowed).
+  bool UpdateFontVisibility();
+  void ReportBlockedFontFamilyName(const nsCString& aFamily,
+                                   FontVisibility aVisibility);
+
   // IMPORTANT: The ownership implicit in the following member variables
   // has been explicitly checked.  If you add any members to this class,
   // please make the ownership explicit (pinkerton, scc).
@@ -1153,6 +1174,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
                                            // Cannot reintroduce cycles
                                            // since there is no dependency
                                            // from gfx back to layout.
+  RefPtr<nsFontCache> mFontCache;
   RefPtr<mozilla::EventStateManager> mEventManager;
   RefPtr<nsRefreshDriver> mRefreshDriver;
   RefPtr<mozilla::AnimationEventDispatcher> mAnimationEventDispatcher;
@@ -1186,8 +1208,6 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
 
   // text performance metrics
   mozilla::UniquePtr<gfxTextPerfMetrics> mTextPerf;
-
-  mozilla::UniquePtr<FontMatchingStats> mFontStats;
 
   mozilla::UniquePtr<gfxMissingFontRecorder> mMissingFonts;
 
@@ -1248,15 +1268,19 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   // last time we did a full style flush
   mozilla::TimeStamp mLastStyleUpdateForAllAnimations;
 
-  nsChangeHint mChangeHintForPrefChange;
-
   uint32_t mInterruptChecksToSkip;
 
   // During page load we use slower frame rate.
   uint32_t mNextFrameRateMultiplier;
 
-  nsTArray<RefPtr<mozilla::OneShotPostRefreshObserver>>
-      mOneShotPostRefreshObservers;
+  nsTArray<RefPtr<mozilla::ManagedPostRefreshObserver>>
+      mManagedPostRefreshObservers;
+
+  // If we block the use of a font-family that is explicitly requested,
+  // due to font visibility settings, we log a message to the web console;
+  // this hash-set keeps track of names we've logged for this context, so
+  // that we can avoid repeatedly reporting the same font.
+  nsTHashSet<nsCString> mBlockedFonts;
 
   ScrollStyles mViewportScrollStyles;
 
@@ -1298,7 +1322,7 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   // widget::ThemeChangeKind
   unsigned mPendingThemeChangeKind : kThemeChangeKindBits;
   unsigned mPendingUIResolutionChanged : 1;
-  unsigned mPostedPrefChangedRunnable : 1;
+  unsigned mPendingFontInfoUpdateReflowFromStyle : 1;
 
   // Are we currently drawing an SVG glyph?
   unsigned mIsGlyph : 1;
@@ -1337,12 +1361,19 @@ class nsPresContext : public nsISupports, public mozilla::SupportsWeakPtr {
   unsigned mHadNonBlankPaint : 1;
   // Has NotifyContentfulPaint been called on this PresContext?
   unsigned mHadContentfulPaint : 1;
+  // True when a contentful paint has happened and this paint doesn't
+  // come from the regular tick process. Usually this means a
+  // contentful paint was triggered manually.
+  unsigned mHadNonTickContentfulPaint : 1;
+
   // Has NotifyDidPaintForSubtree been called for a contentful paint?
   unsigned mHadContentfulPaintComposite : 1;
 
 #ifdef DEBUG
   unsigned mInitialized : 1;
 #endif
+
+  FontVisibility mFontVisibility = FontVisibility::Unknown;
 
  protected:
   virtual ~nsPresContext();

@@ -6,22 +6,24 @@
 
 #ifdef XP_WIN
 // Include Windows headers required for enabling high precision timers.
-#  include "windows.h"
-#  include "mmsystem.h"
+#  include <windows.h>
+#  include <mmsystem.h>
 #endif
 
 #include "VideoSink.h"
 
-#include "GeckoProfiler.h"
 #include "MediaQueue.h"
 #include "VideoUtils.h"
 
 #include "mozilla/IntegerPrintfMacros.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/ProfilerMarkerTypes.h"
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_media.h"
 
-extern mozilla::LazyLogModule gMediaDecoderLog;
+namespace mozilla {
+extern LazyLogModule gMediaDecoderLog;
+}
 
 #undef FMT
 
@@ -136,6 +138,12 @@ void VideoSink::SetVolume(double aVolume) {
   AssertOwnerThread();
 
   mAudioSink->SetVolume(aVolume);
+}
+
+void VideoSink::SetStreamName(const nsAString& aStreamName) {
+  AssertOwnerThread();
+
+  mAudioSink->SetStreamName(aStreamName);
 }
 
 void VideoSink::SetPreservesPitch(bool aPreservesPitch) {

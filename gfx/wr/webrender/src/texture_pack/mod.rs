@@ -3,10 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 mod guillotine;
-mod slab;
 
 pub use guillotine::*;
-pub use slab::*;
 
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -62,8 +60,7 @@ pub trait AtlasAllocatorList<TextureParameters> {
     fn texture_parameters(&self) -> &TextureParameters;
 }
 
-/// A number of 2D textures (single layer), each with a number of
-/// regions that can act as a slab allocator.
+/// A number of 2D textures (single layer), with their own atlas allocator.
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 struct TextureUnit<Allocator> {
@@ -202,6 +199,8 @@ impl<Allocator: AtlasAllocator, TextureParameters> AllocatorList<Allocator, Text
     pub fn allocated_textures(&self) -> usize {
         self.units.len()
     }
+
+    pub fn size(&self) -> i32 { self.size }
 }
 
 impl<Allocator: AtlasAllocator, TextureParameters> AtlasAllocatorList<TextureParameters> 
@@ -232,7 +231,7 @@ impl AtlasAllocator for BucketedShelfAllocator {
 
     fn allocate(&mut self, size: DeviceIntSize) -> Option<(AllocId, DeviceIntRect)> {
         self.allocate(size.to_untyped()).map(|alloc| {
-            (AllocId(alloc.id.serialize()), alloc.rectangle.to_rect().cast_unit())
+            (AllocId(alloc.id.serialize()), alloc.rectangle.cast_unit())
         })
     }
 
@@ -262,7 +261,7 @@ impl AtlasAllocator for ShelfAllocator {
 
     fn allocate(&mut self, size: DeviceIntSize) -> Option<(AllocId, DeviceIntRect)> {
         self.allocate(size.to_untyped()).map(|alloc| {
-            (AllocId(alloc.id.serialize()), alloc.rectangle.to_rect().cast_unit())
+            (AllocId(alloc.id.serialize()), alloc.rectangle.cast_unit())
         })
     }
 

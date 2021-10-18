@@ -38,8 +38,10 @@
 
 #include "mozilla/Array.h"
 #include "mozilla/Atomics.h"
+#include "mozilla/Attributes.h"
 #include "mozilla/Range.h"
 #include "mozilla/SandboxInfo.h"
+#include "mozilla/StackWalk.h"
 #include "mozilla/Span.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/Unused.h"
@@ -80,7 +82,7 @@ mozilla::Atomic<int> gSeccompTsyncBroadcastSignum(0);
 
 namespace mozilla {
 
-static bool gSandboxCrashOnError = false;
+static mozilla::Atomic<bool> gSandboxCrashOnError(false);
 
 // This is initialized by SandboxSetCrashFunc().
 SandboxCrashFunc gSandboxCrashFunc;
@@ -115,7 +117,8 @@ static bool ContextIsError(const ucontext_t* aContext, int aError) {
  * that it could be in async signal context (e.g., intercepting an
  * open() called from an async signal handler).
  */
-static void SigSysHandler(int nr, siginfo_t* info, void* void_context) {
+MOZ_NEVER_INLINE static void SigSysHandler(int nr, siginfo_t* info,
+                                           void* void_context) {
   ucontext_t* ctx = static_cast<ucontext_t*>(void_context);
   // This shouldn't ever be null, but the Chromium handler checks for
   // that and refrains from crashing, so let's not crash release builds:
@@ -148,7 +151,7 @@ static void SigSysHandler(int nr, siginfo_t* info, void* void_context) {
     // Bug 1017393: record syscall number somewhere useful.
     info->si_addr = reinterpret_cast<void*>(report.mSyscall);
 
-    gSandboxCrashFunc(nr, info, &savedCtx);
+    gSandboxCrashFunc(nr, info, &savedCtx, CallerPC());
     _exit(127);
   }
 }
@@ -626,7 +629,7 @@ bool SetContentProcessSandbox(ContentProcessSandboxParams&& aParams) {
 #ifdef MOZ_WIDGET_GONK
   // Live as long as this process.
   aParams.mFiles = new SandboxOpenedFiles();
-  aParams.mFiles->Add("/dev/binder", true, O_RDWR);
+  aParams.mFiles->Add("/dev/binder", SandboxOpenedFile::Dup::YES, O_RDWR);
   {
     char value[PROP_VALUE_MAX];
     if (property_get("media.settings.xml", value, NULL) <= 0) {
@@ -635,7 +638,7 @@ bool SetContentProcessSandbox(ContentProcessSandboxParams&& aParams) {
       // we need to raise error log here.
       SANDBOX_LOG_ERROR("No media profile is pre-opened for camera");
     } else {
-      aParams.mFiles->Add(value, false, O_RDONLY);
+      aParams.mFiles->Add(value, SandboxOpenedFile::Dup::NO, O_RDONLY);
     }
   }
 #endif
@@ -673,7 +676,7 @@ void SetMediaPluginSandbox(const char* aFilePath) {
 
   auto files = new SandboxOpenedFiles();
   files->Add(std::move(plugin));
-  files->Add("/dev/urandom", true);
+  files->Add("/dev/urandom", SandboxOpenedFile::Dup::YES);
   files->Add("/etc/ld.so.cache");  // Needed for NSS in clearkey.
   files->Add("/sys/devices/system/cpu/cpu0/tsc_freq_khz");
   files->Add("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
@@ -726,6 +729,12 @@ void SetSocketProcessSandbox(int aBroker) {
   }
 
   SetCurrentProcessSandbox(GetSocketProcessSandboxPolicy(sBroker));
+}
+
+bool SetSandboxCrashOnError(bool aValue) {
+  bool oldValue = gSandboxCrashOnError;
+  gSandboxCrashOnError = aValue;
+  return oldValue;
 }
 
 }  // namespace mozilla

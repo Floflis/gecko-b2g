@@ -27,6 +27,10 @@ const SEARCH_SHORTCUTS_SEARCH_ENGINES_PREF =
 const SEARCH_SHORTCUTS_HAVE_PINNED_PREF =
   "improvesearch.topSiteSearchShortcuts.havePinned";
 const SHOWN_ON_NEWTAB_PREF = "feeds.topsites";
+const SHOW_SPONSORED_PREF = "showSponsoredTopSites";
+const CONTILE_ENABLED_PREF = "browser.topsites.contile.enabled";
+const TOP_SITES_BLOCKED_SPONSORS_PREF = "browser.topsites.blockedSponsors";
+const REMOTE_SETTING_DEFAULTS_PREF = "browser.topsites.useRemoteSetting";
 
 function FakeTippyTopProvider() {}
 FakeTippyTopProvider.prototype = {
@@ -50,6 +54,7 @@ describe("Top Sites Feed", () => {
   let filterAdultStub;
   let shortURLStub;
   let fakePageThumbs;
+  let fetchStub;
 
   beforeEach(() => {
     globals = new GlobalOverrider();
@@ -87,7 +92,9 @@ describe("Top Sites Feed", () => {
       maybeCacheScreenshot: sandbox.spy(Screenshots.maybeCacheScreenshot),
       _shouldGetScreenshots: sinon.stub().returns(true),
     };
-    filterAdultStub = sinon.stub().returns([]);
+    filterAdultStub = {
+      filter: sinon.stub().returnsArg(0),
+    };
     shortURLStub = sinon
       .stub()
       .callsFake(site =>
@@ -100,6 +107,7 @@ describe("Top Sites Feed", () => {
     };
     globals.set("PageThumbs", fakePageThumbs);
     globals.set("NewTabUtils", fakeNewTabUtils);
+    globals.set("gFilterAdultEnabled", false);
     sandbox.spy(global.XPCOMUtils, "defineLazyGetter");
     FakePrefs.prototype.prefs["default.sites"] = "https://foo.com/";
     ({ TopSitesFeed, DEFAULT_TOP_SITES } = injector({
@@ -110,7 +118,7 @@ describe("Top Sites Feed", () => {
         TOP_SITES_DEFAULT_ROWS,
         TOP_SITES_MAX_SITES_PER_ROW,
       },
-      "lib/FilterAdult.jsm": { filterAdult: filterAdultStub },
+      "lib/FilterAdult.jsm": { FilterAdult: filterAdultStub },
       "lib/Screenshots.jsm": { Screenshots: fakeScreenshot },
       "lib/TippyTopProvider.jsm": { TippyTopProvider: FakeTippyTopProvider },
       "lib/ShortURL.jsm": { shortURL: shortURLStub },
@@ -133,7 +141,7 @@ describe("Top Sites Feed", () => {
         return this.state;
       },
       state: {
-        Prefs: { values: { filterAdult: false, topSitesRows: 2 } },
+        Prefs: { values: { topSitesRows: 2 } },
         TopSites: { rows: Array(12).fill("site") },
       },
       dbStorage: { getDbTable: sandbox.stub().returns(storage) },
@@ -155,13 +163,15 @@ describe("Top Sites Feed", () => {
   }
 
   describe("#constructor", () => {
-    it("should defineLazyGetter for _currentSearchHostname", () => {
-      assert.calledOnce(global.XPCOMUtils.defineLazyGetter);
-      assert.calledWith(
-        global.XPCOMUtils.defineLazyGetter,
-        feed,
-        "_currentSearchHostname",
-        sinon.match.func
+    it("should defineLazyGetter for log and _currentSearchHostname", () => {
+      assert.calledTwice(global.XPCOMUtils.defineLazyGetter);
+
+      let spyCall = global.XPCOMUtils.defineLazyGetter.getCall(0);
+      assert.ok(spyCall.calledWith(sinon.match.any, "log", sinon.match.func));
+
+      spyCall = global.XPCOMUtils.defineLazyGetter.getCall(1);
+      assert.ok(
+        spyCall.calledWith(feed, "_currentSearchHostname", sinon.match.func)
       );
     });
   });
@@ -253,19 +263,14 @@ describe("Top Sites Feed", () => {
 
         assert.propertyVal(result[0], "typedBonus", true);
       });
-      it("should not filter out adult sites when pref is false", async () => {
-        await feed.getLinksWithDefaults();
-
-        assert.notCalled(filterAdultStub);
-      });
-      it("should filter out non-pinned adult sites when pref is true", async () => {
-        feed.store.state.Prefs.values.filterAdult = true;
+      it("should filter out non-pinned adult sites", async () => {
+        filterAdultStub.filter = sinon.stub().returns([]);
         fakeNewTabUtils.pinnedLinks.links = [{ url: "https://foo.com/" }];
 
         const result = await feed.getLinksWithDefaults();
 
         // The stub filters out everything
-        assert.calledOnce(filterAdultStub);
+        assert.calledOnce(filterAdultStub.filter);
         assert.equal(result.length, 1);
         assert.equal(result[0].url, fakeNewTabUtils.pinnedLinks.links[0].url);
       });
@@ -1005,7 +1010,7 @@ describe("Top Sites Feed", () => {
     it("should call refresh without a target if we remove a Topsite from history", () => {
       sandbox.stub(feed, "refresh");
 
-      feed.onAction({ type: at.PLACES_LINK_DELETED });
+      feed.onAction({ type: at.PLACES_LINKS_DELETED });
 
       assert.calledOnce(feed.refresh);
       assert.calledWithExactly(feed.refresh, { broadcast: true });
@@ -2010,6 +2015,242 @@ describe("Top Sites Feed", () => {
       assert.equal(link.tippyTopIcon, "google.png");
       assert.equal(link.smallFavicon, "google.ico");
       assert.equal(link.url, "https://google.com");
+    });
+  });
+
+  describe("#ContileIntegration", () => {
+    beforeEach(() => {
+      // Turn on sponsored TopSites for testing
+      feed.store.state.Prefs.values[SHOW_SPONSORED_PREF] = true;
+      fetchStub = sandbox.stub();
+      globals.set("fetch", fetchStub);
+      sandbox
+        .stub(global.Services.prefs, "getBoolPref")
+        .withArgs(CONTILE_ENABLED_PREF)
+        .returns(true);
+      sandbox
+        .stub(global.Services.prefs, "getStringPref")
+        .withArgs(TOP_SITES_BLOCKED_SPONSORS_PREF)
+        .returns(`["foo","bar"]`);
+    });
+    afterEach(() => {
+      sandbox.restore();
+    });
+
+    it("should fetch sites from Contile", async () => {
+      fetchStub.resolves({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            tiles: [
+              {
+                url: "https://www.test.com",
+                image_url: "images/test-com.png",
+                click_url: "https://www.test-click.com",
+                impression_url: "https://www.test-impression.com",
+                name: "test",
+              },
+              {
+                url: "https://www.test1.com",
+                image_url: "images/test1-com.png",
+                click_url: "https://www.test1-click.com",
+                impression_url: "https://www.test1-impression.com",
+                name: "test1",
+              },
+            ],
+          }),
+      });
+
+      const fetched = await feed._contile._fetchSites();
+
+      assert.ok(fetched);
+      assert.equal(feed._contile.sites.length, 2);
+    });
+
+    it("should filter the blocked sponsors", async () => {
+      fetchStub.resolves({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            tiles: [
+              {
+                url: "https://www.test.com",
+                image_url: "images/test-com.png",
+                click_url: "https://www.test-click.com",
+                impression_url: "https://www.test-impression.com",
+                name: "test",
+              },
+              {
+                url: "https://foo.com",
+                image_url: "images/foo-com.png",
+                click_url: "https://www.foo-click.com",
+                impression_url: "https://www.foo-impression.com",
+                name: "foo",
+              },
+              {
+                url: "https://bar.com",
+                image_url: "images/bar-com.png",
+                click_url: "https://www.bar-click.com",
+                impression_url: "https://www.bar-impression.com",
+                name: "bar",
+              },
+            ],
+          }),
+      });
+
+      const fetched = await feed._contile._fetchSites();
+
+      assert.ok(fetched);
+      // Both "foo" and "bar" should be filtered
+      assert.equal(feed._contile.sites.length, 1);
+      assert.equal(feed._contile.sites[0].url, "https://www.test.com");
+    });
+
+    it("should handle errors properly from Contile", async () => {
+      fetchStub.resolves({
+        ok: false,
+        status: 500,
+      });
+
+      const fetched = await feed._contile._fetchSites();
+
+      assert.ok(!fetched);
+      assert.ok(!feed._contile.sites.length);
+    });
+
+    it("should handle invalid payload properly from Contile", async () => {
+      fetchStub.resolves({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            unknown: [],
+          }),
+      });
+
+      const fetched = await feed._contile._fetchSites();
+
+      assert.ok(!fetched);
+      assert.ok(!feed._contile.sites.length);
+    });
+
+    it("should handle no content properly from Contile", async () => {
+      fetchStub.resolves({ ok: true, status: 204 });
+
+      const fetched = await feed._contile._fetchSites();
+
+      assert.ok(!fetched);
+      assert.ok(!feed._contile.sites.length);
+    });
+  });
+
+  describe("#_readDefaults", () => {
+    beforeEach(() => {
+      // Turn on sponsored TopSites for testing
+      feed.store.state.Prefs.values[SHOW_SPONSORED_PREF] = true;
+      fetchStub = sandbox.stub();
+      globals.set("fetch", fetchStub);
+      fetchStub.resolves({ ok: true, status: 204 });
+      sandbox
+        .stub(global.Services.prefs, "getBoolPref")
+        .withArgs(REMOTE_SETTING_DEFAULTS_PREF)
+        .returns(true);
+
+      sandbox
+        .stub(global.Services.prefs, "getStringPref")
+        .withArgs(TOP_SITES_BLOCKED_SPONSORS_PREF)
+        .returns(`["foo","bar"]`);
+      sandbox.stub(global.Services.prefs, "prefIsLocked").returns(false);
+    });
+    afterEach(() => {
+      sandbox.restore();
+    });
+
+    it("should filter all blocked sponsored tiles from RemoteSettings when Contile is disabled", async () => {
+      sandbox.stub(feed, "_getRemoteConfig").resolves([
+        { url: "https://foo.com", title: "foo", sponsored_position: 1 },
+        { url: "https://bar.com", title: "bar", sponsored_position: 2 },
+        { url: "https://test.com", title: "test", sponsored_position: 3 },
+      ]);
+      global.Services.prefs.getStringPref
+        .withArgs(CONTILE_ENABLED_PREF)
+        .returns(false);
+
+      await feed._readDefaults();
+
+      assert.equal(DEFAULT_TOP_SITES.length, 1);
+      assert.equal(DEFAULT_TOP_SITES[0].label, "test");
+    });
+
+    it("should also filter all blocked sponsored tiles from RemoteSettings when Contile is enabled", async () => {
+      sandbox.stub(feed, "_getRemoteConfig").resolves([
+        { url: "https://foo.com", title: "foo", sponsored_position: 1 },
+        { url: "https://bar.com", title: "bar", sponsored_position: 2 },
+        { url: "https://test.com", title: "test", sponsored_position: 3 },
+      ]);
+      global.Services.prefs.getBoolPref
+        .withArgs(CONTILE_ENABLED_PREF)
+        .returns(true);
+
+      await feed._readDefaults();
+
+      assert.equal(DEFAULT_TOP_SITES.length, 1);
+      assert.equal(DEFAULT_TOP_SITES[0].label, "test");
+    });
+
+    it("should not filter non-sponsored tiles from RemoteSettings", async () => {
+      sandbox.stub(feed, "_getRemoteConfig").resolves([
+        { url: "https://foo.com", title: "foo", sponsored_position: 1 },
+        { url: "https://bar.com", title: "bar", sponsored_position: 2 },
+        { url: "https://foo.com", title: "foo" },
+      ]);
+
+      await feed._readDefaults();
+
+      assert.equal(DEFAULT_TOP_SITES.length, 1);
+      assert.equal(DEFAULT_TOP_SITES[0].label, "foo");
+    });
+
+    it("should take the image from Contile if it's a hi-res one", async () => {
+      global.Services.prefs.getBoolPref
+        .withArgs(CONTILE_ENABLED_PREF)
+        .returns(true);
+      sandbox.stub(feed, "_getRemoteConfig").resolves([]);
+
+      sandbox.stub(feed._contile, "sites").get(() => [
+        {
+          url: "https://test.com",
+          image_url: "https://images.test.com/test-com.png",
+          image_size: 192,
+          click_url: "https://www.test-click.com",
+          impression_url: "https://www.test-impression.com",
+          name: "test",
+        },
+        {
+          url: "https://test1.com",
+          image_url: "https://images.test1.com/test1-com.png",
+          image_size: 32,
+          click_url: "https://www.test1-click.com",
+          impression_url: "https://www.test1-impression.com",
+          name: "test1",
+        },
+      ]);
+
+      await feed._readDefaults();
+
+      const [site1, site2] = DEFAULT_TOP_SITES;
+      assert.propertyVal(
+        site1,
+        "favicon",
+        "https://images.test.com/test-com.png"
+      );
+      assert.propertyVal(site1, "faviconSize", 192);
+
+      // Should not be taken as it's not hi-res
+      assert.isUndefined(site2.favicon);
+      assert.isUndefined(site2.faviconSize);
     });
   });
 });

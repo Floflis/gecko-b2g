@@ -12,7 +12,6 @@
 #include "mozilla/Attributes.h"
 #include "nsContainerFrame.h"
 #include "nsStringFwd.h"
-#include "FrameLayerBuilder.h"
 
 namespace mozilla {
 class PresShell;
@@ -25,7 +24,6 @@ class WebRenderCanvasData;
 }  // namespace mozilla
 
 class nsPresContext;
-class nsDisplayItem;
 
 nsIFrame* NS_NewHTMLCanvasFrame(mozilla::PresShell* aPresShell,
                                 mozilla::ComputedStyle* aStyle);
@@ -36,7 +34,6 @@ class nsHTMLCanvasFrame final : public nsContainerFrame {
   typedef mozilla::layers::Layer Layer;
   typedef mozilla::layers::LayerManager LayerManager;
   typedef mozilla::layers::WebRenderCanvasData WebRenderCanvasData;
-  typedef mozilla::ContainerLayerParameters ContainerLayerParameters;
 
   NS_DECL_QUERYFRAME
   NS_DECL_FRAMEARENA_HELPERS(nsHTMLCanvasFrame)
@@ -52,11 +49,6 @@ class nsHTMLCanvasFrame final : public nsContainerFrame {
                                 const nsDisplayListSet& aLists) override;
 
   void DestroyFrom(nsIFrame*, PostDestroyData&) override;
-
-  already_AddRefed<Layer> BuildLayer(
-      nsDisplayListBuilder* aBuilder, LayerManager* aManager,
-      nsDisplayItem* aItem,
-      const ContainerLayerParameters& aContainerParameters);
 
   bool UpdateWebRenderCanvasData(nsDisplayListBuilder* aBuilder,
                                  WebRenderCanvasData* aCanvasData);

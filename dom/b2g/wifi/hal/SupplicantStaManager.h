@@ -10,6 +10,7 @@
 #include "WifiCommon.h"
 #include "WifiEventCallback.h"
 #include "SupplicantStaNetwork.h"
+#include "SupplicantCallback.h"
 
 // There is a conflict with the value of DEBUG in DEBUG builds.
 #if defined(DEBUG)
@@ -42,6 +43,7 @@ using ::android::hardware::wifi::supplicant::V1_0::ISupplicant;
 using ::android::hardware::wifi::supplicant::V1_0::ISupplicantIface;
 using ::android::hardware::wifi::supplicant::V1_0::ISupplicantP2pIface;
 using ::android::hardware::wifi::supplicant::V1_0::ISupplicantStaIface;
+using ::android::hardware::wifi::supplicant::V1_0::ISupplicantStaIfaceCallback;
 using ::android::hardware::wifi::supplicant::V1_0::SupplicantStatus;
 using ::android::hardware::wifi::supplicant::V1_0::SupplicantStatusCode;
 using ::android::hidl::base::V1_0::IBase;
@@ -131,6 +133,7 @@ class SupplicantStaManager
                               nsAString& aGeneratedPin);
   Result_t CancelWps();
 
+  NetworkConfiguration GetCurrentConfiguration() const;
   int32_t GetCurrentNetworkId() const;
 
   bool IsCurrentEapNetwork();
@@ -223,20 +226,23 @@ class SupplicantStaManager
   android::sp<SupplicantStaNetwork> CreateStaNetwork();
   android::sp<SupplicantStaNetwork> GetStaNetwork(uint32_t aNetId) const;
   android::sp<SupplicantStaNetwork> GetCurrentNetwork() const;
-  NetworkConfiguration GetCurrentConfiguration() const;
 
   bool CompareConfiguration(const NetworkConfiguration& aOld,
                             const NetworkConfiguration& aNew);
+  bool CompareCredential(const NetworkConfiguration& aOld,
+                         const NetworkConfiguration& aNew);
   void NotifyTerminating();
   void SupplicantServiceDiedHandler(int32_t aCookie);
 
   static int16_t ConvertToWpsConfigMethod(const std::string& aConfigMethod);
 
   static mozilla::Mutex sLock;
+  static mozilla::Mutex sHashLock;
 
   android::sp<::android::hidl::manager::V1_0::IServiceManager> mServiceManager;
   android::sp<ISupplicant> mSupplicant;
   android::sp<ISupplicantStaIface> mSupplicantStaIface;
+  android::sp<ISupplicantStaIfaceCallback> mSupplicantStaIfaceCallback;
   android::sp<ServiceManagerDeathRecipient> mServiceManagerDeathRecipient;
   android::sp<SupplicantDeathRecipient> mSupplicantDeathRecipient;
 
@@ -248,9 +254,17 @@ class SupplicantStaManager
   std::string mInterfaceName;
 
   // For current connecting network.
+  enum {
+    CLEAN_ALL,
+    ERASE_CONFIG,
+    ADD_CONFIG,
+  };
+  void ModifyConfigurationHash(int aAction,
+                               const NetworkConfiguration& aConfig);
   std::unordered_map<std::string, NetworkConfiguration> mCurrentConfiguration;
   std::unordered_map<std::string, android::sp<SupplicantStaNetwork>>
       mCurrentNetwork;
+  NetworkConfiguration mDummyNetworkConfiguration;
 
   DISALLOW_COPY_AND_ASSIGN(SupplicantStaManager);
 };

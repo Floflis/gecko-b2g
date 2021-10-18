@@ -392,7 +392,7 @@ static const uint32_t MaxEmptyChunkCount = 30;
 /* JSGC_SLICE_TIME_BUDGET_MS */
 static const int64_t DefaultTimeBudgetMS = 0;  // Unlimited by default.
 
-/* JSGC_INCREMENTAL_ENABLED */
+/* JSGC_INCREMENTAL_GC_ENABLED */
 static const bool IncrementalGCEnabled = false;
 
 /* JSGC_PER_ZONE_GC_ENABLED */
@@ -409,6 +409,9 @@ static const uint32_t NurseryFreeThresholdForIdleCollection = ChunkSize / 4;
 
 /* JSGC_NURSERY_FREE_THRESHOLD_FOR_IDLE_COLLECTION_PERCENT */
 static const double NurseryFreeThresholdForIdleCollectionFraction = 0.25;
+
+/* JSGC_NURSERY_TIMEOUT_FOR_IDLE_COLLECTION_MS */
+static const uint32_t NurseryTimeoutForIdleCollectionMS = 5000;
 
 /* JSGC_PRETENURE_THRESHOLD */
 static const double PretenureThreshold = 0.6;
@@ -428,14 +431,14 @@ static const auto MinLastDitchGCPeriod = 60;  // in seconds
 /* JSGC_MALLOC_THRESHOLD_BASE */
 static const size_t MallocThresholdBase = 38 * 1024 * 1024;
 
-/* JSGC_MALLOC_GROWTH_FACTOR */
-static const double MallocGrowthFactor = 1.5;
-
 /* JSGC_HELPER_THREAD_RATIO */
 static const double HelperThreadRatio = 0.5;
 
 /* JSGC_MAX_HELPER_THREADS */
 static const size_t MaxHelperThreads = 8;
+
+/* JSGC_URGENT_THRESHOLD_MB */
+static const size_t UrgentThresholdBytes = 16 * 1024 * 1024;
 
 }  // namespace TuningDefaults
 
@@ -541,6 +544,9 @@ class GCSchedulingTunables {
   UnprotectedData<uint32_t> nurseryFreeThresholdForIdleCollection_;
   UnprotectedData<double> nurseryFreeThresholdForIdleCollectionFraction_;
 
+  /* See JSGC_NURSERY_TIMEOUT_FOR_IDLE_COLLECTION_MS. */
+  MainThreadData<mozilla::TimeDuration> nurseryTimeoutForIdleCollection_;
+
   /*
    * JSGC_PRETENURE_THRESHOLD
    *
@@ -592,11 +598,11 @@ class GCSchedulingTunables {
   MainThreadOrGCTaskData<size_t> mallocThresholdBase_;
 
   /*
-   * JSGC_MALLOC_GROWTH_FACTOR
+   * JSGC_URGENT_THRESHOLD_MB
    *
-   * Malloc memory growth factor.
+   * The base value used to compute the GC trigger for malloc allocated memory.
    */
-  MainThreadOrGCTaskData<double> mallocGrowthFactor_;
+  MainThreadData<size_t> urgentThresholdBytes_;
 
  public:
   GCSchedulingTunables();
@@ -634,6 +640,9 @@ class GCSchedulingTunables {
   double nurseryFreeThresholdForIdleCollectionFraction() const {
     return nurseryFreeThresholdForIdleCollectionFraction_;
   }
+  mozilla::TimeDuration nurseryTimeoutForIdleCollection() const {
+    return nurseryTimeoutForIdleCollection_;
+  }
 
   bool attemptPretenuring() const { return pretenureThreshold_ < 1.0; }
   double pretenureThreshold() const { return pretenureThreshold_; }
@@ -648,10 +657,11 @@ class GCSchedulingTunables {
   }
 
   size_t mallocThresholdBase() const { return mallocThresholdBase_; }
-  double mallocGrowthFactor() const { return mallocGrowthFactor_; }
 
-  MOZ_MUST_USE bool setParameter(JSGCParamKey key, uint32_t value,
-                                 const AutoLockGC& lock);
+  size_t urgentThresholdBytes() const { return urgentThresholdBytes_; }
+
+  [[nodiscard]] bool setParameter(JSGCParamKey key, uint32_t value,
+                                  const AutoLockGC& lock);
   void resetParameter(JSGCParamKey key, const AutoLockGC& lock);
 
  private:
@@ -804,6 +814,7 @@ class HeapThreshold {
   size_t sliceBytes() const { return sliceBytes_; }
   size_t incrementalLimitBytes() const { return incrementalLimitBytes_; }
   double eagerAllocTrigger(bool highFrequencyGC) const;
+  size_t incrementalBytesRemaining(const HeapSize& heapSize) const;
 
   void setSliceThreshold(ZoneAllocator* zone, const HeapSize& heapSize,
                          const GCSchedulingTunables& tunables);
@@ -811,6 +822,10 @@ class HeapThreshold {
   bool hasSliceThreshold() const { return sliceBytes_ != SIZE_MAX; }
 
  protected:
+  static double computeZoneHeapGrowthFactorForHeapSize(
+      size_t lastBytes, const GCSchedulingTunables& tunables,
+      const GCSchedulingState& state);
+
   void setIncrementalLimitFromStartBytes(size_t retainedBytes,
                                          const GCSchedulingTunables& tunables);
 };
@@ -820,17 +835,13 @@ class HeapThreshold {
 // size. This is used to determine when to do a zone GC based on GC heap size.
 class GCHeapThreshold : public HeapThreshold {
  public:
-  void updateStartThreshold(size_t lastBytes, JSGCInvocationKind gckind,
+  void updateStartThreshold(size_t lastBytes,
                             const GCSchedulingTunables& tunables,
                             const GCSchedulingState& state, bool isAtomsZone,
                             const AutoLockGC& lock);
 
  private:
-  static double computeZoneHeapGrowthFactorForHeapSize(
-      size_t lastBytes, const GCSchedulingTunables& tunables,
-      const GCSchedulingState& state);
   static size_t computeZoneTriggerBytes(double growthFactor, size_t lastBytes,
-                                        JSGCInvocationKind gckind,
                                         const GCSchedulingTunables& tunables,
                                         const AutoLockGC& lock);
 };
@@ -842,6 +853,7 @@ class MallocHeapThreshold : public HeapThreshold {
  public:
   void updateStartThreshold(size_t lastBytes,
                             const GCSchedulingTunables& tunables,
+                            const GCSchedulingState& state,
                             const AutoLockGC& lock);
 
  private:

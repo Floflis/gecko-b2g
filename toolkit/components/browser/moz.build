@@ -11,9 +11,9 @@ DIRS += ["build"]
 
 XPIDL_SOURCES += [
     "nsIEmbeddingSiteWindow.idl",
+    "nsITopLevelNavigationDelegate.idl",
     "nsIWebBrowser.idl",
     "nsIWebBrowserChrome.idl",
-    "nsIWebBrowserChrome3.idl",
     "nsIWebBrowserChromeFocus.idl",
 ]
 
@@ -49,3 +49,5 @@ EXPORTS += [
     "nsEmbedCID.h",
     "nsWebBrowser.h",
 ]
+
+REQUIRES_UNIFIED_BUILD = True

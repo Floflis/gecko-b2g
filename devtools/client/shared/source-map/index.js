@@ -1,7 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- 
+
 (function webpackUniversalModuleDefinition(root, factory) {
 	if(typeof exports === 'object' && typeof module === 'object')
 		module.exports = factory();
@@ -135,7 +135,10 @@ module.exports = networkRequest;
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 function WorkerDispatcher() {
   this.msgId = 1;
-  this.worker = null;
+  this.worker = null; // Map of message ids -> promise resolution functions, for dispatching worker responses
+
+  this.pendingCalls = new Map();
+  this._onMessage = this._onMessage.bind(this);
 }
 
 WorkerDispatcher.prototype = {
@@ -145,6 +148,8 @@ WorkerDispatcher.prototype = {
     this.worker.onerror = err => {
       console.error(`Error in worker ${url}`, err.message);
     };
+
+    this.worker.addEventListener("message", this._onMessage);
   },
 
   stop() {
@@ -152,8 +157,10 @@ WorkerDispatcher.prototype = {
       return;
     }
 
+    this.worker.removeEventListener("message", this._onMessage);
     this.worker.terminate();
     this.worker = null;
+    this.pendingCalls.clear();
   },
 
   task(method, {
@@ -167,7 +174,11 @@ WorkerDispatcher.prototype = {
           Promise.resolve().then(flush);
         }
 
-        calls.push([args, resolve, reject]);
+        calls.push({
+          args,
+          resolve,
+          reject
+        });
 
         if (!queue) {
           flush();
@@ -187,35 +198,9 @@ WorkerDispatcher.prototype = {
       this.worker.postMessage({
         id,
         method,
-        calls: items.map(item => item[0])
+        calls: items.map(item => item.args)
       });
-
-      const listener = ({
-        data: result
-      }) => {
-        if (result.id !== id) {
-          return;
-        }
-
-        if (!this.worker) {
-          return;
-        }
-
-        this.worker.removeEventListener("message", listener);
-        result.results.forEach((resultData, i) => {
-          const [, resolve, reject] = items[i];
-
-          if (resultData.error) {
-            const err = new Error(resultData.message);
-            err.metadata = resultData.metadata;
-            reject(err);
-          } else {
-            resolve(resultData.response);
-          }
-        });
-      };
-
-      this.worker.addEventListener("message", listener);
+      this.pendingCalls.set(id, items);
     };
 
     return (...args) => push(args);
@@ -223,6 +208,36 @@ WorkerDispatcher.prototype = {
 
   invoke(method, ...args) {
     return this.task(method)(...args);
+  },
+
+  _onMessage({
+    data: result
+  }) {
+    const items = this.pendingCalls.get(result.id);
+    this.pendingCalls.delete(result.id);
+
+    if (!items) {
+      return;
+    }
+
+    if (!this.worker) {
+      return;
+    }
+
+    result.results.forEach((resultData, i) => {
+      const {
+        resolve,
+        reject
+      } = items[i];
+
+      if (resultData.error) {
+        const err = new Error(resultData.message);
+        err.metadata = resultData.metadata;
+        reject(err);
+      } else {
+        resolve(resultData.response);
+      }
+    });
   }
 
 };
@@ -251,7 +266,7 @@ function workerHandler(publicInterface) {
         return asErrorMessage(error);
       }
     })).then(results => {
-      self.postMessage({
+      globalThis.postMessage({
         id,
         results
       });
@@ -769,9 +784,9 @@ var _utils = __webpack_require__(584);
 
 var self = _interopRequireWildcard(__webpack_require__(708));
 
-function _getRequireWildcardCache() { if (typeof WeakMap !== "function") return null; var cache = new WeakMap(); _getRequireWildcardCache = function () { return cache; }; return cache; }
+function _getRequireWildcardCache(nodeInterop) { if (typeof WeakMap !== "function") return null; var cacheBabelInterop = new WeakMap(); var cacheNodeInterop = new WeakMap(); return (_getRequireWildcardCache = function (nodeInterop) { return nodeInterop ? cacheNodeInterop : cacheBabelInterop; })(nodeInterop); }
 
-function _interopRequireWildcard(obj) { if (obj && obj.__esModule) { return obj; } if (obj === null || typeof obj !== "object" && typeof obj !== "function") { return { default: obj }; } var cache = _getRequireWildcardCache(); if (cache && cache.has(obj)) { return cache.get(obj); } var newObj = {}; var hasPropertyDescriptor = Object.defineProperty && Object.getOwnPropertyDescriptor; for (var key in obj) { if (Object.prototype.hasOwnProperty.call(obj, key)) { var desc = hasPropertyDescriptor ? Object.getOwnPropertyDescriptor(obj, key) : null; if (desc && (desc.get || desc.set)) { Object.defineProperty(newObj, key, desc); } else { newObj[key] = obj[key]; } } } newObj.default = obj; if (cache) { cache.set(obj, newObj); } return newObj; }
+function _interopRequireWildcard(obj, nodeInterop) { if (!nodeInterop && obj && obj.__esModule) { return obj; } if (obj === null || typeof obj !== "object" && typeof obj !== "function") { return { default: obj }; } var cache = _getRequireWildcardCache(nodeInterop); if (cache && cache.has(obj)) { return cache.get(obj); } var newObj = {}; var hasPropertyDescriptor = Object.defineProperty && Object.getOwnPropertyDescriptor; for (var key in obj) { if (key !== "default" && Object.prototype.hasOwnProperty.call(obj, key)) { var desc = hasPropertyDescriptor ? Object.getOwnPropertyDescriptor(obj, key) : null; if (desc && (desc.get || desc.set)) { Object.defineProperty(newObj, key, desc); } else { newObj[key] = obj[key]; } } } newObj.default = obj; if (cache) { cache.set(obj, newObj); } return newObj; }
 
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this

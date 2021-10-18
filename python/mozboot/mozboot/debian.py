@@ -20,7 +20,7 @@ Mercurial via the "pip" Python packaging utility. This will likely result
 in files being placed in /usr/local/bin and /usr/local/lib.
 
 How would you like to continue?
-  1. Install a modern Mercurial via pip (recommended)
+  1. Install a modern Mercurial via pip [default]
   2. Install a legacy Mercurial via apt
   3. Do not install Mercurial
 Your choice: """
@@ -33,6 +33,7 @@ class DebianBootstrapper(LinuxBootstrapper, BaseBootstrapper):
     COMMON_PACKAGES = [
         "build-essential",
         "libpython3-dev",
+        "m4",
         "nodejs",
         "unzip",
         "uuid",
@@ -54,12 +55,10 @@ class DebianBootstrapper(LinuxBootstrapper, BaseBootstrapper):
         "libdbus-glib-1-dev",
         "libdrm-dev",
         "libgtk-3-dev",
-        "libgtk2.0-dev",
         "libpulse-dev",
         "libx11-xcb-dev",
         "libxt-dev",
         "xvfb",
-        "yasm",
     ]
 
     # These are common packages for building Firefox for Android
@@ -67,6 +66,7 @@ class DebianBootstrapper(LinuxBootstrapper, BaseBootstrapper):
     MOBILE_ANDROID_COMMON_PACKAGES = [
         "openjdk-8-jdk-headless",  # Android's `sdkmanager` requires Java 1.8 exactly.
         "wget",  # For downloading the Android SDK and NDK.
+        "libncurses5",  # For native debugging in Android Studio
     ]
 
     def __init__(self, distro, version, dist_id, codename, **kwargs):
@@ -97,26 +97,17 @@ class DebianBootstrapper(LinuxBootstrapper, BaseBootstrapper):
     def install_system_packages(self):
         self.apt_install(*self.packages)
 
-    def install_browser_packages(self, mozconfig_builder):
-        self.ensure_browser_packages()
-
-    def install_browser_artifact_mode_packages(self, mozconfig_builder):
-        self.ensure_browser_packages(artifact_mode=True)
-
-    def install_mobile_android_packages(self, mozconfig_builder):
-        self.ensure_mobile_android_packages(mozconfig_builder)
-
-    def install_mobile_android_artifact_mode_packages(self, mozconfig_builder):
-        self.ensure_mobile_android_packages(mozconfig_builder, artifact_mode=True)
-
-    def ensure_browser_packages(self, artifact_mode=False):
+    def install_browser_packages(self, mozconfig_builder, artifact_mode=False):
         # TODO: Figure out what not to install for artifact mode
         self.apt_install(*self.BROWSER_COMMON_PACKAGES)
         modern = self.is_nasm_modern()
         if not modern:
             self.apt_install("nasm")
 
-    def ensure_mobile_android_packages(self, mozconfig_builder, artifact_mode=False):
+    def install_browser_artifact_mode_packages(self, mozconfig_builder):
+        self.install_browser_packages(mozconfig_builder, artifact_mode=True)
+
+    def install_mobile_android_packages(self, mozconfig_builder, artifact_mode=False):
         # Multi-part process:
         # 1. System packages.
         # 2. Android SDK. Android NDK only if we are not in artifact mode. Android packages.
@@ -124,7 +115,9 @@ class DebianBootstrapper(LinuxBootstrapper, BaseBootstrapper):
 
         # 2. Android pieces.
         self.ensure_java(mozconfig_builder)
-        super().ensure_mobile_android_packages(artifact_mode=artifact_mode)
+        super().install_mobile_android_packages(
+            mozconfig_builder, artifact_mode=artifact_mode
+        )
 
     def _update_package_manager(self):
         self.apt_update()

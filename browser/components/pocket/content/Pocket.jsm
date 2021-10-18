@@ -13,6 +13,11 @@ ChromeUtils.defineModuleGetter(
   "BrowserUIUtils",
   "resource:///modules/BrowserUIUtils.jsm"
 );
+ChromeUtils.defineModuleGetter(
+  this,
+  "CustomizableUI",
+  "resource:///modules/CustomizableUI.jsm"
+);
 
 var Pocket = {
   get site() {
@@ -20,25 +25,6 @@ var Pocket = {
   },
   get listURL() {
     return "https://" + Pocket.site + "/firefox_learnmore?src=ff_library";
-  },
-
-  openList(event) {
-    let win = event.view;
-    let where = win.whereToOpenLink(event);
-    // Never override the current tab unless it's blank:
-    if (where == "current" && !win.gBrowser.selectedTab.isEmpty) {
-      where = "tab";
-    }
-    win.openTrustedLinkIn(this.listURL, where);
-  },
-
-  /**
-   * Functions related to the Pocket panel UI.
-   */
-  onShownInPhotonPageActionPanel(panel, iframe) {
-    let window = panel.ownerGlobal;
-    window.pktUI.setPhotonPageActionPanelFrame(iframe);
-    Pocket._initPanelView(window);
   },
 
   _initPanelView(window) {
@@ -67,18 +53,18 @@ var Pocket = {
   _urlToSave: null,
   _titleToSave: null,
   savePage(browser, url, title) {
-    if (this.pageAction) {
-      this._urlToSave = url;
-      this._titleToSave = title;
-      this.pageAction.doCommand(browser.ownerGlobal);
+    if (!browser?.ownerDocument || !browser?.ownerGlobal?.PanelUI) {
+      return;
     }
-  },
+    let { ownerDocument, ownerGlobal } = browser;
 
-  get pageAction() {
-    return this._pageAction;
+    let widget = CustomizableUI.getWidget("save-to-pocket-button");
+    let anchorNode = widget.areaType
+      ? widget.forWindow(ownerGlobal).anchor
+      : ownerDocument.getElementById("PanelUI-menu-button");
+
+    this._urlToSave = url;
+    this._titleToSave = title;
+    ownerGlobal.PanelUI.showSubView("PanelUI-savetopocket", anchorNode);
   },
-  set pageAction(pageAction) {
-    this._pageAction = pageAction;
-  },
-  _pageAction: null,
 };

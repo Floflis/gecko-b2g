@@ -39,8 +39,6 @@ Please note that some targeting attributes require stricter controls on the tele
 * [userPrefs](#userprefs)
 * [attachedFxAOAuthClients](#attachedfxaoauthclients)
 * [platformName](#platformname)
-* [scores](#scores)
-* [scoreThreshold](#scorethreshold)
 * [messageImpressions](#messageimpressions)
 * [blockedCountByType](#blockedcountbytype)
 * [isChinaRepack](#ischinarepack)
@@ -48,7 +46,12 @@ Please note that some targeting attributes require stricter controls on the tele
 * [profileRestartCount](#profilerestartcount)
 * [homePageSettings](#homepagesettings)
 * [newtabSettings](#newtabsettings)
-* [isFissionExperimentEnabled](#isFissionExperimentEnabled)
+* [isFissionExperimentEnabled](#isfissionexperimentenabled)
+* [activeNotifications](#activenotifications)
+* [isMajorUpgrade](#ismajorupgrade)
+* [hasActiveEnterprisePolicies](#hasactiveenterprisepolicies)
+* [userMonthlyActivity](#usermonthlyactivity)
+* [doesAppNeedPin](#doesappneedpin)
 
 ## Detailed usage
 
@@ -123,16 +126,18 @@ interface AttributionCode {
 
 ### `browserSettings`
 
-Includes two properties:
-* `attribution`, which indicates how Firefox was downloaded - DEPRECATED - please use [attributionData](#attributiondata)
-* `update`, which has information about how Firefox updates
-
-Note that attribution can be `undefined`, so you should check that it exists first.
+* `update`, which has information about Firefox update channel
 
 #### Examples
+
 * Is updating enabled?
 ```java
 browserSettings.update.enabled
+```
+
+* Is beta channel?
+```js
+browserSettings.update.channel == 'beta'
 ```
 
 #### Definition
@@ -584,26 +589,6 @@ declare const attachedFxAOAuthClients: Promise<OAuthClient[]>
 declare const platformName = "linux" | "win" | "macosx" | "android" | "other";
 ```
 
-### `scores`
-
-#### Definition
-
-See more in [CFR Machine Learning Experiment](https://bugzilla.mozilla.org/show_bug.cgi?id=1594422).
-
-```
-declare const scores = { [cfrId: string]: number (integer); }
-```
-
-### `scoreThreshold`
-
-#### Definition
-
-See more in [CFR Machine Learning Experiment](https://bugzilla.mozilla.org/show_bug.cgi?id=1594422).
-
-```
-declare const scoreThreshold = integer;
-```
-
 ### `messageImpressions`
 
 Dictionary that maps message ids to impression timestamps. Timestamps are stored in
@@ -820,3 +805,25 @@ Object {
 ### `isFissionExperimentEnabled`
 
 A boolean. `true` if we're running Fission experiment, `false` otherwise.
+
+### `activeNotifications`
+
+True when an infobar style message is displayed or when the awesomebar is
+expanded to show a message (for example onboarding tips).
+
+### `isMajorUpgrade`
+
+A boolean. `true` if the browser just updated to a new major version.
+
+### `hasActiveEnterprisePolicies`
+
+A boolean. `true` if any Enterprise Policies are active.
+
+### `userMonthlyActivity`
+
+Returns an array of entries in the form `[int, unixTimestamp]` for each day of
+user activity where the first entry is the total urls visited for that day.
+
+### `doesAppNeedPin`
+
+Checks if Firefox app can and isn't pinned to OS taskbar/dock.

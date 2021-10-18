@@ -7,9 +7,13 @@
 FINAL_LIBRARY = "mozglue"
 
 EXPORTS.mozilla.mscom += [
+    "ActCtxResource.h",
     "ProcessRuntimeShared.h",
 ]
 
 UNIFIED_SOURCES += [
+    "ActCtxResource.cpp",
     "ProcessRuntimeShared.cpp",
 ]
+
+REQUIRES_UNIFIED_BUILD = True

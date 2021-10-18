@@ -4,7 +4,7 @@
 
 //! IPC Implementation, Rust part
 
-use crate::private::{Instant, MetricId};
+use crate::private::MetricId;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,23 +13,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 #[cfg(feature = "with_gecko")]
 use {
+    std::convert::TryInto,
     std::sync::atomic::{AtomicU32, Ordering},
     xpcom::interfaces::nsIXULRuntime,
 };
 
 use super::metrics::__glean_metric_maps;
 
-type EventRecord = (Instant, Option<HashMap<i32, String>>);
+type EventRecord = (u64, HashMap<i32, String>);
 
 /// Contains all the information necessary to update the metrics on the main
 /// process.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct IPCPayload {
     pub counters: HashMap<MetricId, i32>,
+    pub custom_samples: HashMap<MetricId, Vec<i64>>,
+    pub denominators: HashMap<MetricId, i32>,
     pub events: HashMap<MetricId, Vec<EventRecord>>,
+    pub labeled_counters: HashMap<MetricId, HashMap<String, i32>>,
     pub memory_samples: HashMap<MetricId, Vec<u64>>,
+    pub numerators: HashMap<MetricId, i32>,
+    pub rates: HashMap<MetricId, (i32, i32)>,
     pub string_lists: HashMap<MetricId, Vec<String>>,
-    pub timing_samples: HashMap<MetricId, Vec<u128>>,
+    pub timing_samples: HashMap<MetricId, Vec<u64>>,
 }
 
 /// Global singleton: pending IPC payload.
@@ -48,19 +54,54 @@ where
 /// Thread-safe.
 #[cfg(feature = "with_gecko")]
 static PROCESS_TYPE: Lazy<AtomicU32> = Lazy::new(|| {
-    if let Some(appinfo) = xpcom::services::get_XULRuntime() {
-        let mut process_type = nsIXULRuntime::PROCESS_TYPE_DEFAULT as u32;
-        let rv = unsafe { appinfo.GetProcessType(&mut process_type) };
-        if rv.succeeded() {
-            return AtomicU32::new(process_type);
-        }
+    extern "C" {
+        fn FOG_GetProcessType() -> i32;
     }
-    AtomicU32::new(nsIXULRuntime::PROCESS_TYPE_DEFAULT as u32)
+    // SAFETY NOTE: Safe because it returns a primitive by value.
+    let process_type = unsafe { FOG_GetProcessType() };
+    // It's impossible for i32 to overflow u32, but maybe someone got clever
+    // and introduced a negative process type constant. Default to parent.
+    let process_type = process_type
+        .try_into()
+        .unwrap_or(nsIXULRuntime::PROCESS_TYPE_DEFAULT as u32);
+    // We don't have process-specific init locations outside of the main
+    // process, so we introduce this side-effect to a global static init.
+    // This is the absolute first time we decide which process type we're
+    // treating this process as, so this is the earliest we can do this.
+    register_process_shutdown(process_type);
+    AtomicU32::new(process_type)
 });
 
 #[cfg(feature = "with_gecko")]
 pub fn need_ipc() -> bool {
     PROCESS_TYPE.load(Ordering::Relaxed) != nsIXULRuntime::PROCESS_TYPE_DEFAULT as u32
+}
+
+/// The first time we're used in a process,
+/// we'll need to start thinking about cleanup.
+///
+/// Please only call once per process.
+/// Multiple calls may register multiple handlers.
+#[cfg(feature = "with_gecko")]
+fn register_process_shutdown(process_type: u32) {
+    match process_type as i64 {
+        nsIXULRuntime::PROCESS_TYPE_DEFAULT => {
+            // Parent process shutdown is handled by the FOG XPCOM Singleton.
+        }
+        nsIXULRuntime::PROCESS_TYPE_CONTENT => {
+            // Content child shutdown is in C++ for access to RunOnShutdown().
+            extern "C" {
+                fn FOG_RegisterContentChildShutdown();
+            }
+            unsafe {
+                FOG_RegisterContentChildShutdown();
+            };
+        }
+        _ => {
+            // We don't yet support other process types.
+            log::error!("Process type {} tried to use FOG, but isn't supported! (Process type constants are in nsIXULRuntime.rs)", process_type);
+        }
+    }
 }
 
 /// An RAII that, on drop, restores the value used to determine whether FOG
@@ -115,12 +156,65 @@ pub fn take_buf() -> Option<Vec<u8>> {
     })
 }
 
+// Reason: We instrument the error counts,
+// but don't need more detailed error information at the moment.
+#[allow(clippy::result_unit_err)]
 pub fn replay_from_buf(buf: &[u8]) -> Result<(), ()> {
+    // TODO: Instrument failures to find metrics by id.
     let ipc_payload: IPCPayload = bincode::deserialize(buf).map_err(|_| ())?;
     for (id, value) in ipc_payload.counters.into_iter() {
-        log::info!("Asked to replay {:?}, {:?}", id, value);
         if let Some(metric) = __glean_metric_maps::COUNTER_MAP.get(&id) {
             metric.add(value);
+        }
+    }
+    for (id, samples) in ipc_payload.custom_samples.into_iter() {
+        if let Some(metric) = __glean_metric_maps::CUSTOM_DISTRIBUTION_MAP.get(&id) {
+            metric.accumulate_samples_signed(samples);
+        }
+    }
+    for (id, value) in ipc_payload.denominators.into_iter() {
+        if let Some(metric) = __glean_metric_maps::DENOMINATOR_MAP.get(&id) {
+            metric.add(value);
+        }
+    }
+    for (id, records) in ipc_payload.events.into_iter() {
+        for (timestamp, extra) in records.into_iter() {
+            let _ = __glean_metric_maps::record_event_by_id_with_time(id, timestamp, extra);
+        }
+    }
+    for (id, labeled_counts) in ipc_payload.labeled_counters.into_iter() {
+        if let Some(metric) = __glean_metric_maps::LABELED_COUNTER_MAP.get(&id) {
+            for (label, count) in labeled_counts.into_iter() {
+                metric.get(&label).add(count);
+            }
+        }
+    }
+    for (id, samples) in ipc_payload.memory_samples.into_iter() {
+        if let Some(metric) = __glean_metric_maps::MEMORY_DISTRIBUTION_MAP.get(&id) {
+            samples
+                .into_iter()
+                .for_each(|sample| metric.accumulate(sample));
+        }
+    }
+    for (id, value) in ipc_payload.numerators.into_iter() {
+        if let Some(metric) = __glean_metric_maps::NUMERATOR_MAP.get(&id) {
+            metric.add_to_numerator(value);
+        }
+    }
+    for (id, (n, d)) in ipc_payload.rates.into_iter() {
+        if let Some(metric) = __glean_metric_maps::RATE_MAP.get(&id) {
+            metric.add_to_numerator(n);
+            metric.add_to_denominator(d);
+        }
+    }
+    for (id, strings) in ipc_payload.string_lists.into_iter() {
+        if let Some(metric) = __glean_metric_maps::STRING_LIST_MAP.get(&id) {
+            strings.iter().for_each(|s| metric.add(s));
+        }
+    }
+    for (id, samples) in ipc_payload.timing_samples.into_iter() {
+        if let Some(metric) = __glean_metric_maps::TIMING_DISTRIBUTION_MAP.get(&id) {
+            metric.accumulate_raw_samples_nanos(samples);
         }
     }
     Ok(())

@@ -5,10 +5,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #ifdef ACCESSIBILITY
-#  ifdef XP_WIN
-#    include "mozilla/a11y/ProxyAccessible.h"
-#    include "mozilla/a11y/ProxyWrappers.h"
-#  endif
 #  include "mozilla/a11y/DocAccessible.h"
 #  include "mozilla/a11y/DocManager.h"
 #  include "mozilla/a11y/OuterDocAccessible.h"
@@ -28,19 +24,18 @@
 
 using namespace mozilla::ipc;
 
+mozilla::LazyLogModule gBrowserChildFocusLog("BrowserChildFocus");
+
+#define LOGBROWSERCHILDFOCUS(args) \
+  MOZ_LOG(gBrowserChildFocusLog, mozilla::LogLevel::Debug, args)
+
 namespace mozilla::dom {
 
 BrowserBridgeChild::BrowserBridgeChild(BrowsingContext* aBrowsingContext,
                                        TabId aId, const LayersId& aLayersId)
     : mId{aId}, mLayersId{aLayersId}, mBrowsingContext(aBrowsingContext) {}
 
-BrowserBridgeChild::~BrowserBridgeChild() {
-#if defined(ACCESSIBILITY) && defined(XP_WIN)
-  if (mEmbeddedDocAccessible) {
-    mEmbeddedDocAccessible->Shutdown();
-  }
-#endif
-}
+BrowserBridgeChild::~BrowserBridgeChild() {}
 
 already_AddRefed<BrowserBridgeHost> BrowserBridgeChild::FinishInit(
     nsFrameLoader* aFrameLoader) {
@@ -48,15 +43,12 @@ already_AddRefed<BrowserBridgeHost> BrowserBridgeChild::FinishInit(
   mFrameLoader = aFrameLoader;
 
   RefPtr<Element> owner = mFrameLoader->GetOwnerContent();
-  nsCOMPtr<nsIDocShell> docShell = do_GetInterface(owner->GetOwnerGlobal());
-  MOZ_DIAGNOSTIC_ASSERT(docShell);
-
-  nsDocShell::Cast(docShell)->OOPChildLoadStarted(this);
+  Document* doc = owner->OwnerDoc();
+  doc->OOPChildLoadStarted(this);
 
 #if defined(ACCESSIBILITY)
-  if (a11y::DocAccessible* docAcc =
-          a11y::GetExistingDocAccessible(owner->OwnerDoc())) {
-    if (a11y::Accessible* ownerAcc = docAcc->GetAccessible(owner)) {
+  if (a11y::DocAccessible* docAcc = a11y::GetExistingDocAccessible(doc)) {
+    if (a11y::LocalAccessible* ownerAcc = docAcc->GetAccessible(owner)) {
       if (a11y::OuterDocAccessible* outerAcc = ownerAcc->AsOuterDoc()) {
         outerAcc->SendEmbedderAccessible(this);
       }
@@ -77,6 +69,8 @@ void BrowserBridgeChild::NavigateByKey(bool aForward,
 }
 
 void BrowserBridgeChild::Activate(uint64_t aActionId) {
+  LOGBROWSERCHILDFOCUS(
+      ("BrowserBridgeChild::Activate actionid: %" PRIu64, aActionId));
   Unused << SendActivate(aActionId);
 }
 
@@ -151,12 +145,7 @@ BrowserBridgeChild::RecvSetEmbeddedDocAccessibleCOMProxy(
     const a11y::IDispatchHolder& aCOMProxy) {
 #if defined(ACCESSIBILITY) && defined(XP_WIN)
   MOZ_ASSERT(!aCOMProxy.IsNull());
-  if (mEmbeddedDocAccessible) {
-    mEmbeddedDocAccessible->Shutdown();
-  }
-  RefPtr<IDispatch> comProxy(aCOMProxy.Get());
-  mEmbeddedDocAccessible =
-      new a11y::RemoteIframeDocProxyAccessibleWrap(comProxy);
+  mEmbeddedDocAccessible = aCOMProxy.Get();
 #endif
   return IPC_OK();
 }
@@ -210,8 +199,8 @@ mozilla::ipc::IPCResult BrowserBridgeChild::RecvScrollRectIntoView(
       aRect.ScaleToOtherAppUnitsRoundOut(aAppUnitsPerDevPixel, parentAPD);
   rect += extraOffset;
   RefPtr<PresShell> presShell = frame->PresShell();
-  presShell->ScrollFrameRectIntoView(frame, rect, aVertical, aHorizontal,
-                                     aScrollFlags);
+  presShell->ScrollFrameRectIntoView(frame, rect, nsMargin(), aVertical,
+                                     aHorizontal, aScrollFlags);
 
   return IPC_OK();
 }
@@ -225,6 +214,10 @@ mozilla::ipc::IPCResult BrowserBridgeChild::RecvSubFrameCrashed() {
 }
 
 void BrowserBridgeChild::ActorDestroy(ActorDestroyReason aWhy) {
+  if (mFrameLoader) {
+    mFrameLoader->DestroyComplete();
+  }
+
   if (!mBrowsingContext) {
     // This BBC was never valid, skip teardown.
     return;
@@ -238,9 +231,9 @@ void BrowserBridgeChild::ActorDestroy(ActorDestroyReason aWhy) {
 void BrowserBridgeChild::UnblockOwnerDocsLoadEvent() {
   if (!mHadInitialLoad) {
     mHadInitialLoad = true;
-    if (auto* docShell =
-            nsDocShell::Cast(mBrowsingContext->GetParent()->GetDocShell())) {
-      docShell->OOPChildLoadDone(this);
+
+    if (Document* doc = mBrowsingContext->GetParent()->GetExtantDocument()) {
+      doc->OOPChildLoadDone(this);
     }
   }
 }

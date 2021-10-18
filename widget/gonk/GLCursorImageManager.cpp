@@ -220,15 +220,15 @@ void GLCursorImageManager::PrepareCursorImage(nsCursor aCursor,
       const nsStyleUI* ui = frame->StyleUI();
 
       // Retrieve first cursor property from css.
-      MOZ_ASSERT(ui->mCursor.images.Length() > 0);
-      Span<const StyleCursorImage> item = ui->mCursor.images.AsSpan();
+      MOZ_ASSERT(ui->Cursor().images.Length() > 0);
+      Span<const StyleCursorImage> item = ui->Cursor().images.AsSpan();
 
       nsIntPoint hotspot =
           nsIntPoint((int)item[0].hotspot_x, (int)item[0].hotspot_y);
       loadRequest.mTask = new LoadCursorTask(supportedCursor, hotspot, this);
 
-      item[0].url.GetImage()->Clone(loadRequest.mTask.get(),
-                                    getter_AddRefs(loadRequest.mRequest));
+      item[0].image.GetImageRequest()->Clone(
+          loadRequest.mTask.get(), getter_AddRefs(loadRequest.mRequest));
 
       loadRequest.mRequest->StartDecoding(imgIContainer::FLAG_NONE);
 
@@ -240,6 +240,10 @@ void GLCursorImageManager::PrepareCursorImage(nsCursor aCursor,
 
 void GLCursorImageManager::RemoveCursorLoadRequest(nsCursor aCursor) {
   ReentrantMonitorAutoEnter lock(mGLCursorImageManagerMonitor);
+  // Call CancelAndForgetObserver before destroy the imgIRequest object.
+  GLCursorLoadRequest& loadRequest =
+    mGLCursorLoadingRequestMap[aCursor];
+  loadRequest.mRequest->CancelAndForgetObserver(NS_BINDING_ABORTED);
   mGLCursorLoadingRequestMap.erase(aCursor);
 }
 

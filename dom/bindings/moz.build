@@ -45,7 +45,6 @@ EXPORTS.mozilla.dom += [
     "Nullable.h",
     "PinnedStringId.h",
     "PrimitiveConversions.h",
-    "ReadableStream.h",
     "Record.h",
     "RemoteObjectProxy.h",
     "RootedDictionary.h",
@@ -57,6 +56,11 @@ EXPORTS.mozilla.dom += [
     "WebIDLGlobalNameHash.h",
     "XrayExpandoClass.h",
 ]
+
+if not CONFIG["MOZ_DOM_STREAMS"]:
+    EXPORTS.mozilla.dom += [
+        "ReadableStream.h",
+    ]
 
 # Generated bindings reference *Binding.h, not mozilla/dom/*Binding.h. And,
 # since we generate exported bindings directly to $(DIST)/include, we need
@@ -171,10 +175,6 @@ SPHINX_PYTHON_PACKAGE_DIRS += ["mozwebidlcodegen"]
 
 with Files("mozwebidlcodegen/**.py"):
     SCHEDULES.inclusive += ["docs"]
-
-if CONFIG["MOZ_BUILD_APP"] in ["browser", "mobile/android", "xulrunner"]:
-    # This is needed for Window.webidl
-    DEFINES["HAVE_SIDEBAR"] = True
 
 
 PYTHON_UNITTEST_MANIFESTS += [

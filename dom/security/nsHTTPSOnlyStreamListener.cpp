@@ -111,7 +111,8 @@ void nsHTTPSOnlyStreamListener::RecordUpgradeTelemetry(nsIRequest* request,
 
     if (aStatus == NS_ERROR_REDIRECT_LOOP) {
       category.AppendLiteral("f_redirectloop");
-    } else if (aStatus == NS_ERROR_NET_TIMEOUT) {
+    } else if (aStatus == NS_ERROR_NET_TIMEOUT ||
+               aStatus == NS_ERROR_NET_TIMEOUT_EXTERNAL) {
       category.AppendLiteral("f_timeout");
     } else if (aStatus == NS_BINDING_ABORTED) {
       category.AppendLiteral("f_aborted");
@@ -191,6 +192,7 @@ void nsHTTPSOnlyStreamListener::RecordUpgradeTelemetry(nsIRequest* request,
         break;
 
       case ExtContentPolicy::TYPE_FONT:
+      case ExtContentPolicy::TYPE_UA_FONT:
         typeKey = "font"_ns;
         break;
 
@@ -220,6 +222,10 @@ void nsHTTPSOnlyStreamListener::RecordUpgradeTelemetry(nsIRequest* request,
 
       case ExtContentPolicy::TYPE_XSLT:
         typeKey = "xslt"_ns;
+        break;
+
+      case ExtContentPolicy::TYPE_PROXIED_WEBRTC_MEDIA:
+        typeKey = "proxied-webrtc"_ns;
         break;
 
       case ExtContentPolicy::TYPE_INVALID:

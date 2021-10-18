@@ -14,7 +14,6 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/PodOperations.h"
-#include "mozilla/Unused.h"
 
 #include <algorithm>
 #include <new>
@@ -26,6 +25,7 @@
 #include "ds/Sort.h"
 #include "gc/FreeOp.h"
 #include "gc/Marking.h"
+#include "js/CallAndConstruct.h"      // JS::IsCallable
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/PropertySpec.h"
 #include "js/Proxy.h"
@@ -41,12 +41,12 @@
 #include "vm/NativeObject.h"  // js::PlainObject
 #include "vm/Shape.h"
 #include "vm/TypedArrayObject.h"
+#include "vm/WellKnownAtom.h"  // js_*_str
 
 #include "vm/Compartment-inl.h"
 #include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
 #include "vm/PlainObject-inl.h"  // js::PlainObject::createWithTemplate
-#include "vm/ReceiverGuard-inl.h"
 #include "vm/Stack-inl.h"
 #include "vm/StringType-inl.h"
 
@@ -70,13 +70,14 @@ void NativeIterator::trace(JSTracer* trc) {
   TraceNullableEdge(trc, &iterObj_, "iterObj");
 
   // The limits below are correct at every instant of |NativeIterator|
-  // initialization, with the end-pointer incremented as each new guard is
+  // initialization, with the end-pointer incremented as each new shape is
   // created, so they're safe to use here.
-  std::for_each(guardsBegin(), guardsEnd(),
-                [trc](HeapReceiverGuard& guard) { guard.trace(trc); });
+  std::for_each(shapesBegin(), shapesEnd(), [trc](GCPtrShape& shape) {
+    TraceEdge(trc, &shape, "iterator_shape");
+  });
 
-  // But as properties must be created *before* guards, |propertiesBegin()|
-  // that depends on |guardsEnd()| having its final value can't safely be
+  // But as properties must be created *before* shapes, |propertiesBegin()|
+  // that depends on |shapesEnd()| having its final value can't safely be
   // used.  Until this is fully initialized, use |propertyCursor_| instead,
   // which points at the start of properties even in partially initialized
   // |NativeIterator|s.  (|propertiesEnd()| is safe at all times with respect
@@ -96,16 +97,16 @@ void NativeIterator::trace(JSTracer* trc) {
   });
 }
 
-using IdSet = GCHashSet<jsid, DefaultHasher<jsid>>;
+using PropertyKeySet = GCHashSet<PropertyKey, DefaultHasher<PropertyKey>>;
 
 template <bool CheckForDuplicates>
 static inline bool Enumerate(JSContext* cx, HandleObject pobj, jsid id,
                              bool enumerable, unsigned flags,
-                             MutableHandle<IdSet> visited,
+                             MutableHandle<PropertyKeySet> visited,
                              MutableHandleIdVector props) {
   if (CheckForDuplicates) {
     // If we've already seen this, we definitely won't add it.
-    IdSet::AddPtr p = visited.lookupForAdd(id);
+    PropertyKeySet::AddPtr p = visited.lookupForAdd(id);
     if (MOZ_UNLIKELY(!!p)) {
       return true;
     }
@@ -129,7 +130,7 @@ static inline bool Enumerate(JSContext* cx, HandleObject pobj, jsid id,
   // the caller specifically asks for them. A caller can also filter out
   // non-symbols by asking for JSITER_SYMBOLSONLY. PrivateName symbols are
   // skipped unless JSITER_PRIVATE is passed.
-  if (JSID_IS_SYMBOL(id)) {
+  if (id.isSymbol()) {
     if (!(flags & JSITER_SYMBOLS)) {
       return true;
     }
@@ -147,7 +148,7 @@ static inline bool Enumerate(JSContext* cx, HandleObject pobj, jsid id,
 
 static bool EnumerateExtraProperties(JSContext* cx, HandleObject obj,
                                      unsigned flags,
-                                     MutableHandle<IdSet> visited,
+                                     MutableHandle<PropertyKeySet> visited,
                                      MutableHandleIdVector props) {
   MOZ_ASSERT(obj->getClass()->getNewEnumerate());
 
@@ -186,10 +187,23 @@ static bool SortComparatorIntegerIds(jsid a, jsid b, bool* lessOrEqualp) {
 template <bool CheckForDuplicates>
 static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
                                       unsigned flags,
-                                      MutableHandle<IdSet> visited,
+                                      MutableHandle<PropertyKeySet> visited,
                                       MutableHandleIdVector props) {
+  // We don't need to iterate over the shape's properties if we're only
+  // interested in enumerable properties and the object is known to have no
+  // enumerable properties.
+  //
+  // Don't optimize if CheckForDuplicates is true, because non-enumerable
+  // properties still have to participate in duplicate-property checking.
+  const bool iterShapeProperties = CheckForDuplicates ||
+                                   (flags & JSITER_HIDDEN) ||
+                                   pobj->hasEnumerableProperty();
+
   bool enumerateSymbols;
   if (flags & JSITER_SYMBOLSONLY) {
+    if (!iterShapeProperties) {
+      return true;
+    }
     enumerateSymbols = true;
   } else {
     // Collect any dense elements from this object.
@@ -214,7 +228,7 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
     // Collect any typed array or shared typed array elements from this
     // object.
     if (pobj->is<TypedArrayObject>()) {
-      size_t len = pobj->as<TypedArrayObject>().length().get();
+      size_t len = pobj->as<TypedArrayObject>().length();
 
       // Fail early if the typed array is enormous, because this will be very
       // slow and will likely report OOM. This also means we don't need to
@@ -234,6 +248,12 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
       }
     }
 
+    // The code below enumerates shape properties (including sparse elements) so
+    // if we can ignore those we're done.
+    if (!iterShapeProperties) {
+      return true;
+    }
+
     // Collect any sparse elements from this object.
     bool isIndexed = pobj->isIndexed();
     if (isIndexed) {
@@ -243,13 +263,11 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
         firstElemIndex = props.length();
       }
 
-      for (Shape::Range<NoGC> r(pobj->lastProperty()); !r.empty();
-           r.popFront()) {
-        Shape& shape = r.front();
-        jsid id = shape.propid();
+      for (ShapePropertyIter<NoGC> iter(pobj->shape()); !iter.done(); iter++) {
+        jsid id = iter->key();
         uint32_t dummy;
         if (IdIsIndex(id, &dummy)) {
-          if (!Enumerate<CheckForDuplicates>(cx, pobj, id, shape.enumerable(),
+          if (!Enumerate<CheckForDuplicates>(cx, pobj, id, iter->enumerable(),
                                              flags, visited, props)) {
             return false;
           }
@@ -276,12 +294,10 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
 
     /* Collect all unique property names from this object's shape. */
     bool symbolsFound = false;
-    Shape::Range<NoGC> r(pobj->lastProperty());
-    for (; !r.empty(); r.popFront()) {
-      Shape& shape = r.front();
-      jsid id = shape.propid();
+    for (ShapePropertyIter<NoGC> iter(pobj->shape()); !iter.done(); iter++) {
+      jsid id = iter->key();
 
-      if (JSID_IS_SYMBOL(id)) {
+      if (id.isSymbol()) {
         symbolsFound = true;
         continue;
       }
@@ -291,7 +307,7 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
         continue;
       }
 
-      if (!Enumerate<CheckForDuplicates>(cx, pobj, id, shape.enumerable(),
+      if (!Enumerate<CheckForDuplicates>(cx, pobj, id, iter->enumerable(),
                                          flags, visited, props)) {
         return false;
       }
@@ -302,15 +318,16 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
   }
 
   if (enumerateSymbols) {
+    MOZ_ASSERT(iterShapeProperties);
+
     // Do a second pass to collect symbols. ES6 draft rev 25 (2014 May 22)
     // 9.1.12 requires that all symbols appear after all strings in the
     // result.
     size_t initialLength = props.length();
-    for (Shape::Range<NoGC> r(pobj->lastProperty()); !r.empty(); r.popFront()) {
-      Shape& shape = r.front();
-      jsid id = shape.propid();
-      if (JSID_IS_SYMBOL(id)) {
-        if (!Enumerate<CheckForDuplicates>(cx, pobj, id, shape.enumerable(),
+    for (ShapePropertyIter<NoGC> iter(pobj->shape()); !iter.done(); iter++) {
+      jsid id = iter->key();
+      if (id.isSymbol()) {
+        if (!Enumerate<CheckForDuplicates>(cx, pobj, id, iter->enumerable(),
                                            flags, visited, props)) {
           return false;
         }
@@ -324,7 +341,7 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
 
 static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
                                       unsigned flags,
-                                      MutableHandle<IdSet> visited,
+                                      MutableHandle<PropertyKeySet> visited,
                                       MutableHandleIdVector props,
                                       bool checkForDuplicates) {
   if (checkForDuplicates) {
@@ -336,7 +353,7 @@ static bool EnumerateNativeProperties(JSContext* cx, HandleNativeObject pobj,
 template <bool CheckForDuplicates>
 static bool EnumerateProxyProperties(JSContext* cx, HandleObject pobj,
                                      unsigned flags,
-                                     MutableHandle<IdSet> visited,
+                                     MutableHandle<PropertyKeySet> visited,
                                      MutableHandleIdVector props) {
   MOZ_ASSERT(pobj->is<ProxyObject>());
 
@@ -350,7 +367,7 @@ static bool EnumerateProxyProperties(JSContext* cx, HandleObject pobj,
       return false;
     }
 
-    Rooted<PropertyDescriptor> desc(cx);
+    Rooted<mozilla::Maybe<PropertyDescriptor>> desc(cx);
     for (size_t n = 0, len = proxyProps.length(); n < len; n++) {
       bool enumerable = false;
 
@@ -359,7 +376,7 @@ static bool EnumerateProxyProperties(JSContext* cx, HandleObject pobj,
         if (!Proxy::getOwnPropertyDescriptor(cx, pobj, proxyProps[n], &desc)) {
           return false;
         }
-        enumerable = desc.enumerable();
+        enumerable = desc.isSome() && desc->enumerable();
       }
 
       if (!Enumerate<CheckForDuplicates>(cx, pobj, proxyProps[n], enumerable,
@@ -417,18 +434,19 @@ struct SortComparatorIds {
     }
 
     RootedString astr(cx), bstr(cx);
-    if (JSID_IS_SYMBOL(a)) {
-      MOZ_ASSERT(JSID_IS_SYMBOL(b));
-      JS::SymbolCode ca = JSID_TO_SYMBOL(a)->code();
-      JS::SymbolCode cb = JSID_TO_SYMBOL(b)->code();
+    if (a.isSymbol()) {
+      MOZ_ASSERT(b.isSymbol());
+      JS::SymbolCode ca = a.toSymbol()->code();
+      JS::SymbolCode cb = b.toSymbol()->code();
       if (ca != cb) {
         *lessOrEqualp = uint32_t(ca) <= uint32_t(cb);
         return true;
       }
-      MOZ_ASSERT(ca == JS::SymbolCode::InSymbolRegistry ||
+      MOZ_ASSERT(ca == JS::SymbolCode::PrivateNameSymbol ||
+                 ca == JS::SymbolCode::InSymbolRegistry ||
                  ca == JS::SymbolCode::UniqueSymbol);
-      astr = JSID_TO_SYMBOL(a)->description();
-      bstr = JSID_TO_SYMBOL(b)->description();
+      astr = a.toSymbol()->description();
+      bstr = b.toSymbol()->description();
       if (!astr || !bstr) {
         *lessOrEqualp = !astr;
         return true;
@@ -460,10 +478,68 @@ struct SortComparatorIds {
 
 #endif /* DEBUG */
 
+static void AssertNoEnumerableProperties(NativeObject* obj) {
+#ifdef DEBUG
+  // Verify the object has no enumerable properties if the HasEnumerable
+  // ObjectFlag is not set.
+
+  MOZ_ASSERT(!obj->hasEnumerableProperty());
+
+  static constexpr size_t MaxPropsToCheck = 5;
+
+  size_t count = 0;
+  for (ShapePropertyIter<NoGC> iter(obj->shape()); !iter.done(); iter++) {
+    MOZ_ASSERT(!iter->enumerable());
+    if (++count > MaxPropsToCheck) {
+      break;
+    }
+  }
+#endif  // DEBUG
+}
+
+// Typed arrays and classes with an enumerate hook can have extra properties not
+// included in the shape's property map or the object's dense elements.
+static bool ClassCanHaveExtraEnumeratedProperties(const JSClass* clasp) {
+  return IsTypedArrayClass(clasp) || clasp->getNewEnumerate() ||
+         clasp->getEnumerate();
+}
+
+static bool ProtoMayHaveEnumerableProperties(JSObject* obj) {
+  if (!obj->is<NativeObject>()) {
+    return true;
+  }
+
+  JSObject* proto = obj->as<NativeObject>().staticPrototype();
+  while (proto) {
+    if (!proto->is<NativeObject>()) {
+      return true;
+    }
+    NativeObject* nproto = &proto->as<NativeObject>();
+    if (nproto->hasEnumerableProperty() ||
+        nproto->getDenseInitializedLength() > 0 ||
+        ClassCanHaveExtraEnumeratedProperties(nproto->getClass())) {
+      return true;
+    }
+    AssertNoEnumerableProperties(nproto);
+    proto = nproto->staticPrototype();
+  }
+
+  return false;
+}
+
 static bool Snapshot(JSContext* cx, HandleObject pobj_, unsigned flags,
                      MutableHandleIdVector props) {
-  Rooted<IdSet> visited(cx, IdSet(cx));
+  Rooted<PropertyKeySet> visited(cx, PropertyKeySet(cx));
   RootedObject pobj(cx, pobj_);
+
+  // If we're only interested in enumerable properties and the proto chain has
+  // no enumerable properties (the common case), we can optimize this to ignore
+  // the proto chain. This also lets us take advantage of the no-duplicate-check
+  // optimization below.
+  if (!(flags & JSITER_HIDDEN) && !(flags & JSITER_OWNONLY) &&
+      !ProtoMayHaveEnumerableProperties(pobj)) {
+    flags |= JSITER_OWNONLY;
+  }
 
   // Don't check for duplicates if we're only interested in own properties.
   // This does the right thing for most objects: native objects don't have
@@ -481,14 +557,14 @@ static bool Snapshot(JSContext* cx, HandleObject pobj_, unsigned flags,
         return false;
       }
 
-      if (pobj->isNative()) {
+      if (pobj->is<NativeObject>()) {
         if (!EnumerateNativeProperties(cx, pobj.as<NativeObject>(), flags,
                                        &visited, props, true)) {
           return false;
         }
       }
 
-    } else if (pobj->isNative()) {
+    } else if (pobj->is<NativeObject>()) {
       // Give the object a chance to resolve all lazy properties
       if (JSEnumerateOp enumerate = pobj->getClass()->getEnumerate()) {
         if (!enumerate(cx, pobj.as<NativeObject>())) {
@@ -563,7 +639,7 @@ static bool Snapshot(JSContext* cx, HandleObject pobj_, unsigned flags,
   return true;
 }
 
-JS_FRIEND_API bool js::GetPropertyKeys(JSContext* cx, HandleObject obj,
+JS_PUBLIC_API bool js::GetPropertyKeys(JSContext* cx, HandleObject obj,
                                        unsigned flags,
                                        MutableHandleIdVector props) {
   return Snapshot(cx, obj,
@@ -582,57 +658,42 @@ static inline void RegisterEnumerator(ObjectRealm& realm, NativeIterator* ni) {
 }
 
 static PropertyIteratorObject* NewPropertyIteratorObject(JSContext* cx) {
-  RootedObjectGroup group(
-      cx, ObjectGroup::defaultNewGroup(cx, &PropertyIteratorObject::class_,
-                                       TaggedProto(nullptr)));
-  if (!group) {
-    return nullptr;
-  }
-
   const JSClass* clasp = &PropertyIteratorObject::class_;
-  RootedShape shape(cx,
-                    EmptyShape::getInitialShape(cx, clasp, TaggedProto(nullptr),
-                                                ITERATOR_FINALIZE_KIND));
+  RootedShape shape(cx, SharedShape::getInitialShape(cx, clasp, cx->realm(),
+                                                     TaggedProto(nullptr),
+                                                     ITERATOR_FINALIZE_KIND));
   if (!shape) {
     return nullptr;
   }
 
-  JSObject* obj;
-  JS_TRY_VAR_OR_RETURN_NULL(
-      cx, obj,
-      NativeObject::create(cx, ITERATOR_FINALIZE_KIND,
-                           GetInitialHeap(GenericObject, group), shape, group));
+  JSObject* obj = NativeObject::create(
+      cx, ITERATOR_FINALIZE_KIND, GetInitialHeap(GenericObject, clasp), shape);
+  if (!obj) {
+    return nullptr;
+  }
 
   PropertyIteratorObject* res = &obj->as<PropertyIteratorObject>();
 
   // CodeGenerator::visitIteratorStartO assumes the iterator object is not
   // inside the nursery when deciding whether a barrier is necessary.
   MOZ_ASSERT(!js::gc::IsInsideNursery(res));
-
-  MOZ_ASSERT(res->numFixedSlots() == PropertyIteratorObject::NUM_FIXED_SLOTS);
   return res;
 }
 
-static inline size_t ExtraStringCount(size_t propertyCount, size_t guardCount) {
-  static_assert(sizeof(ReceiverGuard) == 2 * sizeof(GCPtrLinearString),
-                "NativeIterators are allocated in space for 1) themselves, "
-                "2) the properties a NativeIterator iterates (as "
-                "GCPtrLinearStrings), and 3) |numGuards| HeapReceiverGuard "
-                "objects; the additional-length calculation below assumes "
-                "this size-relationship when determining the extra space to "
-                "allocate");
-
-  return propertyCount + guardCount * 2;
+static inline size_t NumTrailingWords(size_t propertyCount, size_t shapeCount) {
+  static_assert(sizeof(GCPtrLinearString) == sizeof(uintptr_t));
+  static_assert(sizeof(GCPtrShape) == sizeof(uintptr_t));
+  return propertyCount + shapeCount;
 }
 
-static inline size_t AllocationSize(size_t propertyCount, size_t guardCount) {
-  return sizeof(NativeIterator) + (ExtraStringCount(propertyCount, guardCount) *
-                                   sizeof(GCPtrLinearString));
+static inline size_t AllocationSize(size_t propertyCount, size_t shapeCount) {
+  return sizeof(NativeIterator) +
+         (NumTrailingWords(propertyCount, shapeCount) * sizeof(uintptr_t));
 }
 
 static PropertyIteratorObject* CreatePropertyIterator(
     JSContext* cx, Handle<JSObject*> objBeingIterated, HandleIdVector props,
-    uint32_t numGuards, uint32_t guardKey) {
+    uint32_t numShapes, HashNumber shapesHash) {
   if (props.length() > NativeIterator::PropCountLimit) {
     ReportAllocationOverflow(cx);
     return nullptr;
@@ -643,8 +704,8 @@ static PropertyIteratorObject* CreatePropertyIterator(
     return nullptr;
   }
 
-  void* mem = cx->pod_malloc_with_extra<NativeIterator, GCPtrLinearString>(
-      ExtraStringCount(props.length(), numGuards));
+  void* mem = cx->pod_malloc_with_extra<NativeIterator, uintptr_t>(
+      NumTrailingWords(props.length(), numShapes));
   if (!mem) {
     return nullptr;
   }
@@ -652,14 +713,16 @@ static PropertyIteratorObject* CreatePropertyIterator(
   // This also registers |ni| with |propIter|.
   bool hadError = false;
   NativeIterator* ni = new (mem) NativeIterator(
-      cx, propIter, objBeingIterated, props, numGuards, guardKey, &hadError);
+      cx, propIter, objBeingIterated, props, numShapes, shapesHash, &hadError);
   if (hadError) {
     return nullptr;
   }
 
   ObjectRealm& realm = objBeingIterated ? ObjectRealm::get(objBeingIterated)
                                         : ObjectRealm::get(propIter);
-  RegisterEnumerator(realm, ni);
+  if (!ni->isEmptyIteratorSingleton()) {
+    RegisterEnumerator(realm, ni);
+  }
 
   return propIter;
 }
@@ -692,6 +755,10 @@ NativeIterator* NativeIterator::allocateSentinel(JSContext* cx) {
   return ni;
 }
 
+static HashNumber HashIteratorShape(Shape* shape) {
+  return DefaultHasher<Shape*>::hash(shape);
+}
+
 /**
  * Initialize a fresh NativeIterator.
  *
@@ -702,66 +769,71 @@ NativeIterator* NativeIterator::allocateSentinel(JSContext* cx) {
 NativeIterator::NativeIterator(JSContext* cx,
                                Handle<PropertyIteratorObject*> propIter,
                                Handle<JSObject*> objBeingIterated,
-                               HandleIdVector props, uint32_t numGuards,
-                               uint32_t guardKey, bool* hadError)
+                               HandleIdVector props, uint32_t numShapes,
+                               HashNumber shapesHash, bool* hadError)
     : objectBeingIterated_(objBeingIterated),
       iterObj_(propIter),
       // NativeIterator initially acts (before full initialization) as if it
-      // contains no guards...
-      guardsEnd_(guardsBegin()),
+      // contains no shapes...
+      shapesEnd_(shapesBegin()),
       // ...and no properties.
       propertyCursor_(
-          reinterpret_cast<GCPtrLinearString*>(guardsBegin() + numGuards)),
+          reinterpret_cast<GCPtrLinearString*>(shapesBegin() + numShapes)),
       propertiesEnd_(propertyCursor_),
-      guardKey_(guardKey),
+      shapesHash_(shapesHash),
       flagsAndCount_(
           initialFlagsAndCount(props.length()))  // note: no Flags::Initialized
 {
+  // If there are shapes, the object and all objects on its prototype chain must
+  // be native objects. See CanCompareIterableObjectToCache.
+  MOZ_ASSERT_IF(numShapes > 0,
+                objBeingIterated && objBeingIterated->is<NativeObject>());
+
   MOZ_ASSERT(!*hadError);
 
   // NOTE: This must be done first thing: The caller can't free `this` on error
   //       because it has GCPtr fields whose barriers have already fired; the
   //       store buffer has pointers to them. Only the GC can free `this` (via
   //       PropertyIteratorObject::finalize).
-  propIter->setNativeIterator(this);
+  propIter->initNativeIterator(this);
 
   // The GC asserts on finalization that `this->allocationSize()` matches the
   // `nbytes` passed to `AddCellMemory`. So once these lines run, we must make
   // `this->allocationSize()` correct. That means infallibly initializing the
-  // guards. It's OK for the constructor to fail after that.
-  size_t nbytes = AllocationSize(props.length(), numGuards);
+  // shapes. It's OK for the constructor to fail after that.
+  size_t nbytes = AllocationSize(props.length(), numShapes);
   AddCellMemory(propIter, nbytes, MemoryUse::NativeIterator);
 
-  if (numGuards > 0) {
-    // Construct guards into the guard array.  Also recompute the guard key,
-    // which incorporates Shape* and ObjectGroup* addresses that could have
-    // changed during a GC triggered in (among other places) |IdToString|
-    // above.
+  if (numShapes > 0) {
+    // Construct shapes into the shapes array.  Also recompute the shapesHash,
+    // which incorporates Shape* addresses that could have changed during a GC
+    // triggered in (among other places) |IdToString| above.
     JSObject* pobj = objBeingIterated;
 #ifdef DEBUG
     uint32_t i = 0;
 #endif
-    uint32_t key = 0;
+    HashNumber shapesHash = 0;
     do {
-      ReceiverGuard guard(pobj);
-      new (guardsEnd_) HeapReceiverGuard(guard);
-      guardsEnd_++;
+      MOZ_ASSERT(pobj->is<NativeObject>());
+      Shape* shape = pobj->shape();
+      new (shapesEnd_) GCPtrShape(shape);
+      shapesEnd_++;
 #ifdef DEBUG
       i++;
 #endif
 
-      key = mozilla::AddToHash(key, guard.hash());
+      shapesHash = mozilla::AddToHash(shapesHash, HashIteratorShape(shape));
 
-      // The one caller of this method that passes |numGuards > 0|, does
+      // The one caller of this method that passes |numShapes > 0|, does
       // so only if the entire chain consists of cacheable objects (that
       // necessarily have static prototypes).
       pobj = pobj->staticPrototype();
     } while (pobj);
 
-    guardKey_ = key;
-    MOZ_ASSERT(i == numGuards);
+    shapesHash_ = shapesHash;
+    MOZ_ASSERT(i == numShapes);
   }
-  MOZ_ASSERT(static_cast<void*>(guardsEnd_) == propertyCursor_);
+  MOZ_ASSERT(static_cast<void*>(shapesEnd_) == propertyCursor_);
 
   for (size_t i = 0, len = props.length(); i < len; i++) {
     JSLinearString* str = IdToString(cx, props[i]);
@@ -779,47 +851,47 @@ NativeIterator::NativeIterator(JSContext* cx,
 }
 
 inline size_t NativeIterator::allocationSize() const {
-  size_t numGuards = guardsEnd() - guardsBegin();
-  return AllocationSize(initialPropertyCount(), numGuards);
+  size_t numShapes = shapesEnd() - shapesBegin();
+  return AllocationSize(initialPropertyCount(), numShapes);
 }
 
 /* static */
 bool IteratorHashPolicy::match(PropertyIteratorObject* obj,
                                const Lookup& lookup) {
   NativeIterator* ni = obj->getNativeIterator();
-  if (ni->guardKey() != lookup.key || ni->guardCount() != lookup.numGuards) {
+  if (ni->shapesHash() != lookup.shapesHash ||
+      ni->shapeCount() != lookup.numShapes) {
     return false;
   }
 
-  return ArrayEqual(reinterpret_cast<ReceiverGuard*>(ni->guardsBegin()),
-                    lookup.guards, ni->guardCount());
+  return ArrayEqual(reinterpret_cast<Shape**>(ni->shapesBegin()), lookup.shapes,
+                    ni->shapeCount());
 }
 
 static inline bool CanCompareIterableObjectToCache(JSObject* obj) {
-  if (obj->isNative()) {
+  if (obj->is<NativeObject>()) {
     return obj->as<NativeObject>().getDenseInitializedLength() == 0;
   }
   return false;
 }
 
-using ReceiverGuardVector = Vector<ReceiverGuard, 8>;
-
 static MOZ_ALWAYS_INLINE PropertyIteratorObject* LookupInIteratorCache(
-    JSContext* cx, JSObject* obj, uint32_t* numGuards) {
-  MOZ_ASSERT(*numGuards == 0);
+    JSContext* cx, JSObject* obj, uint32_t* numShapes) {
+  MOZ_ASSERT(*numShapes == 0);
 
-  ReceiverGuardVector guards(cx);
-  uint32_t key = 0;
+  Vector<Shape*, 8> shapes(cx);
+  HashNumber shapesHash = 0;
   JSObject* pobj = obj;
   do {
     if (!CanCompareIterableObjectToCache(pobj)) {
       return nullptr;
     }
 
-    ReceiverGuard guard(pobj);
-    key = mozilla::AddToHash(key, guard.hash());
+    MOZ_ASSERT(pobj->is<NativeObject>());
+    Shape* shape = pobj->shape();
+    shapesHash = mozilla::AddToHash(shapesHash, HashIteratorShape(shape));
 
-    if (MOZ_UNLIKELY(!guards.append(guard))) {
+    if (MOZ_UNLIKELY(!shapes.append(shape))) {
       cx->recoverFromOutOfMemory();
       return nullptr;
     }
@@ -827,10 +899,11 @@ static MOZ_ALWAYS_INLINE PropertyIteratorObject* LookupInIteratorCache(
     pobj = pobj->staticPrototype();
   } while (pobj);
 
-  MOZ_ASSERT(!guards.empty());
-  *numGuards = guards.length();
+  MOZ_ASSERT(!shapes.empty());
+  *numShapes = shapes.length();
 
-  IteratorHashPolicy::Lookup lookup(guards.begin(), guards.length(), key);
+  IteratorHashPolicy::Lookup lookup(shapes.begin(), shapes.length(),
+                                    shapesHash);
   auto p = ObjectRealm::get(obj).iteratorCache.lookup(lookup);
   if (!p) {
     return nullptr;
@@ -849,17 +922,11 @@ static MOZ_ALWAYS_INLINE PropertyIteratorObject* LookupInIteratorCache(
 
 static bool CanStoreInIteratorCache(JSObject* obj) {
   do {
-    MOZ_ASSERT(obj->isNative());
-
     MOZ_ASSERT(obj->as<NativeObject>().getDenseInitializedLength() == 0);
 
     // Typed arrays have indexed properties not captured by the Shape guard.
     // Enumerate hooks may add extra properties.
-    const JSClass* clasp = obj->getClass();
-    if (MOZ_UNLIKELY(IsTypedArrayClass(clasp))) {
-      return false;
-    }
-    if (MOZ_UNLIKELY(clasp->getNewEnumerate() || clasp->getEnumerate())) {
+    if (MOZ_UNLIKELY(ClassCanHaveExtraEnumeratedProperties(obj->getClass()))) {
       return false;
     }
 
@@ -869,16 +936,16 @@ static bool CanStoreInIteratorCache(JSObject* obj) {
   return true;
 }
 
-static MOZ_MUST_USE bool StoreInIteratorCache(JSContext* cx, JSObject* obj,
-                                              PropertyIteratorObject* iterobj) {
+[[nodiscard]] static bool StoreInIteratorCache(
+    JSContext* cx, JSObject* obj, PropertyIteratorObject* iterobj) {
   MOZ_ASSERT(CanStoreInIteratorCache(obj));
 
   NativeIterator* ni = iterobj->getNativeIterator();
-  MOZ_ASSERT(ni->guardCount() > 0);
+  MOZ_ASSERT(ni->shapeCount() > 0);
 
   IteratorHashPolicy::Lookup lookup(
-      reinterpret_cast<ReceiverGuard*>(ni->guardsBegin()), ni->guardCount(),
-      ni->guardKey());
+      reinterpret_cast<Shape**>(ni->shapesBegin()), ni->shapeCount(),
+      ni->shapesHash());
 
   ObjectRealm::IteratorCache& cache = ObjectRealm::get(obj).iteratorCache;
   bool ok;
@@ -931,17 +998,17 @@ static JSObject* GetIterator(JSContext* cx, HandleObject obj) {
   MOZ_ASSERT(cx->compartment() == obj->compartment(),
              "We may end up allocating shapes in the wrong zone!");
 
-  uint32_t numGuards = 0;
+  uint32_t numShapes = 0;
   if (PropertyIteratorObject* iterobj =
-          LookupInIteratorCache(cx, obj, &numGuards)) {
+          LookupInIteratorCache(cx, obj, &numShapes)) {
     NativeIterator* ni = iterobj->getNativeIterator();
     ni->changeObjectBeingIterated(*obj);
     RegisterEnumerator(ObjectRealm::get(obj), ni);
     return iterobj;
   }
 
-  if (numGuards > 0 && !CanStoreInIteratorCache(obj)) {
-    numGuards = 0;
+  if (numShapes > 0 && !CanStoreInIteratorCache(obj)) {
+    numShapes = 0;
   }
 
   RootedIdVector keys(cx);
@@ -965,7 +1032,7 @@ static JSObject* GetIterator(JSContext* cx, HandleObject obj) {
   }
 
   PropertyIteratorObject* iterobj =
-      CreatePropertyIterator(cx, obj, keys, numGuards, 0);
+      CreatePropertyIterator(cx, obj, keys, numShapes, 0);
   if (!iterobj) {
     return nullptr;
   }
@@ -981,7 +1048,7 @@ static JSObject* GetIterator(JSContext* cx, HandleObject obj) {
 #endif
 
   // Cache the iterator object.
-  if (numGuards > 0) {
+  if (numShapes > 0) {
     if (!StoreInIteratorCache(cx, obj, iterobj)) {
       return nullptr;
     }
@@ -992,8 +1059,8 @@ static JSObject* GetIterator(JSContext* cx, HandleObject obj) {
 
 PropertyIteratorObject* js::LookupInIteratorCache(JSContext* cx,
                                                   HandleObject obj) {
-  uint32_t numGuards = 0;
-  return LookupInIteratorCache(cx, obj, &numGuards);
+  uint32_t numShapes = 0;
+  return LookupInIteratorCache(cx, obj, &numShapes);
 }
 
 // ES 2017 draft 7.4.7.
@@ -1003,60 +1070,62 @@ PlainObject* js::CreateIterResultObject(JSContext* cx, HandleValue value,
 
   // Step 2.
   Rooted<PlainObject*> templateObject(
-      cx, cx->realm()->getOrCreateIterResultTemplateObject(cx));
+      cx, GlobalObject::getOrCreateIterResultTemplateObject(cx));
   if (!templateObject) {
     return nullptr;
   }
 
-  PlainObject* resultObj;
-  JS_TRY_VAR_OR_RETURN_NULL(
-      cx, resultObj, PlainObject::createWithTemplate(cx, templateObject));
+  PlainObject* resultObj = PlainObject::createWithTemplate(cx, templateObject);
+  if (!resultObj) {
+    return nullptr;
+  }
 
   // Step 3.
-  resultObj->setSlot(Realm::IterResultObjectValueSlot, value);
+  resultObj->setSlot(GlobalObject::IterResultObjectValueSlot, value);
 
   // Step 4.
-  resultObj->setSlot(Realm::IterResultObjectDoneSlot,
+  resultObj->setSlot(GlobalObject::IterResultObjectDoneSlot,
                      done ? TrueHandleValue : FalseHandleValue);
 
   // Step 5.
   return resultObj;
 }
 
-PlainObject* Realm::getOrCreateIterResultTemplateObject(JSContext* cx) {
-  MOZ_ASSERT(cx->realm() == this);
-
-  if (iterResultTemplate_) {
-    return iterResultTemplate_;
+PlainObject* GlobalObject::getOrCreateIterResultTemplateObject(JSContext* cx) {
+  HeapPtr<PlainObject*>& obj = cx->global()->data().iterResultTemplate;
+  if (obj) {
+    return obj;
   }
 
   PlainObject* templateObj =
       createIterResultTemplateObject(cx, WithObjectPrototype::Yes);
-  iterResultTemplate_.set(templateObj);
-  return iterResultTemplate_;
+  obj.init(templateObj);
+  return obj;
 }
 
-PlainObject* Realm::getOrCreateIterResultWithoutPrototypeTemplateObject(
+/* static */
+PlainObject* GlobalObject::getOrCreateIterResultWithoutPrototypeTemplateObject(
     JSContext* cx) {
-  MOZ_ASSERT(cx->realm() == this);
-
-  if (iterResultWithoutPrototypeTemplate_) {
-    return iterResultWithoutPrototypeTemplate_;
+  HeapPtr<PlainObject*>& obj =
+      cx->global()->data().iterResultWithoutPrototypeTemplate;
+  if (obj) {
+    return obj;
   }
 
   PlainObject* templateObj =
       createIterResultTemplateObject(cx, WithObjectPrototype::No);
-  iterResultWithoutPrototypeTemplate_.set(templateObj);
-  return iterResultWithoutPrototypeTemplate_;
+  obj.init(templateObj);
+  return obj;
 }
 
-PlainObject* Realm::createIterResultTemplateObject(
+/* static */
+PlainObject* GlobalObject::createIterResultTemplateObject(
     JSContext* cx, WithObjectPrototype withProto) {
   // Create template plain object
   Rooted<PlainObject*> templateObject(
       cx, withProto == WithObjectPrototype::Yes
-              ? NewTenuredBuiltinClassInstance<PlainObject>(cx)
-              : NewObjectWithGivenProto<PlainObject>(cx, nullptr));
+              ? NewPlainObject(cx, TenuredObject)
+              : NewPlainObjectWithProto(cx, nullptr));
   if (!templateObject) {
     return nullptr;
   }
@@ -1073,12 +1142,15 @@ PlainObject* Realm::createIterResultTemplateObject(
     return nullptr;
   }
 
+#ifdef DEBUG
   // Make sure that the properties are in the right slots.
-  DebugOnly<Shape*> shape = templateObject->lastProperty();
-  MOZ_ASSERT(shape->previous()->slot() == Realm::IterResultObjectValueSlot &&
-             shape->previous()->propidRef() == NameToId(cx->names().value));
-  MOZ_ASSERT(shape->slot() == Realm::IterResultObjectDoneSlot &&
-             shape->propidRef() == NameToId(cx->names().done));
+  ShapePropertyIter<NoGC> iter(templateObject->shape());
+  MOZ_ASSERT(iter->slot() == GlobalObject::IterResultObjectDoneSlot &&
+             iter->key() == NameToId(cx->names().done));
+  iter++;
+  MOZ_ASSERT(iter->slot() == GlobalObject::IterResultObjectValueSlot &&
+             iter->key() == NameToId(cx->names().value));
+#endif
 
   return templateObject;
 }
@@ -1087,7 +1159,7 @@ PlainObject* Realm::createIterResultTemplateObject(
 
 size_t PropertyIteratorObject::sizeOfMisc(
     mozilla::MallocSizeOf mallocSizeOf) const {
-  return mallocSizeOf(getPrivate());
+  return mallocSizeOf(getNativeIterator());
 }
 
 void PropertyIteratorObject::trace(JSTracer* trc, JSObject* obj) {
@@ -1119,7 +1191,8 @@ const JSClassOps PropertyIteratorObject::classOps_ = {
 };
 
 const JSClass PropertyIteratorObject::class_ = {
-    "Iterator", JSCLASS_HAS_PRIVATE | JSCLASS_BACKGROUND_FINALIZE,
+    "Iterator",
+    JSCLASS_HAS_RESERVED_SLOTS(SlotCount) | JSCLASS_BACKGROUND_FINALIZE,
     &PropertyIteratorObject::classOps_};
 
 static const JSClass ArrayIteratorPrototypeClass = {"Array Iterator", 0};
@@ -1269,6 +1342,21 @@ RegExpStringIteratorObject* js::NewRegExpStringIterator(JSContext* cx) {
   return NewObjectWithGivenProto<RegExpStringIteratorObject>(cx, proto);
 }
 
+// static
+PropertyIteratorObject* GlobalObject::getOrCreateEmptyIterator(JSContext* cx) {
+  if (!cx->global()->data().emptyIterator) {
+    RootedIdVector props(cx);  // Empty
+    PropertyIteratorObject* iter =
+        CreatePropertyIterator(cx, nullptr, props, 0, 0);
+    if (!iter) {
+      return nullptr;
+    }
+    MOZ_ASSERT(iter->getNativeIterator()->isEmptyIteratorSingleton());
+    cx->global()->data().emptyIterator.init(iter);
+  }
+  return cx->global()->data().emptyIterator;
+}
+
 JSObject* js::ValueToIterator(JSContext* cx, HandleValue vp) {
   RootedObject obj(cx);
   if (vp.isObject()) {
@@ -1280,8 +1368,7 @@ JSObject* js::ValueToIterator(JSContext* cx, HandleValue vp) {
      * that |for (var p in <null or undefined>) <loop>;| never executes
      * <loop>, per ES5 12.6.4.
      */
-    RootedIdVector props(cx);  // Empty
-    return CreatePropertyIterator(cx, nullptr, props, 0, 0);
+    return GlobalObject::getOrCreateEmptyIterator(cx);
   } else {
     obj = ToObject(cx, vp);
     if (!obj) {
@@ -1293,19 +1380,26 @@ JSObject* js::ValueToIterator(JSContext* cx, HandleValue vp) {
 }
 
 void js::CloseIterator(JSObject* obj) {
-  if (obj->is<PropertyIteratorObject>()) {
-    /* Remove enumerators from the active list, which is a stack. */
-    NativeIterator* ni = obj->as<PropertyIteratorObject>().getNativeIterator();
-
-    ni->unlink();
-
-    MOZ_ASSERT(ni->isActive());
-    ni->markInactive();
-
-    // Reset the enumerator; it may still be in the cached iterators for
-    // this thread and can be reused.
-    ni->resetPropertyCursorForReuse();
+  if (!obj->is<PropertyIteratorObject>()) {
+    return;
   }
+
+  // Remove iterator from the active list, which is a stack. The shared iterator
+  // used for for-in with null/undefined is immutable and unlinked.
+
+  NativeIterator* ni = obj->as<PropertyIteratorObject>().getNativeIterator();
+  if (ni->isEmptyIteratorSingleton()) {
+    return;
+  }
+
+  ni->unlink();
+
+  MOZ_ASSERT(ni->isActive());
+  ni->markInactive();
+
+  // Reset the enumerator; it may still be in the cached iterators for
+  // this thread and can be reused.
+  ni->resetPropertyCursorForReuse();
 }
 
 bool js::IteratorCloseForException(JSContext* cx, HandleObject obj) {
@@ -1364,6 +1458,9 @@ bool js::IteratorCloseForException(JSContext* cx, HandleObject obj) {
 void js::UnwindIteratorForUncatchableException(JSObject* obj) {
   if (obj->is<PropertyIteratorObject>()) {
     NativeIterator* ni = obj->as<PropertyIteratorObject>().getNativeIterator();
+    if (ni->isEmptyIteratorSingleton()) {
+      return;
+    }
     ni->unlink();
   }
 }
@@ -1418,12 +1515,13 @@ static bool SuppressDeletedProperty(JSContext* cx, NativeIterator* ni,
           return false;
         }
 
-        Rooted<PropertyDescriptor> desc(cx);
-        if (!GetPropertyDescriptor(cx, proto, id, &desc)) {
+        Rooted<mozilla::Maybe<PropertyDescriptor>> desc(cx);
+        RootedObject holder(cx);
+        if (!GetPropertyDescriptor(cx, proto, id, &desc, &holder)) {
           return false;
         }
 
-        if (desc.object() && desc.enumerable()) {
+        if (desc.isSome() && desc->enumerable()) {
           continue;
         }
       }
@@ -1490,7 +1588,7 @@ bool js::SuppressDeletedProperty(JSContext* cx, HandleObject obj, jsid id) {
     return true;
   }
 
-  if (JSID_IS_SYMBOL(id)) {
+  if (id.isSymbol()) {
     return true;
   }
 
@@ -1582,7 +1680,7 @@ static const JSFunctionSpec iterator_methods_with_helpers[] = {
 /* static */
 bool GlobalObject::initIteratorProto(JSContext* cx,
                                      Handle<GlobalObject*> global) {
-  if (global->getReservedSlot(ITERATOR_PROTO).isObject()) {
+  if (global->hasBuiltinProto(ProtoKind::IteratorProto)) {
     return true;
   }
 
@@ -1595,7 +1693,7 @@ bool GlobalObject::initIteratorProto(JSContext* cx,
   // %IteratorPrototype%.map.[[Prototype]] is %Generator% and
   // %Generator%.prototype.[[Prototype]] is %IteratorPrototype%.
   // Populate the slot early, to prevent runaway mutual recursion.
-  global->setReservedSlot(ITERATOR_PROTO, ObjectValue(*proto));
+  global->initBuiltinProto(ProtoKind::IteratorProto, proto);
 
   if (!DefinePropertiesAndFunctions(cx, proto, nullptr, iterator_methods)) {
     // In this case, we leave a partially initialized object in the
@@ -1608,12 +1706,12 @@ bool GlobalObject::initIteratorProto(JSContext* cx,
 }
 
 /* static */
-template <unsigned Slot, const JSClass* ProtoClass,
+template <GlobalObject::ProtoKind Kind, const JSClass* ProtoClass,
           const JSFunctionSpec* Methods>
 bool GlobalObject::initObjectIteratorProto(JSContext* cx,
                                            Handle<GlobalObject*> global,
                                            HandleAtom tag) {
-  if (global->getReservedSlot(Slot).isObject()) {
+  if (global->hasBuiltinProto(Kind)) {
     return true;
   }
 
@@ -1630,16 +1728,17 @@ bool GlobalObject::initObjectIteratorProto(JSContext* cx,
     return false;
   }
 
-  global->setReservedSlot(Slot, ObjectValue(*proto));
+  global->initBuiltinProto(Kind, proto);
   return true;
 }
 
 /* static */
 NativeObject* GlobalObject::getOrCreateArrayIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
-  return MaybeNativeObject(getOrCreateObject(
-      cx, global, ARRAY_ITERATOR_PROTO, cx->names().ArrayIterator.toHandle(),
-      initObjectIteratorProto<ARRAY_ITERATOR_PROTO,
+  return MaybeNativeObject(getOrCreateBuiltinProto(
+      cx, global, ProtoKind::ArrayIteratorProto,
+      cx->names().ArrayIterator.toHandle(),
+      initObjectIteratorProto<ProtoKind::ArrayIteratorProto,
                               &ArrayIteratorPrototypeClass,
                               array_iterator_methods>));
 }
@@ -1647,9 +1746,10 @@ NativeObject* GlobalObject::getOrCreateArrayIteratorPrototype(
 /* static */
 JSObject* GlobalObject::getOrCreateStringIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
-  return getOrCreateObject(
-      cx, global, STRING_ITERATOR_PROTO, cx->names().StringIterator.toHandle(),
-      initObjectIteratorProto<STRING_ITERATOR_PROTO,
+  return getOrCreateBuiltinProto(
+      cx, global, ProtoKind::StringIteratorProto,
+      cx->names().StringIterator.toHandle(),
+      initObjectIteratorProto<ProtoKind::StringIteratorProto,
                               &StringIteratorPrototypeClass,
                               string_iterator_methods>);
 }
@@ -1657,10 +1757,10 @@ JSObject* GlobalObject::getOrCreateStringIteratorPrototype(
 /* static */
 JSObject* GlobalObject::getOrCreateRegExpStringIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
-  return getOrCreateObject(
-      cx, global, REGEXP_STRING_ITERATOR_PROTO,
+  return getOrCreateBuiltinProto(
+      cx, global, ProtoKind::RegExpStringIteratorProto,
       cx->names().RegExpStringIterator.toHandle(),
-      initObjectIteratorProto<REGEXP_STRING_ITERATOR_PROTO,
+      initObjectIteratorProto<ProtoKind::RegExpStringIteratorProto,
                               &RegExpStringIteratorPrototypeClass,
                               regexp_string_iterator_methods>);
 }
@@ -1741,9 +1841,9 @@ const JSClass WrapForValidIteratorObject::class_ = {
 /* static */
 NativeObject* GlobalObject::getOrCreateWrapForValidIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
-  return MaybeNativeObject(getOrCreateObject(
-      cx, global, WRAP_FOR_VALID_ITERATOR_PROTO, HandleAtom(nullptr),
-      initObjectIteratorProto<WRAP_FOR_VALID_ITERATOR_PROTO,
+  return MaybeNativeObject(getOrCreateBuiltinProto(
+      cx, global, ProtoKind::WrapForValidIteratorProto, HandleAtom(nullptr),
+      initObjectIteratorProto<ProtoKind::WrapForValidIteratorProto,
                               &WrapForValidIteratorPrototypeClass,
                               wrap_for_valid_iterator_methods>));
 }
@@ -1773,11 +1873,11 @@ const JSClass IteratorHelperObject::class_ = {
 /* static */
 NativeObject* GlobalObject::getOrCreateIteratorHelperPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
-  return MaybeNativeObject(
-      getOrCreateObject(cx, global, ITERATOR_HELPER_PROTO, HandleAtom(nullptr),
-                        initObjectIteratorProto<ITERATOR_HELPER_PROTO,
-                                                &IteratorHelperPrototypeClass,
-                                                iterator_helper_methods>));
+  return MaybeNativeObject(getOrCreateBuiltinProto(
+      cx, global, ProtoKind::IteratorHelperProto, HandleAtom(nullptr),
+      initObjectIteratorProto<ProtoKind::IteratorHelperProto,
+                              &IteratorHelperPrototypeClass,
+                              iterator_helper_methods>));
 }
 
 IteratorHelperObject* js::NewIteratorHelper(JSContext* cx) {

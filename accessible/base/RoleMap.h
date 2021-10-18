@@ -1789,7 +1789,7 @@ ROLE(BLOCKQUOTE,
 
 ROLE(CONTENT_DELETION,
      "content deletion",
-     ATK_ROLE_SECTION,
+     ATK_ROLE_CONTENT_DELETION,
      NSAccessibilityGroupRole,
      @"AXDeleteStyleGroup",
      USE_ROLE_STRING,
@@ -1799,7 +1799,7 @@ ROLE(CONTENT_DELETION,
 
 ROLE(CONTENT_INSERTION,
      "content insertion",
-     ATK_ROLE_SECTION,
+     ATK_ROLE_CONTENT_INSERTION,
      NSAccessibilityGroupRole,
      @"AXInsertStyleGroup",
      USE_ROLE_STRING,
@@ -1876,4 +1876,14 @@ ROLE(LISTITEM_MARKER,
      ROLE_SYSTEM_STATICTEXT,
      java::SessionAccessibility::CLASSNAME_VIEW,
      eNoNameRule)
+
+ROLE(METER,
+     "meter",
+     ATK_ROLE_LEVEL_BAR,
+     @"AXLevelIndicator",
+     NSAccessibilityUnknownSubrole,
+     ROLE_SYSTEM_PROGRESSBAR,
+     ROLE_SYSTEM_PROGRESSBAR,
+     java::SessionAccessibility::CLASSNAME_VIEW,
+     eNameFromValueRule)
 // clang-format on

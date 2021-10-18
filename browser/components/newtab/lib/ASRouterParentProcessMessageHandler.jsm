@@ -30,10 +30,12 @@ class ASRouterParentProcessMessageHandler {
 
   handleCFRAction({ type, data }, browser) {
     switch (type) {
+      case msg.INFOBAR_TELEMETRY:
       case msg.TOOLBAR_BADGE_TELEMETRY:
       case msg.TOOLBAR_PANEL_TELEMETRY:
       case msg.MOMENTS_PAGE_TELEMETRY:
-      case msg.DOORHANGER_TELEMETRY: {
+      case msg.DOORHANGER_TELEMETRY:
+      case msg.SPOTLIGHT_TELEMETRY: {
         return this.handleTelemetry({ type, data });
       }
       default: {
@@ -134,7 +136,7 @@ class ASRouterParentProcessMessageHandler {
         return this._router.closeWNPanel(browser);
       }
       case msg.MODIFY_MESSAGE_JSON: {
-        return this._router.sendMessage(data.content, data, true, browser);
+        return this._router.routeCFRMessage(data.content, browser, data, true);
       }
       case msg.OVERRIDE_MESSAGE: {
         return this._router.setMessageById(data, true, browser);

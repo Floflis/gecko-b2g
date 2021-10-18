@@ -248,6 +248,13 @@ this.AccessFu = {
       delete this.doneCallback;
     }
 
+    if (Utils.win.speechSynthesis) {
+      let picoService = Cc["@mozilla.org/synthpico;1"].getService(
+        Ci.nsISpeechService
+      );
+      picoService.shutdownEngine();
+    }
+
     Logger.info("AccessFu:Disabled");
   },
 
@@ -699,14 +706,14 @@ var Input = {
   start: function start() {
     // XXX: This is too disruptive on desktop for now.
     // Might need to add special modifiers.
-    if (Utils.MozBuildApp != "browser") {
+    if (Utils.MozBuildApp != "browser" && Utils.MozBuildApp != "b2g") {
       Utils.win.document.addEventListener("keypress", this, true);
     }
     Utils.win.addEventListener("mozAccessFuGesture", this, true);
   },
 
   stop: function stop() {
-    if (Utils.MozBuildApp != "browser") {
+    if (Utils.MozBuildApp != "browser" && Utils.MozBuildApp != "b2g") {
       Utils.win.document.removeEventListener("keypress", this, true);
     }
     Utils.win.removeEventListener("mozAccessFuGesture", this, true);

@@ -14,13 +14,14 @@
 
 #include <utility>  // std::move
 
+#include "jsapi.h"    // JS_WrapValue
 #include "jstypes.h"  // JS_PUBLIC_API
 
 #include "frontend/BytecodeCompilation.h"  // frontend::CompileGlobalScript
-#include "frontend/CompilationInfo.h"  // for frontened::CompilationStencil, frontened::CompilationGCOutput
-#include "frontend/FullParseHandler.h"  // frontend::FullParseHandler
-#include "frontend/ParseContext.h"      // frontend::UsedNameTracker
-#include "frontend/Parser.h"            // frontend::Parser, frontend::ParseGoal
+#include "frontend/CompilationStencil.h"  // for frontened::{CompilationStencil, BorrowingCompilationStencil, CompilationGCOutput}
+#include "frontend/FullParseHandler.h"    // frontend::FullParseHandler
+#include "frontend/ParseContext.h"        // frontend::UsedNameTracker
+#include "frontend/Parser.h"       // frontend::Parser, frontend::ParseGoal
 #include "js/CharacterEncoding.h"  // JS::UTF8Chars, JS::UTF8CharsToNewTwoByteCharsZ
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/RootingAPI.h"            // JS::Rooted
@@ -84,46 +85,40 @@ template <typename Unit>
 static JSScript* CompileSourceBufferAndStartIncrementalEncoding(
     JSContext* cx, const ReadOnlyCompileOptions& options,
     SourceText<Unit>& srcBuf) {
-  ScopeKind scopeKind =
-      options.nonSyntacticScope ? ScopeKind::NonSyntactic : ScopeKind::Global;
-
   MOZ_ASSERT(!cx->zone()->isAtomsZone());
   AssertHeapIsIdle();
   CHECK_THREAD(cx);
 
-  Rooted<frontend::CompilationStencil> stencil(
-      cx, frontend::CompilationStencil(cx, options));
-  if (!stencil.get().input.initForGlobal(cx)) {
-    return nullptr;
-  }
-  if (!frontend::CompileGlobalScriptToStencil(cx, stencil.get(), srcBuf,
-                                              scopeKind)) {
-    return nullptr;
-  }
+  ScopeKind scopeKind =
+      options.nonSyntacticScope ? ScopeKind::NonSyntactic : ScopeKind::Global;
 
-  Rooted<frontend::CompilationGCOutput> gcOutput(cx);
-  if (!frontend::InstantiateStencils(cx, stencil.get(), gcOutput.get())) {
+  Rooted<frontend::CompilationInput> input(cx,
+                                           frontend::CompilationInput(options));
+  auto stencil = frontend::CompileGlobalScriptToExtensibleStencil(
+      cx, input.get(), srcBuf, scopeKind);
+  if (!stencil) {
     return nullptr;
   }
 
-  RootedScript script(cx, gcOutput.get().script);
-  if (!script) {
-    return nullptr;
-  }
+  RootedScript script(cx);
+  {
+    frontend::BorrowingCompilationStencil borrowingStencil(*stencil);
 
-  if (options.useStencilXDR) {
-    UniquePtr<XDRIncrementalEncoderBase> xdrEncoder;
-
-    if (!stencil.get().input.source()->xdrEncodeInitialStencil(
-            cx, stencil.get(), xdrEncoder)) {
+    Rooted<frontend::CompilationGCOutput> gcOutput(cx);
+    if (!frontend::InstantiateStencils(cx, input.get(), borrowingStencil,
+                                       gcOutput.get())) {
       return nullptr;
     }
 
-    script->scriptSource()->setIncrementalEncoder(xdrEncoder.release());
-  } else {
-    if (!script->scriptSource()->xdrEncodeTopLevel(cx, script)) {
+    script = gcOutput.get().script;
+    if (!script) {
       return nullptr;
     }
+  }
+
+  if (!script->scriptSource()->startIncrementalEncoding(cx, options,
+                                                        std::move(stencil))) {
+    return nullptr;
   }
 
   return script;
@@ -198,20 +193,22 @@ JS_PUBLIC_API bool JS_Utf8BufferIsCompilableUnit(JSContext* cx,
   using frontend::Parser;
 
   CompileOptions options(cx);
-  Rooted<frontend::CompilationStencil> stencil(
-      cx, frontend::CompilationStencil(cx, options));
-  if (!stencil.get().input.initForGlobal(cx)) {
+  Rooted<frontend::CompilationInput> input(cx,
+                                           frontend::CompilationInput(options));
+  if (!input.get().initForGlobal(cx)) {
     return false;
   }
 
   LifoAllocScope allocScope(&cx->tempLifoAlloc());
-  frontend::CompilationState compilationState(cx, allocScope, options,
-                                              stencil.get());
+  frontend::CompilationState compilationState(cx, allocScope, input.get());
+  if (!compilationState.init(cx)) {
+    return false;
+  }
 
   JS::AutoSuppressWarningReporter suppressWarnings(cx);
   Parser<FullParseHandler, char16_t> parser(cx, options, chars.get(), length,
                                             /* foldConstants = */ true,
-                                            stencil.get(), compilationState,
+                                            compilationState,
                                             /* syntaxParser = */ nullptr);
   if (!parser.checkOptions() || !parser.parse()) {
     // We ran into an error. If it was because we ran out of source, we
@@ -244,8 +241,8 @@ class FunctionCompiler {
     MOZ_ASSERT(!cx->zone()->isAtomsZone());
   }
 
-  MOZ_MUST_USE bool init(const char* name, unsigned nargs,
-                         const char* const* argnames) {
+  [[nodiscard]] bool init(const char* name, unsigned nargs,
+                          const char* const* argnames) {
     if (!funStr_.ensureTwoByteChars()) {
       return false;
     }
@@ -295,7 +292,7 @@ class FunctionCompiler {
   }
 
   template <typename Unit>
-  inline MOZ_MUST_USE bool addFunctionBody(const SourceText<Unit>& srcBuf) {
+  [[nodiscard]] inline bool addFunctionBody(const SourceText<Unit>& srcBuf) {
     return funStr_.append(srcBuf.get(), srcBuf.length());
   }
 
@@ -424,10 +421,59 @@ JS_PUBLIC_API void JS::ExposeScriptToDebugger(JSContext* cx,
   DebugAPI::onNewScript(cx, script);
 }
 
-JS_PUBLIC_API void JS::SetGetElementCallback(JSContext* cx,
-                                             JSGetElementCallback callback) {
+JS_PUBLIC_API bool JS::UpdateDebugMetadata(
+    JSContext* cx, Handle<JSScript*> script,
+    const ReadOnlyCompileOptions& options, HandleValue privateValue,
+    HandleString elementAttributeName, HandleScript introScript,
+    HandleScript scriptOrModule) {
+  RootedScriptSourceObject sso(cx, script->sourceObject());
+
+  if (!ScriptSourceObject::initElementProperties(cx, sso,
+                                                 elementAttributeName)) {
+    return false;
+  }
+
+  // There is no equivalent of cross-compartment wrappers for scripts. If the
+  // introduction script and ScriptSourceObject are in different compartments,
+  // we would be creating a cross-compartment script reference, which is
+  // forbidden. We can still store a CCW to the script source object though.
+  RootedValue introductionScript(cx);
+  if (introScript) {
+    if (introScript->compartment() == cx->compartment()) {
+      introductionScript.setPrivateGCThing(introScript);
+    }
+  }
+  sso->setIntroductionScript(introductionScript);
+
+  RootedValue privateValueStore(cx, UndefinedValue());
+  if (privateValue.isUndefined()) {
+    // Set the private value to that of the script or module that this source is
+    // part of, if any.
+    if (scriptOrModule) {
+      privateValueStore = scriptOrModule->sourceObject()->getPrivate();
+    }
+  } else {
+    privateValueStore = privateValue;
+  }
+
+  if (!privateValueStore.isUndefined()) {
+    if (!JS_WrapValue(cx, &privateValueStore)) {
+      return false;
+    }
+  }
+  sso->setPrivate(cx->runtime(), privateValueStore);
+
+  if (!options.hideScriptFromDebugger) {
+    JS::ExposeScriptToDebugger(cx, script);
+  }
+
+  return true;
+}
+
+JS_PUBLIC_API void JS::SetSourceElementCallback(
+    JSContext* cx, JSSourceElementCallback callback) {
   MOZ_ASSERT(cx->runtime());
-  cx->runtime()->setElementCallback(cx->runtime(), callback);
+  cx->runtime()->setSourceElementCallback(cx->runtime(), callback);
 }
 
 MOZ_NEVER_INLINE static bool ExecuteScript(JSContext* cx, HandleObject envChain,
@@ -479,37 +525,6 @@ MOZ_NEVER_INLINE JS_PUBLIC_API bool JS_ExecuteScript(
     JSContext* cx, HandleObjectVector envChain, HandleScript scriptArg) {
   RootedValue rval(cx);
   return ExecuteScript(cx, envChain, scriptArg, &rval);
-}
-
-JS_PUBLIC_API bool JS::CloneAndExecuteScript(JSContext* cx,
-                                             HandleScript scriptArg,
-                                             JS::MutableHandleValue rval) {
-  CHECK_THREAD(cx);
-  RootedScript script(cx, scriptArg);
-  RootedObject globalLexical(cx, &cx->global()->lexicalEnvironment());
-  if (script->realm() != cx->realm()) {
-    script = CloneGlobalScript(cx, script);
-    if (!script) {
-      return false;
-    }
-  }
-  return ExecuteScript(cx, globalLexical, script, rval);
-}
-
-JS_PUBLIC_API bool JS::CloneAndExecuteScript(JSContext* cx,
-                                             JS::HandleObjectVector envChain,
-                                             HandleScript scriptArg,
-                                             JS::MutableHandleValue rval) {
-  CHECK_THREAD(cx);
-  MOZ_RELEASE_ASSERT(scriptArg->hasNonSyntacticScope());
-  RootedScript script(cx, scriptArg);
-  if (script->realm() != cx->realm()) {
-    script = CloneGlobalScript(cx, script);
-    if (!script) {
-      return false;
-    }
-  }
-  return ExecuteScript(cx, envChain, script, rval);
 }
 
 template <typename Unit>

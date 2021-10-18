@@ -73,7 +73,12 @@ extern "C" const char* __tsan_default_suppressions() {
          // This is likely a false positive involving a mutex from GTK.
          // See also bug 1642653 - permanent.
          "mutex:GetMaiAtkType\n"
-
+         // Bug 1688716 - Failure due to fire_glxtest_process
+         // calling into uninstrumented external graphics driver code.
+         // For example: iris_dri.so and swrast_dri.so.
+         "race:fire_glxtest_process\n"
+         // Bug 1722721 - WebRender using uninstrumented Mesa drivers
+         "race:swrast_dri.so\n"
 
 
 
@@ -195,6 +200,19 @@ extern "C" const char* __tsan_default_suppressions() {
          // The rest of these suppressions are miscellaneous issues in gecko
          // that should be investigated and ideally fixed.
 
+         // Bug 1671574 - Permanent
+         // The StartupCache thread intentionally races with the main thread to
+         // trigger OS-level paging. It is never joined with the main thread.
+         "thread:StartupCache\n"
+
+         // Bug 1734262 - Permanent
+         // When spawning async processes, we create a helper thread to wait for
+         // the process to terminate in order to asynchronously report the exit
+         // code to Gecko. This thread waits on a syscall for the process to end,
+         // which means there's no easy way to cancel and join it during Gecko
+         // shutdown. Suppress thread leak reports for this thread.
+         "thread:CreateMonitorThread\n"
+
          // Bug 1601600
          "race:SkARGB32_Blitter\n"
          "race:SkARGB32_Shader_Blitter\n"
@@ -262,10 +280,6 @@ extern "C" const char* __tsan_default_suppressions() {
          // Bug 1674776
          "race:DocumentTimeline::GetCurrentTimeAsDuration\n"
 
-         // Bug 1674835
-         "race:nsHttpTransaction::ReadSegments\n"
-         "race:nsHttpTransaction::SecurityInfo\n"
-
          // Bug 1680285
          "race:style::traversal::note_children\n"
          "race:style::matching::MatchMethods::apply_selector_flags\n"
@@ -274,28 +288,26 @@ extern "C" const char* __tsan_default_suppressions() {
          "race:nssToken_Destroy\n"
          "race:nssSlot_GetToken\n"
 
-         // Bug 1683439
-         "race:AudioCallbackDriver::MixerCallback\n"
-         "race:AudioCallbackDriver::Init\n"
-
-         // Bug 1683417
-         "race:DataChannelConnection::SetSignals\n"
-         "race:DataChannelConnection::SetReady\n"
-
-         // Bug 1683404
-         "race:nsTimerImpl::Shutdown\n"
-         "race:nsTimerImpl::CancelImpl\n"
-
          // Bug 1682951
          "race:storage::Connection::Release\n"
-
-         // Bug 1682928
-         "race:EventSourceImpl::OnStopRequest\n"
-         "race:UpdateDontKeepAlive\n"
 
          // Bug 1683357
          "race:image::ImageSurfaceCache::SuggestedSizeInternal\n"
          "race:image::RasterImage::SetMetadata\n"
+         "race:image::RasterImage::GetWidth\n"
+
+         // Bug 1722721 - This is a benign race creating worker/SW compositor threads.
+         "race:webrender::profiler::register_thread\n"
+
+         // Bug 1722721 - This is a false positive during SW-WR rendering.
+         "race:scale_blit\n"
+
+         "race:mozilla::gl::MesaMemoryLeakWorkaround\n"
+
+         // Bug 1733908
+         "race:js::wasm::Code::bestTier\n"
+         "race:js::wasm::Code::commitTier2\n"
+         "race:js::wasm::Code::setTier2\n"
 
       // End of suppressions.
       ;  // Please keep this semicolon.

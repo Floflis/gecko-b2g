@@ -26,6 +26,7 @@
 #include "mozilla/ScrollTypes.h"
 #include "mozilla/PresState.h"
 #include "mozilla/layout/ScrollAnchorContainer.h"
+#include "mozilla/TypedEnumBits.h"
 
 class nsPresContext;
 class nsIContent;
@@ -37,7 +38,7 @@ class PresShell;
 struct ScrollReflowInput;
 namespace layers {
 class Layer;
-class LayerManager;
+class WebRenderLayerManager;
 }  // namespace layers
 namespace layout {
 class ScrollbarActivity;
@@ -52,7 +53,7 @@ class ScrollFrameHelper : public nsIReflowCallback {
   typedef mozilla::layers::ScrollableLayerGuid ScrollableLayerGuid;
   typedef mozilla::layers::ScrollSnapInfo ScrollSnapInfo;
   typedef mozilla::layers::Layer Layer;
-  typedef mozilla::layers::LayerManager LayerManager;
+  typedef mozilla::layers::WebRenderLayerManager WebRenderLayerManager;
   typedef mozilla::layout::ScrollAnchorContainer ScrollAnchorContainer;
   using Element = mozilla::dom::Element;
 
@@ -67,6 +68,18 @@ class ScrollFrameHelper : public nsIReflowCallback {
 
   bool IsForTextControlWithNoScrollbars() const;
 
+  enum class AnonymousContentType {
+    VerticalScrollbar,
+    HorizontalScrollbar,
+    Resizer,
+  };
+  EnumSet<AnonymousContentType> GetNeededAnonymousContent() const;
+  EnumSet<AnonymousContentType> GetCurrentAnonymousContent() const;
+
+  bool HasAllNeededScrollbars() const {
+    return GetCurrentAnonymousContent().contains(GetNeededAnonymousContent());
+  }
+
   // If a child frame was added or removed on the scrollframe,
   // reload our child frame list.
   // We need this if a scrollbar frame is recreated.
@@ -76,6 +89,15 @@ class ScrollFrameHelper : public nsIReflowCallback {
       nsTArray<nsIAnonymousContentCreator::ContentInfo>& aElements);
   void AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                 uint32_t aFilter);
+
+  enum class OverflowState : uint32_t {
+    None = 0,
+    Vertical = (1 << 0),
+    Horizontal = (1 << 1),
+  };
+
+  OverflowState GetOverflowState() const;
+
   nsresult FireScrollPortEvent();
   void PostScrollEndEvent();
   void FireScrollEndEvent();
@@ -377,15 +399,12 @@ class ScrollFrameHelper : public nsIReflowCallback {
 
  public:
   bool IsScrollbarOnRight() const;
-  bool IsScrollingActive(nsDisplayListBuilder* aBuilder) const;
+  bool IsScrollingActive() const;
+  bool IsScrollingActiveNotMinimalDisplayPort() const;
   bool IsMaybeAsynchronouslyScrolled() const {
     // If this is true, then we'll build an ASR, and that's what we want
     // to know I think.
     return mWillBuildScrollableLayer;
-  }
-  bool IsMaybeScrollingActive() const;
-  void ResetScrollPositionForLayerPixelAlignment() {
-    mScrollPosForLayerPixelAlignment = GetScrollPosition();
   }
 
   bool ComputeCustomOverflow(mozilla::OverflowAreas& aOverflowAreas);
@@ -409,6 +428,7 @@ class ScrollFrameHelper : public nsIReflowCallback {
                         const nsRect& aOldScrollArea);
 
   void MarkScrollbarsDirtyForReflow() const;
+  void InvalidateVerticalScrollbar() const;
 
   bool IsAlwaysActive() const;
   void MarkEverScrolled();
@@ -441,6 +461,7 @@ class ScrollFrameHelper : public nsIReflowCallback {
   ScrollSnapInfo GetScrollSnapInfo(
       const mozilla::Maybe<nsPoint>& aDestination) const;
 
+  static bool ShouldActivateAllScrollFrames();
   nsRect RestrictToRootDisplayPort(const nsRect& aDisplayportBase);
   bool DecideScrollableLayer(nsDisplayListBuilder* aBuilder,
                              nsRect* aVisibleRect, nsRect* aDirtyRect,
@@ -475,13 +496,8 @@ class ScrollFrameHelper : public nsIReflowCallback {
                                bool aApzAnimationInProgress);
   bool WantAsyncScroll() const;
   Maybe<mozilla::layers::ScrollMetadata> ComputeScrollMetadata(
-      LayerManager* aLayerManager, const nsIFrame* aContainerReferenceFrame,
-      const Maybe<ContainerLayerParameters>& aParameters,
-      const mozilla::DisplayItemClip* aClip) const;
-  void ClipLayerToDisplayPort(
-      Layer* aLayer, const mozilla::DisplayItemClip* aClip,
-      const ContainerLayerParameters& aParameters) const;
-
+      WebRenderLayerManager* aLayerManager, const nsIFrame* aItemFrame,
+      const nsPoint& aOffsetToReferenceFrame) const;
   // nsIScrollbarMediator
   void ScrollByPage(nsScrollbarFrame* aScrollbar, int32_t aDirection,
                     nsIScrollbarMediator::ScrollSnapMode aSnap =
@@ -492,14 +508,14 @@ class ScrollFrameHelper : public nsIReflowCallback {
   void ScrollByLine(nsScrollbarFrame* aScrollbar, int32_t aDirection,
                     nsIScrollbarMediator::ScrollSnapMode aSnap =
                         nsIScrollbarMediator::DISABLE_SNAP);
+  void ScrollByUnit(nsScrollbarFrame* aScrollbar, ScrollMode aMode,
+                    int32_t aDirection, ScrollUnit aUnit,
+                    nsIScrollbarMediator::ScrollSnapMode aSnap =
+                        nsIScrollbarMediator::DISABLE_SNAP);
   void RepeatButtonScroll(nsScrollbarFrame* aScrollbar);
   void ThumbMoved(nsScrollbarFrame* aScrollbar, nscoord aOldPos,
                   nscoord aNewPos);
   void ScrollbarReleased(nsScrollbarFrame* aScrollbar);
-  void ScrollByUnit(nsScrollbarFrame* aScrollbar, ScrollMode aMode,
-                    int32_t aDirection, mozilla::ScrollUnit aUnit,
-                    nsIScrollbarMediator::ScrollSnapMode aSnap =
-                        nsIScrollbarMediator::DISABLE_SNAP);
   bool ShouldSuppressScrollbarRepaints() const {
     return mSuppressScrollbarRepaints;
   }
@@ -605,7 +621,6 @@ class ScrollFrameHelper : public nsIReflowCallback {
   nsExpirationState mActivityExpirationState;
 
   nsCOMPtr<nsITimer> mScrollActivityTimer;
-  nsPoint mScrollPosForLayerPixelAlignment;
 
   // The scroll position where we last updated frame visibility.
   nsPoint mLastUpdateFramesPos;
@@ -622,8 +637,6 @@ class ScrollFrameHelper : public nsIReflowCallback {
 
   bool mAllowScrollOriginDowngrade : 1;
   bool mHadDisplayPortAtLastFrameUpdate : 1;
-  bool mNeverHasVerticalScrollbar : 1;
-  bool mNeverHasHorizontalScrollbar : 1;
   bool mHasVerticalScrollbar : 1;
   bool mHasHorizontalScrollbar : 1;
   // If mHas(Vertical|Horizontal)Scrollbar is true then
@@ -637,9 +650,6 @@ class ScrollFrameHelper : public nsIReflowCallback {
   bool mDidHistoryRestore : 1;
   // Is this the scrollframe for the document's viewport?
   bool mIsRoot : 1;
-  // True if we should clip all descendants, false if we should only clip
-  // descendants for which we are the containing block.
-  bool mClipAllDescendants : 1;
   // If true, don't try to layout the scrollbars in Reflow().  This can be
   // useful if multiple passes are involved, because we don't want to place the
   // scrollbars at the wrong size.
@@ -670,14 +680,15 @@ class ScrollFrameHelper : public nsIReflowCallback {
   // a scrollable layer. Used for asynchronous scrolling.
   bool mWillBuildScrollableLayer : 1;
 
-  // If true, the scroll frame is an ancestor of other scrolling frames, so
-  // we shouldn't expire the displayport on this scrollframe unless those
-  // descendant scrollframes also have their displayports removed.
-  bool mIsScrollParent : 1;
-
-  // If true, add clipping in ScrollFrameHelper::ClipLayerToDisplayPort.
-  // XXX this flag needs some auditing and better documentation, bug 1646686.
-  bool mAddClipRectToLayer : 1;
+  // If true, the scroll frame is an ancestor of other "active" scrolling
+  // frames, where "active" means has a non-minimal display port if
+  // ShouldActivateAllScrollFrames is true, or has a display port if
+  // ShouldActivateAllScrollFrames is false. And this means that we shouldn't
+  // expire the display port (if ShouldActivateAllScrollFrames is true then
+  // expiring a display port means making it minimal, otherwise it means
+  // removing the display port). If those descendant scrollframes have their
+  // display ports removed or made minimal, then we expire our display port.
+  bool mIsParentToActiveScrollFrames : 1;
 
   // True if this frame has been scrolled at least once
   bool mHasBeenScrolled : 1;
@@ -780,6 +791,8 @@ class ScrollFrameHelper : public nsIReflowCallback {
   // Removes any RefreshDriver observers we might have registered.
   void RemoveObservers();
 };
+
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(ScrollFrameHelper::OverflowState)
 
 }  // namespace mozilla
 
@@ -900,6 +913,9 @@ class nsHTMLScrollFrame : public nsContainerFrame,
   }
   bool IsForTextControlWithNoScrollbars() const final {
     return mHelper.IsForTextControlWithNoScrollbars();
+  }
+  bool HasAllNeededScrollbars() const final {
+    return mHelper.HasAllNeededScrollbars();
   }
   mozilla::layers::OverscrollBehaviorInfo GetOverscrollBehaviorInfo()
       const final {
@@ -1037,17 +1053,12 @@ class nsHTMLScrollFrame : public nsContainerFrame,
     mHelper.PostScrolledAreaEvent();
     return NS_OK;
   }
-  bool IsScrollingActive(nsDisplayListBuilder* aBuilder) final {
-    return mHelper.IsScrollingActive(aBuilder);
-  }
-  bool IsMaybeScrollingActive() const final {
-    return mHelper.IsMaybeScrollingActive();
+  bool IsScrollingActive() final { return mHelper.IsScrollingActive(); }
+  bool IsScrollingActiveNotMinimalDisplayPort() final {
+    return mHelper.IsScrollingActiveNotMinimalDisplayPort();
   }
   bool IsMaybeAsynchronouslyScrolled() final {
     return mHelper.IsMaybeAsynchronouslyScrolled();
-  }
-  void ResetScrollPositionForLayerPixelAlignment() final {
-    mHelper.ResetScrollPositionForLayerPixelAlignment();
   }
   bool DidHistoryRestore() const final { return mHelper.mDidHistoryRestore; }
   void ClearDidHistoryRestore() final { mHelper.mDidHistoryRestore = false; }
@@ -1078,20 +1089,19 @@ class nsHTMLScrollFrame : public nsContainerFrame,
   }
   bool WantAsyncScroll() const final { return mHelper.WantAsyncScroll(); }
   mozilla::Maybe<mozilla::layers::ScrollMetadata> ComputeScrollMetadata(
-      LayerManager* aLayerManager, const nsIFrame* aContainerReferenceFrame,
-      const Maybe<ContainerLayerParameters>& aParameters,
-      const mozilla::DisplayItemClip* aClip) const final {
-    return mHelper.ComputeScrollMetadata(
-        aLayerManager, aContainerReferenceFrame, aParameters, aClip);
-  }
-  void ClipLayerToDisplayPort(
-      Layer* aLayer, const mozilla::DisplayItemClip* aClip,
-      const ContainerLayerParameters& aParameters) const final {
-    mHelper.ClipLayerToDisplayPort(aLayer, aClip, aParameters);
+      mozilla::layers::WebRenderLayerManager* aLayerManager,
+      const nsIFrame* aItemFrame,
+      const nsPoint& aOffsetToReferenceFrame) const final {
+    return mHelper.ComputeScrollMetadata(aLayerManager, aItemFrame,
+                                         aOffsetToReferenceFrame);
   }
   void MarkScrollbarsDirtyForReflow() const final {
     mHelper.MarkScrollbarsDirtyForReflow();
   }
+  void InvalidateVerticalScrollbar() const final {
+    mHelper.InvalidateVerticalScrollbar();
+  }
+
   void UpdateScrollbarPosition() final { mHelper.UpdateScrollbarPosition(); }
   bool DecideScrollableLayer(nsDisplayListBuilder* aBuilder,
                              nsRect* aVisibleRect, nsRect* aDirtyRect,
@@ -1137,6 +1147,11 @@ class nsHTMLScrollFrame : public nsContainerFrame,
                     nsIScrollbarMediator::ScrollSnapMode aSnap =
                         nsIScrollbarMediator::DISABLE_SNAP) final {
     mHelper.ScrollByLine(aScrollbar, aDirection, aSnap);
+  }
+  void ScrollByUnit(nsScrollbarFrame* aScrollbar, ScrollMode aMode,
+                    int32_t aDirection, mozilla::ScrollUnit aUnit,
+                    ScrollSnapMode aSnap = DISABLE_SNAP) final {
+    mHelper.ScrollByUnit(aScrollbar, aMode, aDirection, aUnit, aSnap);
   }
   void RepeatButtonScroll(nsScrollbarFrame* aScrollbar) final {
     mHelper.RepeatButtonScroll(aScrollbar);
@@ -1284,8 +1299,7 @@ class nsXULScrollFrame final : public nsBoxFrame,
 
   friend nsXULScrollFrame* NS_NewXULScrollFrame(mozilla::PresShell* aPresShell,
                                                 ComputedStyle* aStyle,
-                                                bool aIsRoot,
-                                                bool aClipAllDescendants);
+                                                bool aIsRoot);
 
   void BuildDisplayList(nsDisplayListBuilder* aBuilder,
                         const nsDisplayListSet& aLists) final {
@@ -1383,6 +1397,9 @@ class nsXULScrollFrame final : public nsBoxFrame,
   }
   bool IsForTextControlWithNoScrollbars() const final {
     return mHelper.IsForTextControlWithNoScrollbars();
+  }
+  bool HasAllNeededScrollbars() const final {
+    return mHelper.HasAllNeededScrollbars();
   }
   mozilla::layers::OverscrollBehaviorInfo GetOverscrollBehaviorInfo()
       const final {
@@ -1516,17 +1533,12 @@ class nsXULScrollFrame final : public nsBoxFrame,
     mHelper.PostScrolledAreaEvent();
     return NS_OK;
   }
-  bool IsScrollingActive(nsDisplayListBuilder* aBuilder) final {
-    return mHelper.IsScrollingActive(aBuilder);
-  }
-  bool IsMaybeScrollingActive() const final {
-    return mHelper.IsMaybeScrollingActive();
+  bool IsScrollingActive() final { return mHelper.IsScrollingActive(); }
+  bool IsScrollingActiveNotMinimalDisplayPort() final {
+    return mHelper.IsScrollingActiveNotMinimalDisplayPort();
   }
   bool IsMaybeAsynchronouslyScrolled() final {
     return mHelper.IsMaybeAsynchronouslyScrolled();
-  }
-  void ResetScrollPositionForLayerPixelAlignment() final {
-    mHelper.ResetScrollPositionForLayerPixelAlignment();
   }
   bool DidHistoryRestore() const final { return mHelper.mDidHistoryRestore; }
   void ClearDidHistoryRestore() final { mHelper.mDidHistoryRestore = false; }
@@ -1557,19 +1569,17 @@ class nsXULScrollFrame final : public nsBoxFrame,
   }
   bool WantAsyncScroll() const final { return mHelper.WantAsyncScroll(); }
   mozilla::Maybe<mozilla::layers::ScrollMetadata> ComputeScrollMetadata(
-      LayerManager* aLayerManager, const nsIFrame* aContainerReferenceFrame,
-      const Maybe<ContainerLayerParameters>& aParameters,
-      const mozilla::DisplayItemClip* aClip) const final {
-    return mHelper.ComputeScrollMetadata(
-        aLayerManager, aContainerReferenceFrame, aParameters, aClip);
-  }
-  void ClipLayerToDisplayPort(
-      Layer* aLayer, const mozilla::DisplayItemClip* aClip,
-      const ContainerLayerParameters& aParameters) const final {
-    mHelper.ClipLayerToDisplayPort(aLayer, aClip, aParameters);
+      mozilla::layers::WebRenderLayerManager* aLayerManager,
+      const nsIFrame* aItemFrame,
+      const nsPoint& aOffsetToReferenceFrame) const final {
+    return mHelper.ComputeScrollMetadata(aLayerManager, aItemFrame,
+                                         aOffsetToReferenceFrame);
   }
   void MarkScrollbarsDirtyForReflow() const final {
     mHelper.MarkScrollbarsDirtyForReflow();
+  }
+  void InvalidateVerticalScrollbar() const final {
+    mHelper.InvalidateVerticalScrollbar();
   }
   void UpdateScrollbarPosition() final { mHelper.UpdateScrollbarPosition(); }
 
@@ -1604,6 +1614,11 @@ class nsXULScrollFrame final : public nsBoxFrame,
                     nsIScrollbarMediator::ScrollSnapMode aSnap =
                         nsIScrollbarMediator::DISABLE_SNAP) final {
     mHelper.ScrollByLine(aScrollbar, aDirection, aSnap);
+  }
+  void ScrollByUnit(nsScrollbarFrame* aScrollbar, ScrollMode aMode,
+                    int32_t aDirection, mozilla::ScrollUnit aUnit,
+                    ScrollSnapMode aSnap = DISABLE_SNAP) final {
+    mHelper.ScrollByUnit(aScrollbar, aMode, aDirection, aUnit, aSnap);
   }
   void RepeatButtonScroll(nsScrollbarFrame* aScrollbar) final {
     mHelper.RepeatButtonScroll(aScrollbar);
@@ -1709,8 +1724,7 @@ class nsXULScrollFrame final : public nsBoxFrame,
 #endif
 
  protected:
-  nsXULScrollFrame(ComputedStyle*, nsPresContext*, bool aIsRoot,
-                   bool aClipAllDescendants);
+  nsXULScrollFrame(ComputedStyle*, nsPresContext*, bool aIsRoot);
 
   void ClampAndSetBounds(nsBoxLayoutState& aState, nsRect& aRect,
                          nsPoint aScrollPosition,

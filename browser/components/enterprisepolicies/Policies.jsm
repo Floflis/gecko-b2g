@@ -118,6 +118,17 @@ var Policies = {
     },
   },
 
+  AllowedDomainsForApps: {
+    onBeforeAddons(manager, param) {
+      Services.obs.addObserver(function(subject, topic, data) {
+        let channel = subject.QueryInterface(Ci.nsIHttpChannel);
+        if (channel.URI.host.endsWith(".google.com")) {
+          channel.setRequestHeader("X-GoogApps-Allowed-Domains", param, true);
+        }
+      }, "http-on-modify-request");
+    },
+  },
+
   AppAutoUpdate: {
     onBeforeUIStartup(manager, param) {
       // Logic feels a bit reversed here, but it's correct. If AppAutoUpdate is
@@ -201,6 +212,27 @@ var Policies = {
           param.PrivateBrowsing,
           locked
         );
+      }
+    },
+  },
+
+  AutoLaunchProtocolsFromOrigins: {
+    onBeforeAddons(manager, param) {
+      for (let info of param) {
+        addAllowDenyPermissions(
+          `open-protocol-handler^${info.protocol}`,
+          info.allowed_origins
+        );
+      }
+    },
+  },
+
+  BackgroundAppUpdate: {
+    onBeforeAddons(manager, param) {
+      if (param) {
+        manager.disallowFeature("app-background-update-off");
+      } else {
+        manager.disallowFeature("app-background-update-on");
       }
     },
   },
@@ -421,6 +453,11 @@ var Policies = {
           newCookieBehavior,
           param.Locked
         );
+        setDefaultPref(
+          "network.cookie.cookieBehavior.pbmode",
+          newCookieBehavior,
+          param.Locked
+        );
       }
 
       const KEEP_COOKIES_UNTIL_EXPIRATION = 0;
@@ -517,7 +554,7 @@ var Policies = {
       }
       if ("TLS_RSA_WITH_3DES_EDE_CBC_SHA" in param) {
         setAndLockPref(
-          "security.ssl3.rsa_des_ede3_sha",
+          "security.ssl3.deprecated.rsa_des_ede3_sha",
           !param.TLS_RSA_WITH_3DES_EDE_CBC_SHA
         );
       }
@@ -733,11 +770,7 @@ var Policies = {
         // declaratively open the bookmarks toolbar. Otherwise, default
         // to showing it on the New Tab Page.
         let visibilityPref = "browser.toolbars.bookmarks.visibility";
-        let bookmarksFeaturePref = "browser.toolbars.bookmarks.2h2020";
-        let visibility = param ? "always" : "never";
-        if (Services.prefs.getBoolPref(bookmarksFeaturePref, false)) {
-          visibility = param ? "always" : "newtab";
-        }
+        let visibility = param ? "always" : "newtab";
         Services.prefs.setCharPref(visibilityPref, visibility);
         gXulStore.setValue(
           BROWSER_DOCUMENT_URL,
@@ -1099,6 +1132,11 @@ var Policies = {
           param.Pocket,
           locked
         );
+        setDefaultPref(
+          "browser.newtabpage.activity-stream.feeds.section.topstories",
+          param.Pocket,
+          locked
+        );
       }
       if ("Snippets" in param) {
         setDefaultPref(
@@ -1206,6 +1244,10 @@ var Policies = {
         } else {
           // Clear out old run once modification that is no longer used.
           clearRunOnceModification("setHomepage");
+        }
+        // If a homepage has been set via policy, show the home button
+        if (param.URL != "about:blank") {
+          manager.disallowFeature("removeHomeButtonByDefault");
         }
       }
       if (param.StartPage) {
@@ -1324,6 +1366,7 @@ var Policies = {
   OfferToSaveLogins: {
     onBeforeUIStartup(manager, param) {
       setAndLockPref("signon.rememberSignons", param);
+      setAndLockPref("services.passwordSavingEnabled", param);
     },
   },
 
@@ -1492,6 +1535,7 @@ var Policies = {
     onBeforeAddons(manager, param) {
       const allowedPrefixes = [
         "accessibility.",
+        "app.update.",
         "browser.",
         "datareporting.policy.",
         "dom.",
@@ -1499,7 +1543,9 @@ var Policies = {
         "general.autoScroll",
         "general.smoothScroll",
         "geo.",
+        "gfx.",
         "intl.",
+        "layers.",
         "layout.",
         "media.",
         "network.",
@@ -1519,10 +1565,16 @@ var Policies = {
         "security.mixed_content.block_active_content",
         "security.osclientcerts.autoload",
         "security.ssl.errorReporting.enabled",
+        "security.tls.enable_0rtt_data",
         "security.tls.hello_downgrade_check",
+        "security.tls.version.enable-deprecated",
         "security.warn_submit_secure_to_insecure",
       ];
-      const blockedPrefs = [];
+      const blockedPrefs = [
+        "app.update.channel",
+        "app.update.lastUpdateTime",
+        "app.update.migrated",
+      ];
 
       for (let preference in param) {
         if (blockedPrefs.includes(preference)) {
@@ -1657,16 +1709,14 @@ var Policies = {
     onBeforeUIStartup(manager, param) {
       if (typeof param === "boolean") {
         setAndLockPref("privacy.sanitize.sanitizeOnShutdown", param);
-        if (param) {
-          setAndLockPref("privacy.clearOnShutdown.cache", true);
-          setAndLockPref("privacy.clearOnShutdown.cookies", true);
-          setAndLockPref("privacy.clearOnShutdown.downloads", true);
-          setAndLockPref("privacy.clearOnShutdown.formdata", true);
-          setAndLockPref("privacy.clearOnShutdown.history", true);
-          setAndLockPref("privacy.clearOnShutdown.sessions", true);
-          setAndLockPref("privacy.clearOnShutdown.siteSettings", true);
-          setAndLockPref("privacy.clearOnShutdown.offlineApps", true);
-        }
+        setAndLockPref("privacy.clearOnShutdown.cache", param);
+        setAndLockPref("privacy.clearOnShutdown.cookies", param);
+        setAndLockPref("privacy.clearOnShutdown.downloads", param);
+        setAndLockPref("privacy.clearOnShutdown.formdata", param);
+        setAndLockPref("privacy.clearOnShutdown.history", param);
+        setAndLockPref("privacy.clearOnShutdown.sessions", param);
+        setAndLockPref("privacy.clearOnShutdown.siteSettings", param);
+        setAndLockPref("privacy.clearOnShutdown.offlineApps", param);
       } else {
         let locked = true;
         // Needed to preserve original behavior in perpetuity.
@@ -1952,6 +2002,31 @@ var Policies = {
     },
   },
 
+  ShowHomeButton: {
+    onBeforeAddons(manager, param) {
+      if (param) {
+        manager.disallowFeature("removeHomeButtonByDefault");
+      }
+    },
+    onAllWindowsRestored(manager, param) {
+      if (param) {
+        let homeButtonPlacement = CustomizableUI.getPlacementOfWidget(
+          "home-button"
+        );
+        if (!homeButtonPlacement) {
+          let placement = CustomizableUI.getPlacementOfWidget("forward-button");
+          CustomizableUI.addWidgetToArea(
+            "home-button",
+            CustomizableUI.AREA_NAVBAR,
+            placement.position + 2
+          );
+        }
+      } else {
+        CustomizableUI.removeWidgetFromArea("home-button");
+      }
+    },
+  },
+
   SSLVersionMax: {
     onBeforeAddons(manager, param) {
       let tlsVersion;
@@ -2031,7 +2106,11 @@ var Policies = {
         manager.disallowFeature("urlbarinterventions");
       }
       if ("SkipOnboarding") {
-        setAndLockPref("browser.aboutwelcome.enabled", false);
+        setDefaultPref(
+          "browser.aboutwelcome.enabled",
+          !param.SkipOnboarding,
+          locked
+        );
       }
     },
   },
@@ -2039,6 +2118,12 @@ var Policies = {
   WebsiteFilter: {
     onBeforeUIStartup(manager, param) {
       WebsiteFilter.init(param.Block || [], param.Exceptions || []);
+    },
+  },
+
+  WindowsSSO: {
+    onBeforeAddons(manager, param) {
+      setAndLockPref("network.http.windows-sso.enabled", param);
     },
   },
 };
@@ -2338,6 +2423,14 @@ function installAddonFromURL(url, extensionID, addon) {
         log.debug(`Installation succeeded - ${url}`);
       },
     };
+    // If it's a local file install, onDownloadEnded is never called.
+    // So we call it manually, to handle some error cases.
+    if (url.startsWith("file:")) {
+      listener.onDownloadEnded(install);
+      if (install.state == AddonManager.STATE_CANCELLED) {
+        return;
+      }
+    }
     install.addListener(listener);
     install.install();
   });

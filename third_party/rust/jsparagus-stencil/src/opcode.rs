@@ -21,7 +21,7 @@ macro_rules! using_opcode_database {
                 (Uint24, uint24, NULL, 4, 0, 1, JOF_UINT24),
                 (Double, double_, NULL, 9, 0, 1, JOF_DOUBLE),
                 (BigInt, big_int, NULL, 5, 0, 1, JOF_BIGINT),
-                (String, string, NULL, 5, 0, 1, JOF_ATOM),
+                (String, string, NULL, 5, 0, 1, JOF_STRING),
                 (Symbol, symbol, NULL, 2, 0, 1, JOF_UINT8),
                 (Void, void_, NULL, 1, 1, 1, JOF_BYTE),
                 (Typeof, typeof_, NULL, 1, 1, 1, JOF_BYTE|JOF_IC),
@@ -58,11 +58,12 @@ macro_rules! using_opcode_database {
                 (ToNumeric, to_numeric, NULL, 1, 1, 1, JOF_BYTE|JOF_IC),
                 (ToString, to_string, NULL, 1, 1, 1, JOF_BYTE),
                 (GlobalThis, global_this, NULL, 1, 0, 1, JOF_BYTE),
+                (NonSyntacticGlobalThis, non_syntactic_global_this, NULL, 1, 0, 1, JOF_BYTE),
                 (NewTarget, new_target, NULL, 1, 0, 1, JOF_BYTE),
                 (DynamicImport, dynamic_import, NULL, 1, 1, 1, JOF_BYTE),
                 (ImportMeta, import_meta, NULL, 1, 0, 1, JOF_BYTE),
                 (NewInit, new_init, NULL, 1, 0, 1, JOF_BYTE|JOF_IC),
-                (NewObject, new_object, NULL, 5, 0, 1, JOF_OBJECT|JOF_IC),
+                (NewObject, new_object, NULL, 5, 0, 1, JOF_SHAPE|JOF_IC),
                 (Object, object, NULL, 5, 0, 1, JOF_OBJECT),
                 (ObjWithProto, obj_with_proto, NULL, 1, 1, 1, JOF_BYTE),
                 (InitProp, init_prop, NULL, 5, 2, 1, JOF_ATOM|JOF_PROP|JOF_PROPINIT|JOF_IC),
@@ -91,6 +92,7 @@ macro_rules! using_opcode_database {
                 (StrictDelElem, strict_del_elem, NULL, 1, 2, 1, JOF_BYTE|JOF_ELEM|JOF_CHECKSTRICT),
                 (HasOwn, has_own, NULL, 1, 2, 1, JOF_BYTE|JOF_IC),
                 (CheckPrivateField, check_private_field, NULL, 3, 2, 3, JOF_TWO_UINT8|JOF_CHECKSTRICT|JOF_IC),
+                (NewPrivateName, new_private_name, NULL, 5, 0, 1, JOF_ATOM),
                 (SuperBase, super_base, NULL, 1, 1, 1, JOF_BYTE),
                 (GetPropSuper, get_prop_super, NULL, 5, 2, 1, JOF_ATOM|JOF_PROP|JOF_IC),
                 (GetElemSuper, get_elem_super, NULL, 1, 3, 1, JOF_BYTE|JOF_ELEM|JOF_IC),
@@ -107,7 +109,7 @@ macro_rules! using_opcode_database {
                 (ToAsyncIter, to_async_iter, NULL, 1, 2, 1, JOF_BYTE),
                 (MutateProto, mutate_proto, NULL, 1, 2, 1, JOF_BYTE),
                 (NewArray, new_array, NULL, 5, 0, 1, JOF_UINT32|JOF_IC),
-                (InitElemArray, init_elem_array, NULL, 5, 2, 1, JOF_UINT32|JOF_ELEM|JOF_PROPINIT|JOF_IC),
+                (InitElemArray, init_elem_array, NULL, 5, 2, 1, JOF_UINT32|JOF_ELEM|JOF_PROPINIT),
                 (InitElemInc, init_elem_inc, NULL, 1, 3, 2, JOF_BYTE|JOF_ELEM|JOF_PROPINIT|JOF_IC),
                 (Hole, hole, NULL, 1, 0, 1, JOF_BYTE),
                 (RegExp, reg_exp, NULL, 5, 0, 1, JOF_REGEXP),
@@ -117,8 +119,6 @@ macro_rules! using_opcode_database {
                 (InitHomeObject, init_home_object, NULL, 1, 2, 1, JOF_BYTE),
                 (CheckClassHeritage, check_class_heritage, NULL, 1, 1, 1, JOF_BYTE),
                 (FunWithProto, fun_with_proto, NULL, 5, 1, 1, JOF_OBJECT),
-                (ClassConstructor, class_constructor, NULL, 13, 0, 1, JOF_CLASS_CTOR),
-                (DerivedConstructor, derived_constructor, NULL, 13, 1, 1, JOF_CLASS_CTOR),
                 (BuiltinObject, builtin_object, NULL, 2, 0, 1, JOF_UINT8),
                 (Call, call, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_IC),
                 (CallIter, call_iter, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_IC),
@@ -132,7 +132,6 @@ macro_rules! using_opcode_database {
                 (StrictEval, strict_eval, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_CHECKSTRICT|JOF_IC),
                 (StrictSpreadEval, strict_spread_eval, NULL, 1, 3, 1, JOF_BYTE|JOF_INVOKE|JOF_SPREAD|JOF_CHECKSTRICT|JOF_IC),
                 (ImplicitThis, implicit_this, "", 5, 0, 1, JOF_ATOM),
-                (GImplicitThis, g_implicit_this, "", 5, 0, 1, JOF_ATOM),
                 (CallSiteObj, call_site_obj, NULL, 5, 0, 1, JOF_OBJECT),
                 (IsConstructing, is_constructing, NULL, 1, 0, 1, JOF_BYTE),
                 (New, new_, NULL, 3, -1, 1, JOF_ARGC|JOF_INVOKE|JOF_CONSTRUCT|JOF_IC),
@@ -150,15 +149,16 @@ macro_rules! using_opcode_database {
                 (AsyncAwait, async_await, NULL, 1, 2, 1, JOF_BYTE),
                 (AsyncResolve, async_resolve, NULL, 2, 2, 1, JOF_UINT8),
                 (Await, await, NULL, 4, 2, 3, JOF_RESUMEINDEX),
-                (TrySkipAwait, try_skip_await, NULL, 1, 1, 2, JOF_BYTE),
+                (CanSkipAwait, can_skip_await, NULL, 1, 1, 2, JOF_BYTE),
+                (MaybeExtractAwaitValue, maybe_extract_await_value, NULL, 1, 2, 2, JOF_BYTE),
                 (ResumeKind, resume_kind, NULL, 2, 0, 1, JOF_UINT8),
                 (CheckResumeKind, check_resume_kind, NULL, 1, 3, 1, JOF_BYTE),
                 (Resume, resume, NULL, 1, 3, 1, JOF_BYTE|JOF_INVOKE),
                 (JumpTarget, jump_target, NULL, 5, 0, 0, JOF_ICINDEX),
                 (LoopHead, loop_head, NULL, 6, 0, 0, JOF_LOOPHEAD),
                 (Goto, goto_, NULL, 5, 0, 0, JOF_JUMP),
-                (IfEq, if_eq, NULL, 5, 1, 0, JOF_JUMP|JOF_IC),
-                (IfNe, if_ne, NULL, 5, 1, 0, JOF_JUMP|JOF_IC),
+                (JumpIfFalse, jump_if_false, NULL, 5, 1, 0, JOF_JUMP|JOF_IC),
+                (JumpIfTrue, jump_if_true, NULL, 5, 1, 0, JOF_JUMP|JOF_IC),
                 (And, and_, NULL, 5, 1, 1, JOF_JUMP|JOF_IC),
                 (Or, or_, NULL, 5, 1, 1, JOF_JUMP|JOF_IC),
                 (Coalesce, coalesce, NULL, 5, 1, 1, JOF_JUMP),
@@ -169,7 +169,7 @@ macro_rules! using_opcode_database {
                 (GetRval, get_rval, NULL, 1, 0, 1, JOF_BYTE),
                 (SetRval, set_rval, NULL, 1, 1, 0, JOF_BYTE),
                 (RetRval, ret_rval, NULL, 1, 0, 0, JOF_BYTE),
-                (CheckReturn, check_return, NULL, 1, 1, 0, JOF_BYTE),
+                (CheckReturn, check_return, NULL, 1, 1, 1, JOF_BYTE),
                 (Throw, throw_, NULL, 1, 1, 0, JOF_BYTE),
                 (ThrowMsg, throw_msg, NULL, 2, 0, 0, JOF_UINT8),
                 (ThrowSetConst, throw_set_const, NULL, 5, 0, 0, JOF_ATOM|JOF_NAME),
@@ -194,6 +194,7 @@ macro_rules! using_opcode_database {
                 (GetArg, get_arg, NULL, 3, 0, 1, JOF_QARG|JOF_NAME),
                 (GetLocal, get_local, NULL, 4, 0, 1, JOF_LOCAL|JOF_NAME),
                 (GetAliasedVar, get_aliased_var, NULL, 5, 0, 1, JOF_ENVCOORD|JOF_NAME),
+                (GetAliasedDebugVar, get_aliased_debug_var, NULL, 5, 0, 1, JOF_DEBUGCOORD|JOF_NAME),
                 (GetImport, get_import, NULL, 5, 0, 1, JOF_ATOM|JOF_NAME),
                 (GetBoundName, get_bound_name, NULL, 5, 1, 1, JOF_ATOM|JOF_NAME|JOF_IC),
                 (GetIntrinsic, get_intrinsic, NULL, 5, 0, 1, JOF_ATOM|JOF_NAME|JOF_IC),
@@ -212,6 +213,7 @@ macro_rules! using_opcode_database {
                 (DebugLeaveLexicalEnv, debug_leave_lexical_env, NULL, 1, 0, 0, JOF_BYTE),
                 (RecreateLexicalEnv, recreate_lexical_env, NULL, 1, 0, 0, JOF_BYTE),
                 (FreshenLexicalEnv, freshen_lexical_env, NULL, 1, 0, 0, JOF_BYTE),
+                (PushClassBodyEnv, push_class_body_env, NULL, 5, 0, 0, JOF_SCOPE),
                 (PushVarEnv, push_var_env, NULL, 5, 0, 0, JOF_SCOPE),
                 (EnterWith, enter_with, NULL, 5, 1, 0, JOF_SCOPE),
                 (LeaveWith, leave_with, NULL, 1, 0, 0, JOF_BYTE),
@@ -234,9 +236,6 @@ macro_rules! using_opcode_database {
                 (NopDestructuring, nop_destructuring, NULL, 1, 0, 0, JOF_BYTE),
                 (ForceInterpreter, force_interpreter, NULL, 1, 0, 0, JOF_BYTE),
                 (DebugCheckSelfHosted, debug_check_self_hosted, NULL, 1, 1, 1, JOF_BYTE),
-                (InstrumentationActive, instrumentation_active, NULL, 1, 0, 1, JOF_BYTE),
-                (InstrumentationCallback, instrumentation_callback, NULL, 1, 0, 1, JOF_BYTE),
-                (InstrumentationScriptId, instrumentation_script_id, NULL, 1, 0, 1, JOF_BYTE),
                 (Debugger, debugger, NULL, 1, 0, 0, JOF_BYTE),
                 // @@@@ END OPCODES @@@@
             ]
@@ -342,11 +341,17 @@ const JOF_ICINDEX: u32 = 21;
 /// JSOp::LoopHead, combines JOF_ICINDEX and JOF_UINT8
 const JOF_LOOPHEAD: u32 = 22;
 
-/// uint32_t atom index, sourceStart, sourceEnd
-const JOF_CLASS_CTOR: u32 = 23;
-
 /// A pair of unspecified uint8_t arguments
-const JOF_TWO_UINT8: u32 = 24;
+const JOF_TWO_UINT8: u32 = 23;
+
+/// An embedded ScopeCoordinate immediate that may traverse DebugEnvironmentProxies
+const JOF_DEBUGCOORD: u32 = 24;
+
+/// uint32_t shape index
+const JOF_SHAPE: u32 = 25;
+
+/// uint32_t constant index
+const JOF_STRING: u32 = 26;
 
 /// mask for above immediate types
 const JOF_TYPEMASK: u32 = 0xFF;
@@ -446,8 +451,8 @@ impl Opcode {
 
     pub fn is_jump(self) -> bool {
         self == Opcode::Goto
-            || self == Opcode::IfEq
-            || self == Opcode::IfNe
+            || self == Opcode::JumpIfFalse
+            || self == Opcode::JumpIfTrue
             || self == Opcode::Or
             || self == Opcode::And
             || self == Opcode::Coalesce

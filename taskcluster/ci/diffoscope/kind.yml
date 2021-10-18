@@ -2,16 +2,16 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ---
-loader: taskgraph.loader.transform:loader
+loader: gecko_taskgraph.loader.transform:loader
 
 kind-dependencies:
     - build
     - toolchain
 
 transforms:
-    - taskgraph.transforms.diffoscope:transforms
-    - taskgraph.transforms.job:transforms
-    - taskgraph.transforms.task:transforms
+    - gecko_taskgraph.transforms.diffoscope:transforms
+    - gecko_taskgraph.transforms.job:transforms
+    - gecko_taskgraph.transforms.task:transforms
 
 # Note: --exclude-command .--line-numbers is because of
 # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=879003
@@ -27,7 +27,7 @@ job-defaults:
         --no-default-limits
         --max-page-size 100000000
         --max-page-diff-block-lines 10000
-        --exclude-directory-metadata
+        --exclude-directory-metadata=yes
         --exclude-command .--line-numbers
 
 jobs:
@@ -85,7 +85,6 @@ jobs:
         original: build-linux64-shippable/opt
         fail-on-diff: true
         run-on-projects: ['mozilla-central']
-        pre-diff-commands: ['rm {a,b}/firefox/lib*wasm.so']  # Bug 1612035
 
     reproducible-linux64-generated-files:
         symbol: Linux64g
@@ -102,8 +101,8 @@ jobs:
 # kind-dependencies above.
 #     android-build-vs-previous-try:
 #         symbol: A
-#         new: build-android-api-16/opt
-#         original: {index-search: gecko.v2.try.revision.aabd5deb0156f9b55ab60ad6a01ebfc4580bf2e1.mobile.android-api-16-opt}
+#         new: build-android-arm/opt
+#         original: {index-search: gecko.v2.try.revision.aabd5deb0156f9b55ab60ad6a01ebfc4580bf2e1.mobile.android-arm-opt}
 #     linux64-build-vs-previous-try:
 #         symbol: L
 #         new: build-linux64/opt

@@ -11,6 +11,10 @@
 #include "nsMIMEInfoUnix.h"
 #ifdef MOZ_WIDGET_GTK
 #  include "nsGNOMERegistry.h"
+#  ifdef MOZ_BUILD_APP_IS_BROWSER
+#    include "nsIToolkitShellService.h"
+#    include "nsIGNOMEShellService.h"
+#  endif
 #endif
 #include "nsISupports.h"
 #include "nsString.h"
@@ -30,6 +34,7 @@
 #include "ContentHandlerService.h"
 #include "prenv.h"  // for PR_GetEnv()
 #include "mozilla/Preferences.h"
+#include "mozilla/StaticPrefs_browser.h"
 #include "nsMimeTypes.h"
 
 using namespace mozilla;
@@ -1055,6 +1060,12 @@ NS_IMETHODIMP nsOSHelperAppService::GetApplicationDescription(
 NS_IMETHODIMP nsOSHelperAppService::IsCurrentAppOSDefaultForProtocol(
     const nsACString& aScheme, bool* _retval) {
   *_retval = false;
+#if defined(MOZ_BUILD_APP_IS_BROWSER) && defined(MOZ_WIDGET_GTK)
+  if (nsCOMPtr<nsIGNOMEShellService> shell =
+          do_GetService(NS_TOOLKITSHELLSERVICE_CONTRACTID)) {
+    return shell->IsDefaultForScheme(aScheme, _retval);
+  }
+#endif
   return NS_OK;
 }
 
@@ -1199,7 +1210,9 @@ already_AddRefed<nsMIMEInfoBase> nsOSHelperAppService::GetFromExtension(
 
     if (NS_SUCCEEDED(rv)) {
       mimeInfo->SetDefaultApplication(handlerFile);
-      mimeInfo->SetPreferredAction(nsIMIMEInfo::useSystemDefault);
+      mozilla::StaticPrefs::browser_download_improvements_to_download_panel()
+          ? mimeInfo->SetPreferredAction(nsIMIMEInfo::saveToDisk)
+          : mimeInfo->SetPreferredAction(nsIMIMEInfo::useSystemDefault);
       mimeInfo->SetDefaultDescription(handler);
     }
   }
@@ -1315,7 +1328,9 @@ already_AddRefed<nsMIMEInfoBase> nsOSHelperAppService::GetFromType(
 
   if (NS_SUCCEEDED(rv)) {
     mimeInfo->SetDefaultApplication(handlerFile);
-    mimeInfo->SetPreferredAction(nsIMIMEInfo::useSystemDefault);
+    StaticPrefs::browser_download_improvements_to_download_panel()
+        ? mimeInfo->SetPreferredAction(nsIMIMEInfo::saveToDisk)
+        : mimeInfo->SetPreferredAction(nsIMIMEInfo::useSystemDefault);
     mimeInfo->SetDefaultDescription(handler);
   } else {
     mimeInfo->SetPreferredAction(nsIMIMEInfo::saveToDisk);

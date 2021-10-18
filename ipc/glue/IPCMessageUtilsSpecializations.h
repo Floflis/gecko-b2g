@@ -29,12 +29,12 @@
 #ifdef XP_WIN
 #  include "mozilla/TimeStamp_windows.h"
 #endif
+#include "mozilla/UniquePtr.h"
 #include "mozilla/Unused.h"
 #include "mozilla/Vector.h"
 #include "mozilla/dom/ipc/StructuredCloneData.h"
 #include "nsCSSPropertyID.h"
 #include "nsDebug.h"
-#include "nsHashKeys.h"
 #include "nsIContentPolicy.h"
 #include "nsID.h"
 #include "nsILoadInfo.h"
@@ -42,7 +42,7 @@
 #include "nsLiteralString.h"
 #include "nsString.h"
 #include "nsTArray.h"
-#include "nsTHashtable.h"
+#include "nsTHashSet.h"
 
 // XXX Includes that are only required by implementations which could be moved
 // to the cpp file.
@@ -68,6 +68,8 @@ namespace mozilla::dom {
 template <typename T>
 class Optional;
 }
+
+class nsAtom;
 
 namespace IPC {
 
@@ -227,15 +229,18 @@ struct ParamTraits<nsAutoString> : ParamTraits<nsString> {
 
 #endif  // MOZILLA_INTERNAL_API
 
+// XXX While this has no special dependencies, it's currently only used in
+// GfxMessageUtils and could be moved there, or generalized to potentially work
+// with any nsTHashSet.
 template <>
-struct ParamTraits<nsTHashtable<nsUint64HashKey>> {
-  typedef nsTHashtable<nsUint64HashKey> paramType;
+struct ParamTraits<nsTHashSet<uint64_t>> {
+  typedef nsTHashSet<uint64_t> paramType;
 
   static void Write(Message* aMsg, const paramType& aParam) {
     uint32_t count = aParam.Count();
     WriteParam(aMsg, count);
-    for (auto iter = aParam.ConstIter(); !iter.Done(); iter.Next()) {
-      WriteParam(aMsg, iter.Get()->GetKey());
+    for (const auto& key : aParam) {
+      WriteParam(aMsg, key);
     }
   }
 
@@ -251,7 +256,7 @@ struct ParamTraits<nsTHashtable<nsUint64HashKey>> {
       if (!ReadParam(aMsg, aIter, &key)) {
         return false;
       }
-      table.PutEntry(key);
+      table.Insert(key);
     }
     *aResult = std::move(table);
     return true;
@@ -662,7 +667,6 @@ struct ParamTraits<mozilla::TimeStampValue> {
   static void Write(Message* aMsg, const paramType& aParam) {
     WriteParam(aMsg, aParam.mGTC);
     WriteParam(aMsg, aParam.mQPC);
-    WriteParam(aMsg, aParam.mUsedCanonicalNow);
     WriteParam(aMsg, aParam.mIsNull);
     WriteParam(aMsg, aParam.mHasQPC);
   }
@@ -670,33 +674,8 @@ struct ParamTraits<mozilla::TimeStampValue> {
                    paramType* aResult) {
     return (ReadParam(aMsg, aIter, &aResult->mGTC) &&
             ReadParam(aMsg, aIter, &aResult->mQPC) &&
-            ReadParam(aMsg, aIter, &aResult->mUsedCanonicalNow) &&
             ReadParam(aMsg, aIter, &aResult->mIsNull) &&
             ReadParam(aMsg, aIter, &aResult->mHasQPC));
-  }
-};
-
-#else
-
-template <>
-struct ParamTraits<mozilla::TimeStamp63Bit> {
-  typedef mozilla::TimeStamp63Bit paramType;
-  static void Write(Message* aMsg, const paramType& aParam) {
-    WriteParam(aMsg, aParam.mUsedCanonicalNow);
-    WriteParam(aMsg, aParam.mTimeStamp);
-  }
-  static bool Read(const Message* aMsg, PickleIterator* aIter,
-                   paramType* aResult) {
-    bool success = true;
-    uint64_t result;
-
-    success &= ReadParam(aMsg, aIter, &result);
-    aResult->mUsedCanonicalNow = result & 0x01;
-
-    success &= ReadParam(aMsg, aIter, &result);
-    aResult->mTimeStamp = result & 0x7FFFFFFFFFFFFFFF;
-
-    return success;
   }
 };
 
@@ -885,13 +864,34 @@ struct ParamTraits<mozilla::dom::Optional<T>> {
   }
 };
 
+template <>
+struct ParamTraits<nsAtom*> {
+  typedef nsAtom paramType;
+
+  static void Write(Message* aMsg, const paramType* aParam);
+  static bool Read(const Message* aMsg, PickleIterator* aIter,
+                   RefPtr<paramType>* aResult);
+};
+
 struct CrossOriginOpenerPolicyValidator {
-  static bool IsLegalValue(nsILoadInfo::CrossOriginOpenerPolicy e) {
-    return e == nsILoadInfo::OPENER_POLICY_UNSAFE_NONE ||
-           e == nsILoadInfo::OPENER_POLICY_SAME_ORIGIN ||
-           e == nsILoadInfo::OPENER_POLICY_SAME_ORIGIN_ALLOW_POPUPS ||
-           e == nsILoadInfo::
-                    OPENER_POLICY_SAME_ORIGIN_EMBEDDER_POLICY_REQUIRE_CORP;
+  using IntegralType =
+      std::underlying_type_t<nsILoadInfo::CrossOriginOpenerPolicy>;
+
+  static bool IsLegalValue(const IntegralType e) {
+    return AreIntegralValuesEqual(e, nsILoadInfo::OPENER_POLICY_UNSAFE_NONE) ||
+           AreIntegralValuesEqual(e, nsILoadInfo::OPENER_POLICY_SAME_ORIGIN) ||
+           AreIntegralValuesEqual(
+               e, nsILoadInfo::OPENER_POLICY_SAME_ORIGIN_ALLOW_POPUPS) ||
+           AreIntegralValuesEqual(
+               e, nsILoadInfo::
+                      OPENER_POLICY_SAME_ORIGIN_EMBEDDER_POLICY_REQUIRE_CORP);
+  }
+
+ private:
+  static bool AreIntegralValuesEqual(
+      const IntegralType aLhs,
+      const nsILoadInfo::CrossOriginOpenerPolicy aRhs) {
+    return aLhs == static_cast<IntegralType>(aRhs);
   }
 };
 
@@ -901,9 +901,19 @@ struct ParamTraits<nsILoadInfo::CrossOriginOpenerPolicy>
                      CrossOriginOpenerPolicyValidator> {};
 
 struct CrossOriginEmbedderPolicyValidator {
-  static bool IsLegalValue(nsILoadInfo::CrossOriginEmbedderPolicy e) {
-    return e == nsILoadInfo::EMBEDDER_POLICY_NULL ||
-           e == nsILoadInfo::EMBEDDER_POLICY_REQUIRE_CORP;
+  using IntegralType =
+      std::underlying_type_t<nsILoadInfo::CrossOriginEmbedderPolicy>;
+
+  static bool IsLegalValue(const IntegralType e) {
+    return AreIntegralValuesEqual(e, nsILoadInfo::EMBEDDER_POLICY_NULL) ||
+           AreIntegralValuesEqual(e, nsILoadInfo::EMBEDDER_POLICY_REQUIRE_CORP);
+  }
+
+ private:
+  static bool AreIntegralValuesEqual(
+      const IntegralType aLhs,
+      const nsILoadInfo::CrossOriginEmbedderPolicy aRhs) {
+    return aLhs == static_cast<IntegralType>(aRhs);
   }
 };
 
@@ -926,6 +936,38 @@ struct ParamTraits<mozilla::BitSet<N, Word>> {
                    paramType* aResult) {
     for (Word& word : aResult->Storage()) {
       if (!ReadParam(aMsg, aIter, &word)) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+template <typename T>
+struct ParamTraits<mozilla::UniquePtr<T>> {
+  typedef mozilla::UniquePtr<T> paramType;
+
+  static void Write(Message* aMsg, const paramType& aParam) {
+    bool isNull = aParam == nullptr;
+    WriteParam(aMsg, isNull);
+
+    if (!isNull) {
+      WriteParam(aMsg, *aParam.get());
+    }
+  }
+
+  static bool Read(const IPC::Message* aMsg, PickleIterator* aIter,
+                   paramType* aResult) {
+    bool isNull = true;
+    if (!ReadParam(aMsg, aIter, &isNull)) {
+      return false;
+    }
+
+    if (isNull) {
+      aResult->reset();
+    } else {
+      *aResult = mozilla::MakeUnique<T>();
+      if (!ReadParam(aMsg, aIter, aResult->get())) {
         return false;
       }
     }

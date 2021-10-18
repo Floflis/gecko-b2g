@@ -3,6 +3,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#ifdef MOZ_WIDGET_GONK
+#include "libdisplay/GonkDisplay.h"
+#endif
 #include "VsyncSource.h"
 #include "nsThreadUtils.h"
 #include "nsXULAppAPI.h"
@@ -139,8 +142,12 @@ void VsyncSource::Display::NotifyGenericObservers(VsyncEvent aEvent) {
 }
 
 TimeDuration VsyncSource::Display::GetVsyncRate() {
-  // If hardware queries fail / are unsupported, we have to just guess.
-  return TimeDuration::FromMilliseconds(1000.0 / 60.0);
+  float vsyncPeriod = 60.0;
+#ifdef MOZ_WIDGET_GONK
+  vsyncPeriod = GetGonkDisplay()->GetDispNativeData(
+    DisplayType::DISPLAY_PRIMARY).mVsyncPeriod / 1000000.0;
+#endif
+  return TimeDuration::FromMilliseconds(1000.0 / vsyncPeriod);
 }
 
 void VsyncSource::Display::RegisterCompositorVsyncDispatcher(

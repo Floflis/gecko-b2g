@@ -32,8 +32,9 @@
 #include "mozilla/dom/MouseEventBinding.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/DataSurfaceHelpers.h"
+#include "mozilla/gfx/Swizzle.h"
 #include "mozilla/gfx/Types.h"
-#include "mozilla/layers/RenderTrace.h"
+#include "mozilla/layers/LayersTypes.h"
 #include "mozilla/widget/AndroidVsync.h"
 #include <algorithm>
 
@@ -58,6 +59,7 @@ using mozilla::gfx::SurfaceFormat;
 #include "nsFocusManager.h"
 #include "nsUserIdleService.h"
 #include "nsLayoutUtils.h"
+#include "nsNetUtil.h"
 #include "nsViewManager.h"
 
 #include "WidgetUtils.h"
@@ -73,14 +75,13 @@ using mozilla::gfx::SurfaceFormat;
 #include "GLContext.h"
 #include "GLContextProvider.h"
 #include "Layers.h"
+#include "WindowRenderer.h"
 #include "ScopedGLHelpers.h"
 #include "mozilla/layers/APZEventState.h"
 #include "mozilla/layers/APZInputBridge.h"
 #include "mozilla/layers/APZThreadUtils.h"
-#include "mozilla/layers/AsyncCompositionManager.h"
 #include "mozilla/layers/CompositorOGL.h"
 #include "mozilla/layers/IAPZCTreeManager.h"
-#include "mozilla/layers/LayerManagerComposite.h"
 
 #include "nsTArray.h"
 
@@ -103,7 +104,7 @@ using mozilla::gfx::SurfaceFormat;
 #include "ScreenHelperAndroid.h"
 #include "TouchResampler.h"
 
-#include "GeckoProfiler.h"  // For AUTO_PROFILER_LABEL
+#include "mozilla/ProfilerLabels.h"
 #include "nsPrintfCString.h"
 #include "nsString.h"
 
@@ -121,7 +122,6 @@ using mozilla::java::GeckoSession;
 
 #include "mozilla/layers/CompositorBridgeChild.h"
 #include "mozilla/layers/CompositorSession.h"
-#include "mozilla/layers/LayerTransactionParent.h"
 #include "mozilla/layers/UiCompositorControllerChild.h"
 #include "nsThreadUtils.h"
 
@@ -146,6 +146,8 @@ static const int32_t INPUT_RESULT_HANDLED_CONTENT =
     java::PanZoomController::INPUT_RESULT_HANDLED_CONTENT;
 static const int32_t INPUT_RESULT_IGNORED =
     java::PanZoomController::INPUT_RESULT_IGNORED;
+
+static const nsCString::size_type MAX_TOPLEVEL_DATA_URI_LEN = 2 * 1024 * 1024;
 
 namespace {
 template <class Instance, class Impl>
@@ -271,8 +273,7 @@ class NPZCSupport final
 
     // Use vsync for touch resampling on API level 19 and above.
     // See gfxAndroidPlatform::CreateHardwareVsyncSource() for comparison.
-    if (AndroidBridge::Bridge() &&
-        AndroidBridge::Bridge()->GetAPIVersion() >= 19) {
+    if (jni::GetAPIVersion() >= 19) {
       mAndroidVsync = AndroidVsync::GetInstance();
     }
   }
@@ -392,7 +393,7 @@ class NPZCSupport final
         WheelDeltaAdjustmentStrategy::eNone);
 
     APZEventResult result = controller->InputBridge()->ReceiveInputEvent(input);
-    if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
+    if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
       return INPUT_RESULT_IGNORED;
     }
 
@@ -401,11 +402,11 @@ class NPZCSupport final
       window->ProcessUntransformedAPZEvent(&wheelEvent, result);
     });
 
-    switch (result.mStatus) {
+    switch (result.GetStatus()) {
       case nsEventStatus_eIgnore:
         return INPUT_RESULT_UNHANDLED;
       case nsEventStatus_eConsumeDoDefault:
-        return (result.mHandledResult == Some(APZHandledResult::HandledByRoot))
+        return result.GetHandledResult()->IsHandledByRoot()
                    ? INPUT_RESULT_HANDLED
                    : INPUT_RESULT_HANDLED_CONTENT;
       default:
@@ -457,20 +458,57 @@ class NPZCSupport final
     return result;
   }
 
-  static int32_t ConvertAPZHandledResult(APZHandledResult aHandledResult) {
-    switch (aHandledResult) {
-      case APZHandledResult::Unhandled:
+  static int32_t ConvertAPZHandledPlace(APZHandledPlace aHandledPlace) {
+    switch (aHandledPlace) {
+      case APZHandledPlace::Unhandled:
         return INPUT_RESULT_UNHANDLED;
-      case APZHandledResult::HandledByRoot:
+      case APZHandledPlace::HandledByRoot:
         return INPUT_RESULT_HANDLED;
-      case APZHandledResult::HandledByContent:
+      case APZHandledPlace::HandledByContent:
         return INPUT_RESULT_HANDLED_CONTENT;
-      case APZHandledResult::Invalid:
+      case APZHandledPlace::Invalid:
         MOZ_ASSERT_UNREACHABLE("The handled result should NOT be Invalid");
         return INPUT_RESULT_UNHANDLED;
     }
     MOZ_ASSERT_UNREACHABLE("Unknown handled result");
     return INPUT_RESULT_UNHANDLED;
+  }
+
+  static int32_t ConvertSideBits(SideBits aSideBits) {
+    int32_t ret = java::PanZoomController::SCROLLABLE_FLAG_NONE;
+    if (aSideBits & SideBits::eTop) {
+      ret |= java::PanZoomController::SCROLLABLE_FLAG_TOP;
+    }
+    if (aSideBits & SideBits::eRight) {
+      ret |= java::PanZoomController::SCROLLABLE_FLAG_RIGHT;
+    }
+    if (aSideBits & SideBits::eBottom) {
+      ret |= java::PanZoomController::SCROLLABLE_FLAG_BOTTOM;
+    }
+    if (aSideBits & SideBits::eLeft) {
+      ret |= java::PanZoomController::SCROLLABLE_FLAG_LEFT;
+    }
+    return ret;
+  }
+
+  static int32_t ConvertScrollDirections(
+      layers::ScrollDirections aScrollDirections) {
+    int32_t ret = java::PanZoomController::OVERSCROLL_FLAG_NONE;
+    if (aScrollDirections.contains(layers::HorizontalScrollDirection)) {
+      ret |= java::PanZoomController::OVERSCROLL_FLAG_HORIZONTAL;
+    }
+    if (aScrollDirections.contains(layers::VerticalScrollDirection)) {
+      ret |= java::PanZoomController::OVERSCROLL_FLAG_VERTICAL;
+    }
+    return ret;
+  }
+
+  static java::PanZoomController::InputResultDetail::LocalRef
+  ConvertAPZHandledResult(const APZHandledResult& aHandledResult) {
+    return java::PanZoomController::InputResultDetail::New(
+        ConvertAPZHandledPlace(aHandledResult.mPlace),
+        ConvertSideBits(aHandledResult.mScrollableDirections),
+        ConvertScrollDirections(aHandledResult.mOverscrollDirections));
   }
 
  public:
@@ -532,7 +570,7 @@ class NPZCSupport final
         nsWindow::GetEventTimeStamp(aTime), nsWindow::GetModifiers(aMetaState));
 
     APZEventResult result = controller->InputBridge()->ReceiveInputEvent(input);
-    if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
+    if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
       return INPUT_RESULT_IGNORED;
     }
 
@@ -541,11 +579,11 @@ class NPZCSupport final
       window->ProcessUntransformedAPZEvent(&mouseEvent, result);
     });
 
-    switch (result.mStatus) {
+    switch (result.GetStatus()) {
       case nsEventStatus_eIgnore:
         return INPUT_RESULT_UNHANDLED;
       case nsEventStatus_eConsumeDoDefault:
-        return (result.mHandledResult == Some(APZHandledResult::HandledByRoot))
+        return result.GetHandledResult()->IsHandledByRoot()
                    ? INPUT_RESULT_HANDLED
                    : INPUT_RESULT_HANDLED_CONTENT;
       default:
@@ -783,25 +821,28 @@ class NPZCSupport final
 
     if (!controller) {
       if (aReturnResult) {
-        aReturnResult->Complete(
-            java::sdk::Integer::ValueOf(INPUT_RESULT_UNHANDLED));
+        aReturnResult->Complete(java::PanZoomController::InputResultDetail::New(
+            INPUT_RESULT_UNHANDLED,
+            java::PanZoomController::SCROLLABLE_FLAG_NONE,
+            java::PanZoomController::OVERSCROLL_FLAG_NONE));
       }
       return;
     }
 
     APZEventResult result =
         controller->InputBridge()->ReceiveInputEvent(aInput);
-    if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
+    if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
       if (aReturnResult) {
-        aReturnResult->Complete(
-            java::sdk::Integer::ValueOf(INPUT_RESULT_IGNORED));
+        aReturnResult->Complete(java::PanZoomController::InputResultDetail::New(
+            INPUT_RESULT_IGNORED, java::PanZoomController::SCROLLABLE_FLAG_NONE,
+            java::PanZoomController::OVERSCROLL_FLAG_NONE));
       }
       return;
     }
 
     // Dispatch APZ input event on Gecko thread.
     PostInputEvent([aInput, result](nsWindow* window) {
-      WidgetTouchEvent touchEvent = aInput.ToWidgetTouchEvent(window);
+      WidgetTouchEvent touchEvent = aInput.ToWidgetEvent(window);
       window->ProcessUntransformedAPZEvent(&touchEvent, result);
       window->DispatchHitTest(touchEvent);
     });
@@ -811,22 +852,28 @@ class NPZCSupport final
       return;
     }
 
-    if (result.mHandledResult != Nothing()) {
+    if (result.GetHandledResult() != Nothing()) {
       // We know conclusively that the root APZ handled this or not and
       // don't need to do any more work.
-      switch (result.mStatus) {
+      switch (result.GetStatus()) {
         case nsEventStatus_eIgnore:
           aReturnResult->Complete(
-              java::sdk::Integer::ValueOf(INPUT_RESULT_UNHANDLED));
+              java::PanZoomController::InputResultDetail::New(
+                  INPUT_RESULT_UNHANDLED,
+                  java::PanZoomController::SCROLLABLE_FLAG_NONE,
+                  java::PanZoomController::OVERSCROLL_FLAG_NONE));
           break;
         case nsEventStatus_eConsumeDoDefault:
-          aReturnResult->Complete(java::sdk::Integer::ValueOf(
-              ConvertAPZHandledResult(result.mHandledResult.value())));
+          aReturnResult->Complete(
+              ConvertAPZHandledResult(result.GetHandledResult().value()));
           break;
         default:
           MOZ_ASSERT_UNREACHABLE("Unexpected nsEventStatus");
           aReturnResult->Complete(
-              java::sdk::Integer::ValueOf(INPUT_RESULT_UNHANDLED));
+              java::PanZoomController::InputResultDetail::New(
+                  INPUT_RESULT_UNHANDLED,
+                  java::PanZoomController::SCROLLABLE_FLAG_NONE,
+                  java::PanZoomController::OVERSCROLL_FLAG_NONE));
           break;
       }
       return;
@@ -836,9 +883,8 @@ class NPZCSupport final
     controller->AddInputBlockCallback(
         result.mInputBlockId,
         [aReturnResult = java::GeckoResult::GlobalRef(aReturnResult)](
-            uint64_t aInputBlockId, APZHandledResult aHandledResult) {
-          aReturnResult->Complete(java::sdk::Integer::ValueOf(
-              ConvertAPZHandledResult(aHandledResult)));
+            uint64_t aInputBlockId, const APZHandledResult& aHandledResult) {
+          aReturnResult->Complete(ConvertAPZHandledResult(aHandledResult));
         });
   }
 };
@@ -1564,6 +1610,15 @@ auto GeckoViewSupport::OnLoadRequest(mozilla::jni::String::Param aUri,
                                aHasUserGesture, aIsTopLevel);
 }
 
+void GeckoViewSupport::OnShowDynamicToolbar() const {
+  GeckoSession::Window::LocalRef window(mGeckoViewWindow);
+  if (!window) {
+    return;
+  }
+
+  window->OnShowDynamicToolbar();
+}
+
 void GeckoViewSupport::OnReady(jni::Object::Param aQueue) {
   GeckoSession::Window::LocalRef window(mGeckoViewWindow);
   if (!window) {
@@ -1835,9 +1890,14 @@ RefPtr<MozPromise<bool, bool, false>> nsWindow::OnLoadRequest(
   if (!geckoViewSupport) {
     return MozPromise<bool, bool, false>::CreateAndResolve(false, __func__);
   }
+
   nsAutoCString spec, triggeringSpec;
   if (aUri) {
     aUri->GetDisplaySpec(spec);
+    if (aIsTopLevel && mozilla::net::SchemeIsData(aUri) &&
+        spec.Length() > MAX_TOPLEVEL_DATA_URI_LEN) {
+      return MozPromise<bool, bool, false>::CreateAndResolve(false, __func__);
+    }
   }
 
   bool isNullPrincipal = false;
@@ -2123,23 +2183,22 @@ nsresult nsWindow::MakeFullScreen(bool aFullScreen, nsIScreen*) {
   return NS_OK;
 }
 
-mozilla::layers::LayerManager* nsWindow::GetLayerManager(
-    PLayerTransactionChild*, LayersBackend, LayerManagerPersistence) {
-  if (mLayerManager) {
-    return mLayerManager;
+mozilla::WindowRenderer* nsWindow::GetWindowRenderer() {
+  if (mWindowRenderer) {
+    return mWindowRenderer;
   }
 
   if (mIsDisablingWebRender) {
     CreateLayerManager();
     mIsDisablingWebRender = false;
-    return mLayerManager;
+    return mWindowRenderer;
   }
 
   return nullptr;
 }
 
 void nsWindow::CreateLayerManager() {
-  if (mLayerManager) {
+  if (mWindowRenderer) {
     return;
   }
 
@@ -2155,7 +2214,7 @@ void nsWindow::CreateLayerManager() {
   if (ShouldUseOffMainThreadCompositing()) {
     LayoutDeviceIntRect rect = GetBounds();
     CreateCompositor(rect.Width(), rect.Height());
-    if (mLayerManager) {
+    if (mWindowRenderer) {
       return;
     }
 
@@ -2165,13 +2224,22 @@ void nsWindow::CreateLayerManager() {
 
   if (!ComputeShouldAccelerate() || sFailedToCreateGLContext) {
     printf_stderr(" -- creating basic, not accelerated\n");
-    mLayerManager = CreateBasicLayerManager();
+    mWindowRenderer = CreateFallbackRenderer();
   }
 }
 
 void nsWindow::NotifyDisablingWebRender() {
   mIsDisablingWebRender = true;
   RedrawAll();
+}
+
+void nsWindow::ShowDynamicToolbar() {
+  auto acc(mGeckoViewSupport.Access());
+  if (!acc) {
+    return;
+  }
+
+  acc->OnShowDynamicToolbar();
 }
 
 void nsWindow::OnSizeChanged(const gfx::IntSize& aSize) {
@@ -2438,10 +2506,10 @@ nsresult nsWindow::SynthesizeNativeTouchPoint(uint32_t aPointerId,
   return NS_OK;
 }
 
-nsresult nsWindow::SynthesizeNativeMouseEvent(LayoutDeviceIntPoint aPoint,
-                                              uint32_t aNativeMessage,
-                                              uint32_t aModifierFlags,
-                                              nsIObserver* aObserver) {
+nsresult nsWindow::SynthesizeNativeMouseEvent(
+    LayoutDeviceIntPoint aPoint, NativeMouseMessage aNativeMessage,
+    MouseButton aButton, nsIWidget::Modifiers aModifierFlags,
+    nsIObserver* aObserver) {
   mozilla::widget::AutoObserverNotifier notifier(aObserver, "mouseevent");
 
   MOZ_ASSERT(mNPZCSupport.IsAttached());
@@ -2453,36 +2521,64 @@ nsresult nsWindow::SynthesizeNativeMouseEvent(LayoutDeviceIntPoint aPoint,
   aPoint.x -= bounds.x;
   aPoint.y -= bounds.y;
 
+  int32_t nativeMessage;
+  switch (aNativeMessage) {
+    case NativeMouseMessage::ButtonDown:
+      nativeMessage = java::sdk::MotionEvent::ACTION_POINTER_DOWN;
+      break;
+    case NativeMouseMessage::ButtonUp:
+      nativeMessage = java::sdk::MotionEvent::ACTION_POINTER_UP;
+      break;
+    case NativeMouseMessage::Move:
+      nativeMessage = java::sdk::MotionEvent::ACTION_HOVER_MOVE;
+      break;
+    default:
+      MOZ_ASSERT_UNREACHABLE("Non supported mouse event on Android");
+      return NS_ERROR_INVALID_ARG;
+  }
+  int32_t button = 0;
+  if (aNativeMessage != NativeMouseMessage::ButtonUp) {
+    switch (aButton) {
+      case MouseButton::ePrimary:
+        button = java::sdk::MotionEvent::BUTTON_PRIMARY;
+        break;
+      case MouseButton::eMiddle:
+        button = java::sdk::MotionEvent::BUTTON_TERTIARY;
+        break;
+      case MouseButton::eSecondary:
+        button = java::sdk::MotionEvent::BUTTON_SECONDARY;
+        break;
+      case MouseButton::eX1:
+        button = java::sdk::MotionEvent::BUTTON_BACK;
+        break;
+      case MouseButton::eX2:
+        button = java::sdk::MotionEvent::BUTTON_FORWARD;
+        break;
+      default:
+        if (aNativeMessage == NativeMouseMessage::ButtonDown) {
+          MOZ_ASSERT_UNREACHABLE("Non supported mouse button type on Android");
+          return NS_ERROR_INVALID_ARG;
+        }
+        break;
+    }
+  }
+
+  // TODO (bug 1693237): Handle aModifierFlags.
   DispatchToUiThread(
       "nsWindow::SynthesizeNativeMouseEvent",
       [npzc = java::PanZoomController::NativeProvider::GlobalRef(npzc),
-       aNativeMessage, aPoint] {
-        npzc->SynthesizeNativeMouseEvent(aNativeMessage, aPoint.x, aPoint.y);
+       nativeMessage, aPoint, button] {
+        npzc->SynthesizeNativeMouseEvent(nativeMessage, aPoint.x, aPoint.y,
+                                         button);
       });
   return NS_OK;
 }
 
 nsresult nsWindow::SynthesizeNativeMouseMove(LayoutDeviceIntPoint aPoint,
                                              nsIObserver* aObserver) {
-  mozilla::widget::AutoObserverNotifier notifier(aObserver, "mouseevent");
-
-  MOZ_ASSERT(mNPZCSupport.IsAttached());
-  auto npzcSup(mNPZCSupport.Access());
-  MOZ_ASSERT(!!npzcSup);
-
-  const auto& npzc = npzcSup->GetJavaNPZC();
-  const auto& bounds = FindTopLevel()->mBounds;
-  aPoint.x -= bounds.x;
-  aPoint.y -= bounds.y;
-
-  DispatchToUiThread(
-      "nsWindow::SynthesizeNativeMouseMove",
-      [npzc = java::PanZoomController::NativeProvider::GlobalRef(npzc),
-       aPoint] {
-        npzc->SynthesizeNativeMouseEvent(
-            java::sdk::MotionEvent::ACTION_HOVER_MOVE, aPoint.x, aPoint.y);
-      });
-  return NS_OK;
+  return SynthesizeNativeMouseEvent(
+      aPoint, NativeMouseMessage::Move, MouseButton::eNotPressed,
+      nsIWidget::Modifiers::NO_MODIFIERS, aObserver);
 }
 
 bool nsWindow::WidgetPaintsBackground() {
@@ -2491,7 +2587,7 @@ bool nsWindow::WidgetPaintsBackground() {
 
 bool nsWindow::NeedsPaint() {
   auto lvs(mLayerViewSupport.Access());
-  if (!lvs || lvs->CompositorPaused() || !GetLayerManager(nullptr)) {
+  if (!lvs || lvs->CompositorPaused() || !GetWindowRenderer()) {
     return false;
   }
 
@@ -2616,4 +2712,193 @@ already_AddRefed<nsIWidget> nsIWidget::CreateTopLevelWindow() {
 already_AddRefed<nsIWidget> nsIWidget::CreateChildWindow() {
   nsCOMPtr<nsIWidget> window = new nsWindow();
   return window.forget();
+}
+
+static already_AddRefed<DataSourceSurface> GetCursorImage(
+    const nsIWidget::Cursor& aCursor, mozilla::CSSToLayoutDeviceScale aScale) {
+  if (!aCursor.IsCustom()) {
+    return nullptr;
+  }
+
+  RefPtr<DataSourceSurface> destDataSurface;
+
+  nsIntSize size = nsIWidget::CustomCursorSize(aCursor);
+  // prevent DoS attacks
+  if (size.width > 128 || size.height > 128) {
+    return nullptr;
+  }
+
+  RefPtr<gfx::SourceSurface> surface = aCursor.mContainer->GetFrameAtSize(
+      size * aScale.scale, imgIContainer::FRAME_CURRENT,
+      imgIContainer::FLAG_SYNC_DECODE | imgIContainer::FLAG_ASYNC_NOTIFY);
+  if (NS_WARN_IF(!surface)) {
+    return nullptr;
+  }
+
+  RefPtr<DataSourceSurface> srcDataSurface = surface->GetDataSurface();
+  if (NS_WARN_IF(!srcDataSurface)) {
+    return nullptr;
+  }
+
+  DataSourceSurface::ScopedMap sourceMap(srcDataSurface,
+                                         DataSourceSurface::READ);
+
+  destDataSurface = gfx::Factory::CreateDataSourceSurfaceWithStride(
+      srcDataSurface->GetSize(), SurfaceFormat::R8G8B8A8,
+      sourceMap.GetStride());
+  if (NS_WARN_IF(!destDataSurface)) {
+    return nullptr;
+  }
+
+  DataSourceSurface::ScopedMap destMap(destDataSurface,
+                                       DataSourceSurface::READ_WRITE);
+
+  SwizzleData(sourceMap.GetData(), sourceMap.GetStride(), surface->GetFormat(),
+              destMap.GetData(), destMap.GetStride(), SurfaceFormat::R8G8B8A8,
+              destDataSurface->GetSize());
+
+  return destDataSurface.forget();
+}
+
+static int32_t GetCursorType(nsCursor aCursor) {
+  // When our minimal requirement of SDK version is 25+,
+  // we should replace with JNI auto-generator.
+  switch (aCursor) {
+    case eCursor_standard:
+      // android.view.PointerIcon.TYPE_ARROW
+      return 0x3e8;
+    case eCursor_wait:
+      // android.view.PointerIcon.TYPE_WAIT
+      return 0x3ec;
+    case eCursor_select:
+      // android.view.PointerIcon.TYPE_TEXT;
+      return 0x3f0;
+    case eCursor_hyperlink:
+      // android.view.PointerIcon.TYPE_HAND
+      return 0x3ea;
+    case eCursor_n_resize:
+    case eCursor_s_resize:
+    case eCursor_ns_resize:
+    case eCursor_row_resize:
+      // android.view.PointerIcon.TYPE_VERTICAL_DOUBLE_ARROW
+      return 0x3f7;
+    case eCursor_w_resize:
+    case eCursor_e_resize:
+    case eCursor_ew_resize:
+    case eCursor_col_resize:
+      // android.view.PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW
+      return 0x3f6;
+    case eCursor_nw_resize:
+    case eCursor_se_resize:
+    case eCursor_nwse_resize:
+      // android.view.PointerIcon.TYPE_TOP_LEFT_DIAGONAL_DOUBLE_ARROW
+      return 0x3f9;
+    case eCursor_ne_resize:
+    case eCursor_sw_resize:
+    case eCursor_nesw_resize:
+      // android.view.PointerIcon.TYPE_TOP_RIGHT_DIAGONAL_DOUBLE_ARROW
+      return 0x3f8;
+    case eCursor_crosshair:
+      // android.view.PointerIcon.TYPE_CROSSHAIR
+      return 0x3ef;
+    case eCursor_move:
+      // android.view.PointerIcon.TYPE_ARROW
+      return 0x3e8;
+    case eCursor_help:
+      // android.view.PointerIcon.TYPE_HELP
+      return 0x3eb;
+    case eCursor_copy:
+      // android.view.PointerIcon.TYPE_COPY
+      return 0x3f3;
+    case eCursor_alias:
+      // android.view.PointerIcon.TYPE_ALIAS
+      return 0x3f2;
+    case eCursor_context_menu:
+      // android.view.PointerIcon.TYPE_CONTEXT_MENU
+      return 0x3e9;
+    case eCursor_cell:
+      // android.view.PointerIcon.TYPE_CELL
+      return 0x3ee;
+    case eCursor_grab:
+      // android.view.PointerIcon.TYPE_GRAB
+      return 0x3fc;
+    case eCursor_grabbing:
+      // android.view.PointerIcon.TYPE_GRABBING
+      return 0x3fd;
+    case eCursor_spinning:
+      // android.view.PointerIcon.TYPE_WAIT
+      return 0x3ec;
+    case eCursor_zoom_in:
+      // android.view.PointerIcon.TYPE_ZOOM_IN
+      return 0x3fa;
+    case eCursor_zoom_out:
+      // android.view.PointerIcon.TYPE_ZOOM_OUT
+      return 0x3fb;
+    case eCursor_not_allowed:
+      // android.view.PointerIcon.TYPE_NO_DROP:
+      return 0x3f4;
+    case eCursor_no_drop:
+      // android.view.PointerIcon.TYPE_NO_DROP:
+      return 0x3f4;
+    case eCursor_vertical_text:
+      // android.view.PointerIcon.TYPE_VERTICAL_TEXT
+      return 0x3f1;
+    case eCursor_all_scroll:
+      // android.view.PointerIcon.TYPE_ALL_SCROLL
+      return 0x3f5;
+    case eCursor_none:
+      // android.view.PointerIcon.TYPE_NULL
+      return 0;
+    default:
+      NS_WARNING_ASSERTION(aCursor, "Invalid cursor type");
+      // android.view.PointerIcon.TYPE_ARROW
+      return 0x3e8;
+  }
+}
+
+void nsWindow::SetCursor(const Cursor& aCursor) {
+  if (mozilla::jni::GetAPIVersion() < 24) {
+    return;
+  }
+
+  // Only change cursor if it's actually been changed
+  if (!mUpdateCursor && mCursor == aCursor) {
+    return;
+  }
+
+  mUpdateCursor = false;
+  mCursor = aCursor;
+
+  int32_t type = 0;
+  RefPtr<DataSourceSurface> destDataSurface =
+      GetCursorImage(aCursor, GetDefaultScale());
+  if (!destDataSurface) {
+    type = GetCursorType(aCursor.mDefaultCursor);
+  }
+
+  if (mozilla::jni::NativeWeakPtr<LayerViewSupport>::Accessor lvs{
+          mLayerViewSupport.Access()}) {
+    const auto& compositor = lvs->GetJavaCompositor();
+
+    DispatchToUiThread(
+        "nsWindow::SetCursor",
+        [compositor = GeckoSession::Compositor::GlobalRef(compositor), type,
+         destDataSurface = std::move(destDataSurface),
+         hotspotX = aCursor.mHotspotX, hotspotY = aCursor.mHotspotY] {
+          java::sdk::Bitmap::LocalRef bitmap;
+          if (destDataSurface) {
+            DataSourceSurface::ScopedMap destMap(destDataSurface,
+                                                 DataSourceSurface::READ);
+            auto pixels = mozilla::jni::ByteBuffer::New(
+                reinterpret_cast<int8_t*>(destMap.GetData()),
+                destMap.GetStride() * destDataSurface->GetSize().height);
+            bitmap = java::sdk::Bitmap::CreateBitmap(
+                destDataSurface->GetSize().width,
+                destDataSurface->GetSize().height,
+                java::sdk::Config::ARGB_8888());
+            bitmap->CopyPixelsFromBuffer(pixels);
+          }
+          compositor->SetPointerIcon(type, bitmap, hotspotX, hotspotY);
+        });
+  }
 }

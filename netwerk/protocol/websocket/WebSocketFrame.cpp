@@ -34,7 +34,8 @@ WebSocketFrame::WebSocketFrame(bool aFinBit, bool aRsvBit1, bool aRsvBit2,
                                uint32_t aMask, const nsCString& aPayload)
     : mData(PR_Now(), aFinBit, aRsvBit1, aRsvBit2, aRsvBit3, aOpCode, aMaskBit,
             aMask, aPayload) {
-  MOZ_ASSERT(OnSocketThread(), "not on socket thread");
+  // This could be called on the background thread when socket process is
+  // enabled.
   mData.mTimeStamp = PR_Now();
 }
 
@@ -68,14 +69,11 @@ WebSocketFrame::GetPayload(nsACString& aValue) {
 }
 
 WebSocketFrameData::WebSocketFrameData()
-    : mTimeStamp(0),
-      mFinBit(false),
+    : mFinBit(false),
       mRsvBit1(false),
       mRsvBit2(false),
       mRsvBit3(false),
-      mMaskBit(false),
-      mOpCode(0),
-      mMask(0) {
+      mMaskBit(false) {
   MOZ_COUNT_CTOR(WebSocketFrameData);
 }
 
@@ -138,7 +136,7 @@ bool WebSocketFrameData::ReadIPCParams(const IPC::Message* aMessage,
     if (!ReadParam(aMessage, aIter, &bit)) { \
       return false;                          \
     }                                        \
-    x = bit;                                 \
+    (x) = bit;                               \
   }
 
   ReadParamHelper(mFinBit);

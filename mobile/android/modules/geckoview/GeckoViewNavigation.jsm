@@ -184,7 +184,6 @@ class GeckoViewNavigation extends GeckoViewModule {
         navFlags |= Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_LOAD_URI_DELEGATE;
 
         let triggeringPrincipal, referrerInfo, csp;
-        let parsedUri;
         if (referrerSessionId) {
           const referrerWindow = Services.ww.getWindowByName(
             referrerSessionId,
@@ -202,30 +201,19 @@ class GeckoViewNavigation extends GeckoViewModule {
             true,
             referrerWindow.browser.documentURI
           );
-        } else {
-          try {
-            // External apps are treated like web pages, so they should not get
-            // a privileged principal.
-            const isExternal =
-              navFlags & Ci.nsIWebNavigation.LOAD_FLAGS_FROM_EXTERNAL;
-            parsedUri = Services.io.newURI(uri);
-            if (
-              !isExternal &&
-              (parsedUri.schemeIs("about") ||
-                parsedUri.schemeIs("data") ||
-                parsedUri.schemeIs("file") ||
-                parsedUri.schemeIs("resource") ||
-                parsedUri.schemeIs("moz-extension"))
-            ) {
-              // Only allow privileged loading for certain URIs.
-              triggeringPrincipal = Services.scriptSecurityManager.createContentPrincipal(
-                parsedUri,
-                {}
-              );
-            }
-          } catch (ignored) {}
-
+        } else if (referrerUri) {
           referrerInfo = createReferrerInfo(referrerUri);
+        } else {
+          // External apps are treated like web pages, so they should not get
+          // a privileged principal.
+          const isExternal =
+            navFlags & Ci.nsIWebNavigation.LOAD_FLAGS_FROM_EXTERNAL;
+          if (!isExternal) {
+            // Always use the system principal as the triggering principal
+            // for user-initiated (ie. no referrer session and not external)
+            // loads. See discussion in bug 1573860.
+            triggeringPrincipal = Services.scriptSecurityManager.getSystemPrincipal();
+          }
         }
 
         if (!triggeringPrincipal) {
@@ -269,7 +257,7 @@ class GeckoViewNavigation extends GeckoViewModule {
         // referring session, the referrerInfo is null.
         //
         // csp is only present if we have a referring document, null otherwise.
-        this.browser.loadURI(parsedUri ? parsedUri.spec : uri, {
+        this.browser.loadURI(uri, {
           flags: navFlags,
           referrerInfo,
           triggeringPrincipal,
@@ -341,20 +329,38 @@ class GeckoViewNavigation extends GeckoViewModule {
       return null;
     }
 
+    const newSessionId = Services.uuid
+      .generateUUID()
+      .toString()
+      .slice(1, -1)
+      .replace(/-/g, "");
+
     const message = {
       type: "GeckoView:OnNewSession",
       uri: aUri ? aUri.displaySpec : "",
+      newSessionId,
     };
+
+    // The window might be already open by the time we get the response from
+    // the Java layer, so we need to start waiting before sending the message.
+    const setupPromise = this.waitAndSetupWindow(
+      newSessionId,
+      aOpenWindowInfo,
+      aName
+    );
 
     let browser = undefined;
     this.eventDispatcher
       .sendRequestForResult(message)
-      .then(sessionId => {
-        return this.waitAndSetupWindow(sessionId, aOpenWindowInfo, aName);
+      .then(didOpenSession => {
+        if (!didOpenSession) {
+          return Promise.reject();
+        }
+        return setupPromise;
       })
       .then(
         window => {
-          browser = (window && window.browser) || null;
+          browser = window.browser;
         },
         () => {
           browser = null;
@@ -363,6 +369,7 @@ class GeckoViewNavigation extends GeckoViewModule {
 
     // Wait indefinitely for app to respond with a browser or null
     Services.tm.spinEventLoopUntil(
+      "GeckoViewNavigation.jsm:handleNewSession",
       () => this.window.closed || browser !== undefined
     );
     return browser || null;
@@ -550,6 +557,18 @@ class GeckoViewNavigation extends GeckoViewModule {
     this.browser.removeProgressListener(this.progressFilter);
   }
 
+  serializePermission({ type, capability, principal }) {
+    const { URI, originAttributes, privateBrowsingId } = principal;
+    return {
+      uri: Services.io.createExposableURI(URI).displaySpec,
+      principal: E10SUtils.serializePrincipal(principal),
+      perm: type,
+      value: capability,
+      contextId: originAttributes.geckoViewSessionContextId,
+      privateMode: privateBrowsingId != 0,
+    };
+  }
+
   // WebProgress event handler.
   onLocationChange(aWebProgress, aRequest, aLocationURI, aFlags) {
     debug`onLocationChange`;
@@ -569,12 +588,43 @@ class GeckoViewNavigation extends GeckoViewModule {
       return;
     }
 
+    const { contentPrincipal } = this.browser;
+    let permissions;
+    if (contentPrincipal) {
+      const rawPerms = Services.perms.getAllForPrincipal(contentPrincipal);
+      permissions = rawPerms.map(this.serializePermission);
+
+      // The only way for apps to set permissions is to get hold of an existing
+      // permission and change its value.
+      // Tracking protection exception permissions are only present when
+      // explicitly added by the app, so if one is not present, we need to send
+      // a DENY_ACTION tracking protection permission so that apps can use it
+      // to add tracking protection exceptions.
+      const trackingProtectionPermission =
+        contentPrincipal.privateBrowsingId == 0
+          ? "trackingprotection"
+          : "trackingprotection-pb";
+      if (
+        contentPrincipal.isContentPrincipal &&
+        rawPerms.findIndex(p => p.type == trackingProtectionPermission) == -1
+      ) {
+        permissions.push(
+          this.serializePermission({
+            type: trackingProtectionPermission,
+            capability: Ci.nsIPermissionManager.DENY_ACTION,
+            principal: contentPrincipal,
+          })
+        );
+      }
+    }
+
     const message = {
       type: "GeckoView:LocationChange",
       uri: fixedURI.displaySpec,
       canGoBack: this.browser.canGoBack,
       canGoForward: this.browser.canGoForward,
       isTopLevel: aWebProgress.isTopLevel,
+      permissions,
     };
 
     this.eventDispatcher.sendRequest(message);

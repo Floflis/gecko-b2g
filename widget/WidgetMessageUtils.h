@@ -51,6 +51,13 @@ struct ParamTraits<nsCursor>
     : ContiguousEnumSerializer<nsCursor, eCursor_standard, eCursorCount> {};
 
 template <>
+struct ParamTraits<nsIWidget::TouchpadGesturePhase>
+    : ContiguousEnumSerializerInclusive<
+          nsIWidget::TouchpadGesturePhase,
+          nsIWidget::TouchpadGesturePhase::PHASE_BEGIN,
+          nsIWidget::TouchpadGesturePhase::PHASE_END> {};
+
+template <>
 struct ParamTraits<nsIWidget::TouchPointerState>
     : public BitFlagsEnumSerializer<nsIWidget::TouchPointerState,
                                     nsIWidget::TouchPointerState::ALL_BITS> {};

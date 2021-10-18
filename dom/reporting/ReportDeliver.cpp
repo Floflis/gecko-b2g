@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "mozilla/JSONWriter.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/dom/EndpointForReportChild.h"
 #include "mozilla/dom/Fetch.h"
@@ -220,8 +221,9 @@ void SendReports(nsTArray<ReportDeliver::ReportData>& aReports,
   RequestOrUSVString fetchInput;
   fetchInput.SetAsRequest() = request;
 
-  RefPtr<Promise> promise = FetchRequest(
-      globalObject, fetchInput, RequestInit(), CallerType::NonSystem, error);
+  RootedDictionary<RequestInit> requestInit(RootingCx());
+  RefPtr<Promise> promise = FetchRequest(globalObject, fetchInput, requestInit,
+                                         CallerType::NonSystem, error);
   if (error.Failed()) {
     for (auto& report : aReports) {
       ++report.mFailures;
@@ -370,6 +372,12 @@ ReportDeliver::Notify(nsITimer* aTimer) {
 }
 
 NS_IMETHODIMP
+ReportDeliver::GetName(nsACString& aName) {
+  aName.AssignLiteral("ReportDeliver");
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 ReportDeliver::Observe(nsISupports* aSubject, const char* aTopic,
                        const char16_t* aData) {
   MOZ_ASSERT(!strcmp(aTopic, NS_XPCOM_SHUTDOWN_OBSERVER_ID));
@@ -398,6 +406,7 @@ NS_INTERFACE_MAP_BEGIN(ReportDeliver)
   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIObserver)
   NS_INTERFACE_MAP_ENTRY(nsIObserver)
   NS_INTERFACE_MAP_ENTRY(nsITimerCallback)
+  NS_INTERFACE_MAP_ENTRY(nsINamed)
 NS_INTERFACE_MAP_END
 
 NS_IMPL_ADDREF(ReportDeliver)

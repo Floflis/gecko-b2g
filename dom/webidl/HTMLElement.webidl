@@ -26,7 +26,7 @@ interface HTMLElement : Element {
            attribute DOMString dir;
 
   [CEReactions, GetterThrows, Pure]
-           attribute [TreatNullAs=EmptyString] DOMString innerText;
+           attribute [LegacyNullToEmptyString] DOMString innerText;
 
   // user interaction
   [CEReactions, SetterThrows, Pure]
@@ -68,7 +68,7 @@ interface HTMLElement : Element {
   //readonly attribute boolean? commandChecked;
 
   // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-attachinternals
-  [Pref="dom.webcomponents.formAssociatedCustomElement.enabled", Throws]
+  [Pref="dom.webcomponents.elementInternals.enabled", Throws]
   ElementInternals attachInternals();
 };
 

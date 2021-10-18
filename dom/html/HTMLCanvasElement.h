@@ -15,12 +15,10 @@
 #  include "nsSize.h"
 #  include "nsError.h"
 
-#  include "mozilla/dom/BindingDeclarations.h"
 #  include "mozilla/dom/CanvasRenderingContextHelper.h"
 #  include "mozilla/gfx/Rect.h"
 #  include "mozilla/layers/LayersTypes.h"
 
-class nsDisplayListBuilder;
 class nsICanvasRenderingContextInternal;
 class nsIInputStream;
 class nsITimerCallback;
@@ -28,11 +26,11 @@ enum class gfxAlphaType;
 
 namespace mozilla {
 
+class nsDisplayListBuilder;
 class ClientWebGLContext;
 
 namespace layers {
 class CanvasRenderer;
-class CanvasLayer;
 class Image;
 class Layer;
 class LayerManager;
@@ -123,7 +121,6 @@ class HTMLCanvasElement final : public nsGenericHTMLElement,
   enum { DEFAULT_CANVAS_WIDTH = 300, DEFAULT_CANVAS_HEIGHT = 150 };
 
   typedef layers::CanvasRenderer CanvasRenderer;
-  typedef layers::CanvasLayer CanvasLayer;
   typedef layers::Layer Layer;
   typedef layers::LayerManager LayerManager;
   typedef layers::WebRenderCanvasData WebRenderCanvasData;
@@ -282,29 +279,28 @@ class HTMLCanvasElement final : public nsGenericHTMLElement,
                               const nsAString& aValue,
                               nsIPrincipal* aMaybeScriptedPrincipal,
                               nsAttrValue& aResult) override;
+  NS_IMETHOD_(bool) IsAttributeMapped(const nsAtom* aAttribute) const override;
   nsChangeHint GetAttributeChangeHint(const nsAtom* aAttribute,
                                       int32_t aModType) const override;
+  nsMapRuleToAttributesFunc GetAttributeMappingFunction() const override;
 
   virtual nsresult Clone(dom::NodeInfo*, nsINode** aResult) const override;
   nsresult CopyInnerTo(HTMLCanvasElement* aDest);
 
   void GetEventTargetParent(EventChainPreVisitor& aVisitor) override;
 
+  static void MapAttributesIntoRule(const nsMappedAttributes* aAttributes,
+                                    MappedDeclarations&);
+
   /*
    * Helpers called by various users of Canvas
    */
 
-  already_AddRefed<Layer> GetCanvasLayer(nsDisplayListBuilder* aBuilder,
-                                         Layer* aOldLayer,
-                                         LayerManager* aManager);
+  already_AddRefed<layers::Image> GetAsImage();
   bool UpdateWebRenderCanvasData(nsDisplayListBuilder* aBuilder,
                                  WebRenderCanvasData* aCanvasData);
   bool InitializeCanvasRenderer(nsDisplayListBuilder* aBuilder,
                                 CanvasRenderer* aRenderer);
-  // Should return true if the canvas layer should always be marked inactive.
-  // We should return true here if we can't do accelerated compositing with
-  // a non-BasicCanvasLayer.
-  bool ShouldForceInactiveLayer(LayerManager* aManager);
 
   // Call this whenever we need future changes to the canvas
   // to trigger fresh invalidation requests. This needs to be called

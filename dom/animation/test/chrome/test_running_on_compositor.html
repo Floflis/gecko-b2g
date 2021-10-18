@@ -247,9 +247,6 @@ promise_test(async t => {
 // This is to test that we don't temporarily clear the flag when forcing
 // an unthrottled sample.
 promise_test(async t => {
-  // Needs scrollbars to cause overflow.
-  await SpecialPowers.pushPrefEnv({ set: [["ui.showHideScrollbars", 1]] })
-
   var div = addDiv(t, { style: 'animation: rotate 100s' });
   var animation = div.getAnimations()[0];
 
@@ -1050,9 +1047,10 @@ promise_test(async t => {
   await waitForAnimationReadyToRestyle(animation);
   await waitForPaints();
 
-  assert_animation_is_not_running_on_compositor(animation,
-    'Opaque background image stops background-color animations from running ' +
-    'on the compositor');
+  // Bug 1712246. We should optimize this case eventually.
+  //assert_animation_is_not_running_on_compositor(animation,
+  //  'Opaque background image stops background-color animations from running ' +
+  //  'on the compositor');
 }, 'Opaque background image stops background-color animations from running ' +
    ' on the compositor');
 

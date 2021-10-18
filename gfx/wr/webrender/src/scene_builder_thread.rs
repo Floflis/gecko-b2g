@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{AsyncBlobImageRasterizer, BlobImageResult};
+use api::{AsyncBlobImageRasterizer, BlobImageResult, Parameter};
 use api::{DocumentId, PipelineId, ExternalEvent, BlobImageRequest};
 use api::{NotificationRequest, Checkpoint, IdNamespace, QualitySettings};
 use api::{PrimitiveKeyKind, SharedFontInstanceMap};
@@ -14,7 +14,7 @@ use crate::render_api::{ApiMsg, FrameMsg, SceneMsg, ResourceUpdate, TransactionM
 use crate::capture::CaptureConfig;
 use crate::frame_builder::FrameBuilderConfig;
 use crate::scene_building::SceneBuilder;
-use crate::clip::ClipIntern;
+use crate::clip::{ClipIntern, PolygonIntern};
 use crate::filterdata::FilterDataIntern;
 use crate::intern::{Internable, Interner, UpdateList};
 use crate::internal_types::{FastHashMap, FastHashSet};
@@ -28,19 +28,14 @@ use crate::prim_store::picture::Picture;
 use crate::prim_store::text_run::TextRun;
 use crate::profiler::{self, TransactionProfile};
 use crate::render_backend::SceneView;
-use crate::renderer::{PipelineInfo, SceneBuilderHooks};
+use crate::renderer::{FullFrameStats, PipelineInfo, SceneBuilderHooks};
 use crate::scene::{Scene, BuiltScene, SceneStats};
+use crate::spatial_tree::{SceneSpatialTree, SpatialTreeUpdates};
 use std::iter;
-use std::mem::replace;
 use time::precise_time_ns;
 use crate::util::drain_filter;
 use std::thread;
 use std::time::Duration;
-
-#[cfg(feature = "debugger")]
-use crate::debug_server;
-#[cfg(feature = "debugger")]
-use api::{BuiltDisplayListIter, DisplayItem};
 
 fn rasterize_blobs(txn: &mut TransactionMsg, is_low_priority: bool) {
     profile_scope!("rasterize_blobs");
@@ -69,10 +64,11 @@ pub struct BuiltTransaction {
     pub removed_pipelines: Vec<(PipelineId, DocumentId)>,
     pub notifications: Vec<NotificationRequest>,
     pub interner_updates: Option<InternerUpdates>,
+    pub spatial_tree_updates: Option<SpatialTreeUpdates>,
     pub render_frame: bool,
     pub invalidate_rendered_frame: bool,
-    pub discard_frame_state_for_pipelines: Vec<PipelineId>,
     pub profile: TransactionProfile,
+    pub frame_stats: FullFrameStats,
 }
 
 #[cfg(feature = "replay")]
@@ -84,6 +80,7 @@ pub struct LoadScene {
     pub config: FrameBuilderConfig,
     pub build_frame: bool,
     pub interners: Interners,
+    pub spatial_tree: SceneSpatialTree,
 }
 
 /// Message to the scene builder thread.
@@ -95,12 +92,13 @@ pub enum SceneBuilderRequest {
     GetGlyphIndices(GlyphIndexRequest),
     ClearNamespace(IdNamespace),
     SimulateLongSceneBuild(u32),
-    SimulateLongLowPrioritySceneBuild(u32),
     ExternalEvent(ExternalEvent),
     WakeUp,
+    StopRenderBackend,
     ShutDown(Option<Sender<()>>),
     Flush(Sender<()>),
     SetFrameBuilderConfig(FrameBuilderConfig),
+    SetParameter(Parameter),
     ReportMemory(Box<MemoryReport>, Sender<Box<MemoryReport>>),
     #[cfg(feature = "capture")]
     SaveScene(CaptureConfig),
@@ -110,22 +108,31 @@ pub enum SceneBuilderRequest {
     StartCaptureSequence(CaptureConfig),
     #[cfg(feature = "capture")]
     StopCaptureSequence,
-    DocumentsForDebugger
 }
 
 // Message from scene builder to render backend.
 pub enum SceneBuilderResult {
     Transactions(Vec<Box<BuiltTransaction>>, Option<Sender<SceneSwapResult>>),
-    #[cfg(feature = "capture")]
-    CapturedTransactions(Vec<Box<BuiltTransaction>>, CaptureConfig, Option<Sender<SceneSwapResult>>),
     ExternalEvent(ExternalEvent),
     FlushComplete(Sender<()>),
     DeleteDocument(DocumentId),
     ClearNamespace(IdNamespace),
     GetGlyphDimensions(GlyphDimensionRequest),
     GetGlyphIndices(GlyphIndexRequest),
+    SetParameter(Parameter),
+    StopRenderBackend,
     ShutDown(Option<Sender<()>>),
-    DocumentsForDebugger(String)
+
+    #[cfg(feature = "capture")]
+    /// The same as `Transactions`, but also supplies a `CaptureConfig` that the
+    /// render backend should use for sequence capture, until the next
+    /// `CapturedTransactions` or `StopCaptureSequence` result.
+    CapturedTransactions(Vec<Box<BuiltTransaction>>, CaptureConfig, Option<Sender<SceneSwapResult>>),
+
+    #[cfg(feature = "capture")]
+    /// The scene builder has stopped sequence capture, so the render backend
+    /// should do the same.
+    StopCaptureSequence,
 }
 
 // Message from render backend to scene builder to indicate the
@@ -201,18 +208,18 @@ struct Document {
     interners: Interners,
     stats: SceneStats,
     view: SceneView,
+    spatial_tree: SceneSpatialTree,
 }
 
 impl Document {
-    fn new(device_rect: DeviceIntRect, device_pixel_ratio: f32) -> Self {
+    fn new(device_rect: DeviceIntRect) -> Self {
         Document {
             scene: Scene::new(),
             interners: Interners::default(),
             stats: SceneStats::empty(),
+            spatial_tree: SceneSpatialTree::new(),
             view: SceneView {
                 device_rect,
-                device_pixel_ratio,
-                page_zoom_factor: 1.0,
                 quality_settings: QualitySettings::default(),
             },
         }
@@ -224,7 +231,6 @@ pub struct SceneBuilderThread {
     rx: Receiver<SceneBuilderRequest>,
     tx: Sender<ApiMsg>,
     config: FrameBuilderConfig,
-    default_device_pixel_ratio: f32,
     font_instances: SharedFontInstanceMap,
     size_of_ops: Option<MallocSizeOfOps>,
     hooks: Option<Box<dyn SceneBuilderHooks + Send>>,
@@ -257,7 +263,6 @@ impl SceneBuilderThreadChannels {
 impl SceneBuilderThread {
     pub fn new(
         config: FrameBuilderConfig,
-        default_device_pixel_ratio: f32,
         font_instances: SharedFontInstanceMap,
         size_of_ops: Option<MallocSizeOfOps>,
         hooks: Option<Box<dyn SceneBuilderHooks + Send>>,
@@ -270,7 +275,6 @@ impl SceneBuilderThread {
             rx,
             tx,
             config,
-            default_device_pixel_ratio,
             font_instances,
             size_of_ops,
             hooks,
@@ -303,9 +307,9 @@ impl SceneBuilderThread {
                 Ok(SceneBuilderRequest::Flush(tx)) => {
                     self.send(SceneBuilderResult::FlushComplete(tx));
                 }
-                Ok(SceneBuilderRequest::Transactions(mut txns)) => {
-                    let built_txns : Vec<Box<BuiltTransaction>> = txns.iter_mut()
-                        .map(|txn| self.process_transaction(txn))
+                Ok(SceneBuilderRequest::Transactions(txns)) => {
+                    let built_txns : Vec<Box<BuiltTransaction>> = txns.into_iter()
+                        .map(|txn| self.process_transaction(*txn))
                         .collect();
                     #[cfg(feature = "capture")]
                     match built_txns.iter().any(|txn| txn.built_scene.is_some()) {
@@ -317,7 +321,6 @@ impl SceneBuilderThread {
                 Ok(SceneBuilderRequest::AddDocument(document_id, initial_size)) => {
                     let old = self.documents.insert(document_id, Document::new(
                         initial_size.into(),
-                        self.default_device_pixel_ratio,
                     ));
                     debug_assert!(old.is_none());
                 }
@@ -338,6 +341,9 @@ impl SceneBuilderThread {
                 Ok(SceneBuilderRequest::GetGlyphIndices(request)) => {
                     self.send(SceneBuilderResult::GetGlyphIndices(request));
                 }
+                Ok(SceneBuilderRequest::StopRenderBackend) => {
+                    self.send(SceneBuilderResult::StopRenderBackend);
+                }
                 Ok(SceneBuilderRequest::ShutDown(sync)) => {
                     self.send(SceneBuilderResult::ShutDown(sync));
                     break;
@@ -345,13 +351,15 @@ impl SceneBuilderThread {
                 Ok(SceneBuilderRequest::SimulateLongSceneBuild(time_ms)) => {
                     self.simulate_slow_ms = time_ms
                 }
-                Ok(SceneBuilderRequest::SimulateLongLowPrioritySceneBuild(_)) => {}
                 Ok(SceneBuilderRequest::ReportMemory(mut report, tx)) => {
                     (*report) += self.report_memory();
                     tx.send(report).unwrap();
                 }
                 Ok(SceneBuilderRequest::SetFrameBuilderConfig(cfg)) => {
                     self.config = cfg;
+                }
+                Ok(SceneBuilderRequest::SetParameter(prop)) => {
+                    self.send(SceneBuilderResult::SetParameter(prop));
                 }
                 #[cfg(feature = "replay")]
                 Ok(SceneBuilderRequest::LoadScenes(msg)) => {
@@ -370,10 +378,7 @@ impl SceneBuilderThread {
                     // FIXME(aosmond): clear config for frames and resource cache without scene
                     // rebuild?
                     self.capture_config = None;
-                }
-                Ok(SceneBuilderRequest::DocumentsForDebugger) => {
-                    let json = self.get_docs_for_debugger();
-                    self.send(SceneBuilderResult::DocumentsForDebugger(json));
+                    self.send(SceneBuilderResult::StopCaptureSequence);
                 }
                 Err(_) => {
                     break;
@@ -398,6 +403,9 @@ impl SceneBuilderThread {
             let interners_name = format!("interners-{}-{}", id.namespace_id.0, id.id);
             config.serialize_for_scene(&doc.interners, interners_name);
 
+            let scene_spatial_tree_name = format!("scene-spatial-tree-{}-{}", id.namespace_id.0, id.id);
+            config.serialize_for_scene(&doc.spatial_tree, scene_spatial_tree_name);
+
             use crate::render_api::CaptureBits;
             if config.bits.contains(CaptureBits::SCENE) {
                 let file_name = format!("scene-{}-{}", id.namespace_id.0, id.id);
@@ -413,6 +421,7 @@ impl SceneBuilderThread {
 
             let mut built_scene = None;
             let mut interner_updates = None;
+            let mut spatial_tree_updates = None;
 
             if item.scene.has_root_pipeline() {
                 built_scene = Some(SceneBuilder::build(
@@ -421,11 +430,16 @@ impl SceneBuilderThread {
                     &item.view,
                     &self.config,
                     &mut item.interners,
+                    &mut item.spatial_tree,
                     &SceneStats::empty(),
                 ));
 
                 interner_updates = Some(
                     item.interners.end_frame_and_get_pending_updates()
+                );
+
+                spatial_tree_updates = Some(
+                    item.spatial_tree.end_frame_and_get_pending_updates()
                 );
             }
 
@@ -436,6 +450,7 @@ impl SceneBuilderThread {
                     interners: item.interners,
                     stats: SceneStats::empty(),
                     view: item.view.clone(),
+                    spatial_tree: item.spatial_tree,
                 },
             );
 
@@ -450,10 +465,11 @@ impl SceneBuilderThread {
                 blob_rasterizer: None,
                 frame_ops: Vec::new(),
                 removed_pipelines: Vec::new(),
-                discard_frame_state_for_pipelines: Vec::new(),
                 notifications: Vec::new(),
                 interner_updates,
+                spatial_tree_updates,
                 profile: TransactionProfile::new(),
+                frame_stats: FullFrameStats::default(),
             })];
 
             self.forward_built_transactions(txns);
@@ -488,72 +504,8 @@ impl SceneBuilderThread {
         self.save_capture_sequence();
     }
 
-    #[cfg(feature = "debugger")]
-    fn traverse_items<'a>(
-        &self,
-        traversal: &mut BuiltDisplayListIter<'a>,
-        node: &mut debug_server::TreeNode,
-    ) {
-        loop {
-            let subtraversal = {
-                let item = match traversal.next() {
-                    Some(item) => item,
-                    None => break,
-                };
-
-                match *item.item() {
-                    display_item @ DisplayItem::PushStackingContext(..) => {
-                        let mut subtraversal = item.sub_iter();
-                        let mut child_node =
-                            debug_server::TreeNode::new(&display_item.debug_name().to_string());
-                        self.traverse_items(&mut subtraversal, &mut child_node);
-                        node.add_child(child_node);
-                        Some(subtraversal)
-                    }
-                    DisplayItem::PopStackingContext => {
-                        return;
-                    }
-                    display_item => {
-                        node.add_item(&display_item.debug_name().to_string());
-                        None
-                    }
-                }
-            };
-
-            // If flatten_item created a sub-traversal, we need `traversal` to have the
-            // same state as the completed subtraversal, so we reinitialize it here.
-            if let Some(subtraversal) = subtraversal {
-                *traversal = subtraversal;
-            }
-        }
-    }
-
-    #[cfg(not(feature = "debugger"))]
-    fn get_docs_for_debugger(&self) -> String {
-        String::new()
-    }
-
-    #[cfg(feature = "debugger")]
-    fn get_docs_for_debugger(&self) -> String {
-        let mut docs = debug_server::DocumentList::new();
-
-        for (_, doc) in &self.documents {
-            let mut debug_doc = debug_server::TreeNode::new("document");
-
-            for (_, pipeline) in &doc.scene.pipelines {
-                let mut debug_dl = debug_server::TreeNode::new("display-list");
-                self.traverse_items(&mut pipeline.display_list.iter(), &mut debug_dl);
-                debug_doc.add_child(debug_dl);
-            }
-
-            docs.add(debug_doc);
-        }
-
-        serde_json::to_string(&docs).unwrap()
-    }
-
     /// Do the bulk of the work of the scene builder thread.
-    fn process_transaction(&mut self, txn: &mut TransactionMsg) -> Box<BuiltTransaction> {
+    fn process_transaction(&mut self, mut txn: TransactionMsg) -> Box<BuiltTransaction> {
         profile_scope!("process_transaction");
 
         if let Some(ref hooks) = self.hooks {
@@ -565,25 +517,21 @@ impl SceneBuilderThread {
 
         let mut profile = txn.profile.take();
 
-        profile.start_time(profiler::SCENE_BUILD_TIME);
-
-        let mut discard_frame_state_for_pipelines = Vec::new();
+        let scene_build_start = precise_time_ns();
         let mut removed_pipelines = Vec::new();
         let mut rebuild_scene = false;
+        let mut frame_stats = FullFrameStats::default();
+
         for message in txn.scene_ops.drain(..) {
             match message {
                 SceneMsg::UpdateEpoch(pipeline_id, epoch) => {
                     scene.update_epoch(pipeline_id, epoch);
                 }
-                SceneMsg::SetPageZoom(factor) => {
-                    doc.view.page_zoom_factor = factor.get();
-                }
                 SceneMsg::SetQualitySettings { settings } => {
                     doc.view.quality_settings = settings;
                 }
-                SceneMsg::SetDocumentView { device_rect, device_pixel_ratio } => {
+                SceneMsg::SetDocumentView { device_rect } => {
                     doc.view.device_rect = device_rect;
-                    doc.view.device_pixel_ratio = device_pixel_ratio;
                 }
                 SceneMsg::SetDisplayList {
                     epoch,
@@ -591,16 +539,19 @@ impl SceneBuilderThread {
                     background,
                     viewport_size,
                     display_list,
-                    preserve_frame_state,
                 } => {
                     let (builder_start_time_ns, builder_end_time_ns, send_time_ns) =
-                        display_list.times();
-
+                      display_list.times();
                     let content_send_time = profiler::ns_to_ms(precise_time_ns() - send_time_ns);
                     let dl_build_time = profiler::ns_to_ms(builder_end_time_ns - builder_start_time_ns);
                     profile.set(profiler::CONTENT_SEND_TIME, content_send_time);
                     profile.set(profiler::DISPLAY_LIST_BUILD_TIME, dl_build_time);
-                    profile.set(profiler::DISPLAY_LIST_MEM, profiler::bytes_to_mb(display_list.data().len()));
+                    profile.set(profiler::DISPLAY_LIST_MEM, profiler::bytes_to_mb(display_list.size_in_bytes()));
+
+                    let (gecko_display_list_time, full_display_list) = display_list.gecko_display_list_stats();
+                    frame_stats.full_display_list = full_display_list;
+                    frame_stats.gecko_display_list_time = gecko_display_list_time;
+                    frame_stats.wr_display_list_time += dl_build_time;
 
                     if self.removed_pipelines.contains(&pipeline_id) {
                         continue;
@@ -618,10 +569,6 @@ impl SceneBuilderThread {
                         background,
                         viewport_size,
                     );
-
-                    if !preserve_frame_state {
-                        discard_frame_state_for_pipelines.push(pipeline_id);
-                    }
                 }
                 SceneMsg::SetRootPipeline(pipeline_id) => {
                     if scene.root_pipeline_id != Some(pipeline_id) {
@@ -641,6 +588,8 @@ impl SceneBuilderThread {
 
         let mut built_scene = None;
         let mut interner_updates = None;
+        let mut spatial_tree_updates = None;
+
         if scene.has_root_pipeline() && rebuild_scene {
 
             let built = SceneBuilder::build(
@@ -649,6 +598,7 @@ impl SceneBuilderThread {
                 &doc.view,
                 &self.config,
                 &mut doc.interners,
+                &mut doc.spatial_tree,
                 &doc.stats,
             );
 
@@ -660,17 +610,24 @@ impl SceneBuilderThread {
                 doc.interners.end_frame_and_get_pending_updates()
             );
 
+            spatial_tree_updates = Some(
+                doc.spatial_tree.end_frame_and_get_pending_updates()
+            );
+
             built_scene = Some(built);
         }
 
-        profile.end_time(profiler::SCENE_BUILD_TIME);
+        let scene_build_time_ms =
+            profiler::ns_to_ms(precise_time_ns() - scene_build_start);
+        profile.set(profiler::SCENE_BUILD_TIME, scene_build_time_ms);
 
+        frame_stats.scene_build_time += scene_build_time_ms;
 
         if !txn.blob_requests.is_empty() {
             profile.start_time(profiler::BLOB_RASTERIZATION_TIME);
 
             let is_low_priority = false;
-            rasterize_blobs(txn, is_low_priority);
+            rasterize_blobs(&mut txn, is_low_priority);
 
             profile.end_time(profiler::BLOB_RASTERIZATION_TIME);
         }
@@ -691,15 +648,16 @@ impl SceneBuilderThread {
             invalidate_rendered_frame: txn.invalidate_rendered_frame,
             built_scene,
             view: doc.view,
-            rasterized_blobs: replace(&mut txn.rasterized_blobs, Vec::new()),
-            resource_updates: replace(&mut txn.resource_updates, Vec::new()),
-            blob_rasterizer: replace(&mut txn.blob_rasterizer, None),
-            frame_ops: replace(&mut txn.frame_ops, Vec::new()),
+            rasterized_blobs: txn.rasterized_blobs,
+            resource_updates: txn.resource_updates,
+            blob_rasterizer: txn.blob_rasterizer,
+            frame_ops: txn.frame_ops,
             removed_pipelines,
-            discard_frame_state_for_pipelines,
-            notifications: replace(&mut txn.notifications, Vec::new()),
+            notifications: txn.notifications,
             interner_updates,
+            spatial_tree_updates,
             profile,
+            frame_stats,
         })
     }
 
@@ -754,8 +712,6 @@ impl SceneBuilderThread {
         #[cfg(not(feature = "capture"))]
         self.send(SceneBuilderResult::Transactions(txns, result_tx));
 
-        let _ = self.tx.send(ApiMsg::WakeUp);
-
         if let Some(pipeline_info) = pipeline_info {
             // Block until the swap is done, then invoke the hook.
             let swap_result = result_rx.unwrap().recv();
@@ -796,7 +752,6 @@ impl SceneBuilderThread {
 pub struct LowPrioritySceneBuilderThread {
     pub rx: Receiver<SceneBuilderRequest>,
     pub tx: Sender<SceneBuilderRequest>,
-    pub simulate_slow_ms: u32,
 }
 
 impl LowPrioritySceneBuilderThread {
@@ -813,9 +768,6 @@ impl LowPrioritySceneBuilderThread {
                     self.tx.send(SceneBuilderRequest::ShutDown(sync)).unwrap();
                     break;
                 }
-                Ok(SceneBuilderRequest::SimulateLongLowPrioritySceneBuild(time_ms)) => {
-                    self.simulate_slow_ms = time_ms;
-                }
                 Ok(other) => {
                     self.tx.send(other).unwrap();
                 }
@@ -830,10 +782,6 @@ impl LowPrioritySceneBuilderThread {
         let is_low_priority = true;
         rasterize_blobs(&mut txn, is_low_priority);
         txn.blob_requests = Vec::new();
-
-        if self.simulate_slow_ms > 0 {
-            thread::sleep(Duration::from_millis(self.simulate_slow_ms as u64));
-        }
 
         txn
     }

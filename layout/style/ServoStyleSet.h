@@ -11,6 +11,7 @@
 #include "mozilla/AtomArray.h"
 #include "mozilla/EnumeratedArray.h"
 #include "mozilla/EventStates.h"
+#include "mozilla/Maybe.h"
 #include "mozilla/PostTraversalTask.h"
 #include "mozilla/ServoBindingTypes.h"
 #include "mozilla/ServoUtils.h"
@@ -27,6 +28,7 @@
 
 namespace mozilla {
 enum class MediaFeatureChangeReason : uint16_t;
+enum class StyleOrientation : uint8_t;
 enum class StyleRuleChangeKind : uint32_t;
 namespace css {
 class Rule;
@@ -119,7 +121,7 @@ class ServoStyleSet {
   void RuleAdded(StyleSheet&, css::Rule&);
   void RuleRemoved(StyleSheet&, css::Rule&);
   void RuleChanged(StyleSheet&, css::Rule*, StyleRuleChangeKind);
-  void SheetCloned(StyleSheet&) { mNeedsRestyleAfterEnsureUniqueInner = true; }
+  void SheetCloned(StyleSheet&);
   void ImportRuleLoaded(dom::CSSImportRule&, StyleSheet&);
 
   // Runs style invalidation due to document state changes.
@@ -232,6 +234,13 @@ class ServoStyleSet {
 
   size_t SheetCount(Origin) const;
   StyleSheet* SheetAt(Origin, size_t aIndex) const;
+
+  // Gets the default orientation of unnamed CSS pages.
+  // This will return portrait or landscape both for a landscape/portrait
+  // value to page-size, as well as for an explicit size or paper name which
+  // is not square.
+  // If the value is auto or square, then returns nothing.
+  Maybe<StyleOrientation> GetDefaultPageOrientation();
 
   void AppendAllNonDocumentAuthorSheets(nsTArray<StyleSheet*>& aArray) const;
 

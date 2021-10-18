@@ -119,7 +119,6 @@ gfx/vr/service/openvr/src/strtools_public.cpp
 gfx/vr/service/openvr/src/strtools_public.h
 gfx/vr/service/openvr/src/vrpathregistry_public.cpp
 gfx/vr/service/openvr/src/vrpathregistry_public.h
-gfx/wgpu/.*
 gfx/ycbcr/.*
 intl/hyphenation/hyphen/.*
 intl/icu/.*
@@ -172,6 +171,7 @@ modules/woff2/.*
 modules/xz-embedded/.*
 modules/zlib/.*
 mozglue/misc/decimal/.*
+mozglue/tests/glibc_printf_tests/.*
 netwerk/dns/nsIDNKitInterface.h
 netwerk/sctp/src/.*
 netwerk/srtp/src/.*
@@ -197,6 +197,8 @@ toolkit/crashreporter/breakpad-client/.*
 toolkit/crashreporter/google-breakpad/.*
 tools/fuzzing/libfuzzer/.*
 tools/profiler/core/vtune/.*
+# tools/profiler/public/GeckoTraceEvent.h is a modified vendored copy
+tools/profiler/public/GeckoTraceEvent.h
 xpcom/build/mach_override.c
 xpcom/build/mach_override.h
 xpcom/io/crc32c.c

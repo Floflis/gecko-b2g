@@ -68,7 +68,11 @@
 #include "mozilla/media/MediaParent.h"
 #include "mozilla/net/BackgroundDataBridgeParent.h"
 #include "mozilla/net/HttpBackgroundChannelParent.h"
+#include "mozilla/net/HttpConnectionMgrParent.h"
+#include "mozilla/net/WebSocketConnectionParent.h"
 #include "mozilla/psm/VerifySSLServerCertParent.h"
+#include "nsIHttpChannelInternal.h"
+#include "nsIPrincipal.h"
 #include "nsNetUtil.h"
 #include "nsProxyRelease.h"
 #include "nsThreadUtils.h"
@@ -895,6 +899,7 @@ class CheckPrincipalRunnable final : public Runnable {
     if (NS_WARN_IF(principalOrErr.isErr())) {
       mContentParent->KillHard(
           "BroadcastChannel killed: PrincipalInfoToPrincipal failed.");
+      return NS_OK;
     }
 
     nsAutoCString origin;
@@ -1139,6 +1144,44 @@ BackgroundParentImpl::RecvRemoveBackgroundSessionStorageManager(
   return IPC_OK();
 }
 
+mozilla::ipc::IPCResult BackgroundParentImpl::RecvGetSessionStorageManagerData(
+    const uint64_t& aTopContextId, const uint32_t& aSizeLimit,
+    const bool& aCancelSessionStoreTimer,
+    GetSessionStorageManagerDataResolver&& aResolver) {
+  AssertIsInMainProcess();
+  AssertIsOnBackgroundThread();
+
+  if (BackgroundParent::IsOtherProcessActor(this)) {
+    return IPC_FAIL(this, "Wrong actor");
+  }
+
+  if (!mozilla::dom::RecvGetSessionStorageData(aTopContextId, aSizeLimit,
+                                               aCancelSessionStoreTimer,
+                                               std::move(aResolver))) {
+    return IPC_FAIL(this, "Couldn't get session storage data");
+  }
+
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult BackgroundParentImpl::RecvLoadSessionStorageManagerData(
+    const uint64_t& aTopContextId,
+    nsTArray<mozilla::dom::SSCacheCopy>&& aOriginCacheCopy) {
+  AssertIsInMainProcess();
+  AssertIsOnBackgroundThread();
+
+  if (BackgroundParent::IsOtherProcessActor(this)) {
+    return IPC_FAIL(this, "Wrong actor");
+  }
+
+  if (!mozilla::dom::RecvLoadSessionStorageData(aTopContextId,
+                                                std::move(aOriginCacheCopy))) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+
+  return IPC_OK();
+}
+
 already_AddRefed<dom::PFileSystemRequestParent>
 BackgroundParentImpl::AllocPFileSystemRequestParent(
     const FileSystemParams& aParams) {
@@ -1274,6 +1317,15 @@ IPCResult BackgroundParentImpl::RecvStorageActivity(
   return IPC_OK();
 }
 
+IPCResult BackgroundParentImpl::RecvPServiceWorkerManagerConstructor(
+    PServiceWorkerManagerParent* const aActor) {
+  // Only the parent process is allowed to construct this actor.
+  if (BackgroundParent::IsOtherProcessActor(this)) {
+    return IPC_FAIL_NO_REASON(aActor);
+  }
+  return IPC_OK();
+}
+
 already_AddRefed<PServiceWorkerParent>
 BackgroundParentImpl::AllocPServiceWorkerParent(
     const IPCServiceWorkerDescriptor&) {
@@ -1401,6 +1453,27 @@ PFileDescriptorSetParent*
 BackgroundParentImpl::SendPFileDescriptorSetConstructor(
     const FileDescriptor& aFD) {
   return PBackgroundParent::SendPFileDescriptorSetConstructor(aFD);
+}
+
+already_AddRefed<mozilla::net::PWebSocketConnectionParent>
+BackgroundParentImpl::AllocPWebSocketConnectionParent(
+    const uint32_t& aListenerId) {
+  Maybe<nsCOMPtr<nsIHttpUpgradeListener>> listener =
+      net::HttpConnectionMgrParent::GetAndRemoveHttpUpgradeListener(
+          aListenerId);
+  if (!listener) {
+    return nullptr;
+  }
+
+  RefPtr<mozilla::net::WebSocketConnectionParent> actor =
+      new mozilla::net::WebSocketConnectionParent(*listener);
+  return actor.forget();
+}
+
+mozilla::ipc::IPCResult
+BackgroundParentImpl::RecvPWebSocketConnectionConstructor(
+    PWebSocketConnectionParent* actor, const uint32_t& aListenerId) {
+  return IPC_OK();
 }
 
 }  // namespace mozilla::ipc

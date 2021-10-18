@@ -15,6 +15,10 @@ const HTTPROOT = ROOT.replace(
   "chrome://mochitests/content/",
   "http://example.com/"
 );
+const HTTPSROOT = ROOT.replace(
+  "chrome://mochitests/content/",
+  "https://example.com/"
+);
 
 const { SessionSaver } = ChromeUtils.import(
   "resource:///modules/sessionstore/SessionSaver.jsm"
@@ -98,9 +102,11 @@ function waitForBrowserState(aState, aSetStateCallback) {
   let restoreHiddenTabs = Services.prefs.getBoolPref(
     "browser.sessionstore.restore_hidden_tabs"
   );
-  let restoreTabsLazily = Services.prefs.getBoolPref(
-    "browser.sessionstore.restore_tabs_lazily"
-  );
+  // This should match the |restoreTabsLazily| value that
+  // SessionStore.restoreWindow() uses.
+  let restoreTabsLazily =
+    Services.prefs.getBoolPref("browser.sessionstore.restore_on_demand") &&
+    Services.prefs.getBoolPref("browser.sessionstore.restore_tabs_lazily");
 
   aState.windows.forEach(function(winState) {
     winState.tabs.forEach(function(tabState) {
@@ -211,6 +217,12 @@ function promiseTabState(tab, state) {
   let promise = promiseTabRestored(tab);
   ss.setTabState(tab, state);
   return promise;
+}
+
+function promiseWindowRestoring(win) {
+  return new Promise(resolve =>
+    win.addEventListener("SSWindowRestoring", resolve, { once: true })
+  );
 }
 
 function promiseWindowRestored(win) {
@@ -542,15 +554,16 @@ function promiseRemoveTabAndSessionState(tab) {
 
 // Write DOMSessionStorage data to the given browser.
 function modifySessionStorage(browser, storageData, storageOptions = {}) {
+  let browsingContext = browser.browsingContext;
+  if (storageOptions && "frameIndex" in storageOptions) {
+    browsingContext = browsingContext.children[storageOptions.frameIndex];
+  }
+
   return SpecialPowers.spawn(
-    browser,
+    browsingContext,
     [[storageData, storageOptions]],
     async function([data, options]) {
       let frame = content;
-      if (options && "frameIndex" in options) {
-        frame = content.frames[options.frameIndex];
-      }
-
       let keys = new Set(Object.keys(data));
       let isClearing = !keys.size;
       let storage = frame.sessionStorage;
@@ -715,4 +728,23 @@ function promiseOnHistoryReplaceEntry(browser) {
 
 function loadTestSubscript(filePath) {
   Services.scriptloader.loadSubScript(new URL(filePath, gTestPath).href, this);
+}
+
+function addCoopTask(aFile, aTest, aUrlRoot) {
+  async function taskToBeAdded() {
+    info(`File ${aFile} has COOP headers enabled`);
+    let filePath = `browser/browser/components/sessionstore/test/${aFile}`;
+    let url = aUrlRoot + `coopHeaderCommon.sjs?fileRoot=${filePath}`;
+    await aTest(url);
+  }
+  Object.defineProperty(taskToBeAdded, "name", { value: aTest.name });
+  add_task(taskToBeAdded);
+}
+
+function addNonCoopTask(aFile, aTest, aUrlRoot) {
+  async function taskToBeAdded() {
+    await aTest(aUrlRoot + aFile);
+  }
+  Object.defineProperty(taskToBeAdded, "name", { value: aTest.name });
+  add_task(taskToBeAdded);
 }

@@ -95,6 +95,19 @@ static_assert(F_GET_SEALS == (F_LINUX_SPECIFIC_BASE + 10));
 #  define DESKTOP
 #endif
 
+namespace {
+static const unsigned long kIoctlTypeMask = _IOC_TYPEMASK << _IOC_TYPESHIFT;
+static const unsigned long kTtyIoctls = TIOCSTI & kIoctlTypeMask;
+// On some older architectures (but not x86 or ARM), ioctls are
+// assigned type fields differently, and the TIOC/TC/FIO group
+// isn't all the same type.  If/when we support those archs,
+// this would need to be revised (but really this should be a
+// default-deny policy; see below).
+static_assert(kTtyIoctls == (TCSETA & kIoctlTypeMask) &&
+                  kTtyIoctls == (FIOASYNC & kIoctlTypeMask),
+              "tty-related ioctls use the same type");
+};  // namespace
+
 // This file defines the seccomp-bpf system call filter policies.
 // See also SandboxFilterUtil.h, for the CASES_FOR_* macros and
 // SandboxFilterBase::Evaluate{Socket,Ipc}Call.
@@ -281,12 +294,35 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
     // to handle the flags != 0 case is left to userspace; this is
     // impossible to do correctly in all cases, but that's not our
     // problem.
+    //
+    // Starting with kernel 5.8+ and glibc 2.33, there is faccessat2 that
+    // supports flags, handled below.
     if (fd != AT_FDCWD && path[0] != '/') {
       SANDBOX_LOG_ERROR("unsupported fd-relative faccessat(%d, \"%s\", %d)", fd,
                         path, mode);
       return BlockedSyscallTrap(aArgs, nullptr);
     }
     return broker->Access(path, mode);
+  }
+
+  static intptr_t AccessAt2Trap(ArgsRef aArgs, void* aux) {
+    auto* broker = static_cast<SandboxBrokerClient*>(aux);
+    auto fd = static_cast<int>(aArgs.args[0]);
+    const auto* path = reinterpret_cast<const char*>(aArgs.args[1]);
+    auto mode = static_cast<int>(aArgs.args[2]);
+    auto flags = static_cast<int>(aArgs.args[3]);
+    if (fd != AT_FDCWD && path[0] != '/') {
+      SANDBOX_LOG_ERROR(
+          "unsupported fd-relative faccessat2(%d, \"%s\", %d, %d)", fd, path,
+          mode, flags);
+      return BlockedSyscallTrap(aArgs, nullptr);
+    }
+#if !defined(ANDROID) // AT_EACCESS is not supported in bionic.
+    if ((flags & ~AT_EACCESS) == 0) {
+      return broker->Access(path, mode);
+    }
+#endif
+    return ConvertError(ENOSYS);
   }
 
   static intptr_t StatAtTrap(ArgsRef aArgs, void* aux) {
@@ -462,6 +498,17 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
 #endif
   }
 
+  static intptr_t GetSockOptUnpackTrap(ArgsRef aArgs, void* aux) {
+#ifdef __NR_getsockopt
+    auto argsPtr = reinterpret_cast<unsigned long*>(aArgs.args[1]);
+    return DoSyscall(__NR_getsockopt, argsPtr[0], argsPtr[1], argsPtr[2],
+                     argsPtr[3], argsPtr[4]);
+#else
+    MOZ_CRASH("unreachable?");
+    return -ENOSYS;
+#endif
+  }
+
  public:
   ResultExpr InvalidSyscall() const override {
     return Trap(BlockedSyscallTrap, nullptr);
@@ -510,6 +557,9 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
 #endif
                 PR_SET_PTRACER),  // Debug-mode crash handling
                Allow())
+        .CASES((PR_CAPBSET_READ),  // libcap.so.2 loaded by libpulse.so.0
+                                   // queries for capabilities
+               Error(EINVAL))
         .Default(InvalidSyscall());
   }
 
@@ -550,6 +600,22 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
                    // doesn't increase attack surface:
                    .Case(SOCK_DGRAM, Trap(SocketpairDatagramTrap, nullptr))
                    .Default(InvalidSyscall()))
+                .Else(InvalidSyscall()));
+      }
+
+      case SYS_GETSOCKOPT: {
+        // Best-effort argument filtering as for socketpair(2), above.
+        if (!aHasArgs) {
+          if (HasSeparateSocketCalls()) {
+            return Some(Trap(GetSockOptUnpackTrap, nullptr));
+          }
+          return Some(Allow());
+        }
+        Arg<int> level(1), optname(2);
+        // SO_SNDBUF is used by IPC to avoid constructing
+        // unnecessarily large gather arrays for `sendmsg`.
+        return Some(
+            If(AllOf(level == SOL_SOCKET, optname == SO_SNDBUF), Allow())
                 .Else(InvalidSyscall()));
       }
 
@@ -594,6 +660,8 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
           return Trap(OpenAtTrap, mBroker);
         case __NR_faccessat:
           return Trap(AccessAtTrap, mBroker);
+        case __NR_faccessat2:
+          return Trap(AccessAt2Trap, mBroker);
         CASES_FOR_fstatat:
           return Trap(StatAtTrap, mBroker);
         // Used by new libc and Rust's stdlib, if available.
@@ -625,14 +693,6 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
     }
 
     switch (sysno) {
-#ifdef MOZ_WIDGET_GONK
-      // Allow some system calls utilized by app process
-      // Follow-up: will have separate bugs to review these usage
-      case __NR_connect:           // For uds_transport.rs
-      CASES_FOR_fcntl:             // For uds_transport.rs
-      case __NR_process_vm_readv:  // For crash report dump
-        return Allow();
-#endif
         // Timekeeping
         //
         // (Note: the switch needs to start with a literal case, not a
@@ -695,7 +755,6 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
       CASES_FOR_fstat:
         return Allow();
 
-#ifndef MOZ_WIDGET_GONK
       CASES_FOR_fcntl : {
         Arg<int> cmd(1);
         Arg<int> flags(2);
@@ -720,7 +779,6 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
                                .Else(InvalidSyscall()))
             .Default(SandboxPolicyBase::EvaluateSyscall(sysno));
       }
-#endif
 
         // Simple I/O
       case __NR_pread64:
@@ -765,6 +823,8 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
         // madvise hints used by malloc; see bug 1303813 and bug 1364533
       case __NR_madvise: {
         Arg<int> advice(2);
+        // The GMP specific sandbox duplicates this logic, so when adding
+        // allowed values here also add them to the GMP sandbox rules.
         return If(advice == MADV_DONTNEED, Allow())
             .ElseIf(advice == MADV_FREE, Allow())
             .ElseIf(advice == MADV_HUGEPAGE, Allow())
@@ -772,6 +832,7 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
 #ifdef MOZ_ASAN
             .ElseIf(advice == MADV_DONTDUMP, Allow())
 #endif
+            .ElseIf(advice == MADV_MERGEABLE, Error(EPERM))  // bug 1705045
             .Else(InvalidSyscall());
       }
 
@@ -805,6 +866,9 @@ class SandboxPolicyCommon : public SandboxPolicyBase {
         // Thread creation.
       case __NR_clone:
         return ClonePolicy(InvalidSyscall());
+
+      case __NR_clone3:
+        return Error(ENOSYS);
 
         // More thread creation.
 #ifdef __NR_set_robust_list
@@ -1265,6 +1329,7 @@ class ContentSandboxPolicy : public SandboxPolicyCommon {
 #endif
         case __NR_openat:
         case __NR_faccessat:
+        case __NR_faccessat2:
         CASES_FOR_fstatat:
         case __NR_fchmodat:
         case __NR_linkat:
@@ -1298,6 +1363,15 @@ class ContentSandboxPolicy : public SandboxPolicyCommon {
 #ifdef __NR_getgroups32
       case __NR_getgroups32:  // To dump tombstone in logcat
 #endif
+#ifdef __NR_getgroups
+      case __NR_getgroups:
+#endif
+      // Allow some system calls utilized by app process
+      // Follow-up: will have separate bugs to review these usage
+      case __NR_connect:           // For uds_transport.rs
+      CASES_FOR_fcntl:             // For uds_transport.rs
+      case __NR_process_vm_readv:  // For crash report dump
+      case __NR_sched_setaffinity: // For libGLESv2_adreno.so
         return Allow();
 #endif
 
@@ -1355,19 +1429,8 @@ class ContentSandboxPolicy : public SandboxPolicyCommon {
           return Allow();
         }
 #endif
-        static const unsigned long kTypeMask = _IOC_TYPEMASK << _IOC_TYPESHIFT;
-        static const unsigned long kTtyIoctls = TIOCSTI & kTypeMask;
-        // On some older architectures (but not x86 or ARM), ioctls are
-        // assigned type fields differently, and the TIOC/TC/FIO group
-        // isn't all the same type.  If/when we support those archs,
-        // this would need to be revised (but really this should be a
-        // default-deny policy; see below).
-        static_assert(kTtyIoctls == (TCSETA & kTypeMask) &&
-                          kTtyIoctls == (FIOASYNC & kTypeMask),
-                      "tty-related ioctls use the same type");
-
         Arg<unsigned long> request(1);
-        auto shifted_type = request & kTypeMask;
+        auto shifted_type = request & kIoctlTypeMask;
 
         // Rust's stdlib seems to use FIOCLEX instead of equivalent fcntls.
         return If(request == FIOCLEX, Allow())
@@ -1382,6 +1445,7 @@ class ContentSandboxPolicy : public SandboxPolicyCommon {
             .Else(SandboxPolicyCommon::EvaluateSyscall(sysno));
       }
 
+#ifndef MOZ_WIDGET_GONK
       CASES_FOR_fcntl : {
         Arg<int> cmd(1);
         return Switch(cmd)
@@ -1401,6 +1465,7 @@ class ContentSandboxPolicy : public SandboxPolicyCommon {
             .Case(F_GET_SEALS, Allow())
             .Default(SandboxPolicyCommon::EvaluateSyscall(sysno));
       }
+#endif
 
       case __NR_brk:
         // FIXME(bug 1510861) are we using any hints that aren't allowed
@@ -1542,6 +1607,9 @@ class ContentSandboxPolicy : public SandboxPolicyCommon {
         // usually do something reasonable on error.
       case __NR_clone:
         return ClonePolicy(Error(EPERM));
+
+      case __NR_clone3:
+        return Error(ENOSYS);
 
 #  ifdef __NR_fadvise64
       case __NR_fadvise64:
@@ -1741,6 +1809,24 @@ class GMPSandboxPolicy : public SandboxPolicyCommon {
       CASES_FOR_fcntl:
         return Trap(FcntlTrap, nullptr);
 
+      // Allow the same advice values as the default policy, but return
+      // Error(ENOSYS) for other values. Because the Widevine CDM may probe
+      // advice arguments, including invalid values, we don't want to return
+      // InvalidSyscall(), as this will crash the process. So instead just
+      // indicate such calls are not available.
+      case __NR_madvise: {
+        Arg<int> advice(2);
+        return If(advice == MADV_DONTNEED, Allow())
+            .ElseIf(advice == MADV_FREE, Allow())
+            .ElseIf(advice == MADV_HUGEPAGE, Allow())
+            .ElseIf(advice == MADV_NOHUGEPAGE, Allow())
+#ifdef MOZ_ASAN
+            .ElseIf(advice == MADV_DONTDUMP, Allow())
+#endif
+            .ElseIf(advice == MADV_MERGEABLE, Error(EPERM))  // bug 1705045
+            .Else(Error(ENOSYS));
+      }
+
       default:
         return SandboxPolicyCommon::EvaluateSyscall(sysno);
     }
@@ -1767,7 +1853,12 @@ class RDDSandboxPolicy final : public SandboxPolicyCommon {
     switch (sysno) {
       case __NR_getrusage:
         return Allow();
-
+      case __NR_ioctl: {
+        Arg<unsigned long> request(1);
+        // ffmpeg, and anything else that calls isatty(), will be told
+        // that nothing is a typewriter:
+        return If(request == TCGETS, Error(ENOTTY)).Else(InvalidSyscall());
+      }
       // Pass through the common policy.
       default:
         return SandboxPolicyCommon::EvaluateSyscall(sysno);
@@ -1838,8 +1929,13 @@ class SocketProcessSandboxPolicy final : public SandboxPolicyCommon {
   }
 
   ResultExpr PrctlPolicy() const override {
-    // FIXME: bug 1619661
-    return Allow();
+    Arg<int> op(0);
+    return Switch(op)
+        .CASES((PR_SET_NAME,      // Thread creation
+                PR_SET_DUMPABLE,  // Crash reporting
+                PR_SET_PTRACER),  // Debug-mode crash handling
+               Allow())
+        .Default(InvalidSyscall());
   }
 
   ResultExpr EvaluateSyscall(int sysno) const override {
@@ -1848,19 +1944,8 @@ class SocketProcessSandboxPolicy final : public SandboxPolicyCommon {
         return Allow();
 
       case __NR_ioctl: {
-        static const unsigned long kTypeMask = _IOC_TYPEMASK << _IOC_TYPESHIFT;
-        static const unsigned long kTtyIoctls = TIOCSTI & kTypeMask;
-        // On some older architectures (but not x86 or ARM), ioctls are
-        // assigned type fields differently, and the TIOC/TC/FIO group
-        // isn't all the same type.  If/when we support those archs,
-        // this would need to be revised (but really this should be a
-        // default-deny policy; see below).
-        static_assert(kTtyIoctls == (TCSETA & kTypeMask) &&
-                          kTtyIoctls == (FIOASYNC & kTypeMask),
-                      "tty-related ioctls use the same type");
-
         Arg<unsigned long> request(1);
-        auto shifted_type = request & kTypeMask;
+        auto shifted_type = request & kIoctlTypeMask;
 
         // Rust's stdlib seems to use FIOCLEX instead of equivalent fcntls.
         return If(request == FIOCLEX, Allow())

@@ -37,11 +37,7 @@ using namespace mozilla;
 // nsIconChannel methods
 nsIconChannel::nsIconChannel() {}
 
-nsIconChannel::~nsIconChannel() {
-  if (mLoadInfo) {
-    NS_ReleaseOnMainThread("nsIconChannel::mLoadInfo", mLoadInfo.forget());
-  }
-}
+nsIconChannel::~nsIconChannel() {}
 
 NS_IMPL_ISUPPORTS(nsIconChannel, nsIChannel, nsIRequest, nsIRequestObserver, nsIStreamListener)
 
@@ -230,7 +226,7 @@ nsIconChannel::AsyncOpen(nsIStreamListener* aListener) {
 }
 
 nsresult nsIconChannel::MakeInputStream(nsIInputStream** _retval, bool aNonBlocking) {
-  NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT;
+  NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
 
   nsCString contentType;
   nsAutoCString fileExt;
@@ -345,7 +341,7 @@ nsresult nsIconChannel::MakeInputStream(nsIInputStream** _retval, bool aNonBlock
 
   return NS_OK;
 
-  NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT;
+  NS_OBJC_END_TRY_BLOCK_RETURN(NS_ERROR_FAILURE);
 }
 
 NS_IMETHODIMP

@@ -17,20 +17,23 @@
 
 #ifdef XP_WIN
 
-#  include "util/Windows.h"
+#  include "util/WindowsWrapper.h"
 #  include <psapi.h>
 
 #else
 
 #  include <algorithm>
 #  include <errno.h>
-#  include <sys/mman.h>
-#  include <sys/resource.h>
-#  include <sys/stat.h>
-#  include <sys/types.h>
 #  include <unistd.h>
 
-#endif
+#  if !defined(__wasi__)
+#    include <sys/mman.h>
+#    include <sys/resource.h>
+#    include <sys/stat.h>
+#    include <sys/types.h>
+#  endif  // !defined(__wasi__)
+
+#endif  // !XP_WIN
 
 namespace js {
 namespace gc {
@@ -140,6 +143,15 @@ enum class PageAccess : DWORD {
   ReadExecute = PAGE_EXECUTE_READ,
   ReadWriteExecute = PAGE_EXECUTE_READWRITE,
 };
+#elif defined(__wasi__)
+enum class PageAccess : int {
+  None = 0,
+  Read = 0,
+  ReadWrite = 0,
+  Execute = 0,
+  ReadExecute = 0,
+  ReadWriteExecute = 0,
+};
 #else
 enum class PageAccess : int {
   None = PROT_NONE,
@@ -155,7 +167,9 @@ template <bool AlwaysGetNew = true>
 static bool TryToAlignChunk(void** aRegion, void** aRetainedRegion,
                             size_t length, size_t alignment);
 
+#ifndef __wasi__
 static void* MapAlignedPagesSlow(size_t length, size_t alignment);
+#endif  // wasi
 static void* MapAlignedPagesLastDitch(size_t length, size_t alignment);
 
 #ifdef JS_64BIT
@@ -166,11 +180,7 @@ void* TestMapAlignedPagesLastDitch(size_t length, size_t alignment) {
   return MapAlignedPagesLastDitch(length, alignment);
 }
 
-/*
- * We can only decommit unused pages if the hardcoded Arena
- * size matches the page size for the running process.
- */
-static inline bool DecommitEnabled() { return pageSize == ArenaSize; }
+bool DecommitEnabled() { return SystemPageSize() == PageSize; }
 
 /* Returns the offset from the nearest aligned address at or below |region|. */
 static inline size_t OffsetFromAligned(void* region, size_t alignment) {
@@ -184,6 +194,14 @@ static inline void* MapInternal(void* desired, size_t length) {
   DWORD flags =
       (commit == Commit::Yes ? MEM_RESERVE | MEM_COMMIT : MEM_RESERVE);
   region = VirtualAlloc(desired, length, flags, DWORD(prot));
+#elif defined(__wasi__)
+  if (int err = posix_memalign(&region, gc::SystemPageSize(), length)) {
+    MOZ_RELEASE_ASSERT(err == ENOMEM);
+    return nullptr;
+  }
+  if (region) {
+    memset(region, 0, length);
+  }
 #else
   int flags = MAP_PRIVATE | MAP_ANON;
   region = MozTaggedAnonymousMmap(desired, length, int(prot), flags, -1, 0,
@@ -201,6 +219,8 @@ static inline void UnmapInternal(void* region, size_t length) {
 
 #ifdef XP_WIN
   MOZ_RELEASE_ASSERT(VirtualFree(region, 0, MEM_RELEASE) != 0);
+#elif defined(__wasi__)
+  free(region);
 #else
   if (munmap(region, length)) {
     MOZ_RELEASE_ASSERT(errno == ENOMEM);
@@ -411,7 +431,18 @@ void* MapAlignedPages(size_t length, size_t alignment) {
     alignment = allocGranularity;
   }
 
-#ifdef JS_64BIT
+#ifdef __wasi__
+  void* region = nullptr;
+  if (int err = posix_memalign(&region, alignment, length)) {
+    MOZ_ASSERT(err == ENOMEM);
+    return nullptr;
+  }
+  MOZ_ASSERT(region != nullptr);
+  memset(region, 0, length);
+  return region;
+#else
+
+#  ifdef JS_64BIT
   // Use the scattershot allocator if the address range is large enough.
   if (UsingScattershotAllocator()) {
     void* region = MapAlignedPagesRandom(length, alignment);
@@ -421,7 +452,7 @@ void* MapAlignedPages(size_t length, size_t alignment) {
 
     return region;
   }
-#endif
+#  endif
 
   // Try to allocate the region. If the returned address is aligned,
   // either we OOMed (region is nullptr) or we're done.
@@ -464,6 +495,7 @@ void* MapAlignedPages(size_t length, size_t alignment) {
   // At this point we should either have an aligned region or nullptr.
   MOZ_ASSERT(OffsetFromAligned(region, alignment) == 0);
   return region;
+#endif  // !__wasi__
 }
 
 #ifdef JS_64BIT
@@ -550,27 +582,28 @@ static void* MapAlignedPagesRandom(size_t length, size_t alignment) {
 
 #endif  // defined(JS_64BIT)
 
+#ifndef __wasi__
 static void* MapAlignedPagesSlow(size_t length, size_t alignment) {
   void* alignedRegion = nullptr;
   do {
     size_t reserveLength = length + alignment - pageSize;
-#ifdef XP_WIN
+#  ifdef XP_WIN
     // Don't commit the requested pages as we won't use the region directly.
     void* region = MapMemory<Commit::No>(reserveLength);
-#else
+#  else
     void* region = MapMemory(reserveLength);
-#endif
+#  endif
     if (!region) {
       return nullptr;
     }
     alignedRegion =
         reinterpret_cast<void*>(AlignBytes(uintptr_t(region), alignment));
-#ifdef XP_WIN
+#  ifdef XP_WIN
     // Windows requires that map and unmap calls be matched, so deallocate
     // and immediately reallocate at the desired (aligned) address.
     UnmapInternal(region, reserveLength);
     alignedRegion = MapMemoryAt(alignedRegion, length);
-#else
+#  else
     // munmap allows us to simply unmap the pages that don't interest us.
     if (alignedRegion != region) {
       UnmapInternal(region, uintptr_t(alignedRegion) - uintptr_t(region));
@@ -582,12 +615,13 @@ static void* MapAlignedPagesSlow(size_t length, size_t alignment) {
     if (alignedEnd != regionEnd) {
       UnmapInternal(alignedEnd, uintptr_t(regionEnd) - uintptr_t(alignedEnd));
     }
-#endif
+#  endif
     // On Windows we may have raced with another thread; if so, try again.
   } while (!alignedRegion);
 
   return alignedRegion;
 }
+#endif  // wasi
 
 /*
  * In a low memory or high fragmentation situation, alignable chunks of the
@@ -758,25 +792,21 @@ static void CheckDecommit(void* region, size_t length) {
   MOZ_ASSERT(OffsetFromAligned(region, ArenaSize) == 0);
   MOZ_ASSERT(length % ArenaSize == 0);
 
-  if (DecommitEnabled()) {
-    // We can't decommit part of a page.
-    MOZ_RELEASE_ASSERT(OffsetFromAligned(region, pageSize) == 0);
-    MOZ_RELEASE_ASSERT(length % pageSize == 0);
-  }
+  MOZ_RELEASE_ASSERT(OffsetFromAligned(region, pageSize) == 0);
+  MOZ_RELEASE_ASSERT(length % pageSize == 0);
 }
 
 bool MarkPagesUnusedSoft(void* region, size_t length) {
+  MOZ_ASSERT(DecommitEnabled());
   CheckDecommit(region, length);
 
   MOZ_MAKE_MEM_NOACCESS(region, length);
 
-  if (!DecommitEnabled()) {
-    return true;
-  }
-
 #if defined(XP_WIN)
   return VirtualAlloc(region, length, MEM_RESET,
                       DWORD(PageAccess::ReadWrite)) == region;
+#elif defined(__wasi__)
+  return 0;
 #else
   int status;
   do {
@@ -809,6 +839,7 @@ bool MarkPagesUnusedHard(void* region, size_t length) {
 }
 
 void MarkPagesInUseSoft(void* region, size_t length) {
+  MOZ_ASSERT(DecommitEnabled());
   CheckDecommit(region, length);
 
 #if defined(XP_DARWIN)
@@ -847,6 +878,8 @@ size_t GetPageFaultCount() {
     return 0;
   }
   return pmc.PageFaultCount;
+#elif defined(__wasi__)
+  return 0;
 #else
   struct rusage usage;
   int err = getrusage(RUSAGE_SELF, &usage);
@@ -859,6 +892,9 @@ size_t GetPageFaultCount() {
 
 void* AllocateMappedContent(int fd, size_t offset, size_t length,
                             size_t alignment) {
+#ifdef __wasi__
+  MOZ_CRASH("Not yet supported for WASI");
+#else
   if (length == 0 || alignment == 0 || offset % alignment != 0 ||
       std::max(alignment, allocGranularity) %
               std::min(alignment, allocGranularity) !=
@@ -876,7 +912,7 @@ void* AllocateMappedContent(int fd, size_t offset, size_t length,
     mappedLength += pageSize - alignedLength % pageSize;
   }
 
-#ifdef XP_WIN
+#  ifdef XP_WIN
   HANDLE hFile = reinterpret_cast<HANDLE>(intptr_t(fd));
 
   // This call will fail if the file does not exist.
@@ -915,7 +951,7 @@ void* AllocateMappedContent(int fd, size_t offset, size_t length,
   if (!map) {
     return nullptr;
   }
-#else  // !defined(XP_WIN)
+#  else  // !defined(XP_WIN)
   // Sanity check the offset and length, as mmap does not do this for us.
   struct stat st;
   if (fstat(fd, &st) || offset >= uint64_t(st.st_size) ||
@@ -937,9 +973,9 @@ void* AllocateMappedContent(int fd, size_t offset, size_t length,
     UnmapInternal(region, mappedLength);
     return nullptr;
   }
-#endif
+#  endif
 
-#ifdef DEBUG
+#  ifdef DEBUG
   // Zero out data before and after the desired mapping to catch errors early.
   if (offset != alignedOffset) {
     memset(map, 0, offset - alignedOffset);
@@ -947,12 +983,16 @@ void* AllocateMappedContent(int fd, size_t offset, size_t length,
   if (alignedLength % pageSize) {
     memset(map + alignedLength, 0, pageSize - (alignedLength % pageSize));
   }
-#endif
+#  endif
 
   return map + (offset - alignedOffset);
+#endif  // __wasi__
 }
 
 void DeallocateMappedContent(void* region, size_t length) {
+#ifdef __wasi__
+  MOZ_CRASH("Not yet supported for WASI");
+#else
   if (!region) {
     return;
   }
@@ -965,14 +1005,15 @@ void DeallocateMappedContent(void* region, size_t length) {
   // that might be offset from the mapping, as the beginning of a
   // mapping must be aligned with the allocation granularity.
   uintptr_t map = uintptr_t(region) - (uintptr_t(region) % allocGranularity);
-#ifdef XP_WIN
+#  ifdef XP_WIN
   MOZ_RELEASE_ASSERT(UnmapViewOfFile(reinterpret_cast<void*>(map)) != 0);
-#else
+#  else
   size_t alignedLength = length + (uintptr_t(region) % allocGranularity);
   if (munmap(reinterpret_cast<void*>(map), alignedLength)) {
     MOZ_RELEASE_ASSERT(errno == ENOMEM);
   }
-#endif
+#  endif
+#endif  // __wasi__
 }
 
 static inline void ProtectMemory(void* region, size_t length, PageAccess prot) {
@@ -982,6 +1023,8 @@ static inline void ProtectMemory(void* region, size_t length, PageAccess prot) {
   DWORD oldProtect;
   MOZ_RELEASE_ASSERT(VirtualProtect(region, length, DWORD(prot), &oldProtect) !=
                      0);
+#elif defined(__wasi__)
+  /* nothing */
 #else
   MOZ_RELEASE_ASSERT(mprotect(region, length, int(prot)) == 0);
 #endif

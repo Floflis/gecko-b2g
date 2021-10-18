@@ -17,9 +17,9 @@
 
 #include <limits> /* for std::numeric_limits */
 
-#include "js-config.h"
 #include "jstypes.h"
 
+#include "js/HeapAPI.h"
 #include "js/RootingAPI.h"
 #include "js/TypeDecls.h"
 
@@ -220,9 +220,6 @@ enum JSWhyMagic {
   /** an empty subnode in the AST serializer */
   JS_SERIALIZE_NO_NODE,
 
-  /** optimized-away 'arguments' value */
-  JS_OPTIMIZED_ARGUMENTS,
-
   /** magic value passed to natives to indicate construction */
   JS_IS_CONSTRUCTING,
 
@@ -241,8 +238,8 @@ enum JSWhyMagic {
   /** uninitialized lexical bindings that produce ReferenceError on touch. */
   JS_UNINITIALIZED_LEXICAL,
 
-  /** standard constructors are not created for off-thread parsing. */
-  JS_OFF_THREAD_CONSTRUCTOR,
+  /** arguments object can't be created because environment is dead. */
+  JS_MISSING_ARGUMENTS,
 
   /** for local use */
   JS_GENERIC_MAGIC,
@@ -264,6 +261,12 @@ enum JSWhyMagic {
    * using this magic value.
    */
   JS_READABLESTREAM_PIPETO_FINALIZE_WITHOUT_ERROR,
+
+  /**
+   * When an error object is created without the error cause argument, we set
+   * the error's cause slot to this magic value.
+   */
+  JS_ERROR_WITHOUT_CAUSE,
 
   JS_WHY_MAGIC_COUNT
 };
@@ -389,7 +392,6 @@ class alignas(8) Value {
 
  public:
   constexpr Value() : asBits_(bitsFromTagAndPayload(JSVAL_TAG_UNDEFINED, 0)) {}
-  Value(const Value& v) = default;
 
  private:
   explicit constexpr Value(uint64_t asBits) : asBits_(asBits) {}
@@ -915,22 +917,13 @@ static_assert(sizeof(Value) == 8,
               "Value size must leave three tag bits, be a binary power, and "
               "is ubiquitously depended upon everywhere");
 
-inline bool IsOptimizedPlaceholderMagicValue(const Value& v) {
-  if (v.isMagic()) {
-    MOZ_ASSERT(v.whyMagic() == JS_OPTIMIZED_ARGUMENTS ||
-               v.whyMagic() == JS_OPTIMIZED_OUT);
-    return true;
-  }
-  return false;
-}
-
 static MOZ_ALWAYS_INLINE void ExposeValueToActiveJS(const Value& v) {
 #ifdef DEBUG
   Value tmp = v;
   MOZ_ASSERT(!js::gc::EdgeNeedsSweepUnbarrieredSlow(&tmp));
 #endif
   if (v.isGCThing()) {
-    js::gc::ExposeGCThingToActiveJS(GCCellPtr(v));
+    js::gc::ExposeGCThingToActiveJS(v.toGCCellPtr());
   }
 }
 
@@ -1113,6 +1106,11 @@ struct BarrierMethods<JS::Value> {
     JS::HeapValuePostWriteBarrier(v, prev, next);
   }
   static void exposeToJS(const JS::Value& v) { JS::ExposeValueToActiveJS(v); }
+  static void readBarrier(const JS::Value& v) {
+    if (v.isGCThing()) {
+      js::gc::IncrementalReadBarrier(v.toGCCellPtr());
+    }
+  }
 };
 
 template <class Wrapper>
@@ -1147,6 +1145,7 @@ class WrappedPtrOperations<JS::Value, Wrapper> {
   bool isMagic() const { return value().isMagic(); }
   bool isMagic(JSWhyMagic why) const { return value().isMagic(why); }
   bool isGCThing() const { return value().isGCThing(); }
+  bool isPrivateGCThing() const { return value().isPrivateGCThing(); }
   bool isPrimitive() const { return value().isPrimitive(); }
 
   bool isNullOrUndefined() const { return value().isNullOrUndefined(); }
@@ -1162,6 +1161,7 @@ class WrappedPtrOperations<JS::Value, Wrapper> {
   JS::BigInt* toBigInt() const { return value().toBigInt(); }
   JSObject& toObject() const { return value().toObject(); }
   JSObject* toObjectOrNull() const { return value().toObjectOrNull(); }
+  JS::GCCellPtr toGCCellPtr() const { return value().toGCCellPtr(); }
   gc::Cell* toGCThing() const { return value().toGCThing(); }
   JS::TraceKind traceKind() const { return value().traceKind(); }
   void* toPrivate() const { return value().toPrivate(); }
@@ -1222,7 +1222,7 @@ class MutableWrappedPtrOperations<JS::Value, Wrapper>
  * type-querying, value-extracting, and mutating operations.
  */
 template <typename Wrapper>
-class HeapBase<JS::Value, Wrapper>
+class HeapOperations<JS::Value, Wrapper>
     : public MutableWrappedPtrOperations<JS::Value, Wrapper> {};
 
 MOZ_HAVE_NORETURN MOZ_COLD MOZ_NEVER_INLINE void ReportBadValueTypeAndCrash(

@@ -16,8 +16,8 @@ use crate::properties::StyleBuilder;
 use crate::rule_cache::RuleCacheConditions;
 use crate::shared_lock::{SharedRwLockReadGuard, StylesheetGuards, ToCssWithGuard};
 use crate::str::CssStringWriter;
-use crate::stylesheets::{Origin, StylesheetInDocument};
 use crate::stylesheets::cascading_at_rule::DescriptorDeclaration;
+use crate::stylesheets::{Origin, StylesheetInDocument};
 use crate::values::computed::{Context, ToComputedValue};
 use crate::values::generics::length::LengthPercentageOrAuto;
 use crate::values::generics::NonNegative;
@@ -241,8 +241,7 @@ fn parse_shorthand<'i, 't>(
 }
 
 impl<'a, 'b, 'i> AtRuleParser<'i> for ViewportRuleParser<'a, 'b> {
-    type PreludeNoBlock = ();
-    type PreludeBlock = ();
+    type Prelude = ();
     type AtRule = Vec<ViewportDescriptorDeclaration>;
     type Error = StyleParseErrorKind<'i>;
 }
@@ -753,7 +752,7 @@ impl MaybeNew for ViewportConstraints {
                     })
                 } else {
                     None
-                };
+                }
             };
         }
 

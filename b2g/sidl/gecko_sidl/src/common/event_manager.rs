@@ -56,7 +56,7 @@ impl EventManager {
         }
 
         if starts_empty && !self.handlers.is_empty() {
-            struct DummyDelegate {};
+            struct DummyDelegate {}
             impl CoreSimpleReceiverDelegate for DummyDelegate {
                 fn on_success(&mut self) {
                     debug!("Success enabling event listeners");
@@ -87,7 +87,7 @@ impl EventManager {
                 self.handlers.remove(&event);
 
                 // Disable the event.
-                struct DummyDelegate {};
+                struct DummyDelegate {}
                 impl CoreSimpleReceiverDelegate for DummyDelegate {
                     fn on_success(&mut self) {
                         debug!("Success disabling event listeners");
@@ -124,7 +124,7 @@ macro_rules! impl_event_listener {
             key: usize,
         ) -> Result<(), nsresult> {
             let handler =
-                ThreadPtrHolder::new(cstr!("nsISidlEventListener"), RefPtr::new(handler)).unwrap();
+                ThreadPtrHolder::new(cstr!("nsISidlEventListener"), RefPtr::new(handler))?;
 
             self.event_manager
                 .lock()
@@ -179,7 +179,7 @@ macro_rules! xpcom_sidl_event_target {
                 );
                 self.pending_listeners.lock().push((
                     event,
-                    ThreadPtrHolder::new(cstr!("nsISidlEventListener"), RefPtr::new(handler)).unwrap(),
+                    ThreadPtrHolder::new(cstr!("nsISidlEventListener"), RefPtr::new(handler))?,
                     key,
                 ));
             }

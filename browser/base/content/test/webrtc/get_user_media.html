@@ -31,6 +31,7 @@ async function requestDevice(aAudio, aVideo, aShare, aBadDevice = false) {
   const opts = {video: aVideo, audio: aAudio};
   if (aShare) {
     opts.video = { mediaSource: aShare };
+    SpecialPowers.wrap(document).notifyUserGestureActivation();
   }
   if (useFakeStreams) {
     opts.fake = true;
@@ -72,13 +73,40 @@ async function requestDevice(aAudio, aVideo, aShare, aBadDevice = false) {
     message("error: " + err);
   }
 }
+
+async function requestAudioOutput() {
+  SpecialPowers.wrap(document).notifyUserGestureActivation();
+  try {
+    await navigator.mediaDevices.selectAudioOutput();
+    message("ok");
+  } catch (err) {
+    message("error: " + err);
+  }
+}
+
 message("pending");
+
+function stopTracks(aKind) {
+  for (let stream of gStreams) {
+    for (let track of stream.getTracks()) {
+      if (track.kind == aKind) {
+        track.stop();
+        stream.removeTrack(track);
+      }
+    }
+  }
+  gStreams = gStreams.filter(s => !!s.getTracks().length);
+  if (aKind == "video") {
+    gVideoEvents = [];
+  } else if (aKind == "audio") {
+    gAudioEvents = [];
+  }
+}
 
 function closeStream() {
   for (let stream of gStreams) {
-    if (stream) {
-      stream.getTracks().forEach(t => t.stop());
-      stream = null;
+    for (let track of stream.getTracks()) {
+      track.stop();
     }
   }
   gStreams = [];

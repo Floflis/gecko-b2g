@@ -11,6 +11,7 @@
 #include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/ipc/Shmem.h"
 #include "ipc/WebGPUChild.h"
+#include "js/ArrayBuffer.h"
 #include "js/RootingAPI.h"
 #include "nsContentUtils.h"
 #include "nsWrapperCache.h"
@@ -42,8 +43,9 @@ NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN(Buffer)
   }
 NS_IMPL_CYCLE_COLLECTION_TRACE_END
 
-Buffer::Buffer(Device* const aParent, RawId aId, BufferAddress aSize)
-    : ChildOf(aParent), mId(aId), mSize(aSize) {
+Buffer::Buffer(Device* const aParent, RawId aId, BufferAddress aSize,
+               bool aMappable)
+    : ChildOf(aParent), mId(aId), mSize(aSize), mMappable(aMappable) {
   mozilla::HoldJSObjects(this);
 }
 
@@ -57,10 +59,15 @@ void Buffer::Cleanup() {
     mValid = false;
     auto bridge = mParent->GetBridge();
     if (bridge && bridge->IsOpen()) {
+      // Note: even if the buffer is considered mapped,
+      // the shmem may be empty before the mapAsync callback
+      // is resolved.
+      if (mMapped && mMapped->mShmem.IsReadable()) {
+        // Note: if the bridge is closed, all associated shmems are already
+        // deleted.
+        bridge->DeallocShmem(mMapped->mShmem);
+      }
       bridge->SendBufferDestroy(mId);
-    }
-    if (bridge && mMapped) {
-      bridge->DeallocShmem(mMapped->mShmem);
     }
   }
 }
@@ -81,6 +88,10 @@ already_AddRefed<dom::Promise> Buffer::MapAsync(
   }
   if (mMapped) {
     aRv.ThrowInvalidStateError("Unable to map a buffer that is already mapped");
+    return nullptr;
+  }
+  if (!mMappable) {
+    aRv.ThrowInvalidStateError("Unable to map a buffer that is not mappable");
     return nullptr;
   }
   // Initialize with a dummy shmem, it will become real after the promise is
@@ -156,7 +167,8 @@ void Buffer::Unmap(JSContext* aCx, ErrorResult& aRv) {
     }
   };
 
-  mParent->UnmapBuffer(mId, std::move(mMapped->mShmem), mMapped->mWritable);
+  mParent->UnmapBuffer(mId, std::move(mMapped->mShmem), mMapped->mWritable,
+                       mMappable);
   mMapped.reset();
 }
 

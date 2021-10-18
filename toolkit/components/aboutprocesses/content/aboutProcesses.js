@@ -10,11 +10,8 @@
 // mousemove event.
 const TIME_BEFORE_SORTING_AGAIN = 5000;
 
-// How often we should add a sample to our buffer.
-const BUFFER_SAMPLING_RATE_MS = 1000;
-
-// The age of the oldest sample to keep.
-const BUFFER_DURATION_MS = 10000;
+// How long we should wait between samples.
+const MINIMUM_INTERVAL_BETWEEN_SAMPLES_MS = 1000;
 
 // How often we should update
 const UPDATE_INTERVAL_MS = 2000;
@@ -31,6 +28,24 @@ const ONE_MEGA = 1024 * 1024;
 const ONE_KILO = 1024;
 
 const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+const { XPCOMUtils } = ChromeUtils.import(
+  "resource://gre/modules/XPCOMUtils.jsm"
+);
+const { AppConstants } = ChromeUtils.import(
+  "resource://gre/modules/AppConstants.jsm"
+);
+
+XPCOMUtils.defineLazyModuleGetters(this, {
+  ContextualIdentityService:
+    "resource://gre/modules/ContextualIdentityService.jsm",
+});
+
+XPCOMUtils.defineLazyGetter(this, "ProfilerPopupBackground", function() {
+  return ChromeUtils.import(
+    "resource://devtools/client/performance-new/popup/background.jsm.js"
+  );
+});
+
 const { WebExtensionPolicy } = Cu.getGlobalForObject(Services);
 
 const SHOW_THREADS = Services.prefs.getBoolPref(
@@ -39,46 +54,25 @@ const SHOW_THREADS = Services.prefs.getBoolPref(
 const SHOW_ALL_SUBFRAMES = Services.prefs.getBoolPref(
   "toolkit.aboutProcesses.showAllSubframes"
 );
-
-/**
- * Returns a Promise that's resolved after the next turn of the event loop.
- *
- * Just returning a resolved Promise would mean that any `then` callbacks
- * would be called right after the end of the current turn, so `setTimeout`
- * is used to delay Promise resolution until the next turn.
- *
- * In mochi tests, it's possible for this to be called after the
- * about:performance window has been torn down, which causes `setTimeout` to
- * throw an NS_ERROR_NOT_INITIALIZED exception. In that case, returning
- * `undefined` is fine.
- */
-function wait(ms = 0) {
-  try {
-    let resolve;
-    let p = new Promise(resolve_ => {
-      resolve = resolve_;
-    });
-    setTimeout(resolve, ms);
-    return p;
-  } catch (e) {
-    dump(
-      "WARNING: wait aborted because of an invalid Window state in aboutPerformance.js.\n"
-    );
-    return undefined;
-  }
-}
+const SHOW_PROFILER_ICONS = Services.prefs.getBoolPref(
+  "toolkit.aboutProcesses.showProfilerIcons"
+);
+const PROFILE_DURATION = Math.max(
+  1,
+  Services.prefs.getIntPref("toolkit.aboutProcesses.profileDuration")
+);
 
 /**
  * For the time being, Fluent doesn't support duration or memory formats, so we need
  * to fetch units from Fluent. To avoid re-fetching at each update, we prefetch these
- * units during initialization, asynchronously.
+ * units during initialization, asynchronously, and keep them.
  *
- * @type Promise<{
+ * @type {
  *   duration: { ns: String, us: String, ms: String, s: String, m: String, h: String, d: String },
  *   memory: { B: String, KB: String, MB: String, GB: String, TB: String, PB: String, EB: String }
  * }.
  */
-let gPromisePrefetchedUnits;
+let gLocalizedUnits;
 
 let tabFinder = {
   update() {
@@ -135,17 +129,8 @@ let tabFinder = {
  * Utilities for dealing with state
  */
 var State = {
-  /**
-   * Indexed by the number of minutes since the snapshot was taken.
-   *
-   * @type {Array<ApplicationSnapshot>}
-   */
-  _buffer: [],
-  /**
-   * The latest snapshot.
-   *
-   * @type ApplicationSnapshot
-   */
+  // Store the previous and current samples so they can be compared.
+  _previous: null,
   _latest: null,
 
   async _promiseSnapshot() {
@@ -169,54 +154,37 @@ var State = {
    * @return {Promise}
    */
   async update(force = false) {
-    // If the buffer is empty, add one value for bootstraping purposes.
-    if (!this._buffer.length) {
-      this._latest = await this._promiseSnapshot();
-      this._buffer.push(this._latest);
-      await wait(BUFFER_SAMPLING_RATE_MS * 1.1);
-    }
-
-    let now = Cu.now();
-
-    // If we haven't sampled in a while, add a sample to the buffer.
-    let latestInBuffer = this._buffer[this._buffer.length - 1];
-    let deltaT = now - latestInBuffer.date;
-    if (force || deltaT > BUFFER_SAMPLING_RATE_MS) {
-      this._latest = await this._promiseSnapshot();
-      this._buffer.push(this._latest);
-    }
-
-    // If we have too many samples, remove the oldest sample.
-    let oldestInBuffer = this._buffer[0];
-    if (oldestInBuffer.date + BUFFER_DURATION_MS < this._latest.date) {
-      this._buffer.shift();
+    if (
+      force ||
+      !this._latest ||
+      Cu.now() - this._latest.date > MINIMUM_INTERVAL_BETWEEN_SAMPLES_MS
+    ) {
+      // Replacing this._previous before we are done awaiting
+      // this._promiseSnapshot can cause this._previous and this._latest to be
+      // equal for a short amount of time, which can cause test failures when
+      // a forced update of the display is triggered in the meantime.
+      let newSnapshot = await this._promiseSnapshot();
+      this._previous = this._latest;
+      this._latest = newSnapshot;
     }
   },
 
   _getThreadDelta(cur, prev, deltaT) {
-    let name = cur.name || "???";
     let result = {
       tid: cur.tid,
-      name,
-      // Total amount of CPU used, in ns (user).
-      totalCpuUser: cur.cpuUser,
-      slopeCpuUser: null,
-      // Total amount of CPU used, in ns (kernel).
-      totalCpuKernel: cur.cpuKernel,
-      slopeCpuKernel: null,
+      name: cur.name || `(${cur.tid})`,
       // Total amount of CPU used, in ns (user + kernel).
       totalCpu: cur.cpuUser + cur.cpuKernel,
       slopeCpu: null,
+      active: null,
     };
-    if (!prev) {
+    if (!deltaT) {
       return result;
     }
-    if (prev.tid != cur.tid) {
-      throw new Error("Assertion failed: A thread cannot change tid.");
-    }
-    result.slopeCpuUser = (cur.cpuUser - prev.cpuUser) / deltaT;
-    result.slopeCpuKernel = (cur.cpuKernel - prev.cpuKernel) / deltaT;
-    result.slopeCpu = result.slopeCpuKernel + result.slopeCpuUser;
+    result.slopeCpu =
+      (result.totalCpu - (prev ? prev.cpuUser + prev.cpuKernel : 0)) / deltaT;
+    result.active =
+      !!result.slopeCpu || cur.cpuCycleCount > (prev ? prev.cpuCycleCount : 0);
     return result;
   },
 
@@ -287,25 +255,15 @@ var State = {
    */
   _getProcessDelta(cur, prev) {
     let windows = this._getDOMWindows(cur);
-    // Resident set size is the total memory used by the process, including shared memory.
-    // Resident unique size is the memory used by the process, without shared memory.
-    // Since all processes share memory with the parent process, we count the shared memory
-    // as part of the parent process (`"browser"`) rather than as part of the individual
-    // processes.
-    let totalRamSize =
-      cur.type == "browser" ? cur.residentSetSize : cur.residentUniqueSize;
     let result = {
       pid: cur.pid,
       childID: cur.childID,
       filename: cur.filename,
-      totalRamSize,
+      totalRamSize: cur.memory,
       deltaRamSize: null,
-      totalCpuUser: cur.cpuUser,
-      slopeCpuUser: null,
-      totalCpuKernel: cur.cpuKernel,
-      slopeCpuKernel: null,
       totalCpu: cur.cpuUser + cur.cpuKernel,
       slopeCpu: null,
+      active: null,
       type: cur.type,
       origin: cur.origin || "",
       threads: null,
@@ -327,9 +285,7 @@ var State = {
     }
     if (!prev) {
       if (SHOW_THREADS) {
-        result.threads = cur.threads.map(data =>
-          this._getThreadDelta(data, null, null)
-        );
+        result.threads = cur.threads.map(data => this._getThreadDelta(data));
       }
       return result;
     }
@@ -343,21 +299,14 @@ var State = {
       for (let thread of prev.threads) {
         prevThreads.set(thread.tid, thread);
       }
-      threads = cur.threads.map(curThread => {
-        let prevThread = prevThreads.get(curThread.tid);
-        if (!prevThread) {
-          return this._getThreadDelta(curThread);
-        }
-        return this._getThreadDelta(curThread, prevThread, deltaT);
-      });
+      threads = cur.threads.map(curThread =>
+        this._getThreadDelta(curThread, prevThreads.get(curThread.tid), deltaT)
+      );
     }
-    result.deltaRamSize =
-      cur.type == "browser"
-        ? cur.residentSetSize - prev.residentSetSize
-        : cur.residentUniqueSize - prev.residentUniqueSize;
-    result.slopeCpuUser = (cur.cpuUser - prev.cpuUser) / deltaT;
-    result.slopeCpuKernel = (cur.cpuKernel - prev.cpuKernel) / deltaT;
-    result.slopeCpu = result.slopeCpuUser + result.slopeCpuKernel;
+    result.deltaRamSize = cur.memory - prev.memory;
+    result.slopeCpu =
+      (cur.cpuUser + cur.cpuKernel - prev.cpuUser - prev.cpuKernel) / deltaT;
+    result.active = !!result.slopeCpu || cur.cpuCycleCount > prev.cpuCycleCount;
     result.threads = threads;
     return result;
   },
@@ -365,32 +314,11 @@ var State = {
   getCounters() {
     tabFinder.update();
 
-    // We rebuild the maps during each iteration to make sure that
-    // we do not maintain references to processes that have been
-    // shutdown.
-
-    let current = this._latest;
     let counters = [];
 
-    for (let cur of current.processes.values()) {
-      // Look for the oldest point of comparison
-      let oldest = null;
-      let delta;
-      for (let index = 0; index <= this._buffer.length - 2; ++index) {
-        oldest = this._buffer[index].processes.get(cur.pid);
-        if (oldest) {
-          // Found it!
-          break;
-        }
-      }
-      if (oldest) {
-        // Existing process. Let's display slopes info.
-        delta = this._getProcessDelta(cur, oldest);
-      } else {
-        // New process. Let's display basic info.
-        delta = this._getProcessDelta(cur, null);
-      }
-      counters.push(delta);
+    for (let cur of this._latest.processes.values()) {
+      let prev = this._previous?.processes.get(cur.pid);
+      counters.push(this._getProcessDelta(cur, prev));
     }
 
     return counters;
@@ -398,117 +326,250 @@ var State = {
 };
 
 var View = {
-  _fragment: document.createDocumentFragment(),
   // Processes, tabs and subframes that we killed during the previous iteration.
   // Array<{pid:Number} | {windowId:Number}>
   _killedRecently: [],
-  async commit() {
+  commit() {
     this._killedRecently.length = 0;
     let tbody = document.getElementById("process-tbody");
 
-    // Force translation to happen before we insert the new content in the DOM
-    // to avoid flicker when resizing.
-    await document.l10n.translateFragment(this._fragment);
-
-    while (tbody.firstChild) {
-      tbody.firstChild.remove();
+    let insertPoint = tbody.firstChild;
+    let nextRow;
+    while ((nextRow = this._orderedRows.shift())) {
+      if (insertPoint && insertPoint === nextRow) {
+        insertPoint = insertPoint.nextSibling;
+      } else {
+        tbody.insertBefore(nextRow, insertPoint);
+      }
     }
-    tbody.appendChild(this._fragment);
-    this._fragment = document.createDocumentFragment();
+
+    if (insertPoint) {
+      while ((nextRow = insertPoint.nextSibling)) {
+        this._removeRow(nextRow);
+      }
+      this._removeRow(insertPoint);
+    }
+  },
+  // If we are not going to display the updated list of rows, drop references
+  // to rows that haven't been inserted in the DOM tree.
+  discardUpdate() {
+    for (let row of this._orderedRows) {
+      if (!row.parentNode) {
+        this._rowsById.delete(row.rowId);
+      }
+    }
+    this._orderedRows = [];
   },
   insertAfterRow(row) {
-    row.parentNode.insertBefore(this._fragment, row.nextSibling);
-    this._fragment = document.createDocumentFragment();
+    let tbody = row.parentNode;
+    let nextRow;
+    while ((nextRow = this._orderedRows.pop())) {
+      tbody.insertBefore(nextRow, row.nextSibling);
+    }
+  },
+
+  _rowsById: new Map(),
+  _removeRow(row) {
+    this._rowsById.delete(row.rowId);
+
+    row.remove();
+  },
+  _getOrCreateRow(rowId, cellCount) {
+    let row = this._rowsById.get(rowId);
+    if (!row) {
+      row = document.createElement("tr");
+      while (cellCount--) {
+        row.appendChild(document.createElement("td"));
+      }
+      row.rowId = rowId;
+      this._rowsById.set(rowId, row);
+    }
+    this._orderedRows.push(row);
+    return row;
+  },
+
+  displayCpu(data, cpuCell) {
+    if (data.slopeCpu == null) {
+      this._fillCell(cpuCell, {
+        fluentName: "about-processes-cpu-user-and-kernel-not-ready",
+        classes: ["cpu"],
+      });
+    } else {
+      let { duration, unit } = this._getDuration(data.totalCpu);
+      if (data.totalCpu == 0 && AppConstants.platform == "win") {
+        // The minimum non zero CPU time we can get on Windows is 16ms
+        // so avoid displaying '0ns'.
+        unit = "ms";
+      }
+      let localizedUnit = gLocalizedUnits.duration[unit];
+      if (data.slopeCpu == 0) {
+        let fluentName = data.active
+          ? "about-processes-cpu-almost-idle"
+          : "about-processes-cpu-fully-idle";
+        this._fillCell(cpuCell, {
+          fluentName,
+          fluentArgs: {
+            total: duration,
+            unit: localizedUnit,
+          },
+          classes: ["cpu"],
+        });
+      } else {
+        this._fillCell(cpuCell, {
+          fluentName: "about-processes-cpu",
+          fluentArgs: {
+            percent: data.slopeCpu,
+            total: duration,
+            unit: localizedUnit,
+          },
+          classes: ["cpu"],
+        });
+      }
+    }
   },
 
   /**
-   * Append a row showing a single process (without its threads).
+   * Display a row showing a single process (without its threads).
    *
    * @param {ProcessDelta} data The data to display.
    * @return {DOMElement} The row displaying the process.
    */
-  appendProcessRow(data, units) {
-    let row = document.createElement("tr");
-    row.classList.add("process");
-
-    if (data.isHung) {
-      row.classList.add("hung");
+  displayProcessRow(data) {
+    const cellCount = 4;
+    let rowId = "p:" + data.pid;
+    let row = this._getOrCreateRow(rowId, cellCount);
+    row.process = data;
+    {
+      let classNames = "process";
+      if (data.isHung) {
+        classNames += " hung";
+      }
+      row.className = classNames;
     }
 
     // Column: Name
+    let nameCell = row.firstChild;
     {
-      let fluentName;
       let classNames = [];
+      let fluentName;
+      let fluentArgs = {
+        pid: "" + data.pid, // Make sure that this number is not localized
+      };
       switch (data.type) {
         case "web":
-          fluentName = "about-processes-web-process-name";
+          fluentName = "about-processes-web-process";
           break;
         case "webIsolated":
-          fluentName = "about-processes-web-isolated-process-name";
+          fluentName = "about-processes-web-isolated-process";
+          fluentArgs.origin = data.origin;
           break;
         case "webLargeAllocation":
-          fluentName = "about-processes-web-large-allocation-process-name";
+          fluentName = "about-processes-web-large-allocation-process";
+          fluentArgs.origin = data.origin;
           break;
         case "file":
-          fluentName = "about-processes-file-process-name";
+          fluentName = "about-processes-file-process";
           break;
         case "extension":
-          fluentName = "about-processes-extension-process-name";
+          fluentName = "about-processes-extension-process";
           classNames = ["extensions"];
           break;
         case "privilegedabout":
-          fluentName = "about-processes-privilegedabout-process-name";
+          fluentName = "about-processes-privilegedabout-process";
+          break;
+        case "privilegedmozilla":
+          fluentName = "about-processes-privilegedmozilla-process";
           break;
         case "withCoopCoep":
-          fluentName = "about-processes-with-coop-coep-process-name";
+          fluentName = "about-processes-with-coop-coep-process";
+          fluentArgs.origin = data.origin;
           break;
         case "browser":
-          fluentName = "about-processes-browser-process-name";
+          fluentName = "about-processes-browser-process";
           break;
         case "plugin":
-          fluentName = "about-processes-plugin-process-name";
+          fluentName = "about-processes-plugin-process";
           break;
         case "gmpPlugin":
-          fluentName = "about-processes-gmp-plugin-process-name";
+          fluentName = "about-processes-gmp-plugin-process";
           break;
         case "gpu":
-          fluentName = "about-processes-gpu-process-name";
+          fluentName = "about-processes-gpu-process";
           break;
         case "vr":
-          fluentName = "about-processes-vr-process-name";
+          fluentName = "about-processes-vr-process";
           break;
         case "rdd":
-          fluentName = "about-processes-rdd-process-name";
+          fluentName = "about-processes-rdd-process";
           break;
         case "socket":
-          fluentName = "about-processes-socket-process-name";
+          fluentName = "about-processes-socket-process";
           break;
         case "remoteSandboxBroker":
-          fluentName = "about-processes-remote-sandbox-broker-process-name";
+          fluentName = "about-processes-remote-sandbox-broker-process";
           break;
         case "forkServer":
-          fluentName = "about-processes-fork-server-process-name";
+          fluentName = "about-processes-fork-server-process";
           break;
         case "preallocated":
-          fluentName = "about-processes-preallocated-process-name";
+          fluentName = "about-processes-preallocated-process";
           break;
         // The following are probably not going to show up for users
         // but let's handle the case anyway to avoid heisenoranges
         // during tests in case of a leftover process from a previous
         // test.
         default:
-          fluentName = "about-processes-unknown-process-name";
+          fluentName = "about-processes-unknown-process";
+          fluentArgs.type = data.type;
           break;
       }
-      let elt = this._addCell(row, {
-        fluentName,
-        fluentArgs: {
-          pid: "" + data.pid, // Make sure that this number is not localized
-          origin: data.origin,
-          type: data.type,
-        },
-        classes: ["type", "favicon", ...classNames],
-      });
+
+      // Show container names instead of raw origin attribute suffixes.
+      if (fluentArgs.origin?.includes("^")) {
+        let origin = fluentArgs.origin;
+        let privateBrowsingId, userContextId;
+        try {
+          ({
+            privateBrowsingId,
+            userContextId,
+          } = ChromeUtils.createOriginAttributesFromOrigin(origin));
+          fluentArgs.origin = origin.slice(0, origin.indexOf("^"));
+        } catch (e) {
+          // createOriginAttributesFromOrigin can throw NS_ERROR_FAILURE for incorrect origin strings.
+        }
+        if (userContextId) {
+          let identityLabel = ContextualIdentityService.getUserContextLabel(
+            userContextId
+          );
+          if (identityLabel) {
+            fluentArgs.origin += ` — ${identityLabel}`;
+          }
+        }
+        if (privateBrowsingId) {
+          fluentName += "-private";
+        }
+      }
+
+      let processNameElement = nameCell;
+      if (SHOW_PROFILER_ICONS) {
+        if (!nameCell.firstChild) {
+          processNameElement = document.createElement("span");
+          nameCell.appendChild(processNameElement);
+
+          let profilerIcon = document.createElement("span");
+          profilerIcon.className = "profiler-icon";
+          document.l10n.setAttributes(
+            profilerIcon,
+            "about-processes-profile-process",
+            { duration: PROFILE_DURATION }
+          );
+          nameCell.appendChild(profilerIcon);
+        } else {
+          processNameElement = nameCell.firstChild;
+        }
+      }
+      document.l10n.setAttributes(processNameElement, fluentName, fluentArgs);
+      nameCell.className = ["type", "favicon", ...classNames].join(" ");
 
       let image;
       switch (data.type) {
@@ -546,73 +607,45 @@ var View = {
             image = "chrome://browser/skin/link.svg";
           }
       }
-      elt.style.backgroundImage = `url('${image}')`;
+      nameCell.style.backgroundImage = `url('${image}')`;
     }
 
-    // Column: Resident size
+    // Column: Memory
+    let memoryCell = nameCell.nextSibling;
     {
       let formattedTotal = this._formatMemory(data.totalRamSize);
       if (data.deltaRamSize) {
         let formattedDelta = this._formatMemory(data.deltaRamSize);
-        this._addCell(row, {
-          fluentName: "about-processes-total-memory-size",
+        this._fillCell(memoryCell, {
+          fluentName: "about-processes-total-memory-size-changed",
           fluentArgs: {
             total: formattedTotal.amount,
-            totalUnit: units.memory[formattedTotal.unit],
+            totalUnit: gLocalizedUnits.memory[formattedTotal.unit],
             delta: Math.abs(formattedDelta.amount),
-            deltaUnit: units.memory[formattedDelta.unit],
+            deltaUnit: gLocalizedUnits.memory[formattedDelta.unit],
             deltaSign: data.deltaRamSize > 0 ? "+" : "-",
           },
-          classes: ["totalMemorySize"],
+          classes: ["memory"],
         });
       } else {
-        this._addCell(row, {
+        this._fillCell(memoryCell, {
           fluentName: "about-processes-total-memory-size-no-change",
           fluentArgs: {
             total: formattedTotal.amount,
-            totalUnit: units.memory[formattedTotal.unit],
+            totalUnit: gLocalizedUnits.memory[formattedTotal.unit],
           },
-          classes: ["totalMemorySize"],
+          classes: ["memory"],
         });
       }
     }
 
-    // Column: CPU: User and Kernel
-    if (data.slopeCpu == null) {
-      this._addCell(row, {
-        fluentName: "about-processes-cpu-user-and-kernel-not-ready",
-        classes: ["cpu"],
-      });
-    } else {
-      let { duration, unit } = this._getDuration(data.totalCpu);
-      let localizedUnit = units.duration[unit];
-      if (data.slopeCpu == 0) {
-        this._addCell(row, {
-          fluentName: "about-processes-cpu-user-and-kernel-idle",
-          fluentArgs: {
-            total: duration,
-            unit: localizedUnit,
-          },
-          classes: ["cpu"],
-        });
-      } else {
-        this._addCell(row, {
-          fluentName: "about-processes-cpu-user-and-kernel",
-          fluentArgs: {
-            percent: data.slopeCpu,
-            total: duration,
-            unit: localizedUnit,
-          },
-          classes: ["cpu"],
-        });
-      }
-    }
+    // Column: CPU
+    let cpuCell = memoryCell.nextSibling;
+    this.displayCpu(data, cpuCell);
 
     // Column: Kill button – but not for all processes.
-    let killButton = this._addCell(row, {
-      content: "",
-      classes: ["action-icon"],
-    });
+    let killButton = cpuCell.nextSibling;
+    killButton.className = "action-icon";
 
     if (["web", "webIsolated", "webLargeAllocation"].includes(data.type)) {
       // This type of process can be killed.
@@ -636,122 +669,146 @@ var View = {
       }
     }
 
-    this._fragment.appendChild(row);
     return row;
   },
 
-  appendThreadSummaryRow(data, isOpen) {
-    let row = document.createElement("tr");
-    row.classList.add("thread-summary");
+  /**
+   * Display a thread summary row with the thread count and a twisty to
+   * open/close the list.
+   *
+   * @param {ProcessDelta} data The data to display.
+   * @return {boolean} Whether the full thread list should be displayed.
+   */
+  displayThreadSummaryRow(data) {
+    const cellCount = 2;
+    let rowId = "ts:" + data.pid;
+    let row = this._getOrCreateRow(rowId, cellCount);
+    row.process = data;
+    row.className = "thread-summary";
+    let isOpen = false;
 
     // Column: Name
-    let elt = this._addCell(row, {
-      fluentName: "about-processes-thread-summary",
-      fluentArgs: { number: data.threads.length },
-      classes: ["name", "indent"],
-    });
-    if (data.threads.length) {
-      let img = document.createElement("span");
-      img.classList.add("twisty");
-      if (data.isOpen) {
-        img.classList.add("open");
+    let nameCell = row.firstChild;
+    let threads = data.threads;
+    let activeThreads = new Map();
+    let activeThreadCount = 0;
+    for (let t of data.threads) {
+      if (!t.active) {
+        continue;
       }
-      elt.insertBefore(img, elt.firstChild);
+      ++activeThreadCount;
+      let name = t.name.replace(/ ?#[0-9]+$/, "");
+      if (!activeThreads.has(name)) {
+        activeThreads.set(name, { name, slopeCpu: t.slopeCpu, count: 1 });
+      } else {
+        let thread = activeThreads.get(name);
+        thread.count++;
+        thread.slopeCpu += t.slopeCpu;
+      }
+    }
+    let fluentName, fluentArgs;
+    if (activeThreadCount) {
+      let percentFormatter = new Intl.NumberFormat(undefined, {
+        style: "percent",
+        minimumSignificantDigits: 1,
+      });
+
+      let threadList = Array.from(activeThreads.values());
+      threadList.sort((t1, t2) => t2.slopeCpu - t1.slopeCpu);
+
+      fluentName = "about-processes-active-threads";
+      fluentArgs = {
+        number: threads.length,
+        active: activeThreadCount,
+        list: new Intl.ListFormat(undefined, { style: "narrow" }).format(
+          threadList.map(t => {
+            let name = t.count > 1 ? `${t.count} × ${t.name}` : t.name;
+            let percent = Math.round(t.slopeCpu * 1000) / 1000;
+            if (percent) {
+              return `${name} ${percentFormatter.format(percent)}`;
+            }
+            return name;
+          })
+        ),
+      };
+    } else {
+      fluentName = "about-processes-inactive-threads";
+      fluentArgs = {
+        number: threads.length,
+      };
     }
 
-    // Column: Resident size
-    this._addCell(row, {
-      content: "",
-      classes: ["totalRamSize"],
-    });
+    let span;
+    if (!nameCell.firstChild) {
+      nameCell.className = "name indent";
+      // Create the nodes
+      let img = document.createElement("span");
+      img.className = "twisty";
+      nameCell.appendChild(img);
 
-    // Column: CPU: User and Kernel
-    this._addCell(row, {
-      content: "",
-      classes: ["cpu"],
-    });
+      span = document.createElement("span");
+      nameCell.appendChild(span);
+    } else {
+      // The only thing that can change is the thread count.
+      let img = nameCell.firstChild;
+      isOpen = img.classList.contains("open");
+      span = img.nextSibling;
+    }
+    document.l10n.setAttributes(span, fluentName, fluentArgs);
 
     // Column: action
-    this._addCell(row, {
-      content: "",
-      classes: ["action-icon"],
-    });
+    let actionCell = nameCell.nextSibling;
+    actionCell.className = "action-icon";
 
-    this._fragment.appendChild(row);
-    return row;
+    return isOpen;
   },
 
-  appendDOMWindowRow(data, parent) {
-    let row = document.createElement("tr");
-    row.classList.add("window");
+  displayDOMWindowRow(data, parent) {
+    const cellCount = 2;
+    let rowId = "w:" + data.outerWindowId;
+    let row = this._getOrCreateRow(rowId, cellCount);
+    row.win = data;
+    row.className = "window";
 
     // Column: filename
+    let nameCell = row.firstChild;
     let tab = tabFinder.get(data.outerWindowId);
     let fluentName;
-    let name;
+    let fluentArgs = {};
     let className;
-    if (parent.type == "extension") {
-      fluentName = "about-processes-extension-name";
-      if (data.addon) {
-        name = data.addon.name;
-      } else if (data.documentURI.scheme == "about") {
-        // about: URLs don't have an host.
-        name = data.documentURI.spec;
-      } else {
-        name = data.documentURI.host;
-      }
-    } else if (tab && tab.tabbrowser) {
+    if (tab && tab.tabbrowser) {
       fluentName = "about-processes-tab-name";
-      name = data.documentTitle;
+      fluentArgs.name = tab.tab.label;
       className = "tab";
     } else if (tab) {
       fluentName = "about-processes-preloaded-tab";
-      name = null;
       className = "preloaded-tab";
     } else if (data.count == 1) {
       fluentName = "about-processes-frame-name-one";
-      name = data.prePath;
+      fluentArgs.url = data.documentURI.spec;
       className = "frame-one";
     } else {
       fluentName = "about-processes-frame-name-many";
-      name = data.prePath;
+      fluentArgs.number = data.count;
+      fluentArgs.shortUrl =
+        data.documentURI.scheme == "about"
+          ? data.documentURI.spec
+          : data.documentURI.prePath;
       className = "frame-many";
     }
-    let elt = this._addCell(row, {
+    this._fillCell(nameCell, {
       fluentName,
-      fluentArgs: {
-        name,
-        url: data.documentURI.spec,
-        number: data.count,
-        shortUrl:
-          data.documentURI.scheme == "about"
-            ? data.documentURI.spec
-            : data.documentURI.prePath,
-      },
+      fluentArgs,
       classes: ["name", "indent", "favicon", className],
     });
     let image = tab?.tab.getAttribute("image");
     if (image) {
-      elt.style.backgroundImage = `url('${image}')`;
+      nameCell.style.backgroundImage = `url('${image}')`;
     }
 
-    // Column: Resident size (empty)
-    this._addCell(row, {
-      content: "",
-      classes: ["totalRamSize"],
-    });
-
-    // Column: CPU (empty)
-    this._addCell(row, {
-      content: "",
-      classes: ["cpu"],
-    });
-
     // Column: action
-    let killButton = this._addCell(row, {
-      content: "",
-      classes: ["action-icon"],
-    });
+    let killButton = nameCell.nextSibling;
+    killButton.className = "action-icon";
 
     if (data.tab && data.tab.tabbrowser) {
       // A tab. We want to be able to close it.
@@ -775,23 +832,24 @@ var View = {
         document.l10n.setAttributes(killButton, "about-processes-shutdown-tab");
       }
     }
-    this._fragment.appendChild(row);
-    return row;
   },
 
   /**
-   * Append a row showing a single thread.
+   * Display a row showing a single thread.
    *
    * @param {ThreadDelta} data The data to display.
-   * @return {DOMElement} The row displaying the thread.
    */
-  appendThreadRow(data, units) {
-    let row = document.createElement("tr");
-    row.classList.add("thread");
+  displayThreadRow(data) {
+    const cellCount = 3;
+    let rowId = "t:" + data.tid;
+    let row = this._getOrCreateRow(rowId, cellCount);
+    row.thread = data;
+    row.className = "thread";
 
     // Column: filename
-    this._addCell(row, {
-      fluentName: "about-processes-thread-name",
+    let nameCell = row.firstChild;
+    this._fillCell(nameCell, {
+      fluentName: "about-processes-thread-name-and-id",
       fluentArgs: {
         name: data.name,
         tid: "" + data.tid /* Make sure that this number is not localized */,
@@ -799,66 +857,16 @@ var View = {
       classes: ["name", "double_indent"],
     });
 
-    // Column: Resident size (empty)
-    this._addCell(row, {
-      content: "",
-      classes: ["totalRamSize"],
-    });
+    // Column: CPU
+    this.displayCpu(data, nameCell.nextSibling);
 
-    // Column: CPU: User and Kernel
-    if (data.slopeCpu == null) {
-      this._addCell(row, {
-        fluentName: "about-processes-cpu-user-and-kernel-not-ready",
-        classes: ["cpu"],
-      });
-    } else {
-      let { duration, unit } = this._getDuration(data.totalCpu);
-      let localizedUnit = units.duration[unit];
-      if (data.slopeCpu == 0) {
-        this._addCell(row, {
-          fluentName: "about-processes-cpu-user-and-kernel-idle",
-          fluentArgs: {
-            total: duration,
-            unit: localizedUnit,
-          },
-          classes: ["cpu"],
-        });
-      } else {
-        this._addCell(row, {
-          fluentName: "about-processes-cpu-user-and-kernel",
-          fluentArgs: {
-            percent: data.slopeCpu,
-            total: duration,
-            unit: localizedUnit,
-          },
-          classes: ["cpu"],
-        });
-      }
-    }
-
-    // Column: Buttons (empty)
-    this._addCell(row, {
-      content: "",
-      classes: [],
-    });
-
-    this._fragment.appendChild(row);
-    return row;
+    // Third column (Buttons) is empty, nothing to do.
   },
 
-  _addCell(row, { content, classes, fluentName, fluentArgs }) {
-    let elt = document.createElement("td");
-    if (fluentName) {
-      let span = document.createElement("span");
-      document.l10n.setAttributes(span, fluentName, fluentArgs);
-      elt.appendChild(span);
-    } else {
-      elt.textContent = content;
-      elt.setAttribute("title", content);
-    }
-    elt.classList.add(...classes);
-    row.appendChild(elt);
-    return elt;
+  _orderedRows: [],
+  _fillCell(elt, { classes, fluentName, fluentArgs }) {
+    document.l10n.setAttributes(elt, fluentName, fluentArgs);
+    elt.className = classes.join(" ");
   },
 
   _getDuration(rawDurationNS) {
@@ -927,7 +935,6 @@ var View = {
 };
 
 var Control = {
-  _openItems: new Set(),
   // The set of all processes reported as "hung" by the process hang monitor.
   //
   // type: Set<ChildID>
@@ -939,7 +946,7 @@ var Control = {
     while (sibling && !sibling.classList.contains("process")) {
       let next = sibling.nextSibling;
       if (sibling.classList.contains("thread")) {
-        sibling.remove();
+        View._removeRow(sibling);
       }
       sibling = next;
     }
@@ -948,7 +955,7 @@ var Control = {
     this._initHangReports();
 
     // Start prefetching units.
-    gPromisePrefetchedUnits = (async function() {
+    this._promisePrefetchedUnits = (async function() {
       let [
         ns,
         us,
@@ -1005,17 +1012,39 @@ var Control = {
         return;
       }
 
+      if (target.classList.contains("profiler-icon")) {
+        if (Services.profiler.IsActive()) {
+          return;
+        }
+        Services.profiler.StartProfiler(
+          10000000,
+          1,
+          ["default", "ipcmessages"],
+          ["pid:" + target.parentNode.parentNode.process.pid]
+        );
+        target.classList.add("profiler-active");
+        setTimeout(() => {
+          ProfilerPopupBackground.captureProfile("aboutprofiling");
+          target.classList.remove("profiler-active");
+        }, PROFILE_DURATION * 1000);
+        return;
+      }
+
       // Handle selection changes
-      let row = target.parentNode;
+      let row = target.closest("tr");
+      if (!row) {
+        return;
+      }
       if (this.selectedRow) {
         this.selectedRow.removeAttribute("selected");
+        if (this.selectedRow.rowId == row.rowId) {
+          // Clicking the same row again clears the selection.
+          this.selectedRow = null;
+          return;
+        }
       }
-      if (row.windowId) {
-        row.setAttribute("selected", "true");
-        this.selectedRow = row;
-      } else if (this.selectedRow) {
-        this.selectedRow = null;
-      }
+      row.setAttribute("selected", "true");
+      this.selectedRow = row;
     });
 
     // Double click:
@@ -1129,30 +1158,19 @@ var Control = {
       return;
     }
 
-    await wait(0);
-
     await this._updateDisplay(force);
   },
 
   // The force parameter can force a full update even when the mouse has been
   // moved recently.
   async _updateDisplay(force = false) {
-    if (
-      !force &&
-      Date.now() - this._lastMouseEvent < TIME_BEFORE_SORTING_AGAIN
-    ) {
-      return;
+    let counters = State.getCounters();
+    if (this._promisePrefetchedUnits) {
+      gLocalizedUnits = await this._promisePrefetchedUnits;
+      this._promisePrefetchedUnits = null;
     }
 
-    let counters = State.getCounters();
-    let units = await gPromisePrefetchedUnits;
-
-    // Reset the selectedRow field and the _openItems set each time we redraw
-    // to avoid keeping forever references to dead processes.
-    let openItems = this._openItems;
-    this._openItems = new Set();
-
-    // Similarly, we reset `_hungItems`, based on the assumption that the process hang
+    // We reset `_hungItems`, based on the assumption that the process hang
     // monitor will inform us again before the next update. Since the process hang monitor
     // pings its clients about once per second and we update about once per 2 seconds
     // (or more if the mouse moves), we should be ok.
@@ -1164,33 +1182,22 @@ var Control = {
     for (let process of counters) {
       this._sortDOMWindows(process.windows);
 
-      let isOpen = openItems.has(process.pid);
-      process.isOpen = isOpen;
+      process.isHung = process.childID && hungItems.has(process.childID);
 
-      let isHung = process.childID && hungItems.has(process.childID);
-      process.isHung = isHung;
-
-      let processRow = View.appendProcessRow(process, units);
-      processRow.process = process;
+      let processRow = View.displayProcessRow(process);
 
       if (process.type != "extension") {
         // We do not want to display extensions.
-        let winRow;
         for (let win of process.windows) {
           if (SHOW_ALL_SUBFRAMES || win.tab || win.isProcessRoot) {
-            winRow = View.appendDOMWindowRow(win, process);
-            winRow.win = win;
+            View.displayDOMWindowRow(win, process);
           }
         }
       }
 
       if (SHOW_THREADS) {
-        let threadSummaryRow = View.appendThreadSummaryRow(process, isOpen);
-        threadSummaryRow.process = process;
-
-        if (isOpen) {
-          this._openItems.add(process.pid);
-          this._showThreads(processRow, units);
+        if (View.displayThreadSummaryRow(process)) {
+          this._showThreads(processRow);
         }
       }
       if (
@@ -1204,34 +1211,56 @@ var Control = {
       previousProcess = process;
     }
 
-    await View.commit();
+    if (
+      !force &&
+      Date.now() - this._lastMouseEvent < TIME_BEFORE_SORTING_AGAIN
+    ) {
+      // If there has been a recent mouse event, we don't want to reorder,
+      // add or remove rows so that the table content under the mouse pointer
+      // doesn't change when the user might be about to click to close a tab
+      // or kill a process.
+      // We didn't return earlier because updating CPU and memory values is
+      // still valuable.
+      View.discardUpdate();
+      return;
+    }
+
+    View.commit();
+
+    // Reset the selectedRow field if that row is no longer in the DOM
+    // to avoid keeping forever references to dead processes.
+    if (this.selectedRow && !this.selectedRow.parentNode) {
+      this.selectedRow = null;
+    }
+
+    // Used by tests to differentiate full updates from l10n updates.
+    document.dispatchEvent(new CustomEvent("AboutProcessesUpdated"));
   },
-  _showThreads(row, units) {
+  _compareCpu(a, b) {
+    return (
+      b.slopeCpu - a.slopeCpu || b.active - a.active || b.totalCpu - a.totalCpu
+    );
+  },
+  _showThreads(row) {
     let process = row.process;
     this._sortThreads(process.threads);
-    let elt = row;
     for (let thread of process.threads) {
-      // Enrich `elt` with a property `thread`, used for testing.
-      elt = View.appendThreadRow(thread, units);
-      elt.thread = thread;
+      View.displayThreadRow(thread);
     }
-    return elt;
   },
   _sortThreads(threads) {
     return threads.sort((a, b) => {
       let order;
       switch (this._sortColumn) {
         case "column-name":
-          order = a.name.localeCompare(b.name) || a.pid - b.pid;
+          order = a.name.localeCompare(b.name) || a.tid - b.tid;
           break;
         case "column-cpu-total":
-          order = b.slopeCpu - a.slopeCpu;
+          order = this._compareCpu(a, b);
           break;
-
         case "column-memory-resident":
-        case "column-pid":
         case null:
-          order = b.tid - a.tid;
+          order = a.tid - b.tid;
           break;
         default:
           throw new Error("Unsupported order: " + this._sortColumn);
@@ -1246,9 +1275,6 @@ var Control = {
     return counters.sort((a, b) => {
       let order;
       switch (this._sortColumn) {
-        case "column-pid":
-          order = b.pid - a.pid;
-          break;
         case "column-name":
           order =
             String(a.origin).localeCompare(b.origin) ||
@@ -1256,7 +1282,7 @@ var Control = {
             a.pid - b.pid;
           break;
         case "column-cpu-total":
-          order = b.slopeCpu - a.slopeCpu;
+          order = this._compareCpu(a, b);
           break;
         case "column-memory-resident":
           order = b.totalRamSize - a.totalRamSize;
@@ -1343,18 +1369,12 @@ var Control = {
   },
 
   // Open/close list of threads.
-  async _handleTwisty(target) {
-    // We await immediately, to ensure that all DOM changes are made in the same tick.
-    // Otherwise, it's both wasteful and harder to test.
-    let units = await gPromisePrefetchedUnits;
+  _handleTwisty(target) {
     let row = target.parentNode.parentNode;
-    let id = row.process.pid;
     if (target.classList.toggle("open")) {
-      this._openItems.add(id);
-      this._showThreads(row, units);
+      this._showThreads(row);
       View.insertAfterRow(row);
     } else {
-      this._openItems.delete(id);
       this._removeSubtree(row);
     }
   },
@@ -1429,6 +1449,17 @@ var Control = {
 
 window.onload = async function() {
   Control.init();
+
+  // Display immediately the list of processes. CPU values will be missing.
   await Control.update();
+
+  // After the minimum interval between samples, force an update to show
+  // valid CPU values asap.
+  await new Promise(resolve =>
+    setTimeout(resolve, MINIMUM_INTERVAL_BETWEEN_SAMPLES_MS)
+  );
+  await Control.update(true);
+
+  // Then update at the normal frequency.
   window.setInterval(() => Control.update(), UPDATE_INTERVAL_MS);
 };

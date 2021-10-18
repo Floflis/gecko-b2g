@@ -21,6 +21,9 @@
 #  include <process.h>
 #  include <shobjidl.h>
 #  include "mozilla/ipc/WindowsMessageLoop.h"
+#  ifdef MOZ_SANDBOX
+#    include "mozilla/RandomNum.h"
+#  endif
 #  include "mozilla/ScopeExit.h"
 #  include "mozilla/WinDllServices.h"
 #endif
@@ -41,6 +44,7 @@
 #if defined(XP_MACOSX)
 #  include "nsVersionComparator.h"
 #  include "chrome/common/mach_ipc_mac.h"
+#  include "gfxPlatformMac.h"
 #endif
 #include "nsGDKErrorHandler.h"
 #include "base/at_exit.h"
@@ -49,7 +53,7 @@
 #if defined(MOZ_WIDGET_ANDROID)
 #  include "chrome/common/ipc_channel.h"
 #  include "mozilla/jni/Utils.h"
-#  include "ProcessUtils.h"
+#  include "mozilla/ipc/ProcessUtils.h"
 #endif  //  defined(MOZ_WIDGET_ANDROID)
 
 #include "mozilla/AbstractThread.h"
@@ -62,7 +66,6 @@
 #include "mozilla/ipc/IOThreadChild.h"
 #include "mozilla/ipc/ProcessChild.h"
 
-#include "mozilla/plugins/PluginProcessChild.h"
 #include "mozilla/dom/ContentProcess.h"
 #include "mozilla/dom/ContentParent.h"
 
@@ -124,6 +127,10 @@ using mozilla::_ipdltest::IPDLUnitTestProcessChild;
 #  include "mozilla/ipc/ForkServer.h"
 #endif
 
+#if defined(MOZ_X11)
+#  include <X11/Xlib.h>
+#endif
+
 #include "VRProcessChild.h"
 
 using namespace mozilla;
@@ -136,7 +143,6 @@ using mozilla::ipc::ScopedXREEmbed;
 
 using mozilla::dom::ContentParent;
 using mozilla::dom::ContentProcess;
-using mozilla::plugins::PluginProcessChild;
 
 using mozilla::gmp::GMPProcessChild;
 
@@ -214,16 +220,21 @@ void XRE_TermEmbedding() {
 }
 
 const char* XRE_GeckoProcessTypeToString(GeckoProcessType aProcessType) {
-  return (aProcessType < GeckoProcessType_End)
-             ? kGeckoProcessTypeString[aProcessType]
-             : "invalid";
+  switch (aProcessType) {
+#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, xre_name, \
+                           bin_type)                                     \
+  case GeckoProcessType::GeckoProcessType_##enum_name:                   \
+    return string_name;
+#include "mozilla/GeckoProcessTypes.h"
+#undef GECKO_PROCESS_TYPE
+    default:
+      return "invalid";
+  }
 }
 
 const char* XRE_ChildProcessTypeToAnnotation(GeckoProcessType aProcessType) {
   switch (aProcessType) {
     case GeckoProcessType_GMPlugin:
-      // The gecko media plugin and normal plugin processes are lumped together
-      // as a historical artifact.
       return "plugin";
     case GeckoProcessType_Default:
       return "";
@@ -257,9 +268,10 @@ void XRE_SetProcessType(const char* aProcessTypeString) {
   called = true;
 
   sChildProcessType = GeckoProcessType_Invalid;
-  for (int i = 0; i < (int)ArrayLength(kGeckoProcessTypeString); ++i) {
-    if (!strcmp(kGeckoProcessTypeString[i], aProcessTypeString)) {
-      sChildProcessType = static_cast<GeckoProcessType>(i);
+  for (GeckoProcessType t :
+       MakeEnumeratedRange(GeckoProcessType::GeckoProcessType_End)) {
+    if (!strcmp(XRE_GeckoProcessTypeToString(t), aProcessTypeString)) {
+      sChildProcessType = t;
       return;
     }
   }
@@ -391,6 +403,10 @@ nsresult XRE_InitChildProcess(int aArgc, char* aArgv[],
   AUTO_PROFILER_INIT;
   AUTO_PROFILER_LABEL("XRE_InitChildProcess", OTHER);
 
+#ifdef XP_MACOSX
+  gfxPlatformMac::RegisterSupplementalFonts();
+#endif
+
   // Ensure AbstractThread is minimally setup, so async IPC messages
   // work properly.
   AbstractThread::InitTLS();
@@ -493,28 +509,27 @@ nsresult XRE_InitChildProcess(int aArgc, char* aArgv[],
 
   bool exceptionHandlerIsSet = false;
   if (!CrashReporter::IsDummy()) {
+    CrashReporter::FileHandle crashTimeAnnotationFile =
+        CrashReporter::kInvalidFileHandle;
 #if defined(XP_WIN)
     if (aArgc < 1) {
       return NS_ERROR_FAILURE;
     }
+    // Pop the first argument, this is used by the WER runtime exception module
+    // which reads it from the command-line so we can just discard it here.
+    --aArgc;
+
     const char* const crashTimeAnnotationArg = aArgv[--aArgc];
-    uintptr_t crashTimeAnnotationFile =
-        static_cast<uintptr_t>(std::stoul(std::string(crashTimeAnnotationArg)));
+    crashTimeAnnotationFile = reinterpret_cast<CrashReporter::FileHandle>(
+        std::stoul(std::string(crashTimeAnnotationArg)));
 #endif
 
     if (aArgc < 1) return NS_ERROR_FAILURE;
     const char* const crashReporterArg = aArgv[--aArgc];
 
     if (IsCrashReporterEnabled(crashReporterArg)) {
-#if defined(XP_MACOSX)
-      exceptionHandlerIsSet =
-          CrashReporter::SetRemoteExceptionHandler(crashReporterArg);
-#elif defined(XP_WIN)
       exceptionHandlerIsSet = CrashReporter::SetRemoteExceptionHandler(
           crashReporterArg, crashTimeAnnotationFile);
-#else
-      exceptionHandlerIsSet = CrashReporter::SetRemoteExceptionHandler();
-#endif
 
       if (!exceptionHandlerIsSet) {
         // Bug 684322 will add better visibility into this condition
@@ -625,6 +640,10 @@ nsresult XRE_InitChildProcess(int aArgc, char* aArgv[],
     SandboxBroker::Initialize(aChildData->sandboxBrokerServices);
     SandboxBroker::GeckoDependentInitialize();
   }
+
+  // Call RandomUint64 to pre-load bcryptPrimitives.dll while the current
+  // thread still has an unrestricted impersonation token.
+  RandomUint64OrDie();
 #endif
 
   {
@@ -644,11 +663,8 @@ nsresult XRE_InitChildProcess(int aArgc, char* aArgv[],
           MOZ_CRASH("This makes no sense");
           break;
 
-        case GeckoProcessType_Plugin:
-          process = MakeUnique<PluginProcessChild>(parentPID);
-          break;
-
         case GeckoProcessType_Content:
+          ioInterposerGuard.emplace();
           process = MakeUnique<ContentProcess>(parentPID);
           break;
 
@@ -817,7 +833,6 @@ nsresult XRE_InitParentProcess(int aArgc, char* aArgv[],
     if (aMainFunction) {
       nsCOMPtr<nsIRunnable> runnable =
           new MainFunctionRunnable(aMainFunction, aMainFunctionData);
-      NS_ENSURE_TRUE(runnable, NS_ERROR_OUT_OF_MEMORY);
 
       nsresult rv = NS_DispatchToCurrentThread(runnable);
       NS_ENSURE_SUCCESS(rv, rv);

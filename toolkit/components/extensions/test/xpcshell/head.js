@@ -1,6 +1,6 @@
 "use strict";
 
-/* exported createHttpServer, cleanupDir, clearCache, promiseConsoleOutput,
+/* exported createHttpServer, cleanupDir, clearCache, optionalPermissionsPromptHandler, promiseConsoleOutput,
             promiseQuotaManagerServiceReset, promiseQuotaManagerServiceClear,
             runWithPrefs, testEnv, withHandlingUserInput, resetHandlingUserInput */
 
@@ -31,7 +31,7 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   ExtensionParent: "resource://gre/modules/ExtensionParent.jsm",
   ExtensionTestUtils: "resource://testing-common/ExtensionXPCShellUtils.jsm",
   FileUtils: "resource://gre/modules/FileUtils.jsm",
-  MessageChannel: "resource://gre/modules/MessageChannel.jsm",
+  MessageChannel: "resource://testing-common/MessageChannel.jsm",
   NetUtil: "resource://gre/modules/NetUtil.jsm",
   PromiseTestUtils: "resource://testing-common/PromiseTestUtils.jsm",
   Schemas: "resource://gre/modules/Schemas.jsm",
@@ -211,7 +211,7 @@ function handlingUserInputFrameScript() {
   /* globals content */
   // eslint-disable-next-line no-shadow
   const { MessageChannel } = ChromeUtils.import(
-    "resource://gre/modules/MessageChannel.jsm"
+    "resource://testing-common/MessageChannel.jsm"
   );
 
   let handle;
@@ -275,3 +275,34 @@ function promiseQuotaManagerServiceClear() {
     Services.qms.clear().callback = resolve;
   });
 }
+
+// Optional Permission prompt handling
+const optionalPermissionsPromptHandler = {
+  sawPrompt: false,
+  acceptPrompt: false,
+
+  init() {
+    Services.prefs.setBoolPref(
+      "extensions.webextOptionalPermissionPrompts",
+      true
+    );
+    Services.obs.addObserver(this, "webextension-optional-permission-prompt");
+    registerCleanupFunction(() => {
+      Services.obs.removeObserver(
+        this,
+        "webextension-optional-permission-prompt"
+      );
+      Services.prefs.clearUserPref(
+        "extensions.webextOptionalPermissionPrompts"
+      );
+    });
+  },
+
+  observe(subject, topic, data) {
+    if (topic == "webextension-optional-permission-prompt") {
+      this.sawPrompt = true;
+      let { resolve } = subject.wrappedJSObject;
+      resolve(this.acceptPrompt);
+    }
+  },
+};

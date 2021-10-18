@@ -7,14 +7,12 @@
 #include "nsDOMNavigationTiming.h"
 
 #include "GeckoProfiler.h"
+#include "ipc/IPCMessageUtilsSpecializations.h"
+#include "mozilla/ProfilerMarkers.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TimeStamp.h"
-#include "mozilla/Unused.h"
-#include "mozilla/dom/ContentChild.h"
-#include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/PerformanceNavigation.h"
-#include "mozilla/dom/WindowGlobalChild.h"
 #include "mozilla/ipc/IPDLParamTraits.h"
 #include "mozilla/ipc/URIUtils.h"
 #include "nsCOMPtr.h"
@@ -25,12 +23,8 @@
 #include "nsIURI.h"
 #include "nsPrintfCString.h"
 #include "prtime.h"
-#ifdef MOZ_GECKO_PROFILER
-#  include "mozilla/ProfilerMarkerTypes.h"
-#endif
 
 using namespace mozilla;
-using namespace mozilla::dom;
 
 namespace mozilla {
 
@@ -62,7 +56,7 @@ void nsDOMNavigationTiming::Clear() {
   mDOMContentLoadedEventStart = TimeStamp();
   mDOMContentLoadedEventEnd = TimeStamp();
   mDOMComplete = TimeStamp();
-  mContentfulPaint = TimeStamp();
+  mContentfulComposite = TimeStamp();
   mNonBlankPaint = TimeStamp();
 
   mDocShellHasBeenActiveSinceNavigationStart = false;
@@ -91,7 +85,8 @@ void nsDOMNavigationTiming::NotifyNavigationStart(
   mNavigationStart = TimeStamp::Now();
   mDocShellHasBeenActiveSinceNavigationStart =
       (aDocShellState == DocShellState::eActive);
-  PROFILER_MARKER_UNTYPED("Navigation::Start", DOM);
+  PROFILER_MARKER_UNTYPED("Navigation::Start", DOM,
+                          MarkerInnerWindowIdFromDocShell(mDocShell));
 }
 
 void nsDOMNavigationTiming::NotifyFetchStart(nsIURI* aURI,
@@ -143,22 +138,21 @@ void nsDOMNavigationTiming::NotifyLoadEventStart() {
                   Tracing, "Navigation");
 
   if (IsTopLevelContentDocumentInContentProcess()) {
-    mLoadEventStartForTelemetry = TimeStamp::Now();
+    TimeStamp now = TimeStamp::Now();
 
     Telemetry::AccumulateTimeDelta(Telemetry::TIME_TO_LOAD_EVENT_START_MS,
-                                   mNavigationStart,
-                                   mLoadEventStartForTelemetry);
+                                   mNavigationStart, now);
 
     if (mDocShellHasBeenActiveSinceNavigationStart) {
       if (net::nsHttp::IsBeforeLastActiveTabLoadOptimization(
               mNavigationStart)) {
         Telemetry::AccumulateTimeDelta(
             Telemetry::TIME_TO_LOAD_EVENT_START_ACTIVE_NETOPT_MS,
-            mNavigationStart, mLoadEventStartForTelemetry);
+            mNavigationStart, now);
       } else {
         Telemetry::AccumulateTimeDelta(
             Telemetry::TIME_TO_LOAD_EVENT_START_ACTIVE_MS, mNavigationStart,
-            mLoadEventStartForTelemetry);
+            now);
       }
     }
   }
@@ -176,7 +170,6 @@ void nsDOMNavigationTiming::NotifyLoadEventEnd() {
                   Tracing, "Navigation");
 
   if (IsTopLevelContentDocumentInContentProcess()) {
-#ifdef MOZ_GECKO_PROFILER
     if (profiler_can_accept_markers() || PAGELOAD_LOG_ENABLED()) {
       TimeDuration elapsed = mLoadEventEnd - mNavigationStart;
       TimeDuration duration = mLoadEventEnd - mLoadEventStart;
@@ -190,19 +183,12 @@ void nsDOMNavigationTiming::NotifyLoadEventEnd() {
       PAGELOAD_LOG(("%s", marker.get()));
       PROFILER_MARKER_TEXT(
           "DocumentLoad", DOM,
-          MarkerOptions(
-              MarkerTiming::Interval(mNavigationStart, mLoadEventEnd),
-              MarkerInnerWindowId(
-                  profiler_get_inner_window_id_from_docshell(mDocShell))),
+          MarkerOptions(MarkerTiming::Interval(mNavigationStart, mLoadEventEnd),
+                        MarkerInnerWindowIdFromDocShell(mDocShell)),
           marker);
     }
-#endif
-    TimeStamp loadEventEnd = TimeStamp::Now();
-
     Telemetry::AccumulateTimeDelta(Telemetry::TIME_TO_LOAD_EVENT_END_MS,
-                                   mNavigationStart, loadEventEnd);
-
-    MaybeSubmitTimeToLoadEventPreloadTelemetry(loadEventEnd);
+                                   mNavigationStart);
   }
 }
 
@@ -222,7 +208,8 @@ void nsDOMNavigationTiming::NotifyDOMLoading(nsIURI* aURI) {
   mLoadedURI = aURI;
   mDOMLoading = TimeStamp::Now();
 
-  PROFILER_MARKER_UNTYPED("Navigation::DOMLoading", DOM);
+  PROFILER_MARKER_UNTYPED("Navigation::DOMLoading", DOM,
+                          MarkerInnerWindowIdFromDocShell(mDocShell));
 }
 
 void nsDOMNavigationTiming::NotifyDOMInteractive(nsIURI* aURI) {
@@ -232,7 +219,8 @@ void nsDOMNavigationTiming::NotifyDOMInteractive(nsIURI* aURI) {
   mLoadedURI = aURI;
   mDOMInteractive = TimeStamp::Now();
 
-  PROFILER_MARKER_UNTYPED("Navigation::DOMInteractive", DOM);
+  PROFILER_MARKER_UNTYPED("Navigation::DOMInteractive", DOM,
+                          MarkerInnerWindowIdFromDocShell(mDocShell));
 }
 
 void nsDOMNavigationTiming::NotifyDOMComplete(nsIURI* aURI) {
@@ -242,7 +230,8 @@ void nsDOMNavigationTiming::NotifyDOMComplete(nsIURI* aURI) {
   mLoadedURI = aURI;
   mDOMComplete = TimeStamp::Now();
 
-  PROFILER_MARKER_UNTYPED("Navigation::DOMComplete", DOM);
+  PROFILER_MARKER_UNTYPED("Navigation::DOMComplete", DOM,
+                          MarkerInnerWindowIdFromDocShell(mDocShell));
 }
 
 void nsDOMNavigationTiming::NotifyDOMContentLoadedStart(nsIURI* aURI) {
@@ -310,20 +299,20 @@ void nsDOMNavigationTiming::TTITimeoutCallback(nsITimer* aTimer,
 void nsDOMNavigationTiming::TTITimeout(nsITimer* aTimer) {
   // Check TTI: see if it's been 5 seconds since the last Long Task
   TimeStamp now = TimeStamp::Now();
-  MOZ_RELEASE_ASSERT(!mContentfulPaint.IsNull(),
-                     "TTI timeout with no contentful-paint?");
+  MOZ_RELEASE_ASSERT(!mContentfulComposite.IsNull(),
+                     "TTI timeout with no contentful-composite?");
 
   nsCOMPtr<nsIThread> mainThread = do_GetMainThread();
   TimeStamp lastLongTaskEnded;
   mainThread->GetLastLongNonIdleTaskEnd(&lastLongTaskEnded);
-  // Window starts at mContentfulPaint; any long task before that is ignored
-  if (lastLongTaskEnded.IsNull() || lastLongTaskEnded < mContentfulPaint) {
+  // Window starts at mContentfulComposite; any long task before that is ignored
+  if (lastLongTaskEnded.IsNull() || lastLongTaskEnded < mContentfulComposite) {
     PAGELOAD_LOG(
-        ("no longtask (last was %g ms before ContentfulPaint)",
+        ("no longtask (last was %g ms before ContentfulComposite)",
          lastLongTaskEnded.IsNull()
              ? 0
-             : (mContentfulPaint - lastLongTaskEnded).ToMilliseconds()));
-    lastLongTaskEnded = mContentfulPaint;
+             : (mContentfulComposite - lastLongTaskEnded).ToMilliseconds()));
+    lastLongTaskEnded = mContentfulComposite;
   }
   TimeDuration delta = now - lastLongTaskEnded;
   PAGELOAD_LOG(("TTI delta: %g ms", delta.ToMilliseconds()));
@@ -357,7 +346,7 @@ void nsDOMNavigationTiming::TTITimeout(nsITimer* aTimer) {
   // is >= FCP here.
 
   if (mTTFI.IsNull()) {
-    // lastLongTaskEnded is >= mContentfulPaint
+    // lastLongTaskEnded is >= mContentfulComposite
     mTTFI = (mDOMContentLoadedEventEnd.IsNull() ||
              lastLongTaskEnded > mDOMContentLoadedEventEnd)
                 ? lastLongTaskEnded
@@ -379,7 +368,6 @@ void nsDOMNavigationTiming::TTITimeout(nsITimer* aTimer) {
 
   mTTITimer = nullptr;
 
-#ifdef MOZ_GECKO_PROFILER
   if (profiler_can_accept_markers() || PAGELOAD_LOG_ENABLED()) {
     TimeDuration elapsed = mTTFI - mNavigationStart;
     MOZ_ASSERT(elapsed.ToMilliseconds() > 0);
@@ -395,13 +383,10 @@ void nsDOMNavigationTiming::TTITimeout(nsITimer* aTimer) {
 
     PROFILER_MARKER_TEXT(
         "TimeToFirstInteractive (TTFI)", DOM,
-        MarkerOptions(
-            MarkerTiming::Interval(mNavigationStart, mTTFI),
-            MarkerInnerWindowId(
-                profiler_get_inner_window_id_from_docshell(mDocShell))),
+        MarkerOptions(MarkerTiming::Interval(mNavigationStart, mTTFI),
+                      MarkerInnerWindowIdFromDocShell(mDocShell)),
         marker);
   }
-#endif
 }
 
 void nsDOMNavigationTiming::NotifyNonBlankPaintForRootContentDocument() {
@@ -414,7 +399,6 @@ void nsDOMNavigationTiming::NotifyNonBlankPaintForRootContentDocument() {
 
   mNonBlankPaint = TimeStamp::Now();
 
-#ifdef MOZ_GECKO_PROFILER
   if (profiler_thread_is_being_profiled() || PAGELOAD_LOG_ENABLED()) {
     TimeDuration elapsed = mNonBlankPaint - mNavigationStart;
     nsAutoCString spec;
@@ -431,13 +415,10 @@ void nsDOMNavigationTiming::NotifyNonBlankPaintForRootContentDocument() {
     PAGELOAD_LOG(("%s", marker.get()));
     PROFILER_MARKER_TEXT(
         "FirstNonBlankPaint", DOM,
-        MarkerOptions(
-            MarkerTiming::Interval(mNavigationStart, mNonBlankPaint),
-            MarkerInnerWindowId(
-                profiler_get_inner_window_id_from_docshell(mDocShell))),
+        MarkerOptions(MarkerTiming::Interval(mNavigationStart, mNonBlankPaint),
+                      MarkerInnerWindowIdFromDocShell(mDocShell)),
         marker);
   }
-#endif
 
   if (mDocShellHasBeenActiveSinceNavigationStart) {
     if (net::nsHttp::IsBeforeLastActiveTabLoadOptimization(mNavigationStart)) {
@@ -455,20 +436,19 @@ void nsDOMNavigationTiming::NotifyNonBlankPaintForRootContentDocument() {
   }
 }
 
-void nsDOMNavigationTiming::NotifyContentfulPaintForRootContentDocument(
+void nsDOMNavigationTiming::NotifyContentfulCompositeForRootContentDocument(
     const mozilla::TimeStamp& aCompositeEndTime) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(!mNavigationStart.IsNull());
 
-  if (!mContentfulPaint.IsNull()) {
+  if (!mContentfulComposite.IsNull()) {
     return;
   }
 
-  mContentfulPaint = aCompositeEndTime;
+  mContentfulComposite = aCompositeEndTime;
 
-#ifdef MOZ_GECKO_PROFILER
   if (profiler_can_accept_markers() || PAGELOAD_LOG_ENABLED()) {
-    TimeDuration elapsed = mContentfulPaint - mNavigationStart;
+    TimeDuration elapsed = mContentfulComposite - mNavigationStart;
     nsAutoCString spec;
     if (mLoadedURI) {
       mLoadedURI->GetSpec(spec);
@@ -482,14 +462,12 @@ void nsDOMNavigationTiming::NotifyContentfulPaintForRootContentDocument(
               "and first non-blank paint");
     PAGELOAD_LOG(("%s", marker.get()));
     PROFILER_MARKER_TEXT(
-        "FirstContentfulPaint", DOM,
+        "FirstContentfulComposite", DOM,
         MarkerOptions(
-            MarkerTiming::Interval(mNavigationStart, mContentfulPaint),
-            MarkerInnerWindowId(
-                profiler_get_inner_window_id_from_docshell(mDocShell))),
+            MarkerTiming::Interval(mNavigationStart, mContentfulComposite),
+            MarkerInnerWindowIdFromDocShell(mDocShell)),
         marker);
   }
-#endif
 
   if (!mTTITimer) {
     mTTITimer = NS_NewTimer();
@@ -504,7 +482,7 @@ void nsDOMNavigationTiming::NotifyContentfulPaintForRootContentDocument(
 
   if (mDocShellHasBeenActiveSinceNavigationStart) {
     Telemetry::AccumulateTimeDelta(Telemetry::TIME_TO_FIRST_CONTENTFUL_PAINT_MS,
-                                   mNavigationStart, mContentfulPaint);
+                                   mNavigationStart, mContentfulComposite);
   }
 }
 
@@ -518,7 +496,6 @@ void nsDOMNavigationTiming::NotifyDOMContentFlushedForRootContentDocument() {
 
   mDOMContentFlushed = TimeStamp::Now();
 
-#ifdef MOZ_GECKO_PROFILER
   if (profiler_thread_is_being_profiled() || PAGELOAD_LOG_ENABLED()) {
     TimeDuration elapsed = mDOMContentFlushed - mNavigationStart;
     nsAutoCString spec;
@@ -537,11 +514,9 @@ void nsDOMNavigationTiming::NotifyDOMContentFlushedForRootContentDocument() {
         "DOMContentFlushed", DOM,
         MarkerOptions(
             MarkerTiming::Interval(mNavigationStart, mDOMContentFlushed),
-            MarkerInnerWindowId(
-                profiler_get_inner_window_id_from_docshell(mDocShell))),
+            MarkerInnerWindowIdFromDocShell(mDocShell)),
         marker);
   }
-#endif
 }
 
 void nsDOMNavigationTiming::NotifyDocShellStateChanged(
@@ -582,33 +557,6 @@ bool nsDOMNavigationTiming::IsTopLevelContentDocumentInContentProcess() const {
   return mDocShell->GetBrowsingContext()->IsTopContent();
 }
 
-void nsDOMNavigationTiming::MaybeSubmitTimeToLoadEventPreloadTelemetry(
-    mozilla::TimeStamp aLoadEventEnd) const {
-  if (!mDocShell) {
-    return;
-  }
-
-  if (const ContentChild* cc = ContentChild::GetSingleton();
-      cc && !(IsWebRemoteType(cc->GetRemoteType()) ||
-              IsPrivilegedMozillaRemoteType(cc->GetRemoteType()))) {
-    return;
-  }
-
-  Document* doc = mDocShell->GetExtantDocument();
-  if (!doc ||
-      !doc->ShouldIncludeInTelemetry(/* aAllowExtensionURIs = */ false)) {
-    return;
-  }
-
-  WindowGlobalChild* wgc = doc->GetWindowGlobalChild();
-  if (!wgc) {
-    return;
-  }
-
-  wgc->SendSubmitLoadEventPreloadTelemetry(
-      mNavigationStart, mLoadEventStartForTelemetry, aLoadEventEnd);
-}
-
 nsDOMNavigationTiming::nsDOMNavigationTiming(nsDocShell* aDocShell,
                                              nsDOMNavigationTiming* aOther)
     : mDocShell(aDocShell),
@@ -618,7 +566,7 @@ nsDOMNavigationTiming::nsDOMNavigationTiming(nsDocShell* aDocShell,
       mNavigationStartHighRes(aOther->mNavigationStartHighRes),
       mNavigationStart(aOther->mNavigationStart),
       mNonBlankPaint(aOther->mNonBlankPaint),
-      mContentfulPaint(aOther->mContentfulPaint),
+      mContentfulComposite(aOther->mContentfulComposite),
       mDOMContentFlushed(aOther->mDOMContentFlushed),
       mBeforeUnloadStart(aOther->mBeforeUnloadStart),
       mUnloadStart(aOther->mUnloadStart),
@@ -645,7 +593,7 @@ void mozilla::ipc::IPDLParamTraits<nsDOMNavigationTiming*>::Write(
   WriteIPDLParam(aMsg, aActor, aParam->mNavigationStartHighRes);
   WriteIPDLParam(aMsg, aActor, aParam->mNavigationStart);
   WriteIPDLParam(aMsg, aActor, aParam->mNonBlankPaint);
-  WriteIPDLParam(aMsg, aActor, aParam->mContentfulPaint);
+  WriteIPDLParam(aMsg, aActor, aParam->mContentfulComposite);
   WriteIPDLParam(aMsg, aActor, aParam->mDOMContentFlushed);
   WriteIPDLParam(aMsg, aActor, aParam->mBeforeUnloadStart);
   WriteIPDLParam(aMsg, aActor, aParam->mUnloadStart);
@@ -676,7 +624,7 @@ bool mozilla::ipc::IPDLParamTraits<nsDOMNavigationTiming*>::Read(
       !ReadIPDLParam(aMsg, aIter, aActor, &timing->mNavigationStartHighRes) ||
       !ReadIPDLParam(aMsg, aIter, aActor, &timing->mNavigationStart) ||
       !ReadIPDLParam(aMsg, aIter, aActor, &timing->mNonBlankPaint) ||
-      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mContentfulPaint) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mContentfulComposite) ||
       !ReadIPDLParam(aMsg, aIter, aActor, &timing->mDOMContentFlushed) ||
       !ReadIPDLParam(aMsg, aIter, aActor, &timing->mBeforeUnloadStart) ||
       !ReadIPDLParam(aMsg, aIter, aActor, &timing->mUnloadStart) ||

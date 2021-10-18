@@ -6,11 +6,6 @@
 
 ChromeUtils.defineModuleGetter(
   this,
-  "AppConstants",
-  "resource://gre/modules/AppConstants.jsm"
-);
-ChromeUtils.defineModuleGetter(
-  this,
   "Downloads",
   "resource://gre/modules/Downloads.jsm"
 );
@@ -39,6 +34,7 @@ const DOWNLOAD_ITEM_FIELDS = [
   "referrer",
   "filename",
   "incognito",
+  "cookieStoreId",
   "danger",
   "mime",
   "startTime",
@@ -191,6 +187,15 @@ class DownloadItem {
   }
   get incognito() {
     return this.download.source.isPrivate;
+  }
+  get cookieStoreId() {
+    if (this.download.source.isPrivate) {
+      return PRIVATE_STORE;
+    }
+    if (this.download.source.userContextId) {
+      return getCookieStoreIdForContainer(this.download.source.userContextId);
+    }
+    return DEFAULT_STORE;
   }
   get danger() {
     return "safe";
@@ -531,6 +536,7 @@ const downloadQuery = query => {
       "paused",
       "error",
       "incognito",
+      "cookieStoreId",
       "bytesReceived",
       "totalBytes",
       "fileSize",
@@ -691,6 +697,15 @@ this.downloads = class extends ExtensionAPI {
                 });
               }
             }
+          }
+
+          let userContextId = null;
+          if (options.cookieStoreId != null) {
+            userContextId = getUserContextIdForCookieStoreId(
+              extension,
+              options.cookieStoreId,
+              options.incognito
+            );
           }
 
           // Handle method, headers and body options.
@@ -921,13 +936,24 @@ this.downloads = class extends ExtensionAPI {
           return Downloads.getPreferredDownloadsDirectory()
             .then(downloadsDir => createTarget(downloadsDir))
             .then(target => {
+              let uri = Services.io.newURI(options.url);
+              let cookieJarSettings = Cc[
+                "@mozilla.org/cookieJarSettings;1"
+              ].createInstance(Ci.nsICookieJarSettings);
+              cookieJarSettings.initWithURI(uri, options.incognito);
+
               const source = {
                 url: options.url,
                 isPrivate: options.incognito,
                 // Use the extension's principal to allow extensions to observe
                 // their own downloads via the webRequest API.
                 loadingPrincipal: context.principal,
+                cookieJarSettings,
               };
+
+              if (userContextId) {
+                source.userContextId = userContextId;
+              }
 
               // blob:-URLs can only be loaded by the principal with which they
               // are associated. This principal may have origin attributes.

@@ -51,14 +51,18 @@ class JUnitTestRunner(MochitestDesktop):
 
     def __init__(self, log, options):
         self.log = log
-        verbose = False
-        if options.log_tbpl_level == "debug" or options.log_mach_level == "debug":
-            verbose = True
+        self.verbose = False
+        if (
+            options.log_tbpl_level == "debug"
+            or options.log_mach_level == "debug"
+            or options.verbose
+        ):
+            self.verbose = True
         self.device = ADBDeviceFactory(
             adb=options.adbPath or "adb",
             device=options.deviceSerial,
             test_root=options.remoteTestRoot,
-            verbose=verbose,
+            verbose=self.verbose,
             run_as_package=options.app,
         )
         self.options = options
@@ -89,6 +93,21 @@ class JUnitTestRunner(MochitestDesktop):
         self.startServers(self.options, debuggerInfo=None, public=True)
         self.log.debug("Servers started")
 
+    def collectLogcatForCurrentTest(self):
+        # These are unique start and end markers logged by GeckoSessionTestRule.java
+        START_MARKER = "1f0befec-3ff2-40ff-89cf-b127eb38b1ec"
+        END_MARKER = "c5ee677f-bc83-49bd-9e28-2d35f3d0f059"
+        logcat = self.device.get_logcat()
+        test_logcat = ""
+        started = False
+        for l in logcat:
+            if START_MARKER in l and self.test_name in l:
+                started = True
+            if started:
+                test_logcat += l + "\n"
+            if started and END_MARKER in l:
+                return test_logcat
+
     def needsWebsocketProcessBridge(self, options):
         """
         Overrides MochitestDesktop.needsWebsocketProcessBridge and always
@@ -107,10 +126,7 @@ class JUnitTestRunner(MochitestDesktop):
         self.websocketProcessBridge = None
         self.SERVER_STARTUP_TIMEOUT = 180 if mozinfo.info.get("debug") else 90
         if self.options.remoteWebServer is None:
-            if os.name != "nt":
-                self.options.remoteWebServer = moznetwork.get_ip()
-            else:
-                raise UserError("--remote-webserver must be specified")
+            self.options.remoteWebServer = moznetwork.get_ip()
         self.options.webServer = self.options.remoteWebServer
         self.options.webSocketPort = "9988"
         self.options.httpdPath = None
@@ -190,7 +206,7 @@ class JUnitTestRunner(MochitestDesktop):
         elif test_filters:
             if len(test_filters) > 1:
                 # Generate the list file from test_filters
-                with tempfile.NamedTemporaryFile(delete=False) as filter_list:
+                with tempfile.NamedTemporaryFile(delete=False, mode="w") as filter_list:
                     for f in test_filters:
                         print(f, file=filter_list)
                     filter_list_name = filter_list.name
@@ -273,7 +289,9 @@ class JUnitTestRunner(MochitestDesktop):
         self.pass_count = 0
         self.fail_count = 0
         self.todo_count = 0
+        self.total_count = 0
         self.runs = 0
+        self.seen_last_test = False
 
         def callback(line):
             # Output callback: Parse the raw junit log messages, translating into
@@ -289,6 +307,12 @@ class JUnitTestRunner(MochitestDesktop):
             match = re.match(r"INSTRUMENTATION_STATUS:\s*test=(.*)", line)
             if match:
                 self.test_name = match.group(1)
+            match = re.match(r"INSTRUMENTATION_STATUS:\s*numtests=(.*)", line)
+            if match:
+                self.total_count = int(match.group(1))
+            match = re.match(r"INSTRUMENTATION_STATUS:\s*current=(.*)", line)
+            if match:
+                self.current_test_id = int(match.group(1))
             match = re.match(r"INSTRUMENTATION_STATUS:\s*stack=(.*)", line)
             if match:
                 self.exception_message = match.group(1)
@@ -303,13 +327,21 @@ class JUnitTestRunner(MochitestDesktop):
             match = re.match(r"INSTRUMENTATION_STATUS_CODE:\s*([+-]?\d+)", line)
             if match:
                 status = match.group(1)
-                full_name = "%s.%s" % (self.class_name, self.test_name)
+                full_name = "%s#%s" % (self.class_name, self.test_name)
                 if full_name == self.current_full_name:
+                    # A crash in the test harness might cause us to ignore tests,
+                    # so we double check that we've actually ran all the tests
+                    if self.total_count == self.current_test_id:
+                        self.seen_last_test = True
+
                     if status == "0":
                         message = ""
                         status = "PASS"
                         expected = "PASS"
                         self.pass_count += 1
+                        if self.verbose:
+                            self.log.info("Printing logcat for test:")
+                            print(self.collectLogcatForCurrentTest())
                     elif status == "-3":  # ignored (skipped)
                         message = ""
                         status = "SKIP"
@@ -328,6 +360,8 @@ class JUnitTestRunner(MochitestDesktop):
                         status = "FAIL"
                         expected = "PASS"
                         self.fail_count += 1
+                        self.log.info("Printing logcat for test:")
+                        print(self.collectLogcatForCurrentTest())
                     self.log.test_end(full_name, status, expected, message)
                     self.test_started = False
                 else:
@@ -359,6 +393,7 @@ class JUnitTestRunner(MochitestDesktop):
                 self.exception_message = ""
                 self.test_name = ""
                 self.current_full_name = ""
+                self.current_test_id = 0
                 self.runs += 1
                 self.log.info("launching %s" % cmd)
                 p = self.device.shell(
@@ -372,6 +407,11 @@ class JUnitTestRunner(MochitestDesktop):
             self.log.info("Passed: %d" % self.pass_count)
             self.log.info("Failed: %d" % self.fail_count)
             self.log.info("Todo: %d" % self.todo_count)
+            if not self.seen_last_test:
+                self.log.error(
+                    "TEST-UNEXPECTED-FAIL | runjunit.py | "
+                    "Some tests did not run (probably due to a crash in the harness)"
+                )
         finally:
             self.log.suite_end()
 
@@ -508,6 +548,14 @@ class JunitArgumentParser(argparse.ArgumentParser):
             dest="thisChunk",
             default=None,
             help="If running tests by chunks, the chunk number to run.",
+        )
+        self.add_argument(
+            "--verbose",
+            "-v",
+            action="store_true",
+            dest="verbose",
+            default=False,
+            help="Verbose output - enable debug log messages",
         )
         self.add_argument(
             "--enable-coverage",

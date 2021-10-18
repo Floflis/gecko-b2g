@@ -4,7 +4,6 @@
 
 "use strict";
 
-const promise = require("promise");
 const Services = require("Services");
 const flags = require("devtools/shared/flags");
 const { l10n } = require("devtools/shared/inspector/css-logic");
@@ -45,12 +44,6 @@ loader.lazyRequireGetter(
   this,
   "getNodeCompatibilityInfo",
   "devtools/client/inspector/rules/utils/utils",
-  true
-);
-loader.lazyRequireGetter(
-  this,
-  "COLOR_SCHEMES",
-  "devtools/client/inspector/rules/constants",
   true
 );
 loader.lazyRequireGetter(
@@ -157,7 +150,10 @@ function CssRuleView(inspector, document, store) {
   this._onTogglePseudoClassPanel = this._onTogglePseudoClassPanel.bind(this);
   this._onTogglePseudoClass = this._onTogglePseudoClass.bind(this);
   this._onToggleClassPanel = this._onToggleClassPanel.bind(this);
-  this._onToggleColorSchemeSimulation = this._onToggleColorSchemeSimulation.bind(
+  this._onToggleLightColorSchemeSimulation = this._onToggleLightColorSchemeSimulation.bind(
+    this
+  );
+  this._onToggleDarkColorSchemeSimulation = this._onToggleDarkColorSchemeSimulation.bind(
     this
   );
   this._onTogglePrintSimulation = this._onTogglePrintSimulation.bind(this);
@@ -179,8 +175,11 @@ function CssRuleView(inspector, document, store) {
   this.pseudoClassToggle = doc.getElementById("pseudo-class-panel-toggle");
   this.classPanel = doc.getElementById("ruleview-class-panel");
   this.classToggle = doc.getElementById("class-panel-toggle");
-  this.colorSchemeSimulationButton = doc.getElementById(
-    "color-scheme-simulation-toggle"
+  this.colorSchemeLightSimulationButton = doc.getElementById(
+    "color-scheme-simulation-light-toggle"
+  );
+  this.colorSchemeDarkSimulationButton = doc.getElementById(
+    "color-scheme-simulation-dark-toggle"
   );
   this.printSimulationButton = doc.getElementById("print-simulation-toggle");
 
@@ -503,36 +502,25 @@ CssRuleView.prototype = {
   },
 
   /**
-   * Initializes the content-viewer front and enable the print and color scheme simulation
-   * if they are supported in the current target.
+   * Enables the print and color scheme simulation if they are supported in the
+   * current target.
    */
   async _initSimulationFeatures() {
-    // XXX: We used to initialize the front early in order to call
-    // actorHasMethod to check against backward compatibility. This is no longer
-    // necessary and the call to getFront could be done later if needed.
-    this.contentViewerFront = await this.currentTarget.getFront(
-      "contentViewer"
-    );
-
     if (!this.currentTarget.chrome) {
+      this.colorSchemeLightSimulationButton.removeAttribute("hidden");
+      this.colorSchemeDarkSimulationButton.removeAttribute("hidden");
       this.printSimulationButton.removeAttribute("hidden");
       this.printSimulationButton.addEventListener(
         "click",
         this._onTogglePrintSimulation
       );
-    }
-
-    // Show the color scheme simulation toggle button if the feature pref is
-    // enabled.
-    if (
-      Services.prefs.getBoolPref(
-        "devtools.inspector.color-scheme-simulation.enabled"
-      )
-    ) {
-      this.colorSchemeSimulationButton.removeAttribute("hidden");
-      this.colorSchemeSimulationButton.addEventListener(
+      this.colorSchemeLightSimulationButton.addEventListener(
         "click",
-        this._onToggleColorSchemeSimulation
+        this._onToggleLightColorSchemeSimulation
+      );
+      this.colorSchemeDarkSimulationButton.addEventListener(
+        "click",
+        this._onToggleDarkColorSchemeSimulation
       );
     }
   },
@@ -659,7 +647,7 @@ CssRuleView.prototype = {
     // request to complete, and then focus the new rule's selector.
     const eventPromise = this.once("ruleview-refreshed");
     const newRulePromise = this.pageStyle.addNewRule(element, pseudoClasses);
-    promise.all([eventPromise, newRulePromise]).then(values => {
+    Promise.all([eventPromise, newRulePromise]).then(values => {
       const options = values[1];
       // Be sure the reference the correct |rules| here.
       for (const rule of this._elementStyle.rules) {
@@ -841,29 +829,29 @@ CssRuleView.prototype = {
       this._highlighters = null;
     }
 
-    // Clean-up for print simulation.
-    if (this.contentViewerFront) {
-      this.colorSchemeSimulationButton.removeEventListener(
-        "click",
-        this._onToggleColorSchemeSimulation
-      );
-      this.printSimulationButton.removeEventListener(
-        "click",
-        this._onTogglePrintSimulation
-      );
+    // Clean-up for simulations.
+    this.colorSchemeLightSimulationButton.removeEventListener(
+      "click",
+      this._onToggleLightColorSchemeSimulation
+    );
+    this.colorSchemeDarkSimulationButton.removeEventListener(
+      "click",
+      this._onToggleDarkColorSchemeSimulation
+    );
+    this.printSimulationButton.removeEventListener(
+      "click",
+      this._onTogglePrintSimulation
+    );
 
-      this.contentViewerFront.destroy();
-
-      this.colorSchemeSimulationButton = null;
-      this.printSimulationButton = null;
-      this.contentViewerFront = null;
-    }
+    this.colorSchemeLightSimulationButton = null;
+    this.colorSchemeDarkSimulationButton = null;
+    this.printSimulationButton = null;
 
     this.tooltips.destroy();
 
     // Remove bound listeners
     this.shortcuts.destroy();
-    this.styleDocument.removeEventListener("click", this);
+    this.styleDocument.removeEventListener("click", this, { capture: true });
     this.element.removeEventListener("copy", this._onCopy);
     this.element.removeEventListener("contextmenu", this._onContextMenu);
     this.addRuleButton.removeEventListener("click", this._onAddRule);
@@ -940,7 +928,7 @@ CssRuleView.prototype = {
   selectElement: function(element, allowRefresh = false) {
     const refresh = this._viewedElement === element;
     if (refresh && !allowRefresh) {
-      return promise.resolve(undefined);
+      return Promise.resolve(undefined);
     }
 
     if (this._popup && this.popup.isOpen) {
@@ -962,7 +950,7 @@ CssRuleView.prototype = {
         this.pageStyle.off("stylesheet-updated", this.refreshPanel);
         this.pageStyle = null;
       }
-      return promise.resolve(undefined);
+      return Promise.resolve(undefined);
     }
 
     this.pageStyle = element.inspectorFront.pageStyle;
@@ -971,8 +959,7 @@ CssRuleView.prototype = {
     // To figure out how shorthand properties are interpreted by the
     // engine, we will set properties on a dummy element and observe
     // how their .style attribute reflects them as computed values.
-    const dummyElementPromise = promise
-      .resolve(this.styleDocument)
+    const dummyElementPromise = Promise.resolve(this.styleDocument)
       .then(document => {
         // ::before and ::after do not have a namespaceURI
         const namespaceURI =
@@ -1028,7 +1015,7 @@ CssRuleView.prototype = {
   refreshPanel: function() {
     // Ignore refreshes when the panel is hidden, or during editing or when no element is selected.
     if (!this.isPanelVisible() || this.isEditing || !this._elementStyle) {
-      return promise.resolve(undefined);
+      return Promise.resolve(undefined);
     }
 
     // Repopulate the element style once the current modifications are done.
@@ -1039,7 +1026,7 @@ CssRuleView.prototype = {
       }
     }
 
-    return promise.all(promises).then(() => {
+    return Promise.all(promises).then(() => {
       return this._populate();
     });
   },
@@ -1321,7 +1308,7 @@ CssRuleView.prototype = {
     let container = null;
 
     if (!this._elementStyle.rules) {
-      return promise.resolve();
+      return Promise.resolve();
     }
 
     const editorReadyPromises = [];
@@ -1394,7 +1381,7 @@ CssRuleView.prototype = {
       this.searchValue && !seenSearchTerm
     );
 
-    return promise.all(editorReadyPromises);
+    return Promise.all(editorReadyPromises);
   },
 
   /**
@@ -1749,32 +1736,55 @@ CssRuleView.prototype = {
     }
   },
 
-  async _onToggleColorSchemeSimulation() {
-    const currentState = await this.contentViewerFront.getEmulatedColorScheme();
-    const index = COLOR_SCHEMES.indexOf(currentState);
-    const nextState = COLOR_SCHEMES[(index + 1) % COLOR_SCHEMES.length];
+  async _onToggleLightColorSchemeSimulation() {
+    const shouldSimulateLightScheme = this.colorSchemeLightSimulationButton.classList.toggle(
+      "checked"
+    );
 
-    if (nextState) {
-      this.colorSchemeSimulationButton.setAttribute("state", nextState);
-    } else {
-      this.colorSchemeSimulationButton.removeAttribute("state");
+    const darkColorSchemeEnabled = this.colorSchemeDarkSimulationButton.classList.contains(
+      "checked"
+    );
+    if (shouldSimulateLightScheme && darkColorSchemeEnabled) {
+      this.colorSchemeDarkSimulationButton.classList.toggle("checked");
     }
 
-    await this.contentViewerFront.setEmulatedColorScheme(nextState);
+    await this.inspector.commands.targetConfigurationCommand.updateConfiguration(
+      {
+        colorSchemeSimulation: shouldSimulateLightScheme ? "light" : null,
+      }
+    );
+    // Refresh the current element's rules in the panel.
+    this.refreshPanel();
+  },
+
+  async _onToggleDarkColorSchemeSimulation() {
+    const shouldSimulateDarkScheme = this.colorSchemeDarkSimulationButton.classList.toggle(
+      "checked"
+    );
+
+    const lightColorSchemeEnabled = this.colorSchemeLightSimulationButton.classList.contains(
+      "checked"
+    );
+    if (shouldSimulateDarkScheme && lightColorSchemeEnabled) {
+      this.colorSchemeLightSimulationButton.classList.toggle("checked");
+    }
+
+    await this.inspector.commands.targetConfigurationCommand.updateConfiguration(
+      {
+        colorSchemeSimulation: shouldSimulateDarkScheme ? "dark" : null,
+      }
+    );
+    // Refresh the current element's rules in the panel.
     this.refreshPanel();
   },
 
   async _onTogglePrintSimulation() {
-    const enabled = await this.contentViewerFront.getIsPrintSimulationEnabled();
-
-    if (!enabled) {
-      this.printSimulationButton.classList.add("checked");
-      await this.contentViewerFront.startPrintMediaSimulation();
-    } else {
-      this.printSimulationButton.classList.remove("checked");
-      await this.contentViewerFront.stopPrintMediaSimulation(false);
-    }
-
+    const enabled = this.printSimulationButton.classList.toggle("checked");
+    await this.inspector.commands.targetConfigurationCommand.updateConfiguration(
+      {
+        printSimulationEnabled: enabled,
+      }
+    );
     // Refresh the current element's rules in the panel.
     this.refreshPanel();
   },
@@ -1981,7 +1991,7 @@ function RuleViewTool(inspector, window) {
 
   this.view = new CssRuleView(this.inspector, this.document);
 
-  this.clearUserProperties = this.clearUserProperties.bind(this);
+  this._onResourceAvailable = this._onResourceAvailable.bind(this);
   this.refresh = this.refresh.bind(this);
   this.onDetachedFront = this.onDetachedFront.bind(this);
   this.onPanelSelected = this.onPanelSelected.bind(this);
@@ -1993,10 +2003,17 @@ function RuleViewTool(inspector, window) {
   this.inspector.selection.on("detached-front", this.onDetachedFront);
   this.inspector.selection.on("new-node-front", this.onSelected);
   this.inspector.selection.on("pseudoclass", this.refresh);
-  this.inspector.currentTarget.on("navigate", this.clearUserProperties);
   this.inspector.ruleViewSideBar.on("ruleview-selected", this.onPanelSelected);
   this.inspector.sidebar.on("ruleview-selected", this.onPanelSelected);
   this.inspector.styleChangeTracker.on("style-changed", this.refresh);
+
+  this.inspector.commands.resourceCommand.watchResources(
+    [this.inspector.commands.resourceCommand.TYPES.DOCUMENT_EVENT],
+    {
+      onAvailable: this._onResourceAvailable,
+      ignoreExistingResources: true,
+    }
+  );
 
   this.onSelected();
 }
@@ -2050,6 +2067,19 @@ RuleViewTool.prototype = {
     }
   },
 
+  _onResourceAvailable: function(resources) {
+    for (const resource of resources) {
+      if (
+        resource.resourceType ===
+          this.inspector.commands.resourceCommand.TYPES.DOCUMENT_EVENT &&
+        resource.name === "will-navigate" &&
+        resource.targetFront.isTopLevel
+      ) {
+        this.clearUserProperties();
+      }
+    }
+  },
+
   clearUserProperties: function() {
     if (this.view && this.view.store && this.view.store.userProperties) {
       this.view.store.userProperties.clear();
@@ -2075,6 +2105,13 @@ RuleViewTool.prototype = {
     this.inspector.selection.off("new-node-front", this.onSelected);
     this.inspector.currentTarget.off("navigate", this.clearUserProperties);
     this.inspector.sidebar.off("ruleview-selected", this.onPanelSelected);
+
+    this.inspector.commands.resourceCommand.unwatchResources(
+      [this.inspector.commands.resourceCommand.TYPES.DOCUMENT_EVENT],
+      {
+        onAvailable: this._onResourceAvailable,
+      }
+    );
 
     this.view.off("ruleview-refreshed", this.onViewRefreshed);
 

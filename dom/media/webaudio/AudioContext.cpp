@@ -21,8 +21,11 @@
 #include "mozilla/dom/AudioContextBinding.h"
 #include "mozilla/dom/BaseAudioContextBinding.h"
 #include "mozilla/dom/BiquadFilterNodeBinding.h"
+#include "mozilla/dom/BrowsingContext.h"
+#include "mozilla/dom/CanonicalBrowsingContext.h"
 #include "mozilla/dom/ChannelMergerNodeBinding.h"
 #include "mozilla/dom/ChannelSplitterNodeBinding.h"
+#include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/ConvolverNodeBinding.h"
 #include "mozilla/dom/DelayNodeBinding.h"
 #include "mozilla/dom/DynamicsCompressorNodeBinding.h"
@@ -80,6 +83,7 @@
 #include "ScriptProcessorNode.h"
 #include "StereoPannerNode.h"
 #include "WaveShaperNode.h"
+#include "Tracing.h"
 
 extern mozilla::LazyLogModule gAutoplayPermissionLog;
 
@@ -239,6 +243,7 @@ void AudioContext::StartBlockedAudioContextIfAllowed() {
 }
 
 void AudioContext::DisconnectFromWindow() {
+  MaybeClearPageAwakeRequest();
   nsPIDOMWindowInner* window = GetOwner();
   if (window) {
     window->RemoveAudioContext(this);
@@ -248,6 +253,7 @@ void AudioContext::DisconnectFromWindow() {
 AudioContext::~AudioContext() {
   DisconnectFromWindow();
   UnregisterWeakMemoryReporter(this);
+  MOZ_ASSERT(!mSetPageAwakeRequest, "forgot to revoke for page awake?");
 }
 
 JSObject* AudioContext::WrapObject(JSContext* aCx,
@@ -729,12 +735,12 @@ void AudioContext::RemoveFromDecodeQueue(WebAudioDecodeJob* aDecodeJob) {
 
 void AudioContext::RegisterActiveNode(AudioNode* aNode) {
   if (!mCloseCalled) {
-    mActiveNodes.PutEntry(aNode);
+    mActiveNodes.Insert(aNode);
   }
 }
 
 void AudioContext::UnregisterActiveNode(AudioNode* aNode) {
-  mActiveNodes.RemoveEntry(aNode);
+  mActiveNodes.Remove(aNode);
 }
 
 uint32_t AudioContext::MaxChannelCount() const {
@@ -799,6 +805,7 @@ nsISerialEventTarget* AudioContext::GetMainThread() const {
 
 void AudioContext::DisconnectFromOwner() {
   mIsDisconnecting = true;
+  MaybeClearPageAwakeRequest();
   OnWindowDestroy();
   DOMEventTargetHelper::DisconnectFromOwner();
 }
@@ -927,12 +934,65 @@ void AudioContext::OnStateChanged(void* aPromise, AudioContextState aNewState) {
 
   mAudioContextState = aNewState;
   Destination()->NotifyAudioContextStateChanged();
+  MaybeUpdatePageAwakeRequest();
+}
+
+BrowsingContext* AudioContext::GetTopLevelBrowsingContext() {
+  nsCOMPtr<nsPIDOMWindowInner> window = GetParentObject();
+  if (!window) {
+    return nullptr;
+  }
+  BrowsingContext* bc = window->GetBrowsingContext();
+  if (!bc || bc->IsDiscarded()) {
+    return nullptr;
+  }
+  return bc->Top();
+}
+
+void AudioContext::MaybeUpdatePageAwakeRequest() {
+  // No need to keep page awake for offline context.
+  if (IsOffline()) {
+    return;
+  }
+
+  if (mIsShutDown) {
+    return;
+  }
+
+  if (IsRunning() && !mSetPageAwakeRequest) {
+    SetPageAwakeRequest(true);
+  } else if (!IsRunning() && mSetPageAwakeRequest) {
+    SetPageAwakeRequest(false);
+  }
+}
+
+void AudioContext::SetPageAwakeRequest(bool aShouldSet) {
+  mSetPageAwakeRequest = aShouldSet;
+  BrowsingContext* bc = GetTopLevelBrowsingContext();
+  if (!bc) {
+    return;
+  }
+  if (XRE_IsContentProcess()) {
+    ContentChild* contentChild = ContentChild::GetSingleton();
+    Unused << contentChild->SendAddOrRemovePageAwakeRequest(bc, aShouldSet);
+    return;
+  }
+  if (aShouldSet) {
+    bc->Canonical()->AddPageAwakeRequest();
+  } else {
+    bc->Canonical()->RemovePageAwakeRequest();
+  }
+}
+
+void AudioContext::MaybeClearPageAwakeRequest() {
+  if (mSetPageAwakeRequest) {
+    SetPageAwakeRequest(false);
+  }
 }
 
 nsTArray<RefPtr<mozilla::MediaTrack>> AudioContext::GetAllTracks() const {
   nsTArray<RefPtr<mozilla::MediaTrack>> tracks;
-  for (auto iter = mAllNodes.ConstIter(); !iter.Done(); iter.Next()) {
-    AudioNode* node = iter.Get()->GetKey();
+  for (AudioNode* node : mAllNodes) {
     mozilla::MediaTrack* t = node->GetTrack();
     if (t) {
       tracks.AppendElement(t);
@@ -952,6 +1012,7 @@ nsTArray<RefPtr<mozilla::MediaTrack>> AudioContext::GetAllTracks() const {
 }
 
 already_AddRefed<Promise> AudioContext::Suspend(ErrorResult& aRv) {
+  TRACE("AudioContext::Suspend");
   RefPtr<Promise> promise = CreatePromise(aRv);
   if (aRv.Failed() || promise->State() == Promise::PromiseState::Rejected) {
     return promise.forget();
@@ -1052,6 +1113,7 @@ void AudioContext::ResumeFromChrome() {
 }
 
 already_AddRefed<Promise> AudioContext::Resume(ErrorResult& aRv) {
+  TRACE("AudioContext::Resume");
   RefPtr<Promise> promise = CreatePromise(aRv);
   if (aRv.Failed() || promise->State() == Promise::PromiseState::Rejected) {
     return promise.forget();
@@ -1191,6 +1253,7 @@ void AudioContext::ReportBlocked() {
 }
 
 already_AddRefed<Promise> AudioContext::Close(ErrorResult& aRv) {
+  TRACE("AudioContext::Close");
   RefPtr<Promise> promise = CreatePromise(aRv);
   if (aRv.Failed() || promise->State() == Promise::PromiseState::Rejected) {
     return promise.forget();
@@ -1257,12 +1320,12 @@ void AudioContext::CloseInternal(void* aPromise,
 
 void AudioContext::RegisterNode(AudioNode* aNode) {
   MOZ_ASSERT(!mAllNodes.Contains(aNode));
-  mAllNodes.PutEntry(aNode);
+  mAllNodes.Insert(aNode);
 }
 
 void AudioContext::UnregisterNode(AudioNode* aNode) {
   MOZ_ASSERT(mAllNodes.Contains(aNode));
-  mAllNodes.RemoveEntry(aNode);
+  mAllNodes.Remove(aNode);
 }
 
 already_AddRefed<Promise> AudioContext::StartRendering(ErrorResult& aRv) {
@@ -1305,8 +1368,9 @@ void AudioContext::Unmute() const {
 
 void AudioContext::SetParamMapForWorkletName(
     const nsAString& aName, AudioParamDescriptorMap* aParamMap) {
-  MOZ_ASSERT(!mWorkletParamDescriptors.GetValue(aName));
-  Unused << mWorkletParamDescriptors.Put(aName, move(*aParamMap), fallible);
+  MOZ_ASSERT(!mWorkletParamDescriptors.Contains(aName));
+  Unused << mWorkletParamDescriptors.InsertOrUpdate(aName, move(*aParamMap),
+                                                    fallible);
 }
 
 AudioChannel AudioContext::TestAudioChannelInAudioNodeStream() {
@@ -1339,8 +1403,7 @@ AudioContext::CollectReports(nsIHandleReportCallback* aHandleReport,
                              nsISupports* aData, bool aAnonymize) {
   const nsLiteralCString nodeDescription(
       "Memory used by AudioNode DOM objects (Web Audio).");
-  for (auto iter = mAllNodes.ConstIter(); !iter.Done(); iter.Next()) {
-    AudioNode* node = iter.Get()->GetKey();
+  for (AudioNode* node : mAllNodes) {
     int64_t amount = node->SizeOfIncludingThis(MallocSizeOf);
     nsPrintfCString domNodePath("explicit/webaudio/audio-node/%s/dom-nodes",
                                 node->NodeType());

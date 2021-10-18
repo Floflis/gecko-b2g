@@ -5,10 +5,14 @@
 #ifndef mozilla_net_DNSPacket_h__
 #define mozilla_net_DNSPacket_h__
 
+#include "mozilla/Maybe.h"
 #include "mozilla/Result.h"
-#include "nsHostResolver.h"
 #include "pk11pub.h"
 #include "ScopedNSSTypes.h"
+#include "nsClassHashtable.h"
+#include "nsIDNSService.h"
+#include "DNS.h"
+#include "DNSByTypeRecord.h"
 
 namespace mozilla {
 namespace net {
@@ -32,10 +36,23 @@ enum TrrType {
   TRRTYPE_HTTPSSVC = nsIDNSService::RESOLVE_TYPE_HTTPSSVC,  // 65
 };
 
+enum class DNSPacketStatus : uint8_t {
+  Unknown = 0,
+  Success,
+  KeyNotAvailable,
+  KeyNotUsable,
+  EncodeError,
+  EncryptError,
+  DecodeError,
+  DecryptError,
+};
+
 class DNSPacket {
  public:
   DNSPacket() = default;
   virtual ~DNSPacket() = default;
+
+  Result<uint8_t, nsresult> GetRCode() const;
 
   // Called in order to feed data into the buffer.
   nsresult OnDataAvailable(nsIRequest* aRequest, nsIInputStream* aInputStream,
@@ -50,10 +67,11 @@ class DNSPacket {
   // output parameters and have a common format for different record types.
   virtual nsresult Decode(
       nsCString& aHost, enum TrrType aType, nsCString& aCname,
-      bool aAllowRFC1918, nsHostRecord::TRRSkippedReason& reason,
-      DOHresp& aResp, TypeRecordResultType& aTypeResult,
+      bool aAllowRFC1918, DOHresp& aResp, TypeRecordResultType& aTypeResult,
       nsClassHashtable<nsCStringHashKey, DOHresp>& aAdditionalRecords,
       uint32_t& aTTL);
+
+  DNSPacketStatus PacketStatus() const { return mStatus; }
 
  protected:
   // Never accept larger DOH responses than this as that would indicate
@@ -68,22 +86,29 @@ class DNSPacket {
                          const unsigned char* aBuffer);
   nsresult DecodeInternal(
       nsCString& aHost, enum TrrType aType, nsCString& aCname,
-      bool aAllowRFC1918, nsHostRecord::TRRSkippedReason& reason,
-      DOHresp& aResp, TypeRecordResultType& aTypeResult,
+      bool aAllowRFC1918, DOHresp& aResp, TypeRecordResultType& aTypeResult,
       nsClassHashtable<nsCStringHashKey, DOHresp>& aAdditionalRecords,
       uint32_t& aTTL, const unsigned char* aBuffer, uint32_t aLen);
+
+  void SetDNSPacketStatus(DNSPacketStatus aStatus) {
+    if (mStatus == DNSPacketStatus::Unknown ||
+        mStatus == DNSPacketStatus::Success) {
+      mStatus = aStatus;
+    }
+  }
 
   // The response buffer.
   unsigned char mResponse[MAX_SIZE]{};
   unsigned int mBodySize = 0;
+  DNSPacketStatus mStatus = DNSPacketStatus::Unknown;
 };
 
 class ODoHDNSPacket final : public DNSPacket {
  public:
-  ODoHDNSPacket() {}
+  ODoHDNSPacket() = default;
   virtual ~ODoHDNSPacket();
 
-  static bool ParseODoHConfigs(const nsCString& aRawODoHConfig,
+  static bool ParseODoHConfigs(Span<const uint8_t> aData,
                                nsTArray<ObliviousDoHConfig>& aOut);
 
   virtual nsresult EncodeRequest(nsCString& aBody, const nsACString& aHost,
@@ -91,8 +116,7 @@ class ODoHDNSPacket final : public DNSPacket {
 
   virtual nsresult Decode(
       nsCString& aHost, enum TrrType aType, nsCString& aCname,
-      bool aAllowRFC1918, nsHostRecord::TRRSkippedReason& reason,
-      DOHresp& aResp, TypeRecordResultType& aTypeResult,
+      bool aAllowRFC1918, DOHresp& aResp, TypeRecordResultType& aTypeResult,
       nsClassHashtable<nsCStringHashKey, DOHresp>& aAdditionalRecords,
       uint32_t& aTTL) override;
 
@@ -104,6 +128,12 @@ class ODoHDNSPacket final : public DNSPacket {
 
   HpkeContext* mContext = nullptr;
   UniqueSECItem mPlainQuery;
+  // This struct indicates the range of decrypted responses stored in mResponse.
+  struct DecryptedResponseRange {
+    uint16_t mStart = 0;
+    uint16_t mLength = 0;
+  };
+  Maybe<DecryptedResponseRange> mDecryptedResponseRange;
 };
 
 }  // namespace net

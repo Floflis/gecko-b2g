@@ -95,16 +95,16 @@ class MachRegistrar(object):
             return 1
 
         self.command_depth += 1
-        fn = getattr(instance, handler.method)
+        fn = handler.func
 
         start_time = time.time()
 
         if debug_command:
             import pdb
 
-            result = pdb.runcall(fn, **kwargs)
+            result = pdb.runcall(fn, instance, **kwargs)
         else:
-            result = fn(**kwargs)
+            result = fn(instance, **kwargs)
 
         end_time = time.time()
 

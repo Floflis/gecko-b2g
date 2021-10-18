@@ -9,7 +9,7 @@ mod hir;
 use glsl::parser::Parse;
 use glsl::syntax;
 use glsl::syntax::{TranslationUnit, UnaryOp};
-use hir::{Statement, SwizzleSelector, Type};
+use hir::{Statement, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -292,8 +292,7 @@ fn write_program_samplers(state: &mut OutputState, uniform_indices: &UniformIndi
         match tk {
             hir::TypeKind::Sampler2D
             | hir::TypeKind::Sampler2DRect
-            | hir::TypeKind::ISampler2D
-            | hir::TypeKind::Sampler2DArray => {
+            | hir::TypeKind::ISampler2D => {
                 write!(state, " ");
                 show_type_kind(state, &tk);
                 let suffix = if let hir::StorageClass::Sampler(format) = storage {
@@ -316,8 +315,7 @@ fn write_program_samplers(state: &mut OutputState, uniform_indices: &UniformIndi
         match tk {
             hir::TypeKind::Sampler2D
             | hir::TypeKind::Sampler2DRect
-            | hir::TypeKind::ISampler2D
-            | hir::TypeKind::Sampler2DArray => {
+            | hir::TypeKind::ISampler2D => {
                 write!(state, "  case {}:\n", index);
                 write!(state, "   {}_slot = value;\n", name);
                 write!(state, "   return true;\n");
@@ -344,9 +342,6 @@ fn write_bind_textures(state: &mut OutputState, uniforms: &UniformIndices) {
                         name),
                     hir::TypeKind::ISampler2D => write!(state,
                         " {0} = lookup_isampler(&samplers.{0}_impl, samplers.{0}_slot);\n",
-                        name),
-                    hir::TypeKind::Sampler2DArray => write!(state,
-                        " {0} = lookup_sampler_array(&samplers.{0}_impl, samplers.{0}_slot);\n",
                         name),
                     _ => {}
                 };
@@ -398,9 +393,8 @@ fn write_set_uniform_4fv(
         if float4_compatible(tk.clone()) {
             write!(
                 state,
-                "  self->{} = {}_scalar(value);\n",
-                name,
-                tk.glsl_primitive_type_name().unwrap(),
+                "  self->{} = vec4_scalar::load_from_ptr(value);\n",
+                name
             );
         } else {
             write!(state, "  assert(0); // {}\n", name);
@@ -541,6 +535,9 @@ fn write_load_attribs(state: &mut OutputState, attribs: &[hir::SymRef]) {
 fn write_store_outputs(state: &mut OutputState, outputs: &[hir::SymRef]) {
     let is_scalar = state.is_scalar.replace(true);
     write!(state, "public:\nstruct InterpOutputs {{\n");
+    if state.hir.used_clip_dist != 0 {
+       state.write(" Float swgl_ClipDistance;\n");
+    }
     for i in outputs {
         let sym = state.hir.sym(*i);
         match &sym.decl {
@@ -566,6 +563,15 @@ fn write_store_outputs(state: &mut OutputState, outputs: &[hir::SymRef]) {
         state,
         "    auto* dest = reinterpret_cast<InterpOutputs*>(dest_ptr);\n"
     );
+    if state.hir.used_clip_dist != 0 {
+        for (i, comp) in "xyzw".chars().enumerate() {
+            if (state.hir.used_clip_dist & (1 << i)) != 0 {
+                write!(state, "    dest->swgl_ClipDistance.{} = get_nth(gl_ClipDistance[{}], n);\n", comp, i);
+            } else {
+                write!(state, "    dest->swgl_ClipDistance.{} = 0.0f;\n", comp);
+            }
+        }
+    }
     for i in outputs {
         let sym = state.hir.sym(*i);
         match &sym.decl {
@@ -1459,25 +1465,6 @@ pub fn show_double(state: &OutputState, x: f64) {
     }
 }
 
-trait SwizzelSelectorExt {
-    fn to_args(&self) -> String;
-}
-
-impl SwizzelSelectorExt for SwizzleSelector {
-    fn to_args(&self) -> String {
-        let mut s = Vec::new();
-        let fs = match self.field_set {
-            hir::FieldSet::Rgba => ["R", "G", "B", "A"],
-            hir::FieldSet::Xyzw => ["X", "Y", "Z", "W"],
-            hir::FieldSet::Stpq => ["S", "T", "P", "Q"],
-        };
-        for i in &self.components {
-            s.push(fs[*i as usize])
-        }
-        s.join(", ")
-    }
-}
-
 fn expr_run_class(state: &OutputState, expr: &hir::Expr) -> hir::RunClass {
     match &expr.kind {
         hir::ExprKind::Variable(i) => symbol_run_class(&state.hir.sym(*i).decl, state.vector_mask),
@@ -2012,13 +1999,25 @@ pub fn show_hir_expr_inner(state: &OutputState, expr: &hir::Expr, top_level: boo
                 }
                 state.write("(");
                 show_hir_expr(state, &e);
-                if state.is_lval.get() && s.components.len() > 1 {
-                    state.write(").lsel(");
+                state.write(").");
+                if s.components.len() == 1 {
+                    // For single component swizzles, output a field access to
+                    // avoid stressing inlining of sel().
+                    state.write(&s.to_field_set(hir::FieldSet::Xyzw));
                 } else {
-                    state.write(").sel(");
+                    if state.is_lval.get() && s.components.len() > 1 {
+                        state.write("lsel(");
+                    } else {
+                        state.write("sel(");
+                    }
+                    for (i, c) in s.to_string().chars().enumerate() {
+                        if i > 0 {
+                            state.write(",");
+                        }
+                        write!(state, "{}", c.to_uppercase());
+                    }
+                    state.write(")");
                 }
-                state.write(&s.to_args());
-                state.write(")");
             } else {
                 state.write("(");
                 show_hir_expr(state, &e);
@@ -2313,19 +2312,22 @@ pub fn show_declaration(state: &mut OutputState, d: &hir::Declaration) {
             //state.write(";\n");
         }
         hir::Declaration::Global(ref qual, ref identifiers) => {
-            show_type_qualifier(state, &qual);
+            // We only want to output GLSL layout qualifiers if not C++
+            if !state.output_cxx {
+                show_type_qualifier(state, &qual);
 
-            if !identifiers.is_empty() {
-                let mut iter = identifiers.iter();
-                let first = iter.next().unwrap();
-                show_identifier(state, first);
+                if !identifiers.is_empty() {
+                    let mut iter = identifiers.iter();
+                    let first = iter.next().unwrap();
+                    show_identifier(state, first);
 
-                for identifier in iter {
-                    let _ = write!(state, ", {}", identifier);
+                    for identifier in iter {
+                        let _ = write!(state, ", {}", identifier);
+                    }
                 }
-            }
 
-            state.write(";\n");
+                state.write(";\n");
+            }
         }
         hir::Declaration::StructDefinition(ref sym) => {
             show_sym_decl(state, sym);
@@ -3161,7 +3163,7 @@ pub fn show_iteration_statement(state: &mut OutputState, ist: &hir::IterationSta
             show_statement(state, body);
             state.write(" while (");
             show_hir_expr(state, cond);
-            state.write(")\n");
+            state.write(");\n");
         }
         hir::IterationStatement::For(ref init, ref rest, ref body) => {
             state.write("for (");
@@ -3581,11 +3583,11 @@ fn write_abi(state: &mut OutputState) {
             }
             if state.hir.lookup("swgl_drawSpanRGBA8").is_some() {
                 state.write(
-                    "static void draw_span_RGBA8(Self* self) { DISPATCH_DRAW_SPAN(self, RGBA8); }\n");
+                    "static int draw_span_RGBA8(Self* self) { DISPATCH_DRAW_SPAN(self, RGBA8); }\n");
             }
             if state.hir.lookup("swgl_drawSpanR8").is_some() {
                 state.write(
-                    "static void draw_span_R8(Self* self) { DISPATCH_DRAW_SPAN(self, R8); }\n");
+                    "static int draw_span_R8(Self* self) { DISPATCH_DRAW_SPAN(self, R8); }\n");
             }
 
             write!(state, "public:\n{}_frag() {{\n", state.name);
@@ -3634,6 +3636,9 @@ fn write_abi(state: &mut OutputState) {
             state.write(" init_batch_func = (InitBatchFunc)&init_batch;\n");
             state.write(" load_attribs_func = (LoadAttribsFunc)&load_attribs;\n");
             state.write(" run_primitive_func = (RunPrimitiveFunc)&run;\n");
+            if state.hir.used_clip_dist != 0 {
+                state.write(" enable_clip_distance();\n");
+            }
         }
     }
     state.write("}\n");

@@ -13,12 +13,13 @@
 #include "nsIEditor.h"
 #include "nsCaret.h"
 #include "nsCSSPseudoElements.h"
+#include "nsDisplayList.h"
 #include "nsGenericHTMLElement.h"
 #include "nsTextFragment.h"
 #include "nsNameSpaceManager.h"
-#include "nsCheckboxRadioFrame.h"  //for registering accesskeys
 
 #include "nsIContent.h"
+#include "nsIScrollableFrame.h"
 #include "nsPresContext.h"
 #include "nsGkAtoms.h"
 #include "nsLayoutUtils.h"
@@ -31,8 +32,10 @@
 #include "nsILayoutHistoryState.h"
 
 #include "nsFocusManager.h"
+#include "mozilla/EventStateManager.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/PresState.h"
+#include "mozilla/TextEditor.h"
 #include "nsAttrValueInlines.h"
 #include "mozilla/dom/Selection.h"
 #include "nsContentUtils.h"
@@ -143,22 +146,38 @@ void nsTextControlFrame::DestroyFrom(nsIFrame* aDestructRoot,
   MOZ_ASSERT(textControlElement);
   textControlElement->UnbindFromFrame(this);
 
-  nsCheckboxRadioFrame::RegUnRegAccessKey(static_cast<nsIFrame*>(this), false);
-
   if (mMutationObserver) {
     mRootNode->RemoveMutationObserver(mMutationObserver);
     mMutationObserver = nullptr;
   }
 
-  // If we're a subclass like nsNumberControlFrame, then it owns the root of the
-  // anonymous subtree where mRootNode is.
-  if (mClass == kClassID) {
-    aPostDestroyData.AddAnonymousContent(mRootNode.forget());
-  } else {
-    MOZ_ASSERT(!mRootNode || !mRootNode->IsRootOfNativeAnonymousSubtree());
-    mRootNode = nullptr;
+  // If there is a drag session, user may be dragging selection in removing
+  // text node in the text control.  If so, we should set source node to the
+  // text control because another text node may be recreated soon if the text
+  // control is just reframed.
+  if (nsCOMPtr<nsIDragSession> dragSession = nsContentUtils::GetDragSession()) {
+    if (dragSession->IsDraggingTextInTextControl() && mRootNode &&
+        mRootNode->GetFirstChild()) {
+      nsCOMPtr<nsINode> sourceNode;
+      if (NS_SUCCEEDED(
+              dragSession->GetSourceNode(getter_AddRefs(sourceNode))) &&
+          mRootNode->Contains(sourceNode)) {
+        MOZ_ASSERT(sourceNode->IsText());
+        dragSession->UpdateSource(textControlElement, nullptr);
+      }
+    }
+  }
+  // Otherwise, EventStateManager may track gesture to start drag with native
+  // anonymous nodes in the text control element.
+  else if (textControlElement->GetPresContext(Element::eForComposedDoc)) {
+    textControlElement->GetPresContext(Element::eForComposedDoc)
+        ->EventStateManager()
+        ->TextControlRootWillBeRemoved(*textControlElement);
   }
 
+  // If we're a subclass like nsNumberControlFrame, then it owns the root of the
+  // anonymous subtree where mRootNode is.
+  aPostDestroyData.AddAnonymousContent(mRootNode.forget());
   aPostDestroyData.AddAnonymousContent(mPlaceholderDiv.forget());
   aPostDestroyData.AddAnonymousContent(mPreviewDiv.forget());
 
@@ -353,7 +372,7 @@ already_AddRefed<Element> nsTextControlFrame::MakeAnonElement(
   }
 
   if (aParent) {
-    aParent->AppendChildTo(element, false);
+    aParent->AppendChildTo(element, false, IgnoreErrors());
   }
 
   return element.forget();
@@ -377,7 +396,7 @@ already_AddRefed<Element> nsTextControlFrame::MakeAnonDivWithTextNode(
       textNode->MarkAsMaybeMasked();
     }
   }
-  div->AppendChildTo(textNode, false);
+  div->AppendChildTo(textNode, false, IgnoreErrors());
   return div.forget();
 }
 
@@ -412,21 +431,18 @@ nsresult nsTextControlFrame::CreateAnonymousContent(
     return rv;
   }
 
-  aElements.AppendElement(mRootNode);
   CreatePlaceholderIfNeeded();
   if (mPlaceholderDiv) {
-    if (!IsSingleLineTextControl()) {
-      // For textareas, UpdateValueDisplay doesn't initialize the visibility
-      // status of the placeholder because it returns early, so we have to
-      // do that manually here.
-      textControlElement->UpdateOverlayTextVisibility(true);
-    }
     aElements.AppendElement(mPlaceholderDiv);
   }
   CreatePreviewIfNeeded();
   if (mPreviewDiv) {
     aElements.AppendElement(mPreviewDiv);
   }
+
+  // NOTE(emilio): We want the root node always after the placeholder so that
+  // background on the placeholder doesn't obscure the caret.
+  aElements.AppendElement(mRootNode);
 
   rv = UpdateValueDisplay(false);
   NS_ENSURE_SUCCESS(rv, rv);
@@ -454,6 +470,20 @@ bool nsTextControlFrame::ShouldInitializeEagerly() const {
   if (auto* htmlElement = nsGenericHTMLElement::FromNode(mContent)) {
     if (htmlElement->Spellcheck()) {
       return true;
+    }
+  }
+
+  // If text in the editor is being dragged, we need the editor to create
+  // new source node for the drag session (TextEditor creates the text node
+  // in the anonymous <div> element.
+  if (nsCOMPtr<nsIDragSession> dragSession = nsContentUtils::GetDragSession()) {
+    if (dragSession->IsDraggingTextInTextControl()) {
+      nsCOMPtr<nsINode> sourceNode;
+      if (NS_SUCCEEDED(
+              dragSession->GetSourceNode(getter_AddRefs(sourceNode))) &&
+          sourceNode == textControlElement) {
+        return true;
+      }
     }
   }
 
@@ -529,8 +559,6 @@ void nsTextControlFrame::CreatePreviewIfNeeded() {
 
 void nsTextControlFrame::AppendAnonymousContentTo(
     nsTArray<nsIContent*>& aElements, uint32_t aFilter) {
-  aElements.AppendElement(mRootNode);
-
   if (mPlaceholderDiv && !(aFilter & nsIContent::eSkipPlaceholderContent)) {
     aElements.AppendElement(mPlaceholderDiv);
   }
@@ -538,6 +566,8 @@ void nsTextControlFrame::AppendAnonymousContentTo(
   if (mPreviewDiv) {
     aElements.AppendElement(mPreviewDiv);
   }
+
+  aElements.AppendElement(mRootNode);
 }
 
 nscoord nsTextControlFrame::GetPrefISize(gfxContext* aRenderingContext) {
@@ -596,28 +626,34 @@ LogicalSize nsTextControlFrame::ComputeAutoSize(
   return autoSize;
 }
 
-void nsTextControlFrame::ComputeBaseline(const ReflowInput& aReflowInput,
-                                         ReflowOutput& aDesiredSize) {
+Maybe<nscoord> nsTextControlFrame::ComputeBaseline(
+    const nsIFrame* aFrame, const ReflowInput& aReflowInput,
+    bool aForSingleLineControl) {
   // If we're layout-contained, we have no baseline.
   if (aReflowInput.mStyleDisplay->IsContainLayout()) {
-    mFirstBaseline = NS_INTRINSIC_ISIZE_UNKNOWN;
-    return;
+    return Nothing();
   }
   WritingMode wm = aReflowInput.GetWritingMode();
 
   // Calculate the baseline and store it in mFirstBaseline.
   nscoord lineHeight = aReflowInput.ComputedBSize();
-  float inflation = nsLayoutUtils::FontSizeInflationFor(this);
-  if (!IsSingleLineTextControl()) {
+  float inflation = nsLayoutUtils::FontSizeInflationFor(aFrame);
+  if (!aForSingleLineControl || lineHeight == NS_UNCONSTRAINEDSIZE) {
     lineHeight = ReflowInput::CalcLineHeight(
-        GetContent(), Style(), PresContext(), NS_UNCONSTRAINEDSIZE, inflation);
+        aFrame->GetContent(), aFrame->Style(), aFrame->PresContext(),
+        NS_UNCONSTRAINEDSIZE, inflation);
   }
   RefPtr<nsFontMetrics> fontMet =
-      nsLayoutUtils::GetFontMetricsForFrame(this, inflation);
-  mFirstBaseline = nsLayoutUtils::GetCenteredFontBaseline(fontMet, lineHeight,
-                                                          wm.IsLineInverted()) +
-                   aReflowInput.ComputedLogicalBorderPadding(wm).BStart(wm);
-  aDesiredSize.SetBlockStartAscent(mFirstBaseline);
+      nsLayoutUtils::GetFontMetricsForFrame(aFrame, inflation);
+  return Some(nsLayoutUtils::GetCenteredFontBaseline(fontMet, lineHeight,
+                                                     wm.IsLineInverted()) +
+              aReflowInput.ComputedLogicalBorderPadding(wm).BStart(wm));
+}
+
+static bool IsButtonBox(const nsIFrame* aFrame) {
+  auto pseudoType = aFrame->Style()->GetPseudoType();
+  return pseudoType == PseudoStyleType::mozNumberSpinBox ||
+         pseudoType == PseudoStyleType::mozSearchClearButton;
 }
 
 void nsTextControlFrame::Reflow(nsPresContext* aPresContext,
@@ -629,24 +665,47 @@ void nsTextControlFrame::Reflow(nsPresContext* aPresContext,
   DISPLAY_REFLOW(aPresContext, this, aReflowInput, aDesiredSize, aStatus);
   MOZ_ASSERT(aStatus.IsEmpty(), "Caller should pass a fresh reflow status!");
 
-  // make sure that the form registers itself on the initial/first reflow
-  if (mState & NS_FRAME_FIRST_REFLOW) {
-    nsCheckboxRadioFrame::RegUnRegAccessKey(this, true);
-  }
-
   // set values of reflow's out parameters
   WritingMode wm = aReflowInput.GetWritingMode();
   aDesiredSize.SetSize(wm, aReflowInput.ComputedSizeWithBorderPadding(wm));
 
-  ComputeBaseline(aReflowInput, aDesiredSize);
+  {
+    auto baseline =
+        ComputeBaseline(this, aReflowInput, IsSingleLineTextControl());
+    mFirstBaseline = baseline.valueOr(NS_INTRINSIC_ISIZE_UNKNOWN);
+    if (baseline) {
+      aDesiredSize.SetBlockStartAscent(*baseline);
+    }
+  }
 
   // overflow handling
   aDesiredSize.SetOverflowAreasToDesiredBounds();
+
+  nsIFrame* buttonBox = [&]() -> nsIFrame* {
+    nsIFrame* last = mFrames.LastChild();
+    if (!last || !IsButtonBox(last)) {
+      return nullptr;
+    }
+    return last;
+  }();
+
+  // Reflow the button box first, so that we can use its size for the other
+  // frames.
+  nscoord buttonBoxISize = 0;
+  if (buttonBox) {
+    ReflowTextControlChild(buttonBox, aPresContext, aReflowInput, aStatus,
+                           aDesiredSize, buttonBoxISize);
+  }
+
   // perform reflow on all kids
   nsIFrame* kid = mFrames.FirstChild();
   while (kid) {
-    ReflowTextControlChild(kid, aPresContext, aReflowInput, aStatus,
-                           aDesiredSize);
+    if (kid != buttonBox) {
+      MOZ_ASSERT(!IsButtonBox(kid),
+                 "Should only have one button box, and should be last");
+      ReflowTextControlChild(kid, aPresContext, aReflowInput, aStatus,
+                             aDesiredSize, buttonBoxISize);
+    }
     kid = kid->GetNextSibling();
   }
 
@@ -660,37 +719,77 @@ void nsTextControlFrame::Reflow(nsPresContext* aPresContext,
 void nsTextControlFrame::ReflowTextControlChild(
     nsIFrame* aKid, nsPresContext* aPresContext,
     const ReflowInput& aReflowInput, nsReflowStatus& aStatus,
-    ReflowOutput& aParentDesiredSize) {
+    ReflowOutput& aParentDesiredSize, nscoord& aButtonBoxISize) {
+  const WritingMode outerWM = aReflowInput.GetWritingMode();
   // compute available size and frame offsets for child
-  WritingMode wm = aKid->GetWritingMode();
+  const WritingMode wm = aKid->GetWritingMode();
   LogicalSize availSize = aReflowInput.ComputedSizeWithPadding(wm);
   availSize.BSize(wm) = NS_UNCONSTRAINEDSIZE;
 
+  bool isButtonBox = IsButtonBox(aKid);
+
   ReflowInput kidReflowInput(aPresContext, aReflowInput, aKid, availSize,
                              Nothing(), ReflowInput::InitFlag::CallerWillInit);
+
   // Override padding with our computed padding in case we got it from theming
-  // or percentage.
-  kidReflowInput.Init(aPresContext, Nothing(), Nothing(),
-                      Some(aReflowInput.ComputedLogicalPadding(wm)));
+  // or percentage, if we're not the button box.
+  auto overridePadding =
+      isButtonBox ? Nothing() : Some(aReflowInput.ComputedLogicalPadding(wm));
+  // We want to let our button box fill the frame in the block axis, up to the
+  // edge of the control's border. So, we use the control's padding-box as the
+  // containing block size for our button box.
+  auto overrideCBSize =
+      isButtonBox ? Some(aReflowInput.ComputedSizeWithPadding(wm)) : Nothing();
+  kidReflowInput.Init(aPresContext, overrideCBSize, Nothing(), overridePadding);
 
-  // Set computed width and computed height for the child
-  kidReflowInput.SetComputedWidth(aReflowInput.ComputedWidth());
-  kidReflowInput.SetComputedHeight(aReflowInput.ComputedHeight());
+  LogicalPoint position(wm);
+  const auto& bp = aReflowInput.ComputedLogicalBorderPadding(outerWM);
 
-  // Offset the frame by the size of the parent's border
-  nscoord xOffset = aReflowInput.ComputedPhysicalBorderPadding().left -
-                    aReflowInput.ComputedPhysicalPadding().left;
-  nscoord yOffset = aReflowInput.ComputedPhysicalBorderPadding().top -
-                    aReflowInput.ComputedPhysicalPadding().top;
+  if (!isButtonBox) {
+    MOZ_ASSERT(wm == outerWM,
+               "Shouldn't have to care about orthogonal "
+               "writing-modes and such inside the control, "
+               "except for the number spin-box which forces "
+               "horizontal-tb");
+
+    // Offset the frame by the size of the parent's border
+    const auto& padding = aReflowInput.ComputedLogicalPadding(wm);
+    position.B(wm) = bp.BStart(wm) - padding.BStart(wm);
+    position.I(wm) = bp.IStart(wm) - padding.IStart(wm);
+
+    // Set computed width and computed height for the child (the button box is
+    // the only exception, which has an auto size).
+    kidReflowInput.SetComputedISize(
+        std::max(0, aReflowInput.ComputedISize() - aButtonBoxISize));
+    kidReflowInput.SetComputedBSize(aReflowInput.ComputedBSize());
+  }
 
   // reflow the child
   ReflowOutput desiredSize(aReflowInput);
-  ReflowChild(aKid, aPresContext, desiredSize, kidReflowInput, xOffset, yOffset,
-              ReflowChildFlags::Default, aStatus);
+  const nsSize containerSize =
+      aReflowInput.ComputedSizeWithBorderPadding(outerWM).GetPhysicalSize(
+          outerWM);
+  ReflowChild(aKid, aPresContext, desiredSize, kidReflowInput, wm, position,
+              containerSize, ReflowChildFlags::Default, aStatus);
+
+  if (isButtonBox) {
+    auto size = desiredSize.Size(outerWM);
+    // Center button in the block axis of our content box. We do this
+    // computation in terms of outerWM for simplicity.
+    position = LogicalPoint(outerWM);
+    position.B(outerWM) =
+        bp.BStart(outerWM) +
+        (aReflowInput.ComputedBSize() - size.BSize(outerWM)) / 2;
+    // Align to the inline-end of the content box.
+    position.I(outerWM) =
+        bp.IStart(outerWM) + aReflowInput.ComputedISize() - size.ISize(outerWM);
+    position = position.ConvertTo(wm, outerWM, containerSize);
+    aButtonBoxISize = size.ISize(outerWM);
+  }
 
   // place the child
-  FinishReflowChild(aKid, aPresContext, desiredSize, &kidReflowInput, xOffset,
-                    yOffset, ReflowChildFlags::Default);
+  FinishReflowChild(aKid, aPresContext, desiredSize, &kidReflowInput, wm,
+                    position, containerSize, ReflowChildFlags::Default);
 
   // consider the overflow
   aParentDesiredSize.mOverflowAreas.UnionWith(desiredSize.mOverflowAreas);
@@ -714,10 +813,6 @@ void nsTextControlFrame::SetFocus(bool aOn, bool aRepaint) {
 
   // If 'dom.placeholeder.show_on_focus' preference is 'false', focusing or
   // blurring the frame can have an impact on the placeholder visibility.
-  if (mPlaceholderDiv) {
-    textControlElement->UpdateOverlayTextVisibility(true);
-  }
-
   if (!aOn) {
     return;
   }
@@ -821,12 +916,9 @@ nsresult nsTextControlFrame::SetSelectionInternal(
     direction = (aDirection == eBackward) ? eDirPrevious : eDirNext;
   }
 
-  ErrorResult error;
-  selection->SetStartAndEndInLimiter(*aStartNode, aStartOffset, *aEndNode,
-                                     aEndOffset, error);
-  MOZ_TRY(error.StealNSResult());
-
-  selection->SetDirection(direction);
+  MOZ_TRY(selection->SetStartAndEndInLimiter(*aStartNode, aStartOffset,
+                                             *aEndNode, aEndOffset, direction,
+                                             nsISelectionListener::JS_REASON));
   return NS_OK;
 }
 
@@ -855,37 +947,15 @@ nsresult nsTextControlFrame::SelectAllOrCollapseToEndOfText(bool aSelect) {
     return rv;
   }
 
-  nsCOMPtr<nsINode> rootNode;
-  rootNode = mRootNode;
-
+  RefPtr<nsINode> rootNode = mRootNode;
   NS_ENSURE_TRUE(rootNode, NS_ERROR_FAILURE);
 
-  int32_t numChildren = mRootNode->GetChildCount();
+  RefPtr<Text> text = Text::FromNodeOrNull(rootNode->GetFirstChild());
+  MOZ_ASSERT(text);
 
-  if (numChildren > 0) {
-    // We never want to place the selection after the last
-    // br under the root node!
-    nsIContent* child = mRootNode->GetLastChild();
-    if (child) {
-      if (child->IsHTMLElement(nsGkAtoms::br)) {
-        child = child->GetPreviousSibling();
-        --numChildren;
-      } else if (child->IsText() && !child->Length()) {
-        // Editor won't remove text node when empty value.
-        --numChildren;
-      }
-    }
-    if (!aSelect && numChildren) {
-      child = child->GetPreviousSibling();
-      if (child && child->IsText()) {
-        rootNode = child;
-        numChildren = child->AsText()->TextDataLength();
-      }
-    }
-  }
+  uint32_t length = text->Length();
 
-  rv = SetSelectionInternal(rootNode, aSelect ? 0 : numChildren, rootNode,
-                            numChildren);
+  rv = SetSelectionInternal(text, aSelect ? 0 : length, text, length);
   NS_ENSURE_SUCCESS(rv, rv);
 
   ScrollSelectionIntoViewAsync();
@@ -973,16 +1043,8 @@ nsresult nsTextControlFrame::OffsetToDOMPoint(uint32_t aOffset,
     *aPosition = 0;
   } else if (textNode) {
     uint32_t textLength = textNode->Length();
-    if (length == 2 && aOffset == textLength) {
-      // If we're at the end of the text node and we have a trailing BR node,
-      // set the selection on the BR node.
-      rootNode.forget(aResult);
-      *aPosition = 1;
-    } else {
-      // Otherwise, set the selection on the textnode itself.
-      firstNode.forget(aResult);
-      *aPosition = std::min(aOffset, textLength);
-    }
+    firstNode.forget(aResult);
+    *aPosition = std::min(aOffset, textLength);
   } else {
     rootNode.forget(aResult);
     *aPosition = 0;
@@ -1119,42 +1181,29 @@ void nsTextControlFrame::SetInitialChildList(ChildListID aListID,
     MOZ_ASSERT(textControlElement);
     textControlElement->InitializeKeyboardEventListeners();
 
-    if (nsPoint* contentScrollPos = TakeProperty(ContentScrollPos())) {
+    bool hasProperty;
+    nsPoint contentScrollPos = TakeProperty(ContentScrollPos(), &hasProperty);
+    if (hasProperty) {
       // If we have a scroll pos stored to be passed to our anonymous
       // div, do it here!
       nsIStatefulFrame* statefulFrame = do_QueryFrame(frame);
       NS_ASSERTION(statefulFrame,
                    "unexpected type of frame for the anonymous div");
       UniquePtr<PresState> fakePresState = NewPresState();
-      fakePresState->scrollState() = *contentScrollPos;
+      fakePresState->scrollState() = contentScrollPos;
       statefulFrame->RestoreState(fakePresState.get());
-      delete contentScrollPos;
     }
   } else {
     MOZ_ASSERT(!mRootNode || PrincipalChildList().IsEmpty());
   }
 }
 
-void nsTextControlFrame::SetValueChanged(bool aValueChanged) {
-  auto* textControlElement = TextControlElement::FromNode(GetContent());
-  MOZ_ASSERT(textControlElement);
-
-  if (mPlaceholderDiv) {
-    AutoWeakFrame weakFrame(this);
-    textControlElement->UpdateOverlayTextVisibility(true);
-    if (!weakFrame.IsAlive()) {
-      return;
-    }
-  }
-
-  textControlElement->SetValueChanged(aValueChanged);
-}
-
 nsresult nsTextControlFrame::UpdateValueDisplay(bool aNotify,
                                                 bool aBeforeEditorInit,
                                                 const nsAString* aValue) {
-  if (!IsSingleLineTextControl())  // textareas don't use this
+  if (!IsSingleLineTextControl()) {  // textareas don't use this
     return NS_OK;
+  }
 
   MOZ_ASSERT(mRootNode, "Must have a div content\n");
   MOZ_ASSERT(!mEditorHasBeenInitialized,
@@ -1171,7 +1220,7 @@ nsresult nsTextControlFrame::UpdateValueDisplay(bool aNotify,
       textNode->MarkAsMaybeMasked();
     }
 
-    mRootNode->AppendChildTo(textNode, aNotify);
+    mRootNode->AppendChildTo(textNode, aNotify, IgnoreErrors());
     textContent = textNode;
   } else {
     textContent = childContent->GetAsText();
@@ -1189,22 +1238,6 @@ nsresult nsTextControlFrame::UpdateValueDisplay(bool aNotify,
     value = *aValue;
   } else {
     textControlElement->GetTextEditorValue(value, true);
-  }
-
-  // Update the display of the placeholder value and preview text if needed.
-  // We don't need to do this if we're about to initialize the editor, since
-  // EnsureEditorInitialized takes care of this.
-  if ((mPlaceholderDiv || mPreviewDiv) && !aBeforeEditorInit) {
-    AutoWeakFrame weakFrame(this);
-    textControlElement->UpdateOverlayTextVisibility(aNotify);
-    NS_ENSURE_STATE(weakFrame.IsAlive());
-  }
-
-  if (aBeforeEditorInit && value.IsEmpty()) {
-    if (nsIContent* node = mRootNode->GetFirstChild()) {
-      mRootNode->RemoveChildNode(node, true);
-    }
-    return NS_OK;
   }
 
   return textContent->SetText(value, aNotify);
@@ -1253,7 +1286,7 @@ nsTextControlFrame::RestoreState(PresState* aState) {
   // Most likely, we don't have our anonymous content constructed yet, which
   // would cause us to end up here.  In this case, we'll just store the scroll
   // pos ourselves, and forward it to the scroll frame later when it's created.
-  SetProperty(ContentScrollPos(), new nsPoint(aState->scrollState()));
+  SetProperty(ContentScrollPos(), aState->scrollState());
   return NS_OK;
 }
 
@@ -1263,16 +1296,7 @@ nsresult nsTextControlFrame::PeekOffset(nsPeekOffsetStruct* aPos) {
 
 void nsTextControlFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
                                           const nsDisplayListSet& aLists) {
-  /*
-   * The implementation of this method is equivalent as:
-   * nsContainerFrame::BuildDisplayList()
-   * with the difference that we filter-out the placeholder frame when it
-   * should not be visible.
-   */
   DO_GLOBAL_REFLOW_COUNT_DSP("nsTextControlFrame");
-
-  auto* control = TextControlElement::FromNode(GetContent());
-  MOZ_ASSERT(control);
 
   DisplayBorderBackgroundOutline(aBuilder, aLists);
 
@@ -1282,45 +1306,7 @@ void nsTextControlFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
   nsDisplayList* content = aLists.Content();
   nsDisplayListSet set(content, content, content, content, content, content);
 
-  // Clip the placeholder and preview text to the root box, so that it doesn't,
-  // e.g., overlay with our <input type="number"> spin buttons.
-  //
-  // For other input types, this will be a noop since we size the root via
-  // ReflowTextControlChild, which sets the same available space for all
-  // children.
-  auto clipToRoot = [&](Maybe<DisplayListClipState::AutoSaveRestore>& aClip) {
-    if (mRootNode) {
-      if (auto* root = mRootNode->GetPrimaryFrame()) {
-        aClip.emplace(aBuilder);
-        nsRect rootBox(aBuilder->ToReferenceFrame(root), root->GetSize());
-        aClip->ClipContentDescendants(rootBox);
-      }
-    }
-  };
-
-  // We build the ::placeholder first so that it renders below mRootNode which
-  // draws the caret and we always want that on top (bug 1637476).
-  if (mPlaceholderDiv && control->GetPlaceholderVisibility() &&
-      mPlaceholderDiv->GetPrimaryFrame()) {
-    Maybe<DisplayListClipState::AutoSaveRestore> overlayTextClip;
-    clipToRoot(overlayTextClip);
-    auto* kid = mPlaceholderDiv->GetPrimaryFrame();
-    MOZ_ASSERT(kid->GetParent() == this);
-    BuildDisplayListForChild(aBuilder, kid, set);
-  }
-
   for (auto* kid : mFrames) {
-    nsIContent* kidContent = kid->GetContent();
-    Maybe<DisplayListClipState::AutoSaveRestore> overlayTextClip;
-    if (kidContent == mPlaceholderDiv) {
-      continue;  // we handled mPlaceholderDiv explicitly above
-    }
-    if (kidContent == mPreviewDiv && !control->GetPreviewVisibility()) {
-      continue;
-    }
-    if (kidContent == mPreviewDiv) {
-      clipToRoot(overlayTextClip);
-    }
     BuildDisplayListForChild(aBuilder, kid, set);
   }
 }
@@ -1345,6 +1331,47 @@ nsTextControlFrame::EditorInitializer::Run() {
   // bug 682684.
   if (!mFrame) {
     return NS_ERROR_FAILURE;
+  }
+
+  // If there is a drag session which is for dragging text in a text control
+  // and its source node is the text control element, we're being reframed.
+  // In this case we should restore the source node of the drag session to
+  // new text node because it's required for dispatching `dragend` event.
+  if (nsCOMPtr<nsIDragSession> dragSession = nsContentUtils::GetDragSession()) {
+    if (dragSession->IsDraggingTextInTextControl()) {
+      nsCOMPtr<nsINode> sourceNode;
+      if (NS_SUCCEEDED(
+              dragSession->GetSourceNode(getter_AddRefs(sourceNode))) &&
+          mFrame->GetContent() == sourceNode) {
+        if (TextControlElement* textControlElement =
+                TextControlElement::FromNode(mFrame->GetContent())) {
+          if (TextEditor* textEditor =
+                  textControlElement->GetTextEditorWithoutCreation()) {
+            if (Element* anonymousDivElement = textEditor->GetRoot()) {
+              if (anonymousDivElement && anonymousDivElement->GetFirstChild()) {
+                MOZ_ASSERT(anonymousDivElement->GetFirstChild()->IsText());
+                dragSession->UpdateSource(anonymousDivElement->GetFirstChild(),
+                                          textEditor->GetSelection());
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  // Otherwise, EventStateManager may be tracking gesture to start a drag.
+  else if (TextControlElement* textControlElement =
+               TextControlElement::FromNode(mFrame->GetContent())) {
+    if (nsPresContext* presContext =
+            textControlElement->GetPresContext(Element::eForComposedDoc)) {
+      if (TextEditor* textEditor =
+              textControlElement->GetTextEditorWithoutCreation()) {
+        if (Element* anonymousDivElement = textEditor->GetRoot()) {
+          presContext->EventStateManager()->TextControlRootAdded(
+              *anonymousDivElement, *textControlElement);
+        }
+      }
+    }
   }
 
   mFrame->FinishedInitializer();

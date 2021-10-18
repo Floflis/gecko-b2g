@@ -1783,6 +1783,7 @@ SECStatus ssl_PickSignatureScheme(sslSocket *ss,
                                   unsigned int peerSchemeCount,
                                   PRBool requireSha1);
 SECOidTag ssl3_HashTypeToOID(SSLHashType hashType);
+SECOidTag ssl3_AuthTypeToOID(SSLAuthType hashType);
 SSLHashType ssl_SignatureSchemeToHashType(SSLSignatureScheme scheme);
 SSLAuthType ssl_SignatureSchemeToAuthType(SSLSignatureScheme scheme);
 
@@ -1846,6 +1847,9 @@ PK11SymKey *ssl_unwrapSymKey(PK11SymKey *wrapKey,
                              SECItem *wrappedKey,
                              CK_MECHANISM_TYPE target, CK_ATTRIBUTE_TYPE operation,
                              int keySize, CK_FLAGS keyFlags, void *pinArg);
+
+/* determine if the current ssl connection is operating in FIPS mode */
+PRBool ssl_isFIPS(sslSocket *ss);
 
 /* Experimental APIs. Remove when stable. */
 

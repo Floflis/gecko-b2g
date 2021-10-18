@@ -17,7 +17,8 @@
 #include "js/Date.h"
 #include "js/experimental/TypedData.h"  // JS_IsArrayBufferViewObject, JS_GetObjectAsArrayBufferView
 #include "js/MemoryFunctions.h"
-#include "js/Object.h"  // JS::GetBuiltinClass
+#include "js/Object.h"              // JS::GetBuiltinClass
+#include "js/PropertyAndElement.h"  // JS_DefineElement, JS_GetProperty, JS_GetPropertyById, JS_HasOwnProperty, JS_HasOwnPropertyById
 #include "js/Value.h"
 #include "jsfriendapi.h"
 #include "mozilla/Casting.h"
@@ -479,8 +480,8 @@ nsresult Key::DecodeJSValInternal(const EncodedDataType*& aPos,
     uint32_t index = 0;
     JS::Rooted<JS::Value> val(aCx);
     while (aPos < aEnd && *aPos - aTypeOffset != eTerminator) {
-      IDB_TRY(DecodeJSValInternal(aPos, aEnd, aCx, aTypeOffset, &val,
-                                  aRecursionDepth + 1));
+      QM_TRY(MOZ_TO_RESULT(DecodeJSValInternal(aPos, aEnd, aCx, aTypeOffset,
+                                               &val, aRecursionDepth + 1)));
 
       aTypeOffset = 0;
 
@@ -834,7 +835,7 @@ double Key::DecodeNumber(const EncodedDataType*& aPos,
 Result<Ok, nsresult> Key::EncodeBinary(JSObject* aObject, bool aIsViewObject,
                                        uint8_t aTypeOffset) {
   uint8_t* bufferData;
-  uint32_t bufferLength;
+  size_t bufferLength;
 
   // We must use JS::GetObjectAsArrayBuffer()/JS_GetObjectAsArrayBufferView()
   // instead of js::GetArrayBufferLengthAndData(). The object might be wrapped,

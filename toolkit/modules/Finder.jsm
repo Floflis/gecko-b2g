@@ -23,12 +23,6 @@ ChromeUtils.defineModuleGetter(
 
 XPCOMUtils.defineLazyServiceGetter(
   this,
-  "Clipboard",
-  "@mozilla.org/widget/clipboard;1",
-  "nsIClipboard"
-);
-XPCOMUtils.defineLazyServiceGetter(
-  this,
   "ClipboardHelper",
   "@mozilla.org/widget/clipboardhelper;1",
   "nsIClipboardHelper"
@@ -85,6 +79,7 @@ Finder.prototype = {
       // need to clear from the selection.
       this._highlighter.hide(window);
       this._highlighter.clear(window);
+      this.highlighter.removeScrollMarks();
     }
     this.listeners = [];
     this._docShell
@@ -365,6 +360,9 @@ Finder.prototype = {
     );
 
     let results = await Promise.all([highlightPromise, matchCountPromise]);
+
+    this.highlighter.updateScrollMarks();
+
     if (results[1]) {
       return Object.assign(results[1], results[0]);
     } else if (results[0]) {
@@ -452,6 +450,7 @@ Finder.prototype = {
       this.highlighter.clearCurrentOutline(window);
     } else {
       this.highlighter.clear(window);
+      this.highlighter.removeScrollMarks();
     }
   },
 
@@ -492,6 +491,7 @@ Finder.prototype = {
   onFindbarClose() {
     this.enableSelection();
     this.highlighter.highlight(false);
+    this.highlighter.removeScrollMarks();
     this.iterator.reset();
     activeFinderRoots.delete(this._docShell.browsingContext.top);
   },
@@ -801,7 +801,7 @@ Finder.prototype = {
 
 function GetClipboardSearchString(aLoadContext) {
   let searchString = "";
-  if (!Clipboard.supportsFindClipboard()) {
+  if (!Services.clipboard.supportsFindClipboard()) {
     return searchString;
   }
 
@@ -812,7 +812,7 @@ function GetClipboardSearchString(aLoadContext) {
     trans.init(aLoadContext);
     trans.addDataFlavor("text/unicode");
 
-    Clipboard.getData(trans, Ci.nsIClipboard.kFindClipboard);
+    Services.clipboard.getData(trans, Ci.nsIClipboard.kFindClipboard);
 
     let data = {};
     trans.getTransferData("text/unicode", data);
@@ -826,7 +826,7 @@ function GetClipboardSearchString(aLoadContext) {
 }
 
 function SetClipboardSearchString(aSearchString) {
-  if (!aSearchString || !Clipboard.supportsFindClipboard()) {
+  if (!aSearchString || !Services.clipboard.supportsFindClipboard()) {
     return;
   }
 

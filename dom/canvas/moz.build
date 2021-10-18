@@ -59,14 +59,11 @@ EXPORTS.mozilla.dom += [
     "ImageBitmapSource.h",
     "ImageData.h",
     "ImageUtils.h",
-    "IpdlQueue.h",
     "OffscreenCanvas.h",
-    "ProducerConsumerQueue.h",
     "QueueParamTraits.h",
     "TextMetrics.h",
     "WebGLChild.h",
     "WebGLCommandQueue.h",
-    "WebGLCrossProcessCommandQueue.h",
     "WebGLIpdl.h",
     "WebGLParent.h",
     "WebGLTypes.h",
@@ -100,7 +97,7 @@ UNIFIED_SOURCES += [
     "ClientWebGLContext.cpp",
     "ClientWebGLExtensions.cpp",
     "HostWebGLContext.cpp",
-    "Queue.cpp",
+    "SanitizeRenderer.cpp",
     "TexUnpackBlob.cpp",
     "WebGL2Context.cpp",
     "WebGL2ContextBuffers.cpp",
@@ -128,7 +125,6 @@ UNIFIED_SOURCES += [
     "WebGLContextValidate.cpp",
     "WebGLContextVertexArray.cpp",
     "WebGLContextVertices.cpp",
-    "WebGLCrossProcessCommandQueue.cpp",
     "WebGLExtensionColorBufferFloat.cpp",
     "WebGLExtensionColorBufferHalfFloat.cpp",
     "WebGLExtensionCompressedTextureASTC.cpp",
@@ -181,6 +177,10 @@ IPDL_SOURCES += [
     "PWebGL.ipdl",
 ]
 
+TEST_DIRS += [
+    "gtest",
+]
+
 # Suppress warnings from third-party code.
 if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     SOURCES["MurmurHash3.cpp"].flags += ["-Wno-implicit-fallthrough"]
@@ -202,6 +202,7 @@ LOCAL_INCLUDES += [
     "/dom/workers",
     "/dom/xul",
     "/gfx/angle/checkout/include",
+    "/gfx/cairo/cairo/src",
     "/gfx/gl",
     "/image",
     "/js/xpconnect/src",
@@ -211,7 +212,6 @@ LOCAL_INCLUDES += [
     "/media/libyuv/libyuv/include",
 ]
 
-CXXFLAGS += CONFIG["MOZ_CAIRO_CFLAGS"]
 CXXFLAGS += CONFIG["TK_CFLAGS"]
 
 LOCAL_INCLUDES += CONFIG["SKIA_INCLUDES"]

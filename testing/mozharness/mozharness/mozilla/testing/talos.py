@@ -60,6 +60,13 @@ TalosErrorList = PythonErrorList + [
     },
 ]
 
+GeckoProfilerSettings = (
+    "gecko_profile_interval",
+    "gecko_profile_entries",
+    "gecko_profile_features",
+    "gecko_profile_threads",
+)
+
 # TODO: check for running processes on script invocation
 
 
@@ -163,8 +170,32 @@ class Talos(
                 {
                     "dest": "gecko_profile_interval",
                     "type": "int",
-                    "default": 0,
                     "help": "The interval between samples taken by the profiler (milliseconds)",
+                },
+            ],
+            [
+                ["--gecko-profile-entries"],
+                {
+                    "dest": "gecko_profile_entries",
+                    "type": "int",
+                    "help": "How many samples to take with the profiler",
+                },
+            ],
+            [
+                ["--gecko-profile-features"],
+                {
+                    "dest": "gecko_profile_features",
+                    "type": "str",
+                    "default": None,
+                    "help": "The features to enable in the profiler (comma-separated)",
+                },
+            ],
+            [
+                ["--gecko-profile-threads"],
+                {
+                    "dest": "gecko_profile_threads",
+                    "type": "str",
+                    "help": "Comma-separated list of threads to sample.",
                 },
             ],
             [
@@ -204,6 +235,15 @@ class Talos(
                     "help": "Set a browser preference. May be used multiple times.",
                 },
             ],
+            [
+                ["--skip-preflight"],
+                {
+                    "action": "store_true",
+                    "dest": "skip_preflight",
+                    "default": False,
+                    "help": "skip preflight commands to prepare machine.",
+                },
+            ],
         ]
         + testing_config_options
         + copy.deepcopy(code_coverage_config_options)
@@ -240,16 +280,30 @@ class Talos(
 
         self.run_local = self.config.get("run_local")
         self.installer_url = self.config.get("installer_url")
+        self.test_packages_url = self.config.get("test_packages_url")
         self.talos_json_url = self.config.get("talos_json_url")
         self.talos_json = self.config.get("talos_json")
         self.talos_json_config = self.config.get("talos_json_config")
         self.repo_path = self.config.get("repo_path")
         self.obj_path = self.config.get("obj_path")
         self.tests = None
-        self.gecko_profile = self.config.get(
-            "gecko_profile"
-        ) or "--gecko-profile" in self.config.get("talos_extra_options", [])
-        self.gecko_profile_interval = self.config.get("gecko_profile_interval")
+        extra_opts = self.config.get("talos_extra_options", [])
+        self.gecko_profile = (
+            self.config.get("gecko_profile") or "--gecko-profile" in extra_opts
+        )
+        for setting in GeckoProfilerSettings:
+            value = self.config.get(setting)
+            arg = "--" + setting.replace("_", "-")
+            if value is None:
+                try:
+                    value = extra_opts[extra_opts.index(arg) + 1]
+                except ValueError:
+                    pass  # Not found
+            if value is not None:
+                setattr(self, setting, value)
+                if not self.gecko_profile:
+                    self.warning("enabling Gecko profiler for %s setting!" % setting)
+                    self.gecko_profile = True
         self.pagesets_name = None
         self.benchmark_zip = None
         self.webextensions_zip = None
@@ -263,10 +317,11 @@ class Talos(
         # finally, if gecko_profile is set, we add that to the talos options
         if self.gecko_profile:
             gecko_results.append("--gecko-profile")
-            if self.gecko_profile_interval:
-                gecko_results.extend(
-                    ["--gecko-profile-interval", str(self.gecko_profile_interval)]
-                )
+            for setting in GeckoProfilerSettings:
+                value = getattr(self, setting, None)
+                if value:
+                    arg = "--" + setting.replace("_", "-")
+                    gecko_results.extend([arg, str(value)])
         return gecko_results
 
     def query_abs_dirs(self):

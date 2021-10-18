@@ -18,6 +18,7 @@ EXPORTS += [
 UNIFIED_SOURCES += [
     "ia2Accessible.cpp",
     "ia2AccessibleAction.cpp",
+    "ia2AccessibleApplication.cpp",
     "ia2AccessibleComponent.cpp",
     "ia2AccessibleEditableText.cpp",
     "ia2AccessibleHyperlink.cpp",
@@ -56,3 +57,5 @@ if CONFIG["CC_TYPE"] == "clang-cl":
     CXXFLAGS += ["-Wno-extra-tokens"]
 
 include("/ipc/chromium/chromium-config.mozbuild")
+
+REQUIRES_UNIFIED_BUILD = True

@@ -12,6 +12,7 @@
 #include "mozilla/dom/UDPMessageEvent.h"
 #include "mozilla/dom/UDPSocketBinding.h"
 #include "mozilla/dom/UnionTypes.h"
+#include "mozilla/dom/RootedDictionary.h"
 #include "mozilla/net/DNS.h"
 #include "nsComponentManagerUtils.h"
 #include "nsContentUtils.h"
@@ -82,9 +83,7 @@ already_AddRefed<UDPSocket> UDPSocket::Constructor(const GlobalObject& aGlobal,
 
     // check if localAddress is a valid IPv4/6 address
     NS_ConvertUTF16toUTF8 address(localAddress);
-    PRNetAddr prAddr;
-    PRStatus status = PR_StringToNetAddr(address.BeginReading(), &prAddr);
-    if (status != PR_SUCCESS) {
+    if (!net::HostIsIPLiteral(address)) {
       aRv.Throw(NS_ERROR_DOM_INVALID_ACCESS_ERR);
       return nullptr;
     }

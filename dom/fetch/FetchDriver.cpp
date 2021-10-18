@@ -43,6 +43,7 @@
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/StaticPrefs_privacy.h"
+#include "mozilla/StaticPrefs_javascript.h"
 #include "mozilla/Unused.h"
 
 #include "Fetch.h"
@@ -236,21 +237,18 @@ AlternativeDataStreamListener::OnStartRequest(nsIRequest* aRequest) {
     // call FetchDriver::HttpFetch to load main body
     MOZ_ASSERT(mFetchDriver);
     return mFetchDriver->HttpFetch();
-
-  } else {
-    // Needn't load alternative data, since alternative data does not exist.
-    // Set status to FALLBACK to reuse the opened channel to load main body,
-    // then call FetchDriver::OnStartRequest to continue the work. Unfortunately
-    // can't change the stream listener to mFetchDriver, need to keep
-    // AlternativeDataStreamListener alive to redirect OnDataAvailable and
-    // OnStopRequest to mFetchDriver.
-    MOZ_ASSERT(alternativeDataType.IsEmpty());
-    mStatus = AlternativeDataStreamListener::FALLBACK;
-    mAlternativeDataCacheEntryId = 0;
-    MOZ_ASSERT(mFetchDriver);
-    return mFetchDriver->OnStartRequest(aRequest);
   }
-  return NS_OK;
+  // Needn't load alternative data, since alternative data does not exist.
+  // Set status to FALLBACK to reuse the opened channel to load main body,
+  // then call FetchDriver::OnStartRequest to continue the work. Unfortunately
+  // can't change the stream listener to mFetchDriver, need to keep
+  // AlternativeDataStreamListener alive to redirect OnDataAvailable and
+  // OnStopRequest to mFetchDriver.
+  MOZ_ASSERT(alternativeDataType.IsEmpty());
+  mStatus = AlternativeDataStreamListener::FALLBACK;
+  mAlternativeDataCacheEntryId = 0;
+  MOZ_ASSERT(mFetchDriver);
+  return mFetchDriver->OnStartRequest(aRequest);
 }
 
 NS_IMETHODIMP
@@ -648,6 +646,14 @@ nsresult FetchDriver::HttpFetch(
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
+  if (mDocument && mDocument->GetEmbedderElement() &&
+      mDocument->GetEmbedderElement()->IsAnyOfHTMLElements(nsGkAtoms::object,
+                                                           nsGkAtoms::embed)) {
+    nsCOMPtr<nsILoadInfo> loadInfo = chan->LoadInfo();
+    rv = loadInfo->SetIsFromObjectOrEmbed(true);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
   // Insert ourselves into the notification callbacks chain so we can set
   // headers on redirects.
 #ifdef DEBUG
@@ -804,8 +810,9 @@ nsresult FetchDriver::HttpFetch(
   if (!aPreferredAlternativeDataType.IsEmpty()) {
     nsCOMPtr<nsICacheInfoChannel> cic = do_QueryInterface(chan);
     if (cic) {
-      cic->PreferAlternativeDataType(aPreferredAlternativeDataType, ""_ns,
-                                     true);
+      cic->PreferAlternativeDataType(
+          aPreferredAlternativeDataType, ""_ns,
+          nsICacheInfoChannel::PreferredAlternativeDataDeliveryType::ASYNC);
       MOZ_ASSERT(!mAltDataListener);
       mAltDataListener = new AlternativeDataStreamListener(
           this, chan, aPreferredAlternativeDataType);
@@ -816,11 +823,13 @@ nsresult FetchDriver::HttpFetch(
   } else {
     // Integrity check cannot be done on alt-data yet.
     if (mRequest->GetIntegrity().IsEmpty()) {
+      MOZ_ASSERT(!FetchUtil::WasmAltDataType.IsEmpty());
       nsCOMPtr<nsICacheInfoChannel> cic = do_QueryInterface(chan);
-      if (cic) {
-        cic->PreferAlternativeDataType(nsLiteralCString(WASM_ALT_DATA_TYPE_V1),
-                                       nsLiteralCString(WASM_CONTENT_TYPE),
-                                       false);
+      if (cic && StaticPrefs::javascript_options_wasm_caching()) {
+        cic->PreferAlternativeDataType(
+            FetchUtil::WasmAltDataType, nsLiteralCString(WASM_CONTENT_TYPE),
+            nsICacheInfoChannel::PreferredAlternativeDataDeliveryType::
+                SERIALIZE);
       }
     }
 
@@ -975,9 +984,12 @@ FetchDriver::OnStartRequest(nsIRequest* aRequest) {
                 contentLength == InternalResponse::UNKNOWN_BODY_SIZE);
 
   if (httpChannel) {
-    uint32_t responseStatus;
+    uint32_t responseStatus = 0;
     rv = httpChannel->GetResponseStatus(&responseStatus);
-    MOZ_ASSERT(NS_SUCCEEDED(rv));
+    if (NS_FAILED(rv)) {
+      FailWithNetworkError(rv);
+      return rv;
+    }
 
     if (mozilla::net::nsHttpChannel::IsRedirectStatus(responseStatus)) {
       if (mRequest->GetRedirectMode() == RequestRedirect::Error) {
@@ -1088,8 +1100,8 @@ FetchDriver::OnStartRequest(nsIRequest* aRequest) {
       }
     } else if (!cic->PreferredAlternativeDataTypes().IsEmpty()) {
       MOZ_ASSERT(cic->PreferredAlternativeDataTypes().Length() == 1);
-      MOZ_ASSERT(cic->PreferredAlternativeDataTypes()[0].type().EqualsLiteral(
-          WASM_ALT_DATA_TYPE_V1));
+      MOZ_ASSERT(cic->PreferredAlternativeDataTypes()[0].type().Equals(
+          FetchUtil::WasmAltDataType));
       MOZ_ASSERT(
           cic->PreferredAlternativeDataTypes()[0].contentType().EqualsLiteral(
               WASM_CONTENT_TYPE));
@@ -1583,6 +1595,18 @@ void FetchDriver::SetRequestHeaders(nsIHttpChannel* aChannel,
     } else {
       DebugOnly<nsresult> rv = aChannel->SetRequestHeader(
           headers[i].mName, headers[i].mValue, alreadySet /* merge */);
+      MOZ_ASSERT(NS_SUCCEEDED(rv));
+    }
+  }
+
+  nsAutoCString method;
+  mRequest->GetMethod(method);
+  if (!method.EqualsLiteral("GET") && !method.EqualsLiteral("HEAD")) {
+    nsAutoString origin;
+    if (NS_SUCCEEDED(nsContentUtils::GetUTFOrigin(mPrincipal, origin))) {
+      DebugOnly<nsresult> rv = aChannel->SetRequestHeader(
+          nsDependentCString(net::nsHttp::Origin),
+          NS_ConvertUTF16toUTF8(origin), false /* merge */);
       MOZ_ASSERT(NS_SUCCEEDED(rv));
     }
   }

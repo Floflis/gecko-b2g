@@ -145,7 +145,8 @@ InternalRequest::InternalRequest(const IPCInternalRequest& aIPCRequest)
     : mMethod(aIPCRequest.method()),
       mURLList(aIPCRequest.urlList().Clone()),
       mHeaders(new InternalHeaders(aIPCRequest.headers(),
-                                   aIPCRequest.headersGuard())),
+                                   aIPCRequest.headersGuard(),
+                                   aIPCRequest.hasSystemXHRPerm())),
       mBodyLength(aIPCRequest.bodySize()),
       mPreferredAlternativeDataType(aIPCRequest.preferredAlternativeDataType()),
       mContentPolicyType(
@@ -245,6 +246,7 @@ RequestDestination InternalRequest::MapContentPolicyTypeToRequestDestination(
       return RequestDestination::_empty;
     case nsIContentPolicy::TYPE_FONT:
     case nsIContentPolicy::TYPE_INTERNAL_FONT_PRELOAD:
+    case nsIContentPolicy::TYPE_UA_FONT:
       return RequestDestination::Font;
     case nsIContentPolicy::TYPE_MEDIA:
       return RequestDestination::_empty;
@@ -275,6 +277,8 @@ RequestDestination InternalRequest::MapContentPolicyTypeToRequestDestination(
       return RequestDestination::Audioworklet;
     case nsIContentPolicy::TYPE_INTERNAL_PAINTWORKLET:
       return RequestDestination::Paintworklet;
+    case nsIContentPolicy::TYPE_PROXIED_WEBRTC_MEDIA:
+      return RequestDestination::_empty;
     case nsIContentPolicy::TYPE_INVALID:
       break;
       // Do not add default: so that compilers can catch the missing case.

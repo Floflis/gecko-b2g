@@ -10,9 +10,7 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 
-from mozbuild.util import ensure_subprocess_env
 from mozfile import which
 from mozpack.files import FileListFinder
 
@@ -90,17 +88,7 @@ class Repository(object):
         self._tool = get_tool_path(tool)
         self._version = None
         self._valid_diff_filter = ("m", "a", "d")
-
-        if os.name == "nt" and sys.version_info[0] == 2:
-            self._env = {}
-            for k, v in os.environ.iteritems():
-                if isinstance(k, unicode):
-                    k = k.encode("utf8")
-                if isinstance(v, unicode):
-                    v = v.encode("utf8")
-                self._env[k] = v
-        else:
-            self._env = os.environ.copy()
+        self._env = os.environ.copy()
 
     def __enter__(self):
         return self
@@ -114,10 +102,7 @@ class Repository(object):
         cmd = (self._tool,) + args
         try:
             return subprocess.check_output(
-                cmd,
-                cwd=self.path,
-                env=ensure_subprocess_env(self._env),
-                universal_newlines=True,
+                cmd, cwd=self.path, env=self._env, universal_newlines=True
             )
         except subprocess.CalledProcessError as e:
             if e.returncode in return_codes:
@@ -153,6 +138,17 @@ class Repository(object):
     @abc.abstractproperty
     def base_ref(self):
         """Hash of revision the current topic branch is based on."""
+
+    @abc.abstractmethod
+    def base_ref_as_hg(self):
+        """Mercurial hash of revision the current topic branch is based on.
+
+        Return None if the hg hash of the base ref could not be calculated.
+        """
+
+    @abc.abstractproperty
+    def branch(self):
+        """Current branch or bookmark the checkout has active."""
 
     @abc.abstractmethod
     def get_commit_time(self):
@@ -256,6 +252,10 @@ class Repository(object):
         if git cinnabar is not present.
         """
 
+    @abc.abstractmethod
+    def update(self, ref):
+        """Update the working directory to the specified reference."""
+
     def commit(self, message, author=None, date=None, paths=None):
         """Create a commit using the provided commit message. The author, date,
         and files/paths to be included may also be optionally provided. The
@@ -286,7 +286,7 @@ class HgRepository(Repository):
         import hglib.client
 
         super(HgRepository, self).__init__(path, tool=hg)
-        self._env[b"HGPLAIN"] = b"1"
+        self._env["HGPLAIN"] = "1"
 
         # Setting this modifies a global variable and makes all future hglib
         # instances use this binary. Since the tool path was validated, this
@@ -297,11 +297,8 @@ class HgRepository(Repository):
         # Without connect=False this spawns a persistent process. We want
         # the process lifetime tied to a context manager.
         self._client = hglib.client.hgclient(
-            self.path, encoding=b"UTF-8", configs=None, connect=False
+            self.path, encoding="UTF-8", configs=None, connect=False
         )
-
-        # Work around py3 compat issues in python-hglib
-        self._client._env = ensure_subprocess_env(self._client._env)
 
     @property
     def name(self):
@@ -314,6 +311,19 @@ class HgRepository(Repository):
     @property
     def base_ref(self):
         return self._run("log", "-r", "last(ancestors(.) and public())", "-T", "{node}")
+
+    def base_ref_as_hg(self):
+        return self.base_ref
+
+    @property
+    def branch(self):
+        bookmarks_fn = os.path.join(self.path, ".hg", "bookmarks.current")
+        if os.path.exists(bookmarks_fn):
+            with open(bookmarks_fn) as f:
+                bookmark = f.read()
+                return bookmark or None
+
+        return None
 
     def __enter__(self):
         if self._client.server is None:
@@ -477,6 +487,9 @@ class HgRepository(Repository):
             else:
                 shutil.rmtree(f)
 
+    def update(self, ref):
+        return self._run("update", "--check", ref)
+
     def push_to_try(self, message):
         try:
             subprocess.check_call(
@@ -489,7 +502,7 @@ class HgRepository(Repository):
                     message,
                 ),
                 cwd=self.path,
-                env=ensure_subprocess_env(self._env),
+                env=self._env
             )
         except subprocess.CalledProcessError:
             try:
@@ -523,6 +536,17 @@ class GitRepository(Repository):
         if refs:
             return refs[-1][1:]  # boundary starts with a prefix `-`
         return self.head_ref
+
+    def base_ref_as_hg(self):
+        base_ref = self.base_ref
+        try:
+            return self._run("cinnabar", "git2hg", base_ref)
+        except subprocess.CalledProcessError:
+            return
+
+    @property
+    def branch(self):
+        return self._run("branch", "--show-current").strip() or None
 
     @property
     def has_git_cinnabar(self):
@@ -623,6 +647,9 @@ class GitRepository(Repository):
             raise CannotDeleteFromRootOfRepositoryException()
         self._run("checkout", "--", path)
         self._run("clean", "-df", path)
+
+    def update(self, ref):
+        self._run("checkout", ref)
 
     def push_to_try(self, message):
         if not self.has_git_cinnabar:

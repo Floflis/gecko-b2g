@@ -28,6 +28,7 @@
 #include "cutils/properties.h"
 #include "FramebufferSurface.h"
 #include "GonkDisplayP.h"
+#include "mozilla/Preferences.h"
 
 #ifdef LOG_TAG
 #  undef LOG_TAG
@@ -35,8 +36,6 @@
 #endif
 
 #define DEFAULT_XDPI 75.0
-// This define should be passed from gonk-misc and depends on device config.
-// #define GET_FRAMEBUFFER_FORMAT_FROM_HWC
 
 using namespace android;
 
@@ -125,6 +124,11 @@ std::shared_ptr<const HWC2::Display::Config> getActiveConfig(
   return config;
 }
 
+namespace mozilla {
+__attribute__((visibility("default"))) void HookSetVsyncAlwaysEnabled(
+    bool aAlways);
+}
+
 // ----------------------------------------------------------------------------
 namespace mozilla {
 // ----------------------------------------------------------------------------
@@ -174,8 +178,8 @@ GonkDisplayP::GonkDisplayP()
 
   mEnableHWCPower = property_get_bool("persist.hwc.powermode", false);
 
-  ALOGI("width: %i, height: %i, dpi: %f, lcd: %d\n", config->getWidth(),
-        config->getHeight(), config->getDpiX(), lcd_dnsity);
+  ALOGI("width: %i, height: %i, dpi: %f, lcd: %d, vsync: %llu\n", config->getWidth(),
+        config->getHeight(), config->getDpiX(), lcd_dnsity, config->getVsyncPeriod());
 
   DisplayNativeData& dispData =
       mDispNativeData[(uint32_t)DisplayType::DISPLAY_PRIMARY];
@@ -183,6 +187,7 @@ GonkDisplayP::GonkDisplayP()
     dispData.mWidth = config->getWidth();
     dispData.mHeight = config->getHeight();
     dispData.mXdpi = (lcd_dnsity > 0) ? lcd_dnsity : config->getDpiX();
+    dispData.mVsyncPeriod = config->getVsyncPeriod();
     /* The emulator actually reports RGBA_8888, but EGL doesn't return
      * any matching configuration. We force RGBX here to fix it. */
     /*TODO: need to discuss with vendor to check this format issue.*/
@@ -207,9 +212,14 @@ GonkDisplayP::GonkDisplayP()
     ALOGE("Can't find IPower service...");
   }
 
+  DisplayUtils displayUtils;
+  displayUtils.type = DisplayUtils::MAIN;
+  displayUtils.utils.hwcDisplay = mHwcDisplay;
+  // disable mDispSurface by default to avoid updating frame during boot
+  // animation is being played.
   CreateFramebufferSurface(mSTClient, mDispSurface, config->getWidth(),
                            config->getHeight(), dispData.mSurfaceformat,
-                           hwcDisplay, mlayer, nullptr);
+                           displayUtils, false);
 
   (void)hwcDisplay->createLayer(&mlayerBootAnim);
   (void)mlayerBootAnim->setCompositionType(HWC2::Composition::Client);
@@ -221,8 +231,7 @@ GonkDisplayP::GonkDisplayP()
 
   CreateFramebufferSurface(mBootAnimSTClient, mBootAnimDispSurface,
                            config->getWidth(), config->getHeight(),
-                           dispData.mSurfaceformat, hwcDisplay, mlayerBootAnim,
-                           nullptr);
+                           dispData.mSurfaceformat, displayUtils, true);
 
   {
     // mBootAnimSTClient is used by CPU directly via GonkDisplayP's
@@ -253,10 +262,12 @@ GonkDisplayP::GonkDisplayP()
       extDispData.mXdpi = mExtFBDevice->mXdpi;
 
       mExtFBDevice->EnableScreen(true);
+
+      displayUtils.type = DisplayUtils::EXTERNAL;
+      displayUtils.utils.extFBDevice = mExtFBDevice;
       CreateFramebufferSurface(mExtSTClient, mExtDispSurface,
                                extDispData.mWidth, extDispData.mHeight,
-                               extDispData.mSurfaceformat, nullptr, nullptr,
-                               mExtFBDevice);
+                               extDispData.mSurfaceformat, displayUtils, true);
       mExtSTClient->perform(mExtSTClient.get(), NATIVE_WINDOW_SET_BUFFER_COUNT,
                             2);
       mExtSTClient->perform(mExtSTClient.get(), NATIVE_WINDOW_SET_USAGE, usage);
@@ -288,26 +299,25 @@ GonkDisplayP::~GonkDisplayP() {
 }
 
 void GonkDisplayP::CreateFramebufferSurface(
-    sp<ANativeWindow>& aNativeWindow, sp<DisplaySurface>& aDisplaySurface,
-    uint32_t aWidth, uint32_t aHeight, unsigned int format,
-    HWC2::Display* display, HWC2::Layer* layer,
-    NativeFramebufferDevice* ExtFBDevice) {
+    sp<ANativeWindow>& nativeWindow, sp<DisplaySurface>& displaySurface,
+    uint32_t width, uint32_t height, unsigned int format,
+    DisplayUtils displayUtils, bool visibility) {
   sp<IGraphicBufferProducer> producer;
   sp<IGraphicBufferConsumer> consumer;
   BufferQueue::createBufferQueue(&producer, &consumer);
 
-  aDisplaySurface = new FramebufferSurface(aWidth, aHeight, format, consumer,
-                                           display, layer, ExtFBDevice);
-  aNativeWindow = new android::Surface(producer, true);
+  displaySurface = new FramebufferSurface(width, height, format, consumer,
+                                          displayUtils, visibility);
+  nativeWindow = new Surface(producer, true);
 }
 
 void GonkDisplayP::CreateVirtualDisplaySurface(
-    IGraphicBufferProducer* aSink, sp<ANativeWindow>& aNativeWindow,
-    sp<DisplaySurface>& aDisplaySurface) {
+    IGraphicBufferProducer* sink, sp<ANativeWindow>& nativeWindow,
+    sp<DisplaySurface>& displaySurface) {
   /* TODO: implement VirtualDisplay*/
-  (void)aSink;
-  (void)aNativeWindow;
-  (void)aDisplaySurface;
+  (void)sink;
+  (void)nativeWindow;
+  (void)displaySurface;
 
   /* FIXME: bug 4036, fix the build error in libdisplay
   #if ANDROID_VERSION >= 19
@@ -324,35 +334,41 @@ void GonkDisplayP::SetEnabled(bool enabled) {
     if (!mExtFBEnabled) {
       autosuspend_disable();
       mPower->setInteractive(true);
+    }
 
-      if (mHwc && mEnableHWCPower) {
-        SetHwcPowerMode(enabled);
-      } else if (mFBDevice && mFBDevice->enableScreen) {
-        mFBDevice->enableScreen(mFBDevice, enabled);
-      }
+    if (mHwc && mEnableHWCPower) {
+      SetHwcPowerMode(enabled);
+    } else if (mFBDevice && mFBDevice->enableScreen) {
+      mFBDevice->enableScreen(mFBDevice, enabled);
     }
     mFBEnabled = enabled;
 
     // enable vsync
-    if (mEnabledCallback && !mExtFBEnabled) {
+    if (mEnabledCallback) {
       mEnabledCallback(enabled);
+    }
+    if (Preferences::GetBool("gfx.vsync.force-enable", false)) {
+      HookSetVsyncAlwaysEnabled(true);
     }
   } else {
-    if (mEnabledCallback && !mExtFBEnabled) {
+    if (Preferences::GetBool("gfx.vsync.force-enable", false)) {
+      HookSetVsyncAlwaysEnabled(false);
+    }
+    if (mEnabledCallback) {
       mEnabledCallback(enabled);
     }
 
-    if (!mExtFBEnabled) {
-      if (mHwc && mEnableHWCPower) {
-        SetHwcPowerMode(enabled);
-      } else if (mFBDevice && mFBDevice->enableScreen) {
-        mFBDevice->enableScreen(mFBDevice, enabled);
-      }
+    if (mHwc && mEnableHWCPower) {
+      SetHwcPowerMode(enabled);
+    } else if (mFBDevice && mFBDevice->enableScreen) {
+      mFBDevice->enableScreen(mFBDevice, enabled);
+    }
+    mFBEnabled = enabled;
 
+    if (!mExtFBEnabled) {
       autosuspend_enable();
       mPower->setInteractive(false);
     }
-    mFBEnabled = enabled;
   }
 }
 
@@ -373,25 +389,13 @@ void GonkDisplayP::SetExtEnabled(bool enabled) {
     if (!mFBEnabled) {
       autosuspend_disable();
       mPower->setInteractive(true);
-
-      SetHwcPowerMode(enabled);
     }
     mExtFBDevice->EnableScreen(enabled);
     mExtFBEnabled = enabled;
-
-    if (mEnabledCallback && !mFBEnabled) {
-      mEnabledCallback(enabled);
-    }
   } else {
-    if (mEnabledCallback && !mFBEnabled) {
-      mEnabledCallback(enabled);
-    }
-
     mExtFBDevice->EnableScreen(enabled);
     mExtFBEnabled = enabled;
     if (!mFBEnabled) {
-      SetHwcPowerMode(enabled);
-
       autosuspend_enable();
       mPower->setInteractive(false);
     }
@@ -415,6 +419,11 @@ HWC2::Error GonkDisplayP::SetHwcPowerMode(bool enabled) {
     return error;
 }
 
+void GonkDisplayP::SetDisplayVisibility(bool visibility) {
+  android::Mutex::Autolock lock(mPrimaryScreenLock);
+  mDispSurface->setVisibility(visibility);
+}
+
 void GonkDisplayP::OnEnabled(OnEnabledCallbackType callback) {
   mEnabledCallback = callback;
 }
@@ -423,8 +432,8 @@ void* GonkDisplayP::GetHWCDevice() { return mHwc.get(); }
 
 bool GonkDisplayP::IsExtFBDeviceEnabled() { return !!mExtFBDevice; }
 
-bool GonkDisplayP::SwapBuffers(DisplayType aDisplayType) {
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+bool GonkDisplayP::SwapBuffers(DisplayType displayType) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     // Should be called when composition rendering is complete for a frame.
     // Only HWC v1.0 needs this call.
     // HWC > v1.0 case, do not call compositionComplete().
@@ -432,7 +441,7 @@ bool GonkDisplayP::SwapBuffers(DisplayType aDisplayType) {
 
     return Post(mDispSurface->lastHandle, mDispSurface->GetPrevDispAcquireFd(),
                 DisplayType::DISPLAY_PRIMARY);
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     if (mExtFBDevice) {
       return Post(mExtDispSurface->lastHandle,
                   mExtDispSurface->GetPrevDispAcquireFd(),
@@ -445,13 +454,13 @@ bool GonkDisplayP::SwapBuffers(DisplayType aDisplayType) {
   return false;
 }
 
-bool GonkDisplayP::Post(buffer_handle_t buf, int fence,
-                        DisplayType aDisplayType) {
+bool GonkDisplayP::Post(buffer_handle_t buffer, int fence,
+                        DisplayType displayType) {
   sp<Fence> fenceObj = new Fence(fence);
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     // UpdateDispSurface(0, EGL_NO_SURFACE);
     return true;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     // Only support fb1 for certain device, use hwc to control
     // external screen in general case.
     // update buffer on onFrameAvailable.
@@ -461,12 +470,12 @@ bool GonkDisplayP::Post(buffer_handle_t buf, int fence,
   return false;
 }
 
-ANativeWindowBuffer* GonkDisplayP::DequeueBuffer(DisplayType aDisplayType) {
+ANativeWindowBuffer* GonkDisplayP::DequeueBuffer(DisplayType displayType) {
   // Check for bootAnim or normal display flow.
   sp<ANativeWindow> nativeWindow;
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     nativeWindow = !mBootAnimSTClient.get() ? mSTClient : mBootAnimSTClient;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     if (mExtFBDevice) {
       nativeWindow = mExtSTClient;
     }
@@ -476,24 +485,24 @@ ANativeWindowBuffer* GonkDisplayP::DequeueBuffer(DisplayType aDisplayType) {
     return nullptr;
   }
 
-  ANativeWindowBuffer* buf;
+  ANativeWindowBuffer* buffer;
   int fenceFd = -1;
-  nativeWindow->dequeueBuffer(nativeWindow.get(), &buf, &fenceFd);
+  nativeWindow->dequeueBuffer(nativeWindow.get(), &buffer, &fenceFd);
   sp<Fence> fence(new Fence(fenceFd));
   fence->waitForever("GonkDisplay::DequeueBuffer");
-  return buf;
+  return buffer;
 }
 
-bool GonkDisplayP::QueueBuffer(ANativeWindowBuffer* buf,
-                               DisplayType aDisplayType) {
+bool GonkDisplayP::QueueBuffer(ANativeWindowBuffer* buffer,
+                               DisplayType displayType) {
   bool success = false;
-  int error = DoQueueBuffer(buf, aDisplayType);
+  int error = DoQueueBuffer(buffer, displayType);
 
   sp<DisplaySurface> displaySurface;
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     displaySurface =
         !mBootAnimSTClient.get() ? mDispSurface : mBootAnimDispSurface;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     if (mExtFBDevice) {
       displaySurface = mExtDispSurface;
     }
@@ -504,18 +513,18 @@ bool GonkDisplayP::QueueBuffer(ANativeWindowBuffer* buf,
   }
 
   success = Post(displaySurface->lastHandle,
-                 displaySurface->GetPrevDispAcquireFd(), aDisplayType);
+                 displaySurface->GetPrevDispAcquireFd(), displayType);
 
   return error == 0 && success;
 }
 
-int GonkDisplayP::DoQueueBuffer(ANativeWindowBuffer* buf,
-                                DisplayType aDisplayType) {
+int GonkDisplayP::DoQueueBuffer(ANativeWindowBuffer* buffer,
+                                DisplayType displayType) {
   int error = 0;
   sp<ANativeWindow> nativeWindow;
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     nativeWindow = !mBootAnimSTClient.get() ? mSTClient : mBootAnimSTClient;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     if (mExtFBDevice) {
       nativeWindow = mExtSTClient;
     }
@@ -525,7 +534,7 @@ int GonkDisplayP::DoQueueBuffer(ANativeWindowBuffer* buf,
     return error;
   }
 
-  error = nativeWindow->queueBuffer(nativeWindow.get(), buf, -1);
+  error = nativeWindow->queueBuffer(nativeWindow.get(), buffer, -1);
 
   return error;
 }
@@ -545,6 +554,10 @@ void GonkDisplayP::NotifyBootAnimationStopped() {
     mBootAnimSTClient = nullptr;
     mBootAnimDispSurface = nullptr;
   }
+
+  // enable mDispSurface for updating DISPLAY_PRIMARY.
+  SetDisplayVisibility(true);
+
   if (mExtSTClient.get()) {
     Surface* surface = static_cast<Surface*>(mExtSTClient.get());
     surface->disconnect(NATIVE_WINDOW_API_CPU);
@@ -566,16 +579,16 @@ void GonkDisplayP::PowerOnDisplay(int displayId) {
 }
 
 GonkDisplay::NativeData GonkDisplayP::GetNativeData(
-    DisplayType aDisplayType, IGraphicBufferProducer* aSink) {
+    DisplayType displayType, IGraphicBufferProducer* sink) {
   NativeData data;
 
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     data.mNativeWindow = mSTClient;
     data.mDisplaySurface = mDispSurface;
     data.mXdpi = mDispNativeData[(uint32_t)DisplayType::DISPLAY_PRIMARY].mXdpi;
     data.mComposer2DSupported = true;
     data.mVsyncSupported = true;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     if (mExtFBDevice) {
       data.mNativeWindow = mExtSTClient;
       data.mDisplaySurface = mExtDispSurface;
@@ -584,31 +597,31 @@ GonkDisplay::NativeData GonkDisplayP::GetNativeData(
       data.mComposer2DSupported = false;
       data.mVsyncSupported = false;
     }
-  } else if (aDisplayType == DisplayType::DISPLAY_VIRTUAL) {
+  } else if (displayType == DisplayType::DISPLAY_VIRTUAL) {
     data.mXdpi = mDispNativeData[(uint32_t)DisplayType::DISPLAY_PRIMARY].mXdpi;
-    CreateVirtualDisplaySurface(aSink, data.mNativeWindow,
+    CreateVirtualDisplaySurface(sink, data.mNativeWindow,
                                 data.mDisplaySurface);
   }
 
   return data;
 }
 
-android::sp<ANativeWindow> GonkDisplayP::GetSurface(
-    DisplayType aDisplayType) {
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+sp<ANativeWindow> GonkDisplayP::GetSurface(
+    DisplayType displayType) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     return mSTClient? mSTClient : nullptr;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     return mExtSTClient? mExtSTClient : nullptr;
   }
 
   return nullptr;
 }
 
-android::sp<GraphicBuffer> GonkDisplayP::GetFrameBuffer(
-    DisplayType aDisplayType) {
-  if (aDisplayType == DisplayType::DISPLAY_PRIMARY) {
+sp<GraphicBuffer> GonkDisplayP::GetFrameBuffer(
+    DisplayType displayType) {
+  if (displayType == DisplayType::DISPLAY_PRIMARY) {
     return mDispSurface? mDispSurface->GetCurrentFrameBuffer() : nullptr;
-  } else if (aDisplayType == DisplayType::DISPLAY_EXTERNAL) {
+  } else if (displayType == DisplayType::DISPLAY_EXTERNAL) {
     return mExtDispSurface? mExtDispSurface->GetCurrentFrameBuffer() : nullptr;
   }
 

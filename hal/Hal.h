@@ -446,18 +446,12 @@ void NotifySwitchStateFromInputDevice(hal::SwitchDevice aDevice,
                                       hal::SwitchState aState);
 
 /**
- * Return true if the current platform supports the setting of process
- * priority.
- */
-bool SetProcessPrioritySupported();
-
-/**
  * Register an observer that is notified when a programmed alarm
  * expires.
  *
  * Currently, there can only be 0 or 1 alarm observers.
  */
-MOZ_MUST_USE bool RegisterTheOneAlarmObserver(hal::AlarmObserver* aObserver);
+[[nodiscard]] bool RegisterTheOneAlarmObserver(hal::AlarmObserver* aObserver);
 
 /**
  * Unregister the alarm observer.  Doing so will implicitly cancel any
@@ -484,7 +478,7 @@ void NotifyAlarmFired();
  * This API is currently only allowed to be used from non-sandboxed
  * contexts.
  */
-MOZ_MUST_USE bool SetAlarm(int32_t aSeconds, int32_t aNanoseconds);
+[[nodiscard]] bool SetAlarm(int32_t aSeconds, int32_t aNanoseconds);
 
 /**
  * Set the priority of the given process.

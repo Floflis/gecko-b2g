@@ -46,6 +46,7 @@ UNIFIED_SOURCES += [
     'hb-draw.cc',
     'hb-face.cc',
     'hb-font.cc',
+    'hb-ms-feature-ranges.cc',
     'hb-number.cc',
     'hb-ot-cff1-table.cc',
     'hb-ot-cff2-table.cc',
@@ -66,8 +67,8 @@ UNIFIED_SOURCES += [
     'hb-ot-shape-complex-indic.cc',
     'hb-ot-shape-complex-khmer.cc',
     'hb-ot-shape-complex-myanmar.cc',
+    'hb-ot-shape-complex-syllabic.cc',
     'hb-ot-shape-complex-thai.cc',
-    'hb-ot-shape-complex-use-table.cc',
     'hb-ot-shape-complex-use.cc',
     'hb-ot-shape-complex-vowel-constraints.cc',
     'hb-ot-shape-fallback.cc',
@@ -119,7 +120,7 @@ DEFINES['DEBUG'] = False
 # On Android, we want to use harfbuzz's mmap support for file access,
 # so we need to set the appropriate configuration flags as we're not
 # running harfbuzz's own configure script.
-if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'android':
+if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gonk"):
     DEFINES['HAVE_MMAP'] = 1
     DEFINES['HAVE_SYS_MMAN_H'] = 1
 

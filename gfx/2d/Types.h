@@ -32,16 +32,15 @@ enum class SurfaceType : int8_t {
   COREGRAPHICS_IMAGE,     /* Surface wrapping a CoreGraphics Image */
   COREGRAPHICS_CGCONTEXT, /* Surface wrapping a CG context */
   SKIA,                   /* Surface wrapping a Skia bitmap */
-  DUAL_DT,                /* Snapshot of a dual drawtarget */
   D2D1_1_IMAGE,           /* A D2D 1.1 ID2D1Image SourceSurface */
   RECORDING,              /* Surface used for recording */
-  WRAP_AND_RECORD,        /* Surface used for wrap and record */
-  TILED,                  /* Surface from a tiled DrawTarget */
   DATA_SHARED,            /* Data surface using shared memory */
-  CAPTURE,                /* Data from a DrawTargetCapture */
   DATA_RECYCLING_SHARED,  /* Data surface using shared memory */
   OFFSET,                 /* Offset */
   DATA_ALIGNED,           /* Data surface using aligned heap memory */
+  DATA_SHARED_WRAPPER,    /* Shared memory mapped in from another process */
+  BLOB_IMAGE,             /* Recorded blob image */
+  DATA_MAPPED,            /* Data surface wrapping a ScopedMap */
 };
 
 enum class SurfaceFormat : int8_t {
@@ -195,15 +194,149 @@ inline bool IsOpaque(SurfaceFormat aFormat) {
   }
 }
 
+// These are standardized Coding-independent Code Points
+// See [Rec. ITU-T H.273
+// (12/2016)](https://www.itu.int/rec/T-REC-H.273-201612-I/en)
+//
+// We deliberately use an unscoped enum with fixed uint8_t representation since
+// all possible values [0, 255] are legal, but it's unwieldy to declare 200+
+// "RESERVED" enumeration values. Having a fixed underlying type avoids any
+// potential UB and avoids the need for a cast when passing these values across
+// FFI to functions like qcms_profile_create_cicp.
+namespace CICP {
+enum ColourPrimaries : uint8_t {
+  CP_RESERVED_MIN = 0,  // 0, 3, [13, 21], [23, 255] are all reserved
+  CP_BT709 = 1,
+  CP_UNSPECIFIED = 2,
+  CP_BT470M = 4,
+  CP_BT470BG = 5,
+  CP_BT601 = 6,
+  CP_SMPTE240 = 7,
+  CP_GENERIC_FILM = 8,
+  CP_BT2020 = 9,
+  CP_XYZ = 10,
+  CP_SMPTE431 = 11,
+  CP_SMPTE432 = 12,
+  CP_EBU3213 = 22,
+};
+
+inline bool IsReserved(ColourPrimaries aIn) {
+  switch (aIn) {
+    case CP_BT709:
+    case CP_UNSPECIFIED:
+    case CP_BT470M:
+    case CP_BT470BG:
+    case CP_BT601:
+    case CP_SMPTE240:
+    case CP_GENERIC_FILM:
+    case CP_BT2020:
+    case CP_XYZ:
+    case CP_SMPTE431:
+    case CP_SMPTE432:
+    case CP_EBU3213:
+      return false;
+    default:
+      return true;
+  }
+}
+
+enum TransferCharacteristics : uint8_t {
+  TC_RESERVED_MIN = 0,  // 0, 3, [19, 255] are all reserved
+  TC_BT709 = 1,
+  TC_UNSPECIFIED = 2,
+  TC_BT470M = 4,
+  TC_BT470BG = 5,
+  TC_BT601 = 6,
+  TC_SMPTE240 = 7,
+  TC_LINEAR = 8,
+  TC_LOG_100 = 9,
+  TC_LOG_100_SQRT10 = 10,
+  TC_IEC61966 = 11,
+  TC_BT_1361 = 12,
+  TC_SRGB = 13,
+  TC_BT2020_10BIT = 14,
+  TC_BT2020_12BIT = 15,
+  TC_SMPTE2084 = 16,
+  TC_SMPTE428 = 17,
+  TC_HLG = 18,
+};
+
+inline bool IsReserved(TransferCharacteristics aIn) {
+  switch (aIn) {
+    case TC_BT709:
+    case TC_UNSPECIFIED:
+    case TC_BT470M:
+    case TC_BT470BG:
+    case TC_BT601:
+    case TC_SMPTE240:
+    case TC_LINEAR:
+    case TC_LOG_100:
+    case TC_LOG_100_SQRT10:
+    case TC_IEC61966:
+    case TC_BT_1361:
+    case TC_SRGB:
+    case TC_BT2020_10BIT:
+    case TC_BT2020_12BIT:
+    case TC_SMPTE2084:
+    case TC_SMPTE428:
+    case TC_HLG:
+      return false;
+    default:
+      return true;
+  }
+}
+
+enum MatrixCoefficients : uint8_t {
+  MC_IDENTITY = 0,
+  MC_BT709 = 1,
+  MC_UNSPECIFIED = 2,
+  MC_RESERVED_MIN = 3,  // 3, [15, 255] are all reserved
+  MC_FCC = 4,
+  MC_BT470BG = 5,
+  MC_BT601 = 6,
+  MC_SMPTE240 = 7,
+  MC_YCGCO = 8,
+  MC_BT2020_NCL = 9,
+  MC_BT2020_CL = 10,
+  MC_SMPTE2085 = 11,
+  MC_CHROMAT_NCL = 12,
+  MC_CHROMAT_CL = 13,
+  MC_ICTCP = 14,
+};
+
+inline bool IsReserved(MatrixCoefficients aIn) {
+  switch (aIn) {
+    case MC_IDENTITY:
+    case MC_BT709:
+    case MC_UNSPECIFIED:
+    case MC_RESERVED_MIN:
+    case MC_FCC:
+    case MC_BT470BG:
+    case MC_BT601:
+    case MC_SMPTE240:
+    case MC_YCGCO:
+    case MC_BT2020_NCL:
+    case MC_BT2020_CL:
+    case MC_SMPTE2085:
+    case MC_CHROMAT_NCL:
+    case MC_CHROMAT_CL:
+    case MC_ICTCP:
+      return false;
+    default:
+      return true;
+  }
+}
+}  // namespace CICP
+
 // The matrix coeffiecients used for YUV to RGB conversion.
 enum class YUVColorSpace : uint8_t {
   BT601,
   BT709,
   BT2020,
-  Identity,  // aka RGB
-  // This represents the unknown format and is a valid value.
-  UNKNOWN,
-  _NUM_COLORSPACE
+  Identity,  // Todo: s/YUVColorSpace/ColorSpace/, s/Identity/SRGB/
+  Default = BT709,
+  _First = BT601,
+  _Last = Identity,
 };
 
 enum class ColorDepth : uint8_t {
@@ -211,10 +344,98 @@ enum class ColorDepth : uint8_t {
   COLOR_10,
   COLOR_12,
   COLOR_16,
-  UNKNOWN
+  _First = COLOR_8,
+  _Last = COLOR_16,
 };
 
-enum class ColorRange : uint8_t { LIMITED, FULL, UNKNOWN };
+enum class ColorRange : uint8_t {
+  LIMITED,
+  FULL,
+  _First = LIMITED,
+  _Last = FULL,
+};
+
+// Really "YcbcrColorSpace"
+enum class YUVRangedColorSpace : uint8_t {
+  BT601_Narrow = 0,
+  BT601_Full,
+  BT709_Narrow,
+  BT709_Full,
+  BT2020_Narrow,
+  BT2020_Full,
+  GbrIdentity,
+
+  _First = BT601_Narrow,
+  _Last = GbrIdentity,
+  Default = BT709_Narrow,
+};
+
+struct FromYUVRangedColorSpaceT final {
+  const YUVColorSpace space;
+  const ColorRange range;
+};
+
+inline FromYUVRangedColorSpaceT FromYUVRangedColorSpace(
+    const YUVRangedColorSpace s) {
+  switch (s) {
+    case YUVRangedColorSpace::BT601_Narrow:
+      return {YUVColorSpace::BT601, ColorRange::LIMITED};
+    case YUVRangedColorSpace::BT601_Full:
+      return {YUVColorSpace::BT601, ColorRange::FULL};
+
+    case YUVRangedColorSpace::BT709_Narrow:
+      return {YUVColorSpace::BT709, ColorRange::LIMITED};
+    case YUVRangedColorSpace::BT709_Full:
+      return {YUVColorSpace::BT709, ColorRange::FULL};
+
+    case YUVRangedColorSpace::BT2020_Narrow:
+      return {YUVColorSpace::BT2020, ColorRange::LIMITED};
+    case YUVRangedColorSpace::BT2020_Full:
+      return {YUVColorSpace::BT2020, ColorRange::FULL};
+
+    case YUVRangedColorSpace::GbrIdentity:
+      return {YUVColorSpace::Identity, ColorRange::FULL};
+  }
+  MOZ_CRASH("bad YUVRangedColorSpace");
+}
+
+// Todo: This should go in the CPP.
+inline YUVRangedColorSpace ToYUVRangedColorSpace(const YUVColorSpace space,
+                                                 const ColorRange range) {
+  bool narrow;
+  switch (range) {
+    case ColorRange::FULL:
+      narrow = false;
+      break;
+    case ColorRange::LIMITED:
+      narrow = true;
+      break;
+  }
+
+  switch (space) {
+    case YUVColorSpace::Identity:
+      MOZ_ASSERT(range == ColorRange::FULL);
+      return YUVRangedColorSpace::GbrIdentity;
+
+    case YUVColorSpace::BT601:
+      return narrow ? YUVRangedColorSpace::BT601_Narrow
+                    : YUVRangedColorSpace::BT601_Full;
+
+    case YUVColorSpace::BT709:
+      return narrow ? YUVRangedColorSpace::BT709_Narrow
+                    : YUVRangedColorSpace::BT709_Full;
+
+    case YUVColorSpace::BT2020:
+      return narrow ? YUVRangedColorSpace::BT2020_Narrow
+                    : YUVRangedColorSpace::BT2020_Full;
+  }
+  MOZ_CRASH("bad YUVColorSpace");
+}
+
+template <typename DescriptorT>
+inline YUVRangedColorSpace GetYUVRangedColorSpace(const DescriptorT& d) {
+  return ToYUVRangedColorSpace(d.yUVColorSpace(), d.colorRange());
+}
 
 static inline SurfaceFormat SurfaceFormatForColorDepth(ColorDepth aColorDepth) {
   SurfaceFormat format = SurfaceFormat::A8;
@@ -226,14 +447,12 @@ static inline SurfaceFormat SurfaceFormatForColorDepth(ColorDepth aColorDepth) {
     case ColorDepth::COLOR_16:
       format = SurfaceFormat::A16;
       break;
-    case ColorDepth::UNKNOWN:
-      MOZ_ASSERT_UNREACHABLE("invalid color depth value");
   }
   return format;
 }
 
-static inline uint32_t BitDepthForColorDepth(ColorDepth aColorDepth) {
-  uint32_t depth = 8;
+static inline uint8_t BitDepthForColorDepth(ColorDepth aColorDepth) {
+  uint8_t depth = 8;
   switch (aColorDepth) {
     case ColorDepth::COLOR_8:
       break;
@@ -246,8 +465,6 @@ static inline uint32_t BitDepthForColorDepth(ColorDepth aColorDepth) {
     case ColorDepth::COLOR_16:
       depth = 16;
       break;
-    case ColorDepth::UNKNOWN:
-      MOZ_ASSERT_UNREACHABLE("invalid color depth value");
   }
   return depth;
 }
@@ -266,8 +483,6 @@ static inline ColorDepth ColorDepthForBitDepth(uint8_t aBitDepth) {
     case 16:
       depth = ColorDepth::COLOR_16;
       break;
-    default:
-      MOZ_ASSERT_UNREACHABLE("invalid color depth value");
   }
   return depth;
 }
@@ -287,8 +502,6 @@ static inline uint32_t RescalingFactorForColorDepth(ColorDepth aColorDepth) {
       break;
     case ColorDepth::COLOR_16:
       break;
-    case ColorDepth::UNKNOWN:
-      MOZ_ASSERT_UNREACHABLE("invalid color depth value");
   }
   return factor;
 }
@@ -337,7 +550,6 @@ enum class BackendType : int8_t {
   RECORDING,
   DIRECT2D1_1,
   WEBRENDER_TEXT,
-  CAPTURE,  // Used for paths
 
   // Add new entries above this line.
   BACKEND_LAST
@@ -456,42 +668,70 @@ struct sRGBColor {
   constexpr sRGBColor(Float aR, Float aG, Float aB)
       : r(aR), g(aG), b(aB), a(1.0f) {}
 
-  static sRGBColor White(float aA) { return sRGBColor(1.f, 1.f, 1.f, aA); }
+  static constexpr sRGBColor White(float aA) {
+    return sRGBColor(1.f, 1.f, 1.f, aA);
+  }
 
-  static sRGBColor Black(float aA) { return sRGBColor(0.f, 0.f, 0.f, aA); }
+  static constexpr sRGBColor Black(float aA) {
+    return sRGBColor(0.f, 0.f, 0.f, aA);
+  }
 
-  static sRGBColor OpaqueWhite() { return White(1.f); }
+  static constexpr sRGBColor OpaqueWhite() { return White(1.f); }
 
-  static sRGBColor OpaqueBlack() { return Black(1.f); }
+  static constexpr sRGBColor OpaqueBlack() { return Black(1.f); }
 
-  static sRGBColor FromU8(uint8_t aR, uint8_t aG, uint8_t aB, uint8_t aA) {
+  static constexpr sRGBColor FromU8(uint8_t aR, uint8_t aG, uint8_t aB,
+                                    uint8_t aA) {
     return sRGBColor(float(aR) / 255.f, float(aG) / 255.f, float(aB) / 255.f,
                      float(aA) / 255.f);
   }
 
-  static sRGBColor FromABGR(uint32_t aColor) {
-    sRGBColor newColor(((aColor >> 0) & 0xff) * (1.0f / 255.0f),
-                       ((aColor >> 8) & 0xff) * (1.0f / 255.0f),
-                       ((aColor >> 16) & 0xff) * (1.0f / 255.0f),
-                       ((aColor >> 24) & 0xff) * (1.0f / 255.0f));
-
-    return newColor;
+  static constexpr sRGBColor FromABGR(uint32_t aColor) {
+    return sRGBColor(((aColor >> 0) & 0xff) * (1.0f / 255.0f),
+                     ((aColor >> 8) & 0xff) * (1.0f / 255.0f),
+                     ((aColor >> 16) & 0xff) * (1.0f / 255.0f),
+                     ((aColor >> 24) & 0xff) * (1.0f / 255.0f));
   }
 
   // The "Unusual" prefix is to avoid unintentionally using this function when
   // FromABGR(), which is much more common, is needed.
-  static sRGBColor UnusualFromARGB(uint32_t aColor) {
-    sRGBColor newColor(((aColor >> 16) & 0xff) * (1.0f / 255.0f),
-                       ((aColor >> 8) & 0xff) * (1.0f / 255.0f),
-                       ((aColor >> 0) & 0xff) * (1.0f / 255.0f),
-                       ((aColor >> 24) & 0xff) * (1.0f / 255.0f));
-
-    return newColor;
+  static constexpr sRGBColor UnusualFromARGB(uint32_t aColor) {
+    return sRGBColor(((aColor >> 16) & 0xff) * (1.0f / 255.0f),
+                     ((aColor >> 8) & 0xff) * (1.0f / 255.0f),
+                     ((aColor >> 0) & 0xff) * (1.0f / 255.0f),
+                     ((aColor >> 24) & 0xff) * (1.0f / 255.0f));
   }
 
-  uint32_t ToABGR() const {
+  constexpr uint32_t ToABGR() const {
     return uint32_t(r * 255.0f) | uint32_t(g * 255.0f) << 8 |
            uint32_t(b * 255.0f) << 16 | uint32_t(a * 255.0f) << 24;
+  }
+
+  constexpr sRGBColor Premultiplied() const {
+    return sRGBColor(r * a, g * a, b * a, a);
+  }
+
+  constexpr sRGBColor Unpremultiplied() const {
+    return a > 0.f ? sRGBColor(r / a, g / a, b / a, a) : *this;
+  }
+
+  // Returns aFrac*aC2 + (1 - aFrac)*C1. The interpolation is done in
+  // unpremultiplied space, which is what SVG gradients and cairo gradients
+  // expect.
+  constexpr static sRGBColor InterpolatePremultiplied(const sRGBColor& aC1,
+                                                      const sRGBColor& aC2,
+                                                      float aFrac) {
+    double other = 1 - aFrac;
+    return sRGBColor(
+        aC2.r * aFrac + aC1.r * other, aC2.g * aFrac + aC1.g * other,
+        aC2.b * aFrac + aC1.b * other, aC2.a * aFrac + aC1.a * other);
+  }
+
+  constexpr static sRGBColor Interpolate(const sRGBColor& aC1,
+                                         const sRGBColor& aC2, float aFrac) {
+    return InterpolatePremultiplied(aC1.Premultiplied(), aC2.Premultiplied(),
+                                    aFrac)
+        .Unpremultiplied();
   }
 
   // The "Unusual" prefix is to avoid unintentionally using this function when

@@ -24,12 +24,14 @@ class gfxConfigManager {
         mFeatureWrAngle(nullptr),
         mFeatureWrDComp(nullptr),
         mFeatureWrPartial(nullptr),
+        mFeatureWrShaderCache(nullptr),
+        mFeatureWrOptimizedShaders(nullptr),
         mFeatureWrSoftware(nullptr),
         mFeatureHwCompositing(nullptr),
         mFeatureD3D11HwAngle(nullptr),
+        mFeatureD3D11Compositing(nullptr),
         mFeatureGPUProcess(nullptr),
         mWrForceEnabled(false),
-        mWrForceDisabled(false),
         mWrSoftwareForceEnabled(false),
         mWrCompositorForceEnabled(false),
         mWrForceAngle(false),
@@ -37,13 +39,13 @@ class gfxConfigManager {
         mWrDCompWinEnabled(false),
         mWrCompositorDCompRequired(false),
         mWrPartialPresent(false),
+        mWrOptimizedShaders(false),
         mGPUProcessAllowSoftware(false),
-        mXRenderEnabled(false),
         mWrEnvForceEnabled(false),
-        mWrEnvForceDisabled(false),
         mScaledResolution(false),
         mDisableHwCompositingNoWr(false),
         mIsNightly(false),
+        mIsEarlyBetaOrEarlier(false),
         mSafeMode(false),
         mIsWin10OrLater(false) {}
 
@@ -55,7 +57,6 @@ class gfxConfigManager {
  protected:
   void EmplaceUserPref(const char* aPrefName, Maybe<bool>& aValue);
   void ConfigureWebRenderQualified();
-  void ConfigureWebRenderSoftware();
 
   nsCOMPtr<nsIGfxInfo> mGfxInfo;
 
@@ -65,10 +66,13 @@ class gfxConfigManager {
   FeatureState* mFeatureWrAngle;
   FeatureState* mFeatureWrDComp;
   FeatureState* mFeatureWrPartial;
+  FeatureState* mFeatureWrShaderCache;
+  FeatureState* mFeatureWrOptimizedShaders;
   FeatureState* mFeatureWrSoftware;
 
   FeatureState* mFeatureHwCompositing;
   FeatureState* mFeatureD3D11HwAngle;
+  FeatureState* mFeatureD3D11Compositing;
   FeatureState* mFeatureGPUProcess;
 
   /**
@@ -76,7 +80,6 @@ class gfxConfigManager {
    */
   Maybe<bool> mWrCompositorEnabled;
   bool mWrForceEnabled;
-  bool mWrForceDisabled;
   bool mWrSoftwareForceEnabled;
   bool mWrCompositorForceEnabled;
   bool mWrForceAngle;
@@ -84,14 +87,14 @@ class gfxConfigManager {
   bool mWrDCompWinEnabled;
   bool mWrCompositorDCompRequired;
   bool mWrPartialPresent;
+  Maybe<bool> mWrShaderCache;
+  bool mWrOptimizedShaders;
   bool mGPUProcessAllowSoftware;
-  bool mXRenderEnabled;
 
   /**
    * Environment variables
    */
   bool mWrEnvForceEnabled;
-  bool mWrEnvForceDisabled;
 
   /**
    * System support
@@ -100,6 +103,7 @@ class gfxConfigManager {
   bool mScaledResolution;
   bool mDisableHwCompositingNoWr;
   bool mIsNightly;
+  bool mIsEarlyBetaOrEarlier;
   bool mSafeMode;
   bool mIsWin10OrLater;
 };

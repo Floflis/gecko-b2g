@@ -410,6 +410,25 @@ struct InputContext final {
            !mHTMLInputType.EqualsLiteral("email");
   }
 
+  bool IsInputAttributeChanged(const InputContext& aOldContext) const {
+    return mIMEState.mEnabled != aOldContext.mIMEState.mEnabled ||
+#if defined(ANDROID) || defined(MOZ_WIDGET_GTK) || defined(XP_WIN)
+           // input type and inputmode are supported by Windows IME API, GTK
+           // IME API and Android IME API
+           mHTMLInputType != aOldContext.mHTMLInputType ||
+           mHTMLInputInputmode != aOldContext.mHTMLInputInputmode ||
+#endif
+#if defined(ANDROID) || defined(MOZ_WIDGET_GTK)
+           // autocapitalize is supported by Android IME API and GTK IME API
+           mAutocapitalize != aOldContext.mAutocapitalize ||
+#endif
+#if defined(ANDROID)
+           // enterkeyhint is only supported by Android IME API.
+           mActionHint != aOldContext.mActionHint ||
+#endif
+           false;
+  }
+
   IMEState mIMEState;
 
   /* The type of the input if the input is a html input field */
@@ -637,8 +656,8 @@ struct IMENotification final {
       case NOTIFY_IME_OF_MOUSE_BUTTON_EVENT:
         mMouseButtonEventData.mEventMessage = eVoidEvent;
         mMouseButtonEventData.mOffset = UINT32_MAX;
-        mMouseButtonEventData.mCursorPos.Set(nsIntPoint(0, 0));
-        mMouseButtonEventData.mCharRect.Set(nsIntRect(0, 0, 0, 0));
+        mMouseButtonEventData.mCursorPos.MoveTo(0, 0);
+        mMouseButtonEventData.mCharRect.SetRect(0, 0, 0, 0);
         mMouseButtonEventData.mButton = -1;
         mMouseButtonEventData.mButtons = 0;
         mMouseButtonEventData.mModifiers = 0;
@@ -713,29 +732,6 @@ struct IMENotification final {
   }
 
   IMEMessage mMessage;
-
-  struct Point {
-    int32_t mX;
-    int32_t mY;
-
-    void Set(const nsIntPoint& aPoint) {
-      mX = aPoint.x;
-      mY = aPoint.y;
-    }
-    nsIntPoint AsIntPoint() const { return nsIntPoint(mX, mY); }
-  };
-
-  struct Rect {
-    int32_t mX;
-    int32_t mY;
-    int32_t mWidth;
-    int32_t mHeight;
-
-    void Set(const nsIntRect& aRect) {
-      aRect.GetRect(&mX, &mY, &mWidth, &mHeight);
-    }
-    nsIntRect AsIntRect() const { return nsIntRect(mX, mY, mWidth, mHeight); }
-  };
 
   // NOTIFY_IME_OF_SELECTION_CHANGE specific data
   struct SelectionChangeDataBase {
@@ -923,9 +919,9 @@ struct IMENotification final {
     // Character offset from the start of the focused editor under the cursor
     uint32_t mOffset;
     // Cursor position in pixels relative to the widget
-    Point mCursorPos;
+    LayoutDeviceIntPoint mCursorPos;
     // Character rect in pixels under the cursor relative to the widget
-    Rect mCharRect;
+    LayoutDeviceIntRect mCharRect;
     // The value of WidgetMouseEventBase::button and buttons
     int16_t mButton;
     int16_t mButtons;

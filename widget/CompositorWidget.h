@@ -27,7 +27,6 @@ class GLContext;
 namespace layers {
 class Compositor;
 class LayerManager;
-class LayerManagerComposite;
 class NativeLayerRoot;
 }  // namespace layers
 namespace gfx {
@@ -138,7 +137,8 @@ class CompositorWidget {
    */
   virtual already_AddRefed<gfx::DrawTarget> StartRemoteDrawing();
   virtual already_AddRefed<gfx::DrawTarget> StartRemoteDrawingInRegion(
-      LayoutDeviceIntRegion& aInvalidRegion, layers::BufferMode* aBufferMode) {
+      const LayoutDeviceIntRegion& aInvalidRegion,
+      layers::BufferMode* aBufferMode) {
     return StartRemoteDrawing();
   }
 
@@ -264,7 +264,7 @@ class CompositorWidget {
   virtual RefPtr<VsyncObserver> GetVsyncObserver() const;
 
   virtual WinCompositorWidget* AsWindows() { return nullptr; }
-  virtual GtkCompositorWidget* AsX11() { return nullptr; }
+  virtual GtkCompositorWidget* AsGTK() { return nullptr; }
   virtual AndroidCompositorWidget* AsAndroid() { return nullptr; }
   virtual GonkCompositorWidget* AsGonk() { return nullptr; }
 

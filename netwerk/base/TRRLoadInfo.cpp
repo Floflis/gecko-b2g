@@ -58,11 +58,13 @@ nsIPrincipal* TRRLoadInfo::FindPrincipalToInherit(nsIChannel* aChannel) {
   return nullptr;
 }
 
-nsIPrincipal* TRRLoadInfo::GetSandboxedLoadingPrincipal() { return nullptr; }
+const nsID& TRRLoadInfo::GetSandboxedNullPrincipalID() {
+  return mSandboxedNullPrincipalID;
+}
+
+void TRRLoadInfo::ResetSandboxedNullPrincipalID() {}
 
 nsIPrincipal* TRRLoadInfo::GetTopLevelPrincipal() { return nullptr; }
-
-nsIPrincipal* TRRLoadInfo::GetTopLevelStorageAreaPrincipal() { return nullptr; }
 
 NS_IMETHODIMP
 TRRLoadInfo::GetLoadingDocument(Document** aResult) {
@@ -145,14 +147,24 @@ TRRLoadInfo::SetCookieJarSettings(nsICookieJarSettings* aCookieJarSettings) {
 }
 
 NS_IMETHODIMP
-TRRLoadInfo::GetHasStoragePermission(bool* aHasStoragePermission) {
+TRRLoadInfo::GetStoragePermission(
+    nsILoadInfo::StoragePermissionState* aHasStoragePermission) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
-TRRLoadInfo::SetHasStoragePermission(bool aHasStoragePermission) {
+TRRLoadInfo::SetStoragePermission(
+    nsILoadInfo::StoragePermissionState aHasStoragePermission) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
+
+NS_IMETHODIMP
+TRRLoadInfo::GetIsMetaRefresh(bool* aResult) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetIsMetaRefresh(bool aResult) { return NS_ERROR_NOT_IMPLEMENTED; }
 
 NS_IMETHODIMP
 TRRLoadInfo::GetForceInheritPrincipal(bool* aInheritPrincipal) {
@@ -280,16 +292,6 @@ TRRLoadInfo::GetAllowInsecureRedirectToDataURI(
 }
 
 NS_IMETHODIMP
-TRRLoadInfo::SetBypassCORSChecks(bool aBypassCORSChecks) {
-  return NS_ERROR_NOT_IMPLEMENTED;
-}
-
-NS_IMETHODIMP
-TRRLoadInfo::GetBypassCORSChecks(bool* aBypassCORSChecks) {
-  return NS_ERROR_NOT_IMPLEMENTED;
-}
-
-NS_IMETHODIMP
 TRRLoadInfo::SetSkipContentPolicyCheckForWebRequest(bool aSkip) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -389,7 +391,7 @@ TRRLoadInfo::GetInitialSecurityCheckDone(bool* aResult) {
 }
 
 NS_IMETHODIMP
-TRRLoadInfo::AppendRedirectHistoryEntry(nsIRedirectHistoryEntry* aEntry,
+TRRLoadInfo::AppendRedirectHistoryEntry(nsIChannel* aChannelToDeriveFrom,
                                         bool aIsInternalRedirect) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -492,6 +494,16 @@ TRRLoadInfo::SetAllowListFutureDocumentsCreatedFromThisRedirectChain(
 }
 
 NS_IMETHODIMP
+TRRLoadInfo::GetNeedForCheckingAntiTrackingHeuristic(bool* aValue) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetNeedForCheckingAntiTrackingHeuristic(bool aValue) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
 TRRLoadInfo::GetCspNonce(nsAString& aCspNonce) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -519,6 +531,36 @@ TRRLoadInfo::GetIsTopLevelLoad(bool* aResult) {
 NS_IMETHODIMP
 TRRLoadInfo::GetIsFromProcessingFrameAttributes(
     bool* aIsFromProcessingFrameAttributes) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetIsMediaRequest(bool aIsMediaRequest) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::GetIsMediaRequest(bool* aIsMediaRequest) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetIsMediaInitialRequest(bool aIsMediaInitialRequest) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::GetIsMediaInitialRequest(bool* aIsMediaInitialRequest) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetIsFromObjectOrEmbed(bool aIsFromObjectOrEmbed) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::GetIsFromObjectOrEmbed(bool* aIsFromObjectOrEmbed) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
@@ -677,6 +719,14 @@ TRRLoadInfo::SetLoadingEmbedderPolicy(
     nsILoadInfo::CrossOriginEmbedderPolicy aPolicy) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
+
+NS_IMETHODIMP
+TRRLoadInfo::GetUnstrippedURI(nsIURI** aURI) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetUnstrippedURI(nsIURI* aURI) { return NS_ERROR_NOT_IMPLEMENTED; }
 
 }  // namespace net
 }  // namespace mozilla

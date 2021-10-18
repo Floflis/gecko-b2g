@@ -33,6 +33,7 @@
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/Services.h"
 #include "mozilla/SpinEventLoopUntil.h"
+#include "mozilla/StaticLocalPtr.h"
 #include "mozilla/StaticPrefs_threads.h"
 #include "mozilla/TaskController.h"
 #include "nsXPCOMPrivate.h"
@@ -94,12 +95,6 @@ using GetCurrentThreadStackLimitsFn = void(WINAPI*)(PULONG_PTR LowLimit,
 #  include "nsXULAppAPI.h"
 #endif
 
-#ifdef MOZ_TASK_TRACER
-#  include "GeckoTaskTracer.h"
-#  include "TracedTaskCommon.h"
-using namespace mozilla::tasktracer;
-#endif
-
 using namespace mozilla;
 
 extern void InitThreadLocalVariables();
@@ -113,9 +108,6 @@ static LazyLogModule sThreadLog("nsThread");
 NS_DECL_CI_INTERFACE_GETTER(nsThread)
 
 Array<char, nsThread::kRunnableNameBufSize> nsThread::sMainThreadRunnableName;
-
-uint32_t nsThread::sActiveThreads;
-uint32_t nsThread::sMaxActiveThreads;
 
 #ifdef EARLY_BETA_OR_EARLIER
 const uint32_t kTelemetryWakeupCountLimit = 100;
@@ -189,6 +181,7 @@ NS_INTERFACE_MAP_BEGIN(nsThread)
   NS_INTERFACE_MAP_ENTRY(nsIEventTarget)
   NS_INTERFACE_MAP_ENTRY(nsISerialEventTarget)
   NS_INTERFACE_MAP_ENTRY(nsISupportsPriority)
+  NS_INTERFACE_MAP_ENTRY_CONDITIONAL(nsIDelayedRunnableObserver, mEventTarget)
   NS_INTERFACE_MAP_ENTRY(nsIDirectTaskDispatcher)
   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIThread)
   if (aIID.Equals(NS_GET_IID(nsIClassInfo))) {
@@ -239,6 +232,9 @@ class nsThreadShutdownEvent : public Runnable {
         mShutdownContext(aCtx) {}
   NS_IMETHOD Run() override {
     mThread->mShutdownContext = mShutdownContext;
+    if (mThread->mEventTarget) {
+      mThread->mEventTarget->NotifyShutdown();
+    }
     MessageLoop::current()->Quit();
     return NS_OK;
   }
@@ -316,13 +312,15 @@ struct ThreadInitData {
 }  // namespace
 
 /* static */ mozilla::OffTheBooksMutex& nsThread::ThreadListMutex() {
-  static OffTheBooksMutex sMutex("nsThread::ThreadListMutex");
-  return sMutex;
+  static StaticLocalAutoPtr<OffTheBooksMutex> sMutex(
+      new OffTheBooksMutex("nsThread::ThreadListMutex"));
+  return *sMutex;
 }
 
 /* static */ LinkedList<nsThread>& nsThread::ThreadList() {
-  static LinkedList<nsThread> sList;
-  return sList;
+  static StaticLocalAutoPtr<LinkedList<nsThread>> sList(
+      new LinkedList<nsThread>());
+  return *sList;
 }
 
 /* static */
@@ -335,18 +333,9 @@ void nsThread::ClearThreadList() {
 /* static */
 nsThreadEnumerator nsThread::Enumerate() { return {}; }
 
-/* static */
-uint32_t nsThread::MaxActiveThreads() {
-  OffTheBooksMutexAutoLock mal(ThreadListMutex());
-  return sMaxActiveThreads;
-}
-
 void nsThread::AddToThreadList() {
   OffTheBooksMutexAutoLock mal(ThreadListMutex());
   MOZ_ASSERT(!isInList());
-
-  sActiveThreads++;
-  sMaxActiveThreads = std::max(sActiveThreads, sMaxActiveThreads);
 
   ThreadList().insertBack(this);
 }
@@ -354,7 +343,6 @@ void nsThread::AddToThreadList() {
 void nsThread::MaybeRemoveFromThreadList() {
   OffTheBooksMutexAutoLock mal(ThreadListMutex());
   if (isInList()) {
-    sActiveThreads--;
     removeFrom(ThreadList());
   }
 }
@@ -386,7 +374,6 @@ void nsThread::ThreadFunc(void* aArg) {
 
   mozilla::IOInterposer::RegisterCurrentThread();
 
-#ifdef MOZ_GECKO_PROFILER
   // This must come after the call to nsThreadManager::RegisterCurrentThread(),
   // because that call is needed to properly set up this thread as an nsThread,
   // which profiler_register_thread() requires. See bug 1347007.
@@ -394,7 +381,6 @@ void nsThread::ThreadFunc(void* aArg) {
   if (registerWithProfiler) {
     PROFILER_REGISTER_THREAD(initData->name.BeginReading());
   }
-#endif  // MOZ_GECKO_PROFILER
 
   {
     // Scope for MessageLoop.
@@ -430,12 +416,10 @@ void nsThread::ThreadFunc(void* aArg) {
   // Inform the threadmanager that this thread is going away
   nsThreadManager::get().UnregisterCurrentThread(*self);
 
-#ifdef MOZ_GECKO_PROFILER
   // The thread should only unregister itself if it was registered above.
   if (registerWithProfiler) {
     PROFILER_UNREGISTER_THREAD();
   }
-#endif  // MOZ_GECKO_PROFILER
 
   // Dispatch shutdown ACK
   NotNull<nsThreadShutdownContext*> context =
@@ -451,10 +435,6 @@ void nsThread::ThreadFunc(void* aArg) {
 
   // Release any observer of the thread here.
   self->SetObserver(nullptr);
-
-#ifdef MOZ_TASK_TRACER
-  FreeTraceInfo();
-#endif
 
   // The PRThread will be deleted in PR_JoinThread(), so clear references.
   self->mThread = nullptr;
@@ -838,9 +818,10 @@ void nsThread::ShutdownComplete(NotNull<nsThreadShutdownContext*> aContext) {
 }
 
 void nsThread::WaitForAllAsynchronousShutdowns() {
-  // This is the motivating example for why SpinEventLoop has the template
-  // parameter we are providing here.
+  // This is the motivating example for why SpinEventLoopUntil
+  // has the template parameter we are providing here.
   SpinEventLoopUntil<ProcessFailureBehavior::IgnoreAndContinue>(
+      "nsThread::WaitForAllAsynchronousShutdowns"_ns,
       [&]() { return mRequestedShutdownContexts.IsEmpty(); }, this);
 }
 
@@ -857,8 +838,10 @@ nsThread::Shutdown() {
 
   // Process events on the current thread until we receive a shutdown ACK.
   // Allows waiting; ensure no locks are held that would deadlock us!
-  SpinEventLoopUntil([&, context]() { return !context->mAwaitingShutdownAck; },
-                     context->mJoiningThread);
+  SpinEventLoopUntil(
+      "nsThread::Shutdown"_ns,
+      [&, context]() { return !context->mAwaitingShutdownAck; },
+      context->mJoiningThread);
 
   ShutdownComplete(context);
 
@@ -987,10 +970,7 @@ mozilla::PerformanceCounter* nsThread::GetPerformanceCounterBase(
     nsIRunnable* aEvent) {
   RefPtr<SchedulerGroup::Runnable> docRunnable = do_QueryObject(aEvent);
   if (docRunnable) {
-    mozilla::dom::DocGroup* docGroup = docRunnable->DocGroup();
-    if (docGroup) {
-      return docGroup->GetPerformanceCounter();
-    }
+    return docRunnable->GetPerformanceCounter();
   }
   return nullptr;
 }
@@ -1336,6 +1316,8 @@ void nsThread::SetScriptObserver(
   mScriptObserver = aScriptObserver;
 }
 
+void NS_DispatchMemoryPressure();
+
 void nsThread::DoMainThreadSpecificProcessing() const {
   MOZ_ASSERT(mIsMainThread);
 
@@ -1343,23 +1325,7 @@ void nsThread::DoMainThreadSpecificProcessing() const {
 
   // Fire a memory pressure notification, if one is pending.
   if (!ShuttingDown()) {
-    MemoryPressureState mpPending = NS_GetPendingMemoryPressure();
-    if (mpPending != MemPressure_None) {
-      nsCOMPtr<nsIObserverService> os = services::GetObserverService();
-
-      if (os) {
-        if (mpPending == MemPressure_Stopping) {
-          os->NotifyObservers(nullptr, "memory-pressure-stop", nullptr);
-        } else {
-          os->NotifyObservers(nullptr, "memory-pressure",
-                              mpPending == MemPressure_New
-                                  ? u"low-memory"
-                                  : u"low-memory-ongoing");
-        }
-      } else {
-        NS_WARNING("Can't get observer service!");
-      }
-    }
+    NS_DispatchMemoryPressure();
   }
 }
 
@@ -1402,6 +1368,18 @@ NS_IMETHODIMP nsThread::HaveDirectTasks(bool* aValue) {
 nsIEventTarget* nsThread::EventTarget() { return this; }
 
 nsISerialEventTarget* nsThread::SerialEventTarget() { return this; }
+
+void nsThread::OnDelayedRunnableCreated(mozilla::DelayedRunnable* aRunnable) {
+  mEventTarget->OnDelayedRunnableCreated(aRunnable);
+}
+
+void nsThread::OnDelayedRunnableScheduled(mozilla::DelayedRunnable* aRunnable) {
+  mEventTarget->OnDelayedRunnableScheduled(aRunnable);
+}
+
+void nsThread::OnDelayedRunnableRan(mozilla::DelayedRunnable* aRunnable) {
+  mEventTarget->OnDelayedRunnableRan(aRunnable);
+}
 
 nsLocalExecutionRecord nsThread::EnterLocalExecution() {
   MOZ_RELEASE_ASSERT(!mIsInLocalExecutionMode);
@@ -1497,7 +1475,6 @@ void PerformanceCounterState::MaybeReportAccumulatedTime(TimeStamp aNow) {
     }
     mLastLongTaskEnd = aNow;
 
-#ifdef MOZ_GECKO_PROFILER
     if (profiler_thread_is_being_profiled()) {
       struct LongTaskMarker {
         static constexpr Span<const char> MarkerTypeName() {
@@ -1509,8 +1486,8 @@ void PerformanceCounterState::MaybeReportAccumulatedTime(TimeStamp aNow) {
         }
         static MarkerSchema MarkerTypeDisplay() {
           using MS = MarkerSchema;
-          MS schema{MS::Location::markerChart, MS::Location::markerTable};
-          schema.AddKeyLabelFormat("category", "Type", MS::Format::string);
+          MS schema{MS::Location::MarkerChart, MS::Location::MarkerTable};
+          schema.AddKeyLabelFormat("category", "Type", MS::Format::String);
           return schema;
         }
       };
@@ -1522,7 +1499,6 @@ void PerformanceCounterState::MaybeReportAccumulatedTime(TimeStamp aNow) {
                           MarkerTiming::Interval(mCurrentTimeSliceStart, aNow),
                           LongTaskMarker{});
     }
-#endif
   }
 }
 

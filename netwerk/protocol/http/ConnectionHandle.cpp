@@ -13,6 +13,7 @@
 #define LOG_ENABLED() LOG5_ENABLED()
 
 #include "ConnectionHandle.h"
+#include "nsHttpHandler.h"
 
 namespace mozilla {
 namespace net {
@@ -79,7 +80,7 @@ already_AddRefed<HttpConnectionBase> ConnectionHandle::HttpConnection() {
   return rv.forget();
 }
 
-void ConnectionHandle::TopLevelOuterContentWindowIdChanged(uint64_t windowId) {
+void ConnectionHandle::TopBrowsingContextIdChanged(uint64_t id) {
   // Do nothing.
 }
 

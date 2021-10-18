@@ -55,6 +55,7 @@ class NetworkEventStackTracesWatcher {
    *        The target actor from which we should stop observing the strack traces
    */
   destroy(targetActor) {
+    this.stacktraces.clear();
     Services.obs.removeObserver(this, "http-on-opening-request");
     Services.obs.removeObserver(this, "document-on-opening-request");
     Services.obs.removeObserver(this, "network-monitor-alternate-stack");
@@ -107,7 +108,12 @@ class NetworkEventStackTracesWatcher {
     }
 
     // XXX: is window the best filter to use?
-    if (!matchRequest(channel, { window: this.targetActor.window })) {
+    if (
+      !matchRequest(channel, {
+        window: this.targetActor.window,
+        matchExactWindow: this.targetActor.ignoreSubFrames,
+      })
+    ) {
       return;
     }
 
@@ -183,7 +189,6 @@ class NetworkEventStackTracesWatcher {
       {
         resourceType: NETWORK_EVENT_STACKTRACE,
         resourceId,
-        targetFront: this.targetFront,
         stacktraceAvailable: stacktrace && stacktrace.length > 0,
         lastFrame:
           stacktrace && stacktrace.length > 0 ? stacktrace[0] : undefined,
@@ -195,7 +200,6 @@ class NetworkEventStackTracesWatcher {
     let stacktrace = [];
     if (this.stacktraces.has(id)) {
       stacktrace = this.stacktraces.get(id);
-      this.stacktraces.delete(id);
     }
     return stacktrace;
   }

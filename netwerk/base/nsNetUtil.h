@@ -81,7 +81,7 @@ already_AddRefed<nsINetUtil> do_GetNetUtil(nsresult* error = nullptr);
 // private little helper function... don't call this directly!
 nsresult net_EnsureIOService(nsIIOService** ios, nsCOMPtr<nsIIOService>& grip);
 
-nsresult NS_NewURI(nsIURI** result, const nsACString& spec,
+nsresult NS_NewURI(nsIURI** aURI, const nsACString& spec,
                    const char* charset = nullptr, nsIURI* baseURI = nullptr);
 
 nsresult NS_NewURI(nsIURI** result, const nsACString& spec,
@@ -102,6 +102,21 @@ nsresult NS_NewFileURI(
     nsIURI** result, nsIFile* spec,
     nsIIOService* ioService =
         nullptr);  // pass in nsIIOService to optimize callers
+
+// Functions for adding additional encoding to a URL for compatibility with
+// Apple's NSURL class URLWithString method.
+//
+// @param aResult
+//        Out parameter for the encoded URL spec
+// @param aSpec
+//        The spec for the URL to be encoded
+nsresult NS_GetSpecWithNSURLEncoding(nsACString& aResult,
+                                     const nsACString& aSpec);
+// @param aResult
+//        Out parameter for the encoded URI
+// @param aSpec
+//        The spec for the URL to be encoded
+nsresult NS_NewURIWithNSURLEncoding(nsIURI** aResult, const nsACString& aSpec);
 
 // These methods will only mutate the URI if the ref of aInput doesn't already
 // match the ref we are trying to set.
@@ -629,11 +644,6 @@ bool NS_IsSafeMethodNav(nsIChannel* aChannel);
   "about.ef2a7dd5-93bc-417f-a698-142c3116864f.mozilla"
 
 /**
- * Determines whether appcache should be checked for a given principal.
- */
-bool NS_ShouldCheckAppCache(nsIPrincipal* aPrincipal);
-
-/**
  * Wraps an nsIAuthPrompt so that it can be used as an nsIAuthPrompt2. This
  * method is provided mainly for use by other methods in this file.
  *
@@ -980,5 +990,19 @@ bool SchemeIsResource(nsIURI* aURI);
 bool SchemeIsFTP(nsIURI* aURI);
 }  // namespace net
 }  // namespace mozilla
+
+/**
+ * Returns true if the |aInput| in is part of the root domain of |aHost|.
+ * For example, if |aInput| is "www.mozilla.org", and we pass in
+ * "mozilla.org" as |aHost|, this will return true.  It would return false
+ * the other way around.
+ *
+ * @param aInput The host to be analyzed.
+ * @param aHost  The host to compare to.
+ */
+nsresult NS_HasRootDomain(const nsACString& aInput, const nsACString& aHost,
+                          bool* aResult);
+
+void CheckForBrokenChromeURL(nsILoadInfo* aLoadInfo, nsIURI* aURI);
 
 #endif  // !nsNetUtil_h__

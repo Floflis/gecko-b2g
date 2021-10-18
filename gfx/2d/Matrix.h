@@ -1158,10 +1158,7 @@ class Matrix4x4Typed {
 
   bool operator!=(const Matrix4x4Typed& o) const { return !((*this) == o); }
 
-  Matrix4x4Typed& operator=(const Matrix4x4Typed& aOther) {
-    memcpy(components, aOther.components, sizeof(components));
-    return *this;
-  }
+  Matrix4x4Typed& operator=(const Matrix4x4Typed& aOther) = default;
 
   template <typename NewTargetUnits>
   Matrix4x4Typed<SourceUnits, NewTargetUnits, T> operator*(
@@ -1435,7 +1432,7 @@ class Matrix4x4Typed {
     }
 
     // Extract rotation
-    rotation.SetFromRotationMatrix(*this);
+    rotation.SetFromRotationMatrix(this->ToUnknownMatrix());
     return true;
   }
 
@@ -1694,11 +1691,12 @@ class Matrix4x4Typed {
   /**
    * Convert between typed and untyped matrices.
    */
-  Matrix4x4 ToUnknownMatrix() const {
-    return Matrix4x4{_11, _12, _13, _14, _21, _22, _23, _24,
-                     _31, _32, _33, _34, _41, _42, _43, _44};
+  using UnknownMatrix = Matrix4x4Typed<UnknownUnits, UnknownUnits, T>;
+  UnknownMatrix ToUnknownMatrix() const {
+    return UnknownMatrix{_11, _12, _13, _14, _21, _22, _23, _24,
+                         _31, _32, _33, _34, _41, _42, _43, _44};
   }
-  static Matrix4x4Typed FromUnknownMatrix(const Matrix4x4& aUnknown) {
+  static Matrix4x4Typed FromUnknownMatrix(const UnknownMatrix& aUnknown) {
     return Matrix4x4Typed{
         aUnknown._11, aUnknown._12, aUnknown._13, aUnknown._14,
         aUnknown._21, aUnknown._22, aUnknown._23, aUnknown._24,
@@ -1709,7 +1707,7 @@ class Matrix4x4Typed {
    * For convenience, overload FromUnknownMatrix() for Maybe<Matrix>.
    */
   static Maybe<Matrix4x4Typed> FromUnknownMatrix(
-      const Maybe<Matrix4x4>& aUnknown) {
+      const Maybe<UnknownMatrix>& aUnknown) {
     if (aUnknown.isSome()) {
       return Some(FromUnknownMatrix(*aUnknown));
     }
@@ -1719,9 +1717,6 @@ class Matrix4x4Typed {
 
 typedef Matrix4x4Typed<UnknownUnits, UnknownUnits> Matrix4x4;
 typedef Matrix4x4Typed<UnknownUnits, UnknownUnits, double> Matrix4x4Double;
-
-// This typedef is for IPDL, which can't reference a template-id directly.
-typedef Maybe<Matrix4x4> MaybeMatrix4x4;
 
 class Matrix5x4 {
  public:

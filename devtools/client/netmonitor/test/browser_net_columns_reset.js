@@ -8,7 +8,7 @@
  * header is visible only if there are requests in the list.
  */
 add_task(async function() {
-  const { monitor, tab } = await initNetMonitor(SIMPLE_URL, {
+  const { monitor } = await initNetMonitor(SIMPLE_URL, {
     requestCount: 1,
   });
   info("Starting test... ");
@@ -21,13 +21,13 @@ add_task(async function() {
   store.dispatch(Actions.batchEnable(false));
 
   const wait = waitForNetworkEvents(monitor, 1);
-  tab.linkedBrowser.reload();
+  await reloadBrowser();
   await wait;
 
   await hideColumn(monitor, "status");
   await hideColumn(monitor, "waterfall");
 
-  await EventUtils.sendMouseEvent(
+  EventUtils.sendMouseEvent(
     { type: "contextmenu" },
     document.querySelector("#requests-list-contentSize-button")
   );

@@ -1073,13 +1073,12 @@ nsresult nsAppShell::Init() {
   rv = AddFdHandler(signalfds[0], pipeHandler, "");
   NS_ENSURE_SUCCESS(rv, rv);
 
-  bool isXPCShellTest = PR_GetEnv("XPCSHELL_TEST_PROFILE_DIR");
-
-  if (!isXPCShellTest) {
-    InitGonkMemoryPressureMonitoring();
-  }
-
   if (XRE_IsParentProcess()) {
+    bool isXPCShellTest = PR_GetEnv("XPCSHELL_TEST_PROFILE_DIR");
+
+    if (!isXPCShellTest) {
+      InitGonkMemoryPressureMonitoring();
+    }
     printf(
         "*****************************************************************\n");
     printf("***\n");
@@ -1245,7 +1244,7 @@ bool nsAppShell::ProcessNextNativeEvent(bool mayWait) {
     AUTO_PROFILER_LABEL("nsAppShell::ProcessNextNativeEvent::Wait", IDLE);
 
     if ((event_count = epoll_wait(epollfd, events, 16, mayWait ? -1 : 0)) <= 0)
-      return true;
+      return false;
   }
 
   for (int i = 0; i < event_count; i++) mHandlers[events[i].data.u32].run();

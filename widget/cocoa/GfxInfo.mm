@@ -14,6 +14,8 @@
 #include "nsCocoaFeatures.h"
 #include "nsCocoaUtils.h"
 #include "mozilla/Preferences.h"
+#include "js/PropertyAndElement.h"  // JS_SetElement, JS_SetProperty
+
 #include <algorithm>
 
 #import <Foundation/Foundation.h>
@@ -21,8 +23,6 @@
 #import <Cocoa/Cocoa.h>
 
 #include "jsapi.h"
-
-#define NS_CRASHREPORTER_CONTRACTID "@mozilla.org/toolkit/crash-reporter;1"
 
 using namespace mozilla;
 using namespace mozilla::widget;

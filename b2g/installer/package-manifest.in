@@ -27,6 +27,7 @@
 @RESPATH@/chrome/@AB_CD@@JAREXT@
 @RESPATH@/chrome/@AB_CD@.manifest
 @RESPATH@/@PREF_DIR@/b2g-l10n.js
+@RESPATH@/localization/*
 #ifdef MOZ_UPDATER
 @RESPATH@/update.locale
 @RESPATH@/updater.ini
@@ -40,6 +41,7 @@
 #ifdef PACKAGE_GAIA
 [gaia]
 @BINPATH@/gaia/*
+@BINPATH@/api-daemon/*
 #endif
 
 [xpcom]
@@ -85,7 +87,6 @@
 #endif
 #ifdef MOZ_GTK
 @BINPATH@/@DLL_PREFIX@mozgtk@DLL_SUFFIX@
-@BINPATH@/gtk2/@DLL_PREFIX@mozgtk@DLL_SUFFIX@
 #endif
 #ifdef MOZ_WAYLAND
 @BINPATH@/@DLL_PREFIX@mozwayland@DLL_SUFFIX@
@@ -101,6 +102,7 @@
 #ifndef XP_UNIX
 @BINPATH@/@MOZ_APP_NAME@.exe
 #else
+@BINPATH@/@MOZ_APP_NAME@-bin
 @BINPATH@/@MOZ_APP_NAME@
 #endif
 @RESPATH@/application.ini
@@ -117,6 +119,14 @@
 #endif
 #ifdef MOZ_WEBSPEECH_MODELS
 @RESPATH@/models/
+#endif
+#ifdef MOZ_GTK
+@RESPATH@/chrome/icons/default/default16.png
+@RESPATH@/chrome/icons/default/default32.png
+@RESPATH@/chrome/icons/default/default48.png
+@RESPATH@/chrome/icons/default/default64.png
+@RESPATH@/chrome/icons/default/default128.png
+@RESPATH@/chrome/icons/default/default256.png
 #endif
 
 ; [Components]
@@ -278,7 +288,6 @@
 #ifdef MOZ_DEBUG
 @RESPATH@/components/TestInterfaceJS.js
 @RESPATH@/components/TestInterfaceJS.manifest
-@RESPATH@/components/TestInterfaceJSMaplike.js
 #endif
 
 ; Modules
@@ -352,9 +361,15 @@
 @RESPATH@/res/fonts/*
 @RESPATH@/res/dtd/*
 @RESPATH@/res/language.properties
+@RESPATH@/res/locale/layout/HtmlForm.properties
+@RESPATH@/res/locale/layout/MediaDocument.properties
+@RESPATH@/res/locale/layout/xmlparser.properties
+@RESPATH@/res/locale/dom/dom.properties
 #ifdef XP_MACOSX
 @RESPATH@/res/MainMenu.nib/
 #endif
+@RESPATH@/contentaccessible/TopLevelVideoDocument.css
+@RESPATH@/contentaccessible/TopLevelImageDocument.css
 
 ; svg
 @RESPATH@/res/svg.css
@@ -417,7 +432,6 @@ bin/libfreebl_32int64_3.so
 @BINPATH@/crashreporter.app/
 #else
 @BINPATH@/crashreporter@BIN_SUFFIX@
-@RESPATH@/crashreporter.crt
 @RESPATH@/crashreporter.ini
 #ifdef XP_UNIX
 @RESPATH@/Throbber-small.gif
@@ -438,11 +452,9 @@ bin/libfreebl_32int64_3.so
 @RESPATH@/chrome/chrome@JAREXT@
 @RESPATH@/chrome/chrome.manifest
 @RESPATH@/components/B2GComponents.manifest
-#if defined(ENABLE_MARIONETTE) || !defined(MOZ_WIDGET_GONK)
-@RESPATH@/chrome/marionette@JAREXT@
-@RESPATH@/chrome/marionette.manifest
-@RESPATH@/components/marionette.manifest
-@RESPATH@/components/marionette.js
+#if defined(ENABLE_WEBDRIVER) || !defined(MOZ_WIDGET_GONK)
+@RESPATH@/chrome/remote@JAREXT@
+@RESPATH@/chrome/remote.manifest
 #endif
 @RESPATH@/components/AlertsService.js
 #ifdef MOZ_UPDATER
@@ -451,7 +463,6 @@ bin/libfreebl_32int64_3.so
 @RESPATH@/components/AppsServiceDelegate.js
 @RESPATH@/components/DirectoryProvider.js
 @RESPATH@/components/ProcessGlobal.js
-@RESPATH@/components/OMAContentHandler.js
 @RESPATH@/components/PaymentProviderStrategy.js
 @RESPATH@/components/RecoveryService.js
 @RESPATH@/components/MailtoProtocolHandler.js
@@ -492,3 +503,10 @@ bin/libfreebl_32int64_3.so
 #ifdef PKG_LOCALE_MANIFEST
 #include @PKG_LOCALE_MANIFEST@
 #endif
+
+; [Extensions]
+@RESPATH@/components/extensions-toolkit.manifest
+@RESPATH@/components/extensions-b2g.manifest
+
+; Blocklist for addons.
+@BINPATH@/defaults/settings/blocklists

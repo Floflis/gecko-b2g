@@ -14,9 +14,11 @@
 
 #include "mozilla/dom/BluetoothMapParametersBinding.h"
 #include "mozilla/EndianUtils.h"
+#include "mozilla/ErrorResult.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPtr.h"
+#include "mozilla/Unused.h"
 #include "nsIInputStream.h"
 #include "nsIObserver.h"
 #include "nsIObserverService.h"
@@ -147,7 +149,7 @@ void BluetoothMapSmsManager::Uninit() {
     return;
   }
 
-  NS_WARN_IF(
+  Unused << NS_WARN_IF(
       NS_FAILED(obs->RemoveObserver(this, NS_XPCOM_SHUTDOWN_OBSERVER_ID)));
 }
 

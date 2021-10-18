@@ -14,6 +14,7 @@
 #  include "mozilla/Atomics.h"
 #  include "mozilla/Monitor.h"
 #  include "mozilla/MozPromise.h"
+#  include "mozilla/ProfilerUtils.h"
 #  include "mozilla/RefPtr.h"
 #  include "mozilla/Result.h"
 #  include "mozilla/TimeStamp.h"
@@ -21,10 +22,6 @@
 #  include "nsCOMPtr.h"
 #  include "nsThreadUtils.h"
 #  include "WavDumper.h"
-
-#  if defined(XP_WIN)
-#    include "mozilla/audio/AudioNotificationReceiver.h"
-#  endif
 
 namespace soundtouch {
 class MOZ_EXPORT SoundTouch;
@@ -174,11 +171,7 @@ class AudioBufferWriter : private AudioBufferCursor {
 // callers, or made from a single thread.  One exception is that access to
 // GetPosition, GetPositionInFrames, SetVolume, and Get{Rate,Channels},
 // SetMicrophoneActive is thread-safe without external synchronization.
-class AudioStream final
-#  if defined(XP_WIN)
-    : public audio::DeviceChangeListener
-#  endif
-{
+class AudioStream final {
   virtual ~AudioStream();
 
  public:
@@ -231,6 +224,8 @@ class AudioStream final
   // 0 (meaning muted) to 1 (meaning full volume).  Thread-safe.
   void SetVolume(double aVolume);
 
+  void SetStreamName(const nsAString& aStreamName);
+
   // Start the stream and return a promise that will be resolve when the
   // playback completes.
   Result<already_AddRefed<MediaSink::EndedPromise>, nsresult> Start();
@@ -240,11 +235,6 @@ class AudioStream final
 
   // Resume audio playback.
   void Resume();
-
-#  if defined(XP_WIN)
-  // Reset stream to the default device.
-  void ResetDefaultDevice() override;
-#  endif
 
   // Return the position in microseconds of the audio frame being played by
   // the audio hardware, compensated for playback rate change. Thread-safe.
@@ -343,8 +333,8 @@ class AudioStream final
   // the default device is used. It is set
   // during the Init() in decoder thread.
   RefPtr<AudioDeviceInfo> mSinkInfo;
-  /* Contains the id of the audio thread, from profiler_get_thread_id. */
-  std::atomic<int> mAudioThreadId;
+  // Contains the id of the audio thread, from profiler_get_thread_id.
+  std::atomic<ProfilerThreadId> mAudioThreadId;
   const bool mSandboxed = false;
 
   MozPromiseHolder<MediaSink::EndedPromise> mEndedPromise;

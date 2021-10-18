@@ -4,6 +4,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(clippy::upper_case_acronyms)]
+
 use crate::agentio::as_c_void;
 use crate::err::{Error, Res};
 use crate::once::OnceResult;
@@ -120,17 +122,17 @@ impl TryInto<PRTime> for Time {
         // TODO(mt) use checked_duration_since when that is available.
         let delta = self.t.duration_since(base.instant);
         if let Ok(d) = PRTime::try_from(delta.as_micros()) {
-            d.checked_add(base.prtime)
-                .map_or(Err(Error::TimeTravelError), Ok)
+            d.checked_add(base.prtime).ok_or(Error::TimeTravelError)
         } else {
             Err(Error::TimeTravelError)
         }
     }
 }
 
-impl Into<Instant> for Time {
-    fn into(self) -> Instant {
-        self.t
+impl From<Time> for Instant {
+    #[must_use]
+    fn from(t: Time) -> Self {
+        t.t
     }
 }
 
@@ -177,7 +179,7 @@ pub struct TimeHolder {
 
 impl TimeHolder {
     unsafe extern "C" fn time_func(arg: *mut c_void) -> PRTime {
-        let p = arg as *mut PRTime as *const PRTime;
+        let p = arg as *const PRTime;
         *p.as_ref().unwrap()
     }
 

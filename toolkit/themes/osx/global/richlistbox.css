@@ -22,9 +22,9 @@ richlistitem[selected="true"] {
   color: -moz-DialogText;
 }
 
-richlistbox:focus > richlistitem[selected="true"] {
-  background-color: Highlight;
-  color: HighlightText;
+richlistbox:where(:focus) > richlistitem[selected="true"] {
+  background-color: SelectedItem;
+  color: SelectedItemText;
 }
 
 richlistbox.theme-listbox > richlistitem {

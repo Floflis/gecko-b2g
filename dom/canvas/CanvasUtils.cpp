@@ -86,7 +86,8 @@ bool IsImageExtractionAllowed(dom::Document* aDocument, JSContext* aCx,
     return true;
   }
 
-  dom::Document* topLevelDocument = aDocument->GetTopLevelContentDocument();
+  dom::Document* topLevelDocument =
+      aDocument->GetTopLevelContentDocumentIfSameProcess();
   nsIURI* topLevelDocURI =
       topLevelDocument ? topLevelDocument->GetDocumentURI() : nullptr;
   nsCString topLevelDocURISpec;
@@ -206,7 +207,7 @@ bool GetCanvasContextType(const nsAString& str,
   }
 
   if (StaticPrefs::dom_webgpu_enabled()) {
-    if (str.EqualsLiteral("gpupresent")) {
+    if (str.EqualsLiteral("webgpu")) {
       *out_type = dom::CanvasContextType::WebGPU;
       return true;
     }

@@ -7,8 +7,8 @@ const {
   processDescriptorSpec,
 } = require("devtools/shared/specs/descriptors/process");
 const {
-  BrowsingContextTargetFront,
-} = require("devtools/client/fronts/targets/browsing-context");
+  WindowGlobalTargetFront,
+} = require("devtools/client/fronts/targets/window-global");
 const {
   ContentProcessTargetFront,
 } = require("devtools/client/fronts/targets/content-process");
@@ -16,14 +16,18 @@ const {
   FrontClassWithSpec,
   registerFront,
 } = require("devtools/shared/protocol");
+const {
+  DescriptorMixin,
+} = require("devtools/client/fronts/descriptors/descriptor-mixin");
 
-class ProcessDescriptorFront extends FrontClassWithSpec(processDescriptorSpec) {
+class ProcessDescriptorFront extends DescriptorMixin(
+  FrontClassWithSpec(processDescriptorSpec)
+) {
   constructor(client, targetFront, parentFront) {
     super(client, targetFront, parentFront);
     this.isParent = false;
     this._processTargetFront = null;
     this._targetFrontPromise = null;
-    this._client = client;
   }
 
   form(json) {
@@ -41,8 +45,8 @@ class ProcessDescriptorFront extends FrontClassWithSpec(processDescriptorSpec) {
     // the right front based on the actor ID.
     if (form.actor.includes("parentProcessTarget")) {
       // ParentProcessTargetActor doesn't have a specific front, instead it uses
-      // BrowsingContextTargetFront on the client side.
-      front = new BrowsingContextTargetFront(this._client, null, this);
+      // WindowGlobalTargetFront on the client side.
+      front = new WindowGlobalTargetFront(this._client, null, this);
     } else {
       front = new ContentProcessTargetFront(this._client, null, this);
     }
@@ -58,6 +62,14 @@ class ProcessDescriptorFront extends FrontClassWithSpec(processDescriptorSpec) {
 
     this.manage(front);
     return front;
+  }
+
+  get isParentProcessDescriptor() {
+    return this.isParent;
+  }
+
+  get isProcessDescriptor() {
+    return true;
   }
 
   getCachedTarget() {

@@ -55,7 +55,7 @@ const DISPATCH_QUEUE_LABEL: &str = "org.mozilla.cubeb";
 const PRIVATE_AGGREGATE_DEVICE_NAME: &str = "CubebAggregateDevice";
 
 // Testing empirically, some headsets report a minimal latency that is very low,
-// but this does not work in practice. Lie and say the minimum is 256 frames.
+// but this does not work in practice. Lie and say the minimum is 128 frames.
 const SAFE_MIN_LATENCY_FRAMES: u32 = 128;
 const SAFE_MAX_LATENCY_FRAMES: u32 = 512;
 
@@ -136,10 +136,10 @@ impl device_property_listener {
 #[derive(Debug, PartialEq)]
 struct CAChannelLabel(AudioChannelLabel);
 
-impl Into<mixer::Channel> for CAChannelLabel {
-    fn into(self) -> mixer::Channel {
+impl From<CAChannelLabel> for mixer::Channel {
+    fn from(label: CAChannelLabel) -> mixer::Channel {
         use self::coreaudio_sys_utils::sys;
-        match self.0 {
+        match label.0 {
             sys::kAudioChannelLabel_Left => mixer::Channel::FrontLeft,
             sys::kAudioChannelLabel_Right => mixer::Channel::FrontRight,
             sys::kAudioChannelLabel_Center | sys::kAudioChannelLabel_Mono => {
@@ -336,7 +336,7 @@ extern "C" fn audiounit_input_callback(
     enum ErrorHandle {
         Return(OSStatus),
         Reinit,
-    };
+    }
 
     assert!(input_frames > 0);
     assert_eq!(bus, AU_IN_BUS);
@@ -346,7 +346,7 @@ extern "C" fn audiounit_input_callback(
 
     if unsafe { *flags | kAudioTimeStampHostTimeValid } != 0 {
         let now = unsafe { mach_absolute_time() };
-        let input_latency_frames = compute_input_latency(&stm, unsafe { (*tstamp).mHostTime }, now);
+        let input_latency_frames = compute_input_latency(stm, unsafe { (*tstamp).mHostTime }, now);
         stm.total_input_latency_frames
             .store(input_latency_frames, Ordering::SeqCst);
     }
@@ -419,10 +419,6 @@ extern "C" fn audiounit_input_callback(
             ErrorHandle::Return(status)
         };
 
-        // Advance input frame counter.
-        stm.frames_read
-            .fetch_add(input_frames as usize, atomic::Ordering::SeqCst);
-
         cubeb_logv!(
             "({:p}) input: buffers {}, size {}, channels {}, rendered frames {}, total frames {}.",
             stm.core_stream_data.stm_ptr,
@@ -445,7 +441,10 @@ extern "C" fn audiounit_input_callback(
             / stm.core_stream_data.input_desc.mChannelsPerFrame as usize)
             as i64;
         assert!(input_frames as i64 <= total_input_frames);
-        let input_buffer = input_buffer_manager.get_linear_data(total_input_frames as usize);
+        stm.frames_read
+            .fetch_add(total_input_frames as usize, atomic::Ordering::SeqCst);
+        let input_buffer =
+            input_buffer_manager.get_linear_data(input_buffer_manager.available_samples());
         let outframes = stm.core_stream_data.resampler.fill(
             input_buffer,
             &mut total_input_frames,
@@ -562,7 +561,7 @@ extern "C" fn audiounit_output_callback(
 
     if unsafe { *flags | kAudioTimeStampHostTimeValid } != 0 {
         let output_latency_frames =
-            compute_output_latency(&stm, unsafe { (*tstamp).mHostTime }, now);
+            compute_output_latency(stm, unsafe { (*tstamp).mHostTime }, now);
         stm.total_output_latency_frames
             .store(output_latency_frames, Ordering::SeqCst);
     }
@@ -613,13 +612,12 @@ extern "C" fn audiounit_output_callback(
         if prev_frames_written == 0 && buffered_input_frames > input_frames_needed as usize {
             input_buffer_manager.trim(input_frames_needed * input_channels);
             let popped_frames = buffered_input_frames - input_frames_needed as usize;
-            stm.frames_read.fetch_sub(popped_frames, Ordering::SeqCst);
-
             cubeb_log!("Dropping {} frames in input buffer.", popped_frames);
         }
 
         let input_frames = if input_frames_needed > buffered_input_frames
             && (stm.switching_device.load(Ordering::SeqCst)
+                || stm.reinit_pending.load(Ordering::SeqCst)
                 || stm.frames_read.load(Ordering::SeqCst) == 0)
         {
             // The silent frames will be inserted in `get_linear_data` below.
@@ -629,20 +627,20 @@ extern "C" fn audiounit_output_callback(
                 stm.core_stream_data.stm_ptr,
                 if stm.frames_read.load(Ordering::SeqCst) == 0 {
                     "input hasn't started,"
-                } else {
-                    assert!(stm.switching_device.load(Ordering::SeqCst));
+                } else if stm.switching_device.load(Ordering::SeqCst) {
                     "device switching,"
+                } else {
+                    "reinit pending,"
                 },
                 silent_frames_to_push
             );
-            stm.frames_read
-                .fetch_add(input_frames_needed, Ordering::SeqCst);
             input_frames_needed
         } else {
             buffered_input_frames
         };
 
         let input_samples_needed = input_frames * input_channels;
+        stm.frames_read.fetch_add(input_frames, Ordering::SeqCst);
         (
             input_buffer_manager.get_linear_data(input_samples_needed),
             input_frames as i64,
@@ -651,6 +649,9 @@ extern "C" fn audiounit_output_callback(
         (ptr::null_mut::<c_void>(), 0)
     };
 
+    // If `input_buffer` is non-null but `input_frames` is zero and this is the first call to
+    // resampler, then we will hit an assertion in resampler code since no internal buffer will be
+    // allocated in the resampler due to zero `input_frames`
     let outframes = stm.core_stream_data.resampler.fill(
         input_buffer,
         if input_buffer.is_null() {
@@ -1489,8 +1490,10 @@ fn create_cubeb_device_info(
         return Err(Error::error());
     }
 
-    let mut dev_info = ffi::cubeb_device_info::default();
-    dev_info.max_channels = channels;
+    let mut dev_info = ffi::cubeb_device_info {
+        max_channels: channels,
+        ..Default::default()
+    };
 
     assert!(
         mem::size_of::<ffi::cubeb_devid>() >= mem::size_of_val(&devid),
@@ -1630,7 +1633,7 @@ fn is_aggregate_device(device_info: &ffi::cubeb_device_info) -> bool {
         libc::strncmp(
             device_info.friendly_name,
             private_name.as_ptr(),
-            libc::strlen(private_name.as_ptr()),
+            private_name.as_bytes().len(),
         ) == 0
     }
 }
@@ -1831,22 +1834,13 @@ impl Default for DevicesData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SharedDevices {
     input: DevicesData,
     output: DevicesData,
 }
 
-impl Default for SharedDevices {
-    fn default() -> Self {
-        Self {
-            input: DevicesData::default(),
-            output: DevicesData::default(),
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct LatencyController {
     streams: u32,
     latency: Option<u32>,
@@ -1872,15 +1866,6 @@ impl LatencyController {
             self.latency = None;
         }
         self.latency
-    }
-}
-
-impl Default for LatencyController {
-    fn default() -> Self {
-        Self {
-            streams: 0,
-            latency: None,
-        }
     }
 }
 
@@ -2593,7 +2578,10 @@ impl<'ctx> CoreStreamData<'ctx> {
                 return Err(Error::error());
             }
 
-            self.input_buffer_manager = Some(BufferManager::new(self.input_stream_params.format()));
+            self.input_buffer_manager = Some(BufferManager::new(
+                &self.input_stream_params,
+                SAFE_MAX_LATENCY_FRAMES,
+            ));
 
             let aurcbs_in = AURenderCallbackStruct {
                 inputProc: Some(audiounit_input_callback),
@@ -3311,6 +3299,7 @@ impl<'ctx> AudioUnitStream<'ctx> {
                 "({:p}) Stream reinit failed.",
                 self.core_stream_data.stm_ptr
             );
+            self.core_stream_data.close();
             if has_input && input_device != kAudioObjectUnknown {
                 // Attempt to re-use the same device-id failed, so attempt again with
                 // default input device.
@@ -3490,9 +3479,6 @@ impl<'ctx> StreamOps for AudioUnitStream<'ctx> {
         );
         Ok(())
     }
-    fn reset_default_device(&mut self) -> Result<()> {
-        Err(Error::not_supported())
-    }
     fn position(&mut self) -> Result<u64> {
         let OutputCallbackTimingData {
             frames_queued,
@@ -3559,7 +3545,24 @@ impl<'ctx> StreamOps for AudioUnitStream<'ctx> {
         }
     }
     fn set_volume(&mut self, volume: f32) -> Result<()> {
-        set_volume(self.core_stream_data.output_unit, volume)
+        // Execute set_volume in serial queue to avoid racing with destroy or reinit.
+        let mut result = Err(Error::error());
+        let set = &mut result;
+        let stream = &self;
+        self.queue.run_sync(move || {
+            *set = set_volume(stream.core_stream_data.output_unit, volume);
+        });
+
+        if result.is_err() {
+            return result;
+        }
+
+        cubeb_log!(
+            "Cubeb stream ({:p}) set volume to {}.",
+            self as *const AudioUnitStream,
+            volume
+        );
+        Ok(())
     }
     fn set_name(&mut self, _: &CStr) -> Result<()> {
         Err(Error::not_supported())

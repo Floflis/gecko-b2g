@@ -39,7 +39,6 @@ TEST_HARNESS_FILES.gtest += [
     "test_case_1301065.mp4",
     "test_case_1329061.mov",
     "test_case_1351094.mp4",
-    "test_case_1380468.mp4",
     "test_case_1388991.mp4",
     "test_case_1389299.mp4",
     "test_case_1389527.mp4",
@@ -49,6 +48,7 @@ TEST_HARNESS_FILES.gtest += [
     "test_case_1519617-cenc-init-with-track_id-0.mp4",
     "test_case_1519617-track2-trafs-removed.mp4",
     "test_case_1519617-video-has-track_id-0.mp4",
+    "test_case_1714125-2-sample-description-entires-with-identical-crypto.mp4",
 ]
 
 UNIFIED_SOURCES += [

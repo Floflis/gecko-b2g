@@ -23,7 +23,6 @@ def options(request):
     opts = {
         "app": "firefox",
         "binary": "path/to/dummy/browser",
-        "no_conditioned_profile": True,
         "browsertime_visualmetrics": False,
     }
 
@@ -52,7 +51,11 @@ def raptor(options):
 
 @pytest.fixture
 def mock_test():
-    return {"name": "raptor-firefox-tp6", "test_url": "/dummy/url"}
+    return {
+        "name": "raptor-firefox-tp6",
+        "test_url": "/dummy/url",
+        "secondary_url": "/dummy/url-2",
+    }
 
 
 @pytest.fixture(scope="session")

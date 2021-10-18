@@ -6,7 +6,9 @@
 
 #include <unistd.h>
 #include "BluetoothInterface.h"
+#ifdef MOZ_WIDGET_GONK
 #include <cutils/properties.h>
+#endif
 #ifdef MOZ_B2G_BT_DAEMON
 #  include "BluetoothDaemonInterface.h"
 #endif
@@ -307,6 +309,13 @@ void BluetoothHandsfreeNotificationHandler::UnknownAtNotification(
 void BluetoothHandsfreeNotificationHandler::KeyPressedNotification(
     const BluetoothAddress& aBdAddr) {}
 
+void BluetoothHandsfreeNotificationHandler::BindNotification(
+    const nsACString& aAtString, const BluetoothAddress& aBdAddr) {}
+
+void BluetoothHandsfreeNotificationHandler::BievNotification(
+    BluetoothHandsfreeHfIndType aId, int aValue,
+    const BluetoothAddress& aBdAddr) {}
+
 // Result handling
 //
 
@@ -435,6 +444,13 @@ void BluetoothAvrcpNotificationHandler::VolumeChangeNotification(
 void BluetoothAvrcpNotificationHandler::PassthroughCmdNotification(
     uint8_t aId, uint8_t aKeyState) {}
 
+void BluetoothAvrcpNotificationHandler::SetAddressedPlayerNotification(
+    uint16_t aPlayerId) {}
+
+void BluetoothAvrcpNotificationHandler::GetFolderItemsNotification(
+    uint8_t aScope, uint32_t aStartItem, uint32_t aEndItem, uint8_t aNumAttr,
+    const uint32_t* aAttrIds) {}
+
 // Result handling
 //
 
@@ -461,6 +477,10 @@ void BluetoothAvrcpResultHandler::SetPlayerAppValueRsp() {}
 void BluetoothAvrcpResultHandler::RegisterNotificationRsp() {}
 
 void BluetoothAvrcpResultHandler::SetVolume() {}
+
+void BluetoothAvrcpResultHandler::SetAddressedPlayerRsp() {}
+
+void BluetoothAvrcpResultHandler::GetFolderItemsListRsp() {}
 
 // Interface
 //
@@ -761,16 +781,18 @@ BluetoothInterface* BluetoothInterface::GetInstance() {
     break;
   }
 
+#ifdef MOZ_WIDGET_GONK
   char value[PROPERTY_VALUE_MAX];
-  int len;
-
-  len = property_get("ro.moz.bluetooth.backend", value, defaultBackend);
+  int len = property_get("ro.moz.bluetooth.backend", value, defaultBackend);
   if (len < 0) {
     BT_WARNING("No Bluetooth backend available.");
     return nullptr;
   }
 
   const nsDependentCString backend(value, len);
+#else
+  const nsDependentCString backend;
+#endif
 
   /* Here's where we decide which implementation to use. Currently
    * there is only Bluedroid and the Bluetooth daemon, but others are

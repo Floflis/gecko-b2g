@@ -19,7 +19,7 @@ use crate::services::settings::messages::*;
 use crate::services::settings::observer::*;
 use crate::settinginfo_as_isettinginfo;
 use log::{debug, error};
-use moz_task::{TaskRunnable, ThreadPtrHandle, ThreadPtrHolder};
+use moz_task::{ThreadPtrHandle, ThreadPtrHolder};
 use nserror::{nsresult, NS_ERROR_INVALID_ARG, NS_OK};
 use nsstring::*;
 use parking_lot::Mutex;
@@ -148,26 +148,25 @@ impl SessionObject for SettingsManagerImpl {
                 let listeners = event_manager
                     .handlers
                     .get(&(nsISettingsManager::CHANGE_EVENT as _));
-                let count = if let Some(listeners) = listeners {
-                    listeners.len()
+                if let Some(listeners) = listeners {
+                    debug!(
+                        "Received settings change for {}, will dispatch to {} listeners.",
+                        event_info.name,
+                        listeners.len()
+                    );
+                    for listener in listeners {
+                        // We are not on the calling thread, so dispatch a task.
+                        let mut task = SidlEventTask::new(listener.0.clone());
+                        task.set_value(event_info.clone());
+                        let _ = SidlRunnable::new("SidlEvent", Box::new(task.clone()))
+                            .and_then(|r| SidlRunnable::dispatch(r, task.thread()));
+                    }
                 } else {
-                    0
+                    debug!(
+                        "Received settings change for {}, no listeners.",
+                        event_info.name
+                    );
                 };
-                debug!(
-                    "Received event {:?}, will dispatch to {} listeners.",
-                    event_info, count
-                );
-                if count == 0 {
-                    return;
-                }
-
-                for listener in listeners.unwrap() {
-                    // We are not on the calling thread, so dispatch a task.
-                    let mut task = SidlEventTask::new(listener.0.clone());
-                    task.set_value(event_info.clone());
-                    let _ = TaskRunnable::new("SidlEvent", Box::new(task.clone()))
-                        .and_then(|r| TaskRunnable::dispatch(r, task.thread()));
-                }
             }
             Ok(other) => error!("Unexpected setting event: {:?}", other),
             Err(err) => error!("Failed to deserialize settings event: {}", err),
@@ -203,6 +202,17 @@ impl ServiceClientImpl<SettingsTask> for SettingsManagerImpl {
         }
     }
 
+    fn run_task(&mut self, task: SettingsTask) -> Result<(), nsresult> {
+        match task {
+            SettingsTask::Clear(task) => self.clear(task),
+            SettingsTask::Set(task) => self.set(task),
+            SettingsTask::Get(task) => self.get(task),
+            SettingsTask::GetBatch(task) => self.get_batch(task),
+            SettingsTask::AddObserver(task) => self.add_observer(task),
+            SettingsTask::RemoveObserver(task) => self.remove_observer(task),
+        }
+    }
+
     fn dispatch_queue(
         &mut self,
         task_queue: &Shared<Vec<SettingsTask>>,
@@ -221,26 +231,7 @@ impl ServiceClientImpl<SettingsTask> for SettingsManagerImpl {
 
         // drain the queue.
         for task in task_queue.drain(..) {
-            match task {
-                SettingsTask::Clear(task) => {
-                    let _ = self.clear(task);
-                }
-                SettingsTask::Set(task) => {
-                    let _ = self.set(task);
-                }
-                SettingsTask::Get(task) => {
-                    let _ = self.get(task);
-                }
-                SettingsTask::GetBatch(task) => {
-                    let _ = self.get_batch(task);
-                }
-                SettingsTask::AddObserver(task) => {
-                    let _ = self.add_observer(task);
-                }
-                SettingsTask::RemoveObserver(task) => {
-                    let _ = self.remove_observer(task);
-                }
-            }
+            let _ = self.run_task(task);
         }
     }
 }
@@ -458,9 +449,12 @@ impl SettingsManagerXpcom {
         });
 
         let obs = instance.coerce::<nsISidlConnectionObserver>();
-        transport.add_connection_observer(
-            ThreadPtrHolder::new(cstr!("nsISidlConnectionObserver"), RefPtr::new(obs)).unwrap(),
-        );
+        match ThreadPtrHolder::new(cstr!("nsISidlConnectionObserver"), RefPtr::new(obs)) {
+            Ok(obs) => {
+                transport.add_connection_observer(obs);
+            }
+            Err(err) => error!("Failed to create connection observer: {}", err),
+        }
 
         instance
     }
@@ -475,21 +469,10 @@ impl SettingsManagerXpcom {
         debug!("SettingsManagerXpcom::clear");
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = SidlCallTask::new(callback);
 
-        if !self.ensure_service() {
-            self.queue_task(SettingsTask::Clear(task));
-            return Ok(());
-        }
-
-        // The service is ready, send the request right away.
-        debug!("SettingsManager::clear direct call");
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().clear(task);
-        } else {
-            error!("Unable to get SettingsManagerImpl");
-        }
+        self.run_or_queue_task(Some(SettingsTask::Clear(task)));
         Ok(())
     }
 
@@ -536,21 +519,10 @@ impl SettingsManagerXpcom {
         }
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), settings_info);
 
-        if !self.ensure_service() {
-            self.queue_task(SettingsTask::Set(task));
-            return Ok(());
-        }
-
-        // The service is ready, send the request right away.
-        debug!("SettingsManager::set direct call");
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().set(task);
-        } else {
-            error!("Unable to get SettingsManagerImpl");
-        }
+        self.run_or_queue_task(Some(SettingsTask::Set(task)));
         Ok(())
     }
 
@@ -559,22 +531,10 @@ impl SettingsManagerXpcom {
         debug!("SettingsManagerXpcom::get");
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISettingsGetResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISettingsGetResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), name.to_string());
 
-        if !self.ensure_service() {
-            self.queue_task(SettingsTask::Get(task));
-            return Ok(());
-        }
-
-        // The service is ready, send the request right away.
-        debug!("SettingsManager::get direct call");
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().get(task);
-        } else {
-            error!("Unable to get SettingsManagerImpl");
-        }
-
+        self.run_or_queue_task(Some(SettingsTask::Get(task)));
         Ok(())
     }
 
@@ -592,23 +552,10 @@ impl SettingsManagerXpcom {
             .collect();
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISettingsGetBatchResponse"), RefPtr::new(callback))
-                .unwrap();
+            ThreadPtrHolder::new(cstr!("nsISettingsGetBatchResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), names);
 
-        if !self.ensure_service() {
-            self.queue_task(SettingsTask::GetBatch(task));
-            return Ok(());
-        }
-
-        // The service is ready, send the request right away.
-        debug!("SettingsManager::get_batch direct call");
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().get_batch(task);
-        } else {
-            error!("Unable to get SettingsManagerImpl");
-        }
-
+        self.run_or_queue_task(Some(SettingsTask::GetBatch(task)));
         Ok(())
     }
 
@@ -622,27 +569,16 @@ impl SettingsManagerXpcom {
         debug!("SettingsManagerXpcom::add_observer {}", name);
 
         let key: usize = unsafe { std::mem::transmute(observer) };
-        let observer =
-            ThreadPtrHolder::new(cstr!("nsISettingsObserver"), RefPtr::new(observer)).unwrap();
+        let observer = ThreadPtrHolder::new(cstr!("nsISettingsObserver"), RefPtr::new(observer))?;
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (
             SidlCallTask::new(callback),
             (name.to_string(), observer, key),
         );
 
-        if !self.ensure_service() {
-            self.queue_task(SettingsTask::AddObserver(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().add_observer(task);
-        } else {
-            error!("Unable to get SettingsManagerImpl");
-        }
-
+        self.run_or_queue_task(Some(SettingsTask::AddObserver(task)));
         Ok(())
     }
 
@@ -658,24 +594,14 @@ impl SettingsManagerXpcom {
         let key: usize = unsafe { std::mem::transmute(observer) };
 
         let callback =
-            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback)).unwrap();
+            ThreadPtrHolder::new(cstr!("nsISidlDefaultResponse"), RefPtr::new(callback))?;
         let task = (SidlCallTask::new(callback), (name.to_string(), key));
 
-        if !self.ensure_service() {
-            self.queue_task(SettingsTask::RemoveObserver(task));
-            return Ok(());
-        }
-
-        if let Some(inner) = self.inner.lock().as_ref() {
-            return inner.lock().remove_observer(task);
-        } else {
-            error!("Unable to get SettingsManagerImpl");
-        }
-
+        self.run_or_queue_task(Some(SettingsTask::RemoveObserver(task)));
         Ok(())
     }
 
-    ensure_service_and_queue!(SettingsTask, "SettingsManager", SERVICE_FINGERPRINT);
+    task_runner!(SettingsTask, "SettingsManager", SERVICE_FINGERPRINT);
     xpcom_sidl_event_target!();
 }
 

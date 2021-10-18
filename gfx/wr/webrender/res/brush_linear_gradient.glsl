@@ -6,7 +6,9 @@
 
 #include shared,prim_shared,brush,gradient_shared
 
-flat varying vec2 v_start_point;
+// Start offset. Packed in to vector to work around bug 1630356.
+flat varying vec2 v_start_offset;
+
 flat varying vec2 v_scale_dir;
 
 #ifdef WR_VERTEX_SHADER
@@ -29,8 +31,8 @@ Gradient fetch_gradient(int address) {
 void brush_vs(
     VertexInfo vi,
     int prim_address,
-    RectWithSize local_rect,
-    RectWithSize segment_rect,
+    RectWithEndpoint local_rect,
+    RectWithEndpoint segment_rect,
     ivec4 prim_user_data,
     int specific_resource_address,
     mat4 transform,
@@ -55,71 +57,47 @@ void brush_vs(
     vec2 end_point = gradient.start_end_point.zw;
     vec2 dir = end_point - start_point;
 
-    v_start_point = start_point;
-    v_scale_dir = dir / dot(dir, dir);
-
     // Normalize UV and offsets to 0..1 scale.
-    v_start_point /= v_repeated_size;
+    v_scale_dir = dir / dot(dir, dir);
+    v_start_offset.x = dot(start_point, v_scale_dir);
     v_scale_dir *= v_repeated_size;
 }
 #endif
 
 #ifdef WR_FRAGMENT_SHADER
-float get_gradient_offset() {
-    // Get the brush position to solve for gradient offset.
-    vec2 pos = compute_gradient_pos();
-
+float get_gradient_offset(vec2 pos) {
     // Project position onto a direction vector to compute offset.
-    return dot(pos - v_start_point, v_scale_dir);
+    return dot(pos, v_scale_dir) - v_start_offset.x;
 }
 
 Fragment brush_fs() {
-    vec4 color = sample_gradient(get_gradient_offset());
+    vec4 color = sample_gradient(get_gradient_offset(compute_repeated_pos()));
 
 #ifdef WR_FEATURE_ALPHA_PASS
-    color *= init_transform_fs(v_local_pos);
+    color *= antialias_brush();
 #endif
 
     return Fragment(color);
 }
 
-#ifdef SWGL
+#ifdef SWGL_DRAW_SPAN
 void swgl_drawSpanRGBA8() {
-    int address = swgl_validateGradient(sGpuCache, get_gpu_cache_uv(v_gradient_address), int(GRADIENT_ENTRIES + 2.0));
+  int address = swgl_validateGradient(sGpuCache, get_gpu_cache_uv(v_gradient_address.x), int(GRADIENT_ENTRIES + 2.0));
     if (address < 0) {
         return;
     }
-#ifdef WR_FEATURE_ALPHA_PASS
-    if (has_valid_transform_bounds()) {
-        // If there is a transform, need to anti-alias the result.
+    #ifndef WR_FEATURE_ALPHA_PASS
+        swgl_commitLinearGradientRGBA8(sGpuCache, address, GRADIENT_ENTRIES, v_gradient_repeat.x != 0.0,
+                                       get_gradient_offset(v_pos));
+    #else
         while (swgl_SpanLength > 0) {
-            float alpha = init_transform_fs(v_local_pos);
-            v_local_pos += swgl_interpStep(v_local_pos);
-            float offset = get_gradient_offset();
-            // Handle both repeating and clamped gradients.
-            offset -= floor(offset) * v_gradient_repeat;
+            float offset = get_gradient_offset(compute_repeated_pos());
+            if (v_gradient_repeat.x != 0.0) offset = fract(offset);
             float entry = clamp_gradient_entry(offset);
-            swgl_commitGradientColorRGBA8(sGpuCache, address, entry, alpha);
-            v_pos += swgl_interpStep(v_pos);
-        }
-        return;
-    }
-#endif
-    if (v_gradient_repeat != 0.0) {
-        // The gradient repeats, so use fract() on the offset.
-        while (swgl_SpanLength > 0) {
-            float entry = clamp_gradient_entry(fract(get_gradient_offset()));
             swgl_commitGradientRGBA8(sGpuCache, address, entry);
             v_pos += swgl_interpStep(v_pos);
         }
-    } else {
-        // The gradient offset is only clamped.
-        while (swgl_SpanLength > 0) {
-            float entry = clamp_gradient_entry(get_gradient_offset());
-            swgl_commitGradientRGBA8(sGpuCache, address, entry);
-            v_pos += swgl_interpStep(v_pos);
-        }
-    }
+    #endif
 }
 #endif
 

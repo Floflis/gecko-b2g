@@ -6,19 +6,17 @@
 
 #include "TRRServiceBase.h"
 
-#include "mozilla/Logging.h"
 #include "mozilla/Preferences.h"
 #include "nsHostResolver.h"
 #include "nsNetUtil.h"
 #include "nsIOService.h"
 #include "nsIDNSService.h"
+// Put DNSLogging.h at the end to avoid LOG being overwritten by other headers.
+#include "DNSLogging.h"
+#include "mozilla/StaticPrefs_network.h"
 
 namespace mozilla {
 namespace net {
-
-#undef LOG
-extern mozilla::LazyLogModule gHostResolverLog;
-#define LOG(args) MOZ_LOG(gHostResolverLog, mozilla::LogLevel::Debug, args)
 
 TRRServiceBase::TRRServiceBase()
     : mMode(nsIDNSService::MODE_NATIVEONLY), mURISetByDetection(false) {}
@@ -76,7 +74,7 @@ void TRRServiceBase::CheckURIPrefs() {
   mURISetByDetection = false;
 
   // The user has set a custom URI so it takes precedence.
-  if (mURIPrefHasUserValue) {
+  if (!mURIPref.IsEmpty()) {
     MaybeSetPrivateURI(mURIPref);
     return;
   }
@@ -88,7 +86,7 @@ void TRRServiceBase::CheckURIPrefs() {
   }
 
   // Otherwise just use the default value.
-  MaybeSetPrivateURI(mURIPref);
+  MaybeSetPrivateURI(mDefaultURIPref);
 }
 
 // static
@@ -127,6 +125,7 @@ void TRRServiceBase::OnTRRModeChange() {
   uint32_t oldMode = mMode;
   mMode = ModeFromPrefs();
   if (mMode != oldMode) {
+    LOG(("TRR Mode changed from %d to %d", oldMode, int(mMode)));
     nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
     if (obs) {
       obs->NotifyObservers(nullptr, NS_NETWORK_TRR_MODE_CHANGED_TOPIC, nullptr);
@@ -143,9 +142,9 @@ void TRRServiceBase::OnTRRModeChange() {
 }
 
 void TRRServiceBase::OnTRRURIChange() {
-  mURIPrefHasUserValue = Preferences::HasUserValue("network.trr.uri");
   Preferences::GetCString("network.trr.uri", mURIPref);
   Preferences::GetCString(kRolloutURIPref, mRolloutURIPref);
+  Preferences::GetCString("network.trr.default_provider_uri", mDefaultURIPref);
 
   CheckURIPrefs();
 }

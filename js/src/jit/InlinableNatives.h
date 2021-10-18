@@ -9,8 +9,6 @@
 
 #include <stdint.h>  // For uint16_t
 
-#include "jspubtd.h"  // For JSClass
-
 #define INLINABLE_NATIVE_LIST(_)                   \
   _(Array)                                         \
   _(ArrayIsArray)                                  \
@@ -65,6 +63,9 @@
   _(IntlGuardToPluralRules)                        \
   _(IntlGuardToRelativeTimeFormat)                 \
                                                    \
+  _(MapGet)                                        \
+  _(MapHas)                                        \
+                                                   \
   _(MathAbs)                                       \
   _(MathFloor)                                     \
   _(MathCeil)                                      \
@@ -113,6 +114,8 @@
   _(RegExpPrototypeOptimizable)                    \
   _(RegExpInstanceOptimizable)                     \
   _(GetFirstDollarIndex)                           \
+                                                   \
+  _(SetHas)                                        \
                                                    \
   _(String)                                        \
   _(StringToString)                                \
@@ -192,8 +195,9 @@
   _(IntrinsicTypedArrayLength)                     \
   _(IntrinsicPossiblyWrappedTypedArrayLength)      \
   _(IntrinsicTypedArrayByteOffset)                 \
-  _(IntrinsicTypedArrayElementShift)
+  _(IntrinsicTypedArrayElementSize)
 
+struct JSClass;
 class JSJitInfo;
 
 namespace js {

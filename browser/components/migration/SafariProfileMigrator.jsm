@@ -8,7 +8,6 @@ const { FileUtils } = ChromeUtils.import(
   "resource://gre/modules/FileUtils.jsm"
 );
 const { OS } = ChromeUtils.import("resource://gre/modules/osfile.jsm");
-const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
@@ -70,9 +69,6 @@ Bookmarks.prototype = {
       ) {
         PlacesUIUtils.maybeToggleBookmarkToolbarVisibilityAfterMigration();
       }
-      Services.telemetry
-        .getKeyedHistogramById("FX_MIGRATION_BOOKMARKS_ROOTS")
-        .add("safari", this._histogramBookmarkRoots);
     })().then(
       () => aCallback(true),
       e => {
@@ -149,34 +145,12 @@ Bookmarks.prototype = {
       }
       case this.MENU_COLLECTION: {
         folderGuid = PlacesUtils.bookmarks.menuGuid;
-        if (
-          !Services.prefs.getBoolPref("browser.toolbars.bookmarks.2h2020") &&
-          !MigrationUtils.isStartupMigration &&
-          PlacesUtils.getChildCountForFolder(folderGuid) >
-            PlacesUIUtils.NUM_TOOLBAR_BOOKMARKS_TO_UNHIDE
-        ) {
-          folderGuid = await MigrationUtils.createImportedBookmarksFolder(
-            "Safari",
-            folderGuid
-          );
-        }
         this._histogramBookmarkRoots |=
           MigrationUtils.SOURCE_BOOKMARK_ROOTS_BOOKMARKS_MENU;
         break;
       }
       case this.TOOLBAR_COLLECTION: {
         folderGuid = PlacesUtils.bookmarks.toolbarGuid;
-        if (
-          !Services.prefs.getBoolPref("browser.toolbars.bookmarks.2h2020") &&
-          !MigrationUtils.isStartupMigration &&
-          PlacesUtils.getChildCountForFolder(folderGuid) >
-            PlacesUIUtils.NUM_TOOLBAR_BOOKMARKS_TO_UNHIDE
-        ) {
-          folderGuid = await MigrationUtils.createImportedBookmarksFolder(
-            "Safari",
-            folderGuid
-          );
-        }
         this._histogramBookmarkRoots |=
           MigrationUtils.SOURCE_BOOKMARK_ROOTS_BOOKMARKS_TOOLBAR;
         break;

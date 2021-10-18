@@ -95,102 +95,122 @@ enum class ExplicitActiveStatus : uint8_t {
 //  * `CanSet` is called before attempting to set the value, in both the process
 //    which calls `Set`, and the parent process, and will kill the misbehaving
 //    process if it fails.
-#define MOZ_EACH_BC_FIELD(FIELD)                                             \
-  FIELD(Name, nsString)                                                      \
-  FIELD(Closed, bool)                                                        \
-  FIELD(ExplicitActive, ExplicitActiveStatus)                                \
-  /* Top()-only. If true, new-playing media will be suspended when in an     \
-   * inactive browsing context. */                                           \
-  FIELD(SuspendMediaWhenInactive, bool)                                      \
-  /* If true, we're within the nested event loop in window.open, and this    \
-   * context may not be used as the target of a load */                      \
-  FIELD(PendingInitialization, bool)                                         \
-  /* Indicates if the browser window is active for the purpose of the        \
-   * :-moz-window-inactive pseudoclass. Only read from or set on the         \
-   * top BrowsingContext. */                                                 \
-  FIELD(IsActiveBrowserWindowInternal, bool)                                 \
-  FIELD(OpenerPolicy, nsILoadInfo::CrossOriginOpenerPolicy)                  \
-  /* Current opener for the BrowsingContext. Weak reference */               \
-  FIELD(OpenerId, uint64_t)                                                  \
-  FIELD(OnePermittedSandboxedNavigatorId, uint64_t)                          \
-  /* WindowID of the inner window which embeds this BC */                    \
-  FIELD(EmbedderInnerWindowId, uint64_t)                                     \
-  FIELD(CurrentInnerWindowId, uint64_t)                                      \
-  FIELD(HadOriginalOpener, bool)                                             \
-  FIELD(IsPopupSpam, bool)                                                   \
-  /* Hold the audio muted state and should be used on top level browsing     \
-   * contexts only */                                                        \
-  FIELD(Muted, bool)                                                         \
-  /* See nsSandboxFlags.h for the possible flags. */                         \
-  FIELD(SandboxFlags, uint32_t)                                              \
-  FIELD(InitialSandboxFlags, uint32_t)                                       \
-  /* A non-zero unique identifier for the browser element that is hosting    \
-   * this                                                                    \
-   * BrowsingContext tree. Every BrowsingContext in the element's tree will  \
-   * return the same ID in all processes and it will remain stable           \
-   * regardless of process changes. When a browser element's frameloader is  \
-   * switched to another browser element this ID will remain the same but    \
-   * hosted under the under the new browser element. */                      \
-  FIELD(BrowserId, uint64_t)                                                 \
-  FIELD(HistoryID, nsID)                                                     \
-  FIELD(InRDMPane, bool)                                                     \
-  FIELD(Loading, bool)                                                       \
-  /* A field only set on top browsing contexts, which indicates that either: \
-   *                                                                         \
-   *  * This is a browsing context created explicitly for printing or print  \
-   *    preview (thus hosting static documents).                             \
-   *                                                                         \
-   *  * This is a browsing context where something in this tree is calling   \
-   *    window.print() (and thus showing a modal dialog).                    \
-   *                                                                         \
-   * We use it exclusively to block navigation for both of these cases. */   \
-  FIELD(IsPrinting, bool)                                                    \
-  FIELD(AncestorLoading, bool)                                               \
-  FIELD(AllowPlugins, bool)                                                  \
-  FIELD(AllowContentRetargeting, bool)                                       \
-  FIELD(AllowContentRetargetingOnChildren, bool)                             \
-  FIELD(ForceEnableTrackingProtection, bool)                                 \
-  FIELD(UseGlobalHistory, bool)                                              \
-  FIELD(FullscreenAllowedByOwner, bool)                                      \
-  /* These field are used to store the states of autoplay media request on   \
-   * GeckoView only, and it would only be modified on the top level browsing \
-   * context. */                                                             \
-  FIELD(GVAudibleAutoplayRequestStatus, GVAutoplayRequestStatus)             \
-  FIELD(GVInaudibleAutoplayRequestStatus, GVAutoplayRequestStatus)           \
-  /* ScreenOrientation-related APIs */                                       \
-  FIELD(CurrentOrientationAngle, float)                                      \
-  FIELD(CurrentOrientationType, mozilla::dom::OrientationType)               \
-  FIELD(OrientationLock, mozilla::hal::ScreenOrientation)                    \
-  FIELD(UserAgentOverride, nsString)                                         \
-  FIELD(TouchEventsOverrideInternal, mozilla::dom::TouchEventsOverride)      \
-  FIELD(EmbedderElementType, Maybe<nsString>)                                \
-  FIELD(MessageManagerGroup, nsString)                                       \
-  FIELD(MaxTouchPointsOverride, uint8_t)                                     \
-  FIELD(FullZoom, float)                                                     \
-  FIELD(WatchedByDevToolsInternal, bool)                                     \
-  FIELD(TextZoom, float)                                                     \
-  /* The current in-progress load. */                                        \
-  FIELD(CurrentLoadIdentifier, Maybe<uint64_t>)                              \
-  /* See nsIRequest for possible flags. */                                   \
-  FIELD(DefaultLoadFlags, uint32_t)                                          \
-  /* Signals that session history is enabled for this browsing context tree. \
-   * This is only ever set to true on the top BC, so consumers need to get   \
-   * the value from the top BC! */                                           \
-  FIELD(HasSessionHistory, bool)                                             \
-  /* Tracks if this context is the only top-level document in the session    \
-   * history of the context. */                                              \
-  FIELD(IsSingleToplevelInHistory, bool)                                     \
-  FIELD(UseErrorPages, bool)                                                 \
-  FIELD(PlatformOverride, nsString)                                          \
-  FIELD(HasLoadedNonInitialDocument, bool)                                   \
-  FIELD(CreatedDynamically, bool)                                            \
-  /* Default value for nsIContentViewer::authorStyleDisabled in any new      \
-   * browsing contexts created as a descendant of this one.  Valid only for  \
-   * top BCs. */                                                             \
-  FIELD(AuthorStyleDisabledDefault, bool)                                    \
-  FIELD(DisplayMode, mozilla::dom::DisplayMode)                              \
-  /* True if the top level browsing context owns a main media controller */  \
-  FIELD(HasMainMediaController, bool)
+#define MOZ_EACH_BC_FIELD(FIELD)                                              \
+  FIELD(Name, nsString)                                                       \
+  FIELD(Closed, bool)                                                         \
+  FIELD(ExplicitActive, ExplicitActiveStatus)                                 \
+  /* Top()-only. If true, new-playing media will be suspended when in an      \
+   * inactive browsing context. */                                            \
+  FIELD(SuspendMediaWhenInactive, bool)                                       \
+  /* If true, we're within the nested event loop in window.open, and this     \
+   * context may not be used as the target of a load */                       \
+  FIELD(PendingInitialization, bool)                                          \
+  /* Indicates if the browser window is active for the purpose of the         \
+   * :-moz-window-inactive pseudoclass. Only read from or set on the          \
+   * top BrowsingContext. */                                                  \
+  FIELD(IsActiveBrowserWindowInternal, bool)                                  \
+  FIELD(OpenerPolicy, nsILoadInfo::CrossOriginOpenerPolicy)                   \
+  /* Current opener for the BrowsingContext. Weak reference */                \
+  FIELD(OpenerId, uint64_t)                                                   \
+  FIELD(OnePermittedSandboxedNavigatorId, uint64_t)                           \
+  /* WindowID of the inner window which embeds this BC */                     \
+  FIELD(EmbedderInnerWindowId, uint64_t)                                      \
+  FIELD(CurrentInnerWindowId, uint64_t)                                       \
+  FIELD(HadOriginalOpener, bool)                                              \
+  FIELD(IsPopupSpam, bool)                                                    \
+  /* Hold the audio muted state and should be used on top level browsing      \
+   * contexts only */                                                         \
+  FIELD(Muted, bool)                                                          \
+  /* See nsSandboxFlags.h for the possible flags. */                          \
+  FIELD(SandboxFlags, uint32_t)                                               \
+  FIELD(InitialSandboxFlags, uint32_t)                                        \
+  /* A non-zero unique identifier for the browser element that is hosting     \
+   * this                                                                     \
+   * BrowsingContext tree. Every BrowsingContext in the element's tree will   \
+   * return the same ID in all processes and it will remain stable            \
+   * regardless of process changes. When a browser element's frameloader is   \
+   * switched to another browser element this ID will remain the same but     \
+   * hosted under the under the new browser element. */                       \
+  FIELD(BrowserId, uint64_t)                                                  \
+  FIELD(HistoryID, nsID)                                                      \
+  FIELD(InRDMPane, bool)                                                      \
+  FIELD(Loading, bool)                                                        \
+  /* A field only set on top browsing contexts, which indicates that either:  \
+   *                                                                          \
+   *  * This is a browsing context created explicitly for printing or print   \
+   *    preview (thus hosting static documents).                              \
+   *                                                                          \
+   *  * This is a browsing context where something in this tree is calling    \
+   *    window.print() (and thus showing a modal dialog).                     \
+   *                                                                          \
+   * We use it exclusively to block navigation for both of these cases. */    \
+  FIELD(IsPrinting, bool)                                                     \
+  FIELD(AncestorLoading, bool)                                                \
+  FIELD(AllowPlugins, bool)                                                   \
+  FIELD(AllowContentRetargeting, bool)                                        \
+  FIELD(AllowContentRetargetingOnChildren, bool)                              \
+  FIELD(ForceEnableTrackingProtection, bool)                                  \
+  FIELD(UseGlobalHistory, bool)                                               \
+  FIELD(FullscreenAllowedByOwner, bool)                                       \
+  /* These field are used to store the states of autoplay media request on    \
+   * GeckoView only, and it would only be modified on the top level browsing  \
+   * context. */                                                              \
+  FIELD(GVAudibleAutoplayRequestStatus, GVAutoplayRequestStatus)              \
+  FIELD(GVInaudibleAutoplayRequestStatus, GVAutoplayRequestStatus)            \
+  /* ScreenOrientation-related APIs */                                        \
+  FIELD(CurrentOrientationAngle, float)                                       \
+  FIELD(CurrentOrientationType, mozilla::dom::OrientationType)                \
+  FIELD(OrientationLock, mozilla::hal::ScreenOrientation)                     \
+  FIELD(UserAgentOverride, nsString)                                          \
+  FIELD(TouchEventsOverrideInternal, mozilla::dom::TouchEventsOverride)       \
+  FIELD(EmbedderElementType, Maybe<nsString>)                                 \
+  FIELD(MessageManagerGroup, nsString)                                        \
+  FIELD(MaxTouchPointsOverride, uint8_t)                                      \
+  FIELD(FullZoom, float)                                                      \
+  FIELD(WatchedByDevToolsInternal, bool)                                      \
+  FIELD(TextZoom, float)                                                      \
+  FIELD(OverrideDPPX, float)                                                  \
+  /* The current in-progress load. */                                         \
+  FIELD(CurrentLoadIdentifier, Maybe<uint64_t>)                               \
+  /* See nsIRequest for possible flags. */                                    \
+  FIELD(DefaultLoadFlags, uint32_t)                                           \
+  /* Signals that session history is enabled for this browsing context tree.  \
+   * This is only ever set to true on the top BC, so consumers need to get    \
+   * the value from the top BC! */                                            \
+  FIELD(HasSessionHistory, bool)                                              \
+  /* Tracks if this context is the only top-level document in the session     \
+   * history of the context. */                                               \
+  FIELD(IsSingleToplevelInHistory, bool)                                      \
+  FIELD(UseErrorPages, bool)                                                  \
+  FIELD(PlatformOverride, nsString)                                           \
+  /* Specifies if this BC has loaded documents besides the initial            \
+   * about:blank document. about:privatebrowsing, about:home, about:newtab    \
+   * and non-initial about:blank are not considered to be initial             \
+   * documents. */                                                            \
+  FIELD(HasLoadedNonInitialDocument, bool)                                    \
+  /* Default value for nsIContentViewer::authorStyleDisabled in any new       \
+   * browsing contexts created as a descendant of this one.  Valid only for   \
+   * top BCs. */                                                              \
+  FIELD(AuthorStyleDisabledDefault, bool)                                     \
+  FIELD(ServiceWorkersTestingEnabled, bool)                                   \
+  FIELD(MediumOverride, nsString)                                             \
+  FIELD(PrefersColorSchemeOverride, mozilla::dom::PrefersColorSchemeOverride) \
+  FIELD(DisplayMode, mozilla::dom::DisplayMode)                               \
+  /* The number of entries added to the session history because of this       \
+   * browsing context. */                                                     \
+  FIELD(HistoryEntryCount, uint32_t)                                          \
+  /* Don't use the getter of the field, but IsInBFCache() method */           \
+  FIELD(IsInBFCache, bool)                                                    \
+  FIELD(HasRestoreData, bool)                                                 \
+  FIELD(SessionStoreEpoch, uint32_t)                                          \
+  /* Whether we can execute scripts in this BrowsingContext. Has no effect    \
+   * unless scripts are also allowed in the parent WindowContext. */          \
+  FIELD(AllowJavascript, bool)                                                \
+  FIELD(IsTopOfNestedWebView, bool)                                           \
+  /* The count of request that are used to prevent the browsing context tree  \
+   * from being suspended, which would ONLY be modified on the top level      \
+   * context in the chrome process because that's a non-atomic counter */     \
+  FIELD(PageAwakeRequestCount, uint32_t)
 
 // BrowsingContext, in this context, is the cross process replicated
 // environment in which information about documents is stored. In
@@ -216,6 +236,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   static void Init();
   static LogModule* GetLog();
+  static LogModule* GetSyncLog();
 
   // Look up a BrowsingContext in the current process by ID.
   static already_AddRefed<BrowsingContext> Get(uint64_t aId);
@@ -225,6 +246,12 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   // Look up the top-level BrowsingContext by BrowserID.
   static already_AddRefed<BrowsingContext> GetCurrentTopByBrowserId(
       uint64_t aBrowserId);
+  static already_AddRefed<BrowsingContext> GetCurrentTopByBrowserId(
+      GlobalObject&, uint64_t aId) {
+    return GetCurrentTopByBrowserId(aId);
+  }
+
+  static bool ContainCurrentTopByBrowserId(uint64_t aBrowserId);
 
   static already_AddRefed<BrowsingContext> GetFromWindow(
       WindowProxyHolder& aProxy);
@@ -352,9 +379,6 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   void DisplayLoadError(const nsAString& aURI);
 
-  // Determine if the current BrowsingContext is in the BFCache.
-  bool IsCached() const;
-
   // Check that this browsing context is targetable for navigations (i.e. that
   // it is neither closed, cached, nor discarded).
   bool IsTargetable() const;
@@ -371,24 +395,30 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   bool IsChrome() const { return !IsContent(); }
 
   bool IsTop() const { return !GetParent(); }
-  bool IsFrame() const { return !IsTop(); }
+  bool IsSubframe() const { return !IsTop(); }
 
   bool IsTopContent() const { return IsContent() && IsTop(); }
+  bool IsTopContentOfNestedWebView() const {
+    return IsContent() && GetIsTopOfNestedWebView();
+  }
 
   bool IsInSubtreeOf(BrowsingContext* aContext);
 
-  bool IsContentSubframe() const { return IsContent() && IsFrame(); }
+  bool IsContentSubframe() const { return IsContent() && IsSubframe(); }
+
   // non-zero
   uint64_t Id() const { return mBrowsingContextId; }
 
   BrowsingContext* GetParent() const;
   BrowsingContext* Top();
+  const BrowsingContext* Top() const;
+
   int32_t IndexOf(BrowsingContext* aChild);
 
   // NOTE: Unlike `GetEmbedderWindowGlobal`, `GetParentWindowContext` does not
   // cross toplevel content browser boundaries.
   WindowContext* GetParentWindowContext() const { return mParentWindow; }
-  WindowContext* GetTopWindowContext();
+  WindowContext* GetTopWindowContext() const;
 
   already_AddRefed<BrowsingContext> GetOpener() const {
     RefPtr<BrowsingContext> opener(Get(GetOpenerId()));
@@ -432,7 +462,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
     }
   }
 
-  uint32_t SandboxFlags() { return GetSandboxFlags(); }
+  uint32_t SandboxFlags() const { return GetSandboxFlags(); }
 
   Span<RefPtr<BrowsingContext>> Children() const;
   void GetChildren(nsTArray<RefPtr<BrowsingContext>>& aChildren);
@@ -450,8 +480,38 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   // Helpers to traverse this BrowsingContext subtree. Note that these will only
   // traverse active contexts, and will ignore ones in the BFCache.
-  void PreOrderWalk(const std::function<void(BrowsingContext*)>& aCallback);
+  enum class WalkFlag {
+    Next,
+    Skip,
+    Stop,
+  };
+
+  /**
+   * Walk the browsing context tree in pre-order and call `aCallback`
+   * for every node in the tree. PreOrderWalk accepts two types of
+   * callbacks, either of the type `void(BrowsingContext*)` or
+   * `WalkFlag(BrowsingContext*)`. The former traverses the entire
+   * tree, but the latter let's you control if a sub-tree should be
+   * skipped by returning `WalkFlag::Skip`, completely abort traversal
+   * by returning `WalkFlag::Stop` or continue as normal with
+   * `WalkFlag::Next`.
+   */
+  template <typename F>
+  void PreOrderWalk(F&& aCallback) {
+    if constexpr (std::is_void_v<
+                      typename std::invoke_result_t<F, BrowsingContext*>>) {
+      PreOrderWalkVoid(std::forward<F>(aCallback));
+    } else {
+      PreOrderWalkFlag(std::forward<F>(aCallback));
+    }
+  }
+
+  void PreOrderWalkVoid(const std::function<void(BrowsingContext*)>& aCallback);
+  WalkFlag PreOrderWalkFlag(
+      const std::function<WalkFlag(BrowsingContext*)>& aCallback);
+
   void PostOrderWalk(const std::function<void(BrowsingContext*)>& aCallback);
+
   void GetAllBrowsingContextsInSubtree(
       nsTArray<RefPtr<BrowsingContext>>& aBrowsingContexts);
 
@@ -476,16 +536,14 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   bool WatchedByDevTools();
   void SetWatchedByDevTools(bool aWatchedByDevTools, ErrorResult& aRv);
 
-  mozilla::dom::TouchEventsOverride TouchEventsOverride() const;
-  void SetTouchEventsOverride(
-      const enum TouchEventsOverride aTouchEventsOverride, ErrorResult& aRv);
-  MOZ_MUST_USE nsresult
-  SetTouchEventsOverride(const enum TouchEventsOverride aTouchEventsOverride);
+  dom::TouchEventsOverride TouchEventsOverride() const;
 
   bool FullscreenAllowed() const;
 
   float FullZoom() const { return GetFullZoom(); }
   float TextZoom() const { return GetTextZoom(); }
+
+  float OverrideDPPX() const { return Top()->GetOverrideDPPX(); }
 
   bool SuspendMediaWhenInactive() const {
     return GetSuspendMediaWhenInactive();
@@ -595,7 +653,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   Nullable<WindowProxyHolder> GetWindow();
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
-  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(BrowsingContext)
+  NS_DECL_CYCLE_COLLECTION_SKIPPABLE_SCRIPT_HOLDER_CLASS(BrowsingContext)
   NS_DECL_NSILOADCONTEXT
 
   // Window APIs that are cross-origin-accessible (from the HTML spec).
@@ -607,7 +665,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   void Close(CallerType aCallerType, ErrorResult& aError);
   bool GetClosed(ErrorResult&) { return GetClosed(); }
   void Focus(CallerType aCallerType, ErrorResult& aError);
-  void Blur(ErrorResult& aError);
+  void Blur(CallerType aCallerType, ErrorResult& aError);
   WindowProxyHolder GetFrames(ErrorResult& aError);
   int32_t Length() const { return Children().Length(); }
   Nullable<WindowProxyHolder> GetTop(ErrorResult& aError);
@@ -665,6 +723,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
     bool mUseRemoteTabs = false;
     bool mUseRemoteSubframes = false;
     bool mCreatedDynamically = false;
+    int32_t mChildOffset = 0;
     int32_t mSessionHistoryIndex = -1;
     int32_t mSessionHistoryCount = 0;
     OriginAttributes mOriginAttributes;
@@ -703,6 +762,10 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   bool CreatedDynamically() const { return mCreatedDynamically; }
 
+  int32_t ChildOffset() const { return mChildOffset; }
+
+  bool GetOffsetPath(nsTArray<uint32_t>& aPath) const;
+
   const OriginAttributes& OriginAttributesRef() { return mOriginAttributes; }
   nsresult SetOriginAttributes(const OriginAttributes& aAttrs);
 
@@ -718,15 +781,14 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   bool CrossOriginIsolated();
 
-  void SessionHistoryChanged(int32_t aIndexDelta, int32_t aLengthDelta);
-
   // Check if it is allowed to open a popup from the current browsing
   // context or any of its ancestors.
   bool IsPopupAllowed();
 
   void SessionHistoryCommit(const LoadingSessionHistoryInfo& aInfo,
                             uint32_t aLoadType, bool aHadActiveEntry,
-                            bool aPersist, bool aCloneEntryChildren);
+                            bool aPersist, bool aCloneEntryChildren,
+                            bool aChannelExpired);
 
   // Set a new active entry on this browsing context. This is used for
   // implementing history.pushState/replaceState and same document navigations.
@@ -749,7 +811,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   void RemoveDynEntriesFromActiveSessionHistoryEntry();
 
   // Removes entries corresponding to this BrowsingContext from session history.
-  void RemoveFromSessionHistory();
+  void RemoveFromSessionHistory(const nsID& aChangeID);
 
   void SetTriggeringAndInheritPrincipals(nsIPrincipal* aTriggeringPrincipal,
                                          nsIPrincipal* aPrincipalToInherit,
@@ -761,7 +823,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   GetTriggeringAndInheritPrincipalsForCurrentLoad();
 
   void HistoryGo(int32_t aOffset, uint64_t aHistoryEpoch,
-                 bool aRequireUserInteraction,
+                 bool aRequireUserInteraction, bool aUserActivation,
                  std::function<void(int32_t&&)>&& aResolver);
 
   bool ShouldUpdateSessionHistory(uint32_t aLoadType);
@@ -781,8 +843,43 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   // Returns canFocus, isActive
   std::tuple<bool, bool> CanFocusCheck(CallerType aCallerType);
 
+  bool CanBlurCheck(CallerType aCallerType);
+
   PopupBlocker::PopupControlState RevisePopupAbuseLevel(
       PopupBlocker::PopupControlState aControl);
+
+  void IncrementHistoryEntryCountForBrowsingContext();
+
+  bool ServiceWorkersTestingEnabled() const {
+    return GetServiceWorkersTestingEnabled();
+  }
+
+  void GetMediumOverride(nsAString& aOverride) const {
+    aOverride = GetMediumOverride();
+  }
+
+  dom::PrefersColorSchemeOverride PrefersColorSchemeOverride() const {
+    return GetPrefersColorSchemeOverride();
+  }
+
+  void FlushSessionStore();
+
+  bool IsInBFCache() const;
+
+  bool AllowJavascript() const { return GetAllowJavascript(); }
+  bool CanExecuteScripts() const { return mCanExecuteScripts; }
+
+  uint32_t DefaultLoadFlags() const { return GetDefaultLoadFlags(); }
+
+  // When request for page awake, it would increase a count that is used to
+  // prevent whole browsing context tree from being suspended. The request can
+  // be called multiple times. When calling the revoke, it would decrease the
+  // count and once the count reaches to zero, the browsing context tree could
+  // be suspended when the tree is inactive.
+  void RequestForPageAwake();
+  void RevokeForPageAwake();
+
+  void AddDiscardListener(std::function<void(uint64_t)>&& aListener);
 
  protected:
   virtual ~BrowsingContext();
@@ -797,6 +894,12 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
  private:
   void Attach(bool aFromIPC, ContentParent* aOriginProcess);
+
+  // Recomputes whether we can execute scripts in this BrowsingContext based on
+  // the value of AllowJavascript() and whether scripts are allowed in the
+  // parent WindowContext. Called whenever the AllowJavascript() flag or the
+  // parent WC changes.
+  void RecomputeCanExecuteScripts();
 
   // Find the special browsing context if aName is '_self', '_parent',
   // '_top', but not '_blank'. The latter is handled in FindWithName
@@ -862,6 +965,13 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   void SendCommitTransaction(ContentChild* aChild, const BaseTransaction& aTxn,
                              uint64_t aEpoch);
 
+  bool CanSet(FieldIndex<IDX_SessionStoreEpoch>, uint32_t aEpoch,
+              ContentParent* aSource) {
+    return IsTop() && !aSource;
+  }
+
+  using CanSetResult = syncedcontext::CanSetResult;
+
   // Ensure that opener is in the same BrowsingContextGroup.
   bool CanSet(FieldIndex<IDX_OpenerId>, const uint64_t& aValue,
               ContentParent* aSource) {
@@ -872,16 +982,40 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
     return true;
   }
 
+  bool CanSet(FieldIndex<IDX_ServiceWorkersTestingEnabled>, bool,
+              ContentParent*) {
+    return IsTop();
+  }
+
+  bool CanSet(FieldIndex<IDX_MediumOverride>, const nsString&, ContentParent*) {
+    return IsTop();
+  }
+
+  bool CanSet(FieldIndex<IDX_PrefersColorSchemeOverride>,
+              dom::PrefersColorSchemeOverride, ContentParent*) {
+    return IsTop();
+  }
+
+  void DidSet(FieldIndex<IDX_InRDMPane>, bool aOldValue);
+
+  void DidSet(FieldIndex<IDX_PrefersColorSchemeOverride>,
+              dom::PrefersColorSchemeOverride aOldValue);
+
+  void DidSet(FieldIndex<IDX_MediumOverride>, nsString&& aOldValue);
+
   bool CanSet(FieldIndex<IDX_SuspendMediaWhenInactive>, bool, ContentParent*) {
     return IsTop();
   }
 
   bool CanSet(FieldIndex<IDX_TouchEventsOverrideInternal>,
-              const enum TouchEventsOverride& aTouchEventsOverride,
+              dom::TouchEventsOverride aTouchEventsOverride,
               ContentParent* aSource);
 
   bool CanSet(FieldIndex<IDX_DisplayMode>, const enum DisplayMode& aDisplayMode,
-              ContentParent* aSource);
+              ContentParent* aSource) {
+    return IsTop();
+  }
+
   void DidSet(FieldIndex<IDX_DisplayMode>, enum DisplayMode aOldValue);
 
   void DidSet(FieldIndex<IDX_ExplicitActive>, ExplicitActiveStatus aOldValue);
@@ -895,11 +1029,15 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   // volume of all media elements.
   void DidSet(FieldIndex<IDX_Muted>);
 
+  bool CanSet(FieldIndex<IDX_OverrideDPPX>, const float& aValue,
+              ContentParent* aSource);
+  void DidSet(FieldIndex<IDX_OverrideDPPX>, float aOldValue);
+
   bool CanSet(FieldIndex<IDX_EmbedderInnerWindowId>, const uint64_t& aValue,
               ContentParent* aSource);
 
-  bool CanSet(FieldIndex<IDX_CurrentInnerWindowId>, const uint64_t& aValue,
-              ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_CurrentInnerWindowId>,
+                      const uint64_t& aValue, ContentParent* aSource);
 
   void DidSet(FieldIndex<IDX_CurrentInnerWindowId>);
 
@@ -916,12 +1054,13 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   void DidSet(FieldIndex<IDX_AncestorLoading>);
 
   void DidSet(FieldIndex<IDX_PlatformOverride>);
-  bool CanSet(FieldIndex<IDX_PlatformOverride>,
-              const nsString& aPlatformOverride, ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_PlatformOverride>,
+                      const nsString& aPlatformOverride,
+                      ContentParent* aSource);
 
   void DidSet(FieldIndex<IDX_UserAgentOverride>);
-  bool CanSet(FieldIndex<IDX_UserAgentOverride>, const nsString& aUserAgent,
-              ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_UserAgentOverride>,
+                      const nsString& aUserAgent, ContentParent* aSource);
   bool CanSet(FieldIndex<IDX_OrientationLock>,
               const mozilla::hal::ScreenOrientation& aOrientationLock,
               ContentParent* aSource);
@@ -932,20 +1071,22 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   bool CanSet(FieldIndex<IDX_MessageManagerGroup>,
               const nsString& aMessageManagerGroup, ContentParent* aSource);
 
-  bool CanSet(FieldIndex<IDX_AllowContentRetargeting>,
-              const bool& aAllowContentRetargeting, ContentParent* aSource);
-  bool CanSet(FieldIndex<IDX_AllowContentRetargetingOnChildren>,
-              const bool& aAllowContentRetargetingOnChildren,
-              ContentParent* aSource);
-  bool CanSet(FieldIndex<IDX_AllowPlugins>, const bool& aAllowPlugins,
-              ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_AllowContentRetargeting>,
+                      const bool& aAllowContentRetargeting,
+                      ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_AllowContentRetargetingOnChildren>,
+                      const bool& aAllowContentRetargetingOnChildren,
+                      ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_AllowPlugins>, const bool& aAllowPlugins,
+                      ContentParent* aSource);
   bool CanSet(FieldIndex<IDX_FullscreenAllowedByOwner>, const bool&,
               ContentParent*);
   bool CanSet(FieldIndex<IDX_WatchedByDevToolsInternal>,
               const bool& aWatchedByDevToolsInternal, ContentParent* aSource);
 
-  bool CanSet(FieldIndex<IDX_DefaultLoadFlags>,
-              const uint32_t& aDefaultLoadFlags, ContentParent* aSource);
+  CanSetResult CanSet(FieldIndex<IDX_DefaultLoadFlags>,
+                      const uint32_t& aDefaultLoadFlags,
+                      ContentParent* aSource);
   void DidSet(FieldIndex<IDX_DefaultLoadFlags>);
 
   bool CanSet(FieldIndex<IDX_UseGlobalHistory>, const bool& aUseGlobalHistory,
@@ -962,9 +1103,16 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   bool CanSet(FieldIndex<IDX_PendingInitialization>, bool aNewValue,
               ContentParent* aSource);
 
-  bool CanSet(FieldIndex<IDX_HasMainMediaController>, bool aNewValue,
+  bool CanSet(FieldIndex<IDX_PageAwakeRequestCount>, uint32_t aNewValue,
               ContentParent* aSource);
-  void DidSet(FieldIndex<IDX_HasMainMediaController>, bool aOldValue);
+  void DidSet(FieldIndex<IDX_PageAwakeRequestCount>, uint32_t aOldValue);
+
+  CanSetResult CanSet(FieldIndex<IDX_AllowJavascript>, bool aValue,
+                      ContentParent* aSource);
+  void DidSet(FieldIndex<IDX_AllowJavascript>, bool aOldValue);
+
+  bool CanSet(FieldIndex<IDX_HasRestoreData>, bool aNewValue,
+              ContentParent* aSource);
 
   template <size_t I, typename T>
   bool CanSet(FieldIndex<I>, const T&, ContentParent*) {
@@ -983,10 +1131,13 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   void DidSet(FieldIndex<IDX_TextZoom>, float aOldValue);
   void DidSet(FieldIndex<IDX_AuthorStyleDisabledDefault>);
 
-  // True if the process attemping to set field is the same as the owning
+  bool CanSet(FieldIndex<IDX_IsInBFCache>, bool, ContentParent* aSource);
+  void DidSet(FieldIndex<IDX_IsInBFCache>);
+
+  // Allow if the process attemping to set field is the same as the owning
   // process. Deprecated. New code that might use this should generally be moved
   // to WindowContext or be settable only by the parent process.
-  bool LegacyCheckOnlyOwningProcessCanSet(ContentParent* aSource);
+  CanSetResult LegacyRevertIfNotOwningOrParentProcess(ContentParent* aSource);
 
   // True if the process attempting to set field is the same as the embedder's
   // process.
@@ -1071,6 +1222,20 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   // True if this BrowsingContext is for a frame that was added dynamically.
   bool mCreatedDynamically : 1;
 
+  // Set to true if the browsing context is in the bfcache and pagehide has been
+  // dispatched. When coming out from the bfcache, the value is set to false
+  // before dispatching pageshow.
+  bool mIsInBFCache : 1;
+
+  // Determines if we can execute scripts in this BrowsingContext. True if
+  // AllowJavascript() is true and script execution is allowed in the parent
+  // WindowContext.
+  bool mCanExecuteScripts : 1;
+
+  // The original offset of this context in its container. This property is -1
+  // if this BrowsingContext is for a frame that was added dynamically.
+  int32_t mChildOffset;
+
   // The start time of user gesture, this is only available if the browsing
   // context is in process.
   TimeStamp mUserGestureStart;
@@ -1108,6 +1273,8 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
 
   RefPtr<SessionStorageManager> mSessionStorageManager;
   RefPtr<ChildSHistory> mChildSessionHistory;
+
+  nsTArray<std::function<void(uint64_t)>> mDiscardListeners;
 
   // Counter and time span for rate limiting Location and History API calls.
   // Used by CheckLocationChangeRateLimit. Do not apply cross-process.

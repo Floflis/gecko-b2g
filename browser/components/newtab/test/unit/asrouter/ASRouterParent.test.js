@@ -14,7 +14,6 @@ describe("ASRouterParent", () => {
       destroy: sandbox.stub(),
       size: 1,
       messageAll: sandbox.stub().resolves(),
-      messagePreloaded: sandbox.stub().resolves(),
       registerActor: sandbox.stub(),
       unregisterActor: sandbox.stub(),
       loadingMessageHandler: Promise.resolve({
@@ -32,6 +31,7 @@ describe("ASRouterParent", () => {
         getAttribute: () => true,
       },
     };
+    asRouterParent.tabId = ASRouterParent.nextTabId;
   });
   afterEach(() => {
     sandbox.restore();
@@ -77,27 +77,30 @@ describe("ASRouterParent", () => {
         data: { id: 1 },
       });
       assert.calledOnce(handleMessage);
-      // No "ClearMessages" message should be sent.
-      assert.notCalled(ASRouterParent.tabs.messagePreloaded);
       assert.equal(result, "handle-message-result");
     });
-    it(
-      "passes preloadedOnly BLOCK_MESSAGE_BY_ID calls to messagePreloaded, sends " +
-        "a message to clear messages, and then returns false",
-      async () => {
-        const MESSAGE_ID = 1;
-        const result = await asRouterParent.receiveMessage({
-          name: msg.BLOCK_MESSAGE_BY_ID,
-          data: { id: MESSAGE_ID, preloadedOnly: true },
-        });
-        assert.calledOnce(handleMessage);
-        assert.calledWithExactly(
-          ASRouterParent.tabs.messagePreloaded,
-          "ClearMessages",
-          [MESSAGE_ID]
-        );
-        assert.equal(result, false);
-      }
-    );
+    it("it messages all actors on BLOCK_MESSAGE_BY_ID messages", async () => {
+      const MESSAGE_ID = 1;
+      const result = await asRouterParent.receiveMessage({
+        name: msg.BLOCK_MESSAGE_BY_ID,
+        data: { id: MESSAGE_ID, campaign: "message-campaign" },
+      });
+      assert.calledOnce(handleMessage);
+      // Check that we correctly pass the tabId
+      assert.calledWithExactly(
+        handleMessage,
+        sinon.match.any,
+        sinon.match.any,
+        { id: sinon.match.number, browser: sinon.match.any }
+      );
+      assert.calledWithExactly(
+        ASRouterParent.tabs.messageAll,
+        "ClearMessages",
+        // When blocking an id the entire campaign is blocked
+        // and all other snippets become invalid
+        ["message-campaign"]
+      );
+      assert.equal(result, "handle-message-result");
+    });
   });
 });

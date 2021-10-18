@@ -7,20 +7,30 @@
 #include "DNS.h"
 #include "mozilla/EndianUtils.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/StaticPrefs_network.h"
 #include "ODoHService.h"
+// Put DNSLogging.h at the end to avoid LOG being overwritten by other headers.
+#include "DNSLogging.h"
+
+#include "nsIInputStream.h"
 
 namespace mozilla {
 namespace net {
 
-extern mozilla::LazyLogModule gHostResolverLog;
-#undef LOG
-#undef LOG_ENABLED
-#define LOG(args) MOZ_LOG(gHostResolverLog, mozilla::LogLevel::Debug, args)
-#define LOG_ENABLED() \
-  MOZ_LOG_TEST(mozilla::net::gHostResolverLog, mozilla::LogLevel::Debug)
-
 static uint16_t get16bit(const unsigned char* aData, unsigned int index) {
   return ((aData[index] << 8) | aData[index + 1]);
+}
+
+static bool get16bit(const Span<const uint8_t>& aData,
+                     Span<const uint8_t>::const_iterator& it,
+                     uint16_t& result) {
+  if (it >= aData.cend() || std::distance(it, aData.cend()) < 2) {
+    return false;
+  }
+
+  result = (*it << 8) | *(it + 1);
+  it += 2;
+  return true;
 }
 
 static uint32_t get32bit(const unsigned char* aData, unsigned int index) {
@@ -338,8 +348,10 @@ nsresult DNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
   aBody += '\0';
   aBody += '\0';  // NSCOUNT
 
-  aBody += '\0';                    // ARCOUNT
-  aBody += aDisableECS ? 1 : '\0';  // ARCOUNT low byte for EDNS(0)
+  char additionalRecords =
+      (aDisableECS || StaticPrefs::network_trr_padding()) ? 1 : 0;
+  aBody += '\0';               // ARCOUNT
+  aBody += additionalRecords;  // ARCOUNT low byte for EDNS(0)
 
   // Question
 
@@ -363,6 +375,7 @@ nsresult DNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
     }
     if (labelLength > 63) {
       // too long label!
+      SetDNSPacketStatus(DNSPacketStatus::EncodeError);
       return NS_ERROR_ILLEGAL_VALUE;
     }
     if (labelLength > 0) {
@@ -382,7 +395,7 @@ nsresult DNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
   aBody += '\0';           // upper 8 bit CLASS
   aBody += kDNS_CLASS_IN;  // IN - "the Internet"
 
-  if (aDisableECS) {
+  if (additionalRecords) {
     // EDNS(0) is RFC 6891, ECS is RFC 7871
     aBody += '\0';  // NAME       | domain name  | MUST be 0 (root domain) |
     aBody += '\0';
@@ -395,34 +408,81 @@ nsresult DNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
     aBody += '\0';
     aBody += '\0';
 
-    aBody += '\0';  // upper 8 bit RDLEN
-    aBody += 8;  // RDLEN      | u_int16_t    | length of all RDATA          |
+    // calculate padding length
+    unsigned int paddingLen = 0;
+    unsigned int rdlen = 0;
+    if (StaticPrefs::network_trr_padding()) {
+      // always add padding specified in rfc 7830 when this config is enabled
+      // to allow the reponse to be padded as well
+
+      // two bytes RDLEN, 4 bytes padding header
+      unsigned int packetLen = aBody.Length() + 2 + 4;
+      if (aDisableECS) {
+        // 8 bytes for disabling ecs
+        packetLen += 8;
+      }
+      // pad to 16 byte
+      paddingLen = (16 - (packetLen & 15)) & 15;
+      // padding header + padding length
+      rdlen += 4 + paddingLen;
+    }
+    if (aDisableECS) {
+      rdlen += 8;
+    }
+
+    // RDLEN      | u_int16_t    | length of all RDATA          |
+    aBody += (char)((rdlen >> 8) & 0xff);  // upper 8 bit RDLEN
+    aBody += (char)(rdlen & 0xff);
 
     // RDATA      | octet stream | {attribute,value} pairs      |
     // The RDATA is just the ECS option setting zero subnet prefix
 
-    aBody += '\0';  // upper 8 bit OPTION-CODE ECS
-    aBody += 8;     // OPTION-CODE, 2 octets, for ECS is 8
+    if (aDisableECS) {
+      aBody += '\0';  // upper 8 bit OPTION-CODE ECS
+      aBody += 8;     // OPTION-CODE, 2 octets, for ECS is 8
 
-    aBody += '\0';  // upper 8 bit OPTION-LENGTH
-    aBody += 4;  // OPTION-LENGTH, 2 octets, contains the length of the payload
-                 // after OPTION-LENGTH
-    aBody += '\0';  // upper 8 bit FAMILY. IANA Address Family Numbers registry,
-                    // not the AF_* constants!
-    aBody += 1;     // FAMILY (Ipv4), 2 octets
+      aBody += '\0';  // upper 8 bit OPTION-LENGTH
+      aBody += 4;     // OPTION-LENGTH, 2 octets, contains the length of the
+                      // payload after OPTION-LENGTH
+      aBody += '\0';  // upper 8 bit FAMILY. IANA Address Family Numbers
+                      // registry, not the AF_* constants!
+      aBody += 1;     // FAMILY (Ipv4), 2 octets
 
-    aBody += '\0';  // SOURCE PREFIX-LENGTH      |     SCOPE PREFIX-LENGTH |
-    aBody += '\0';
+      aBody += '\0';  // SOURCE PREFIX-LENGTH      |     SCOPE PREFIX-LENGTH |
+      aBody += '\0';
 
-    // ADDRESS, minimum number of octets == nothing because zero bits
+      // ADDRESS, minimum number of octets == nothing because zero bits
+    }
+
+    if (StaticPrefs::network_trr_padding()) {
+      aBody += '\0';  // upper 8 bit option OPTION-CODE PADDING
+      aBody += 12;    // OPTION-CODE, 2 octets, for PADDING is 12
+
+      // OPTION-LENGTH, 2 octets
+      aBody += (char)((paddingLen >> 8) & 0xff);
+      aBody += (char)(paddingLen & 0xff);
+      for (unsigned int i = 0; i < paddingLen; i++) {
+        aBody += '\0';
+      }
+    }
   }
+
+  SetDNSPacketStatus(DNSPacketStatus::Success);
   return NS_OK;
+}
+
+Result<uint8_t, nsresult> DNSPacket::GetRCode() const {
+  if (mBodySize < 12) {
+    LOG(("DNSPacket::GetRCode - packet too small"));
+    return Err(NS_ERROR_ILLEGAL_VALUE);
+  }
+
+  return mResponse[3] & 0x0F;
 }
 
 nsresult DNSPacket::DecodeInternal(
     nsCString& aHost, enum TrrType aType, nsCString& aCname, bool aAllowRFC1918,
-    nsHostRecord::TRRSkippedReason& aReason, DOHresp& aResp,
-    TypeRecordResultType& aTypeResult,
+    DOHresp& aResp, TypeRecordResultType& aTypeResult,
     nsClassHashtable<nsCStringHashKey, DOHresp>& aAdditionalRecords,
     uint32_t& aTTL, const unsigned char* aBuffer, uint32_t aLen) {
   // The response has a 12 byte header followed by the question (returned)
@@ -452,13 +512,8 @@ nsresult DNSPacket::DecodeInternal(
     LOG(("TRR bad incoming DOH, eject!\n"));
     return NS_ERROR_ILLEGAL_VALUE;
   }
-  uint8_t rcode = aBuffer[3] & 0x0F;
-  LOG(("TRR Decode %s RCODE %d\n", aHost.get(), rcode));
-  if (rcode) {
-    if (aReason == nsHostRecord::TRR_UNSET) {
-      aReason = nsHostRecord::TRR_RCODE_FAIL;
-    }
-  }
+  uint8_t rcode = mResponse[3] & 0x0F;
+  LOG(("TRR Decode %s RCODE %d\n", PromiseFlatCString(aHost).get(), rcode));
 
   uint16_t questionRecords = get16bit(aBuffer, 4);  // qdcount
   // iterate over the single(?) host name in question
@@ -763,6 +818,8 @@ nsresult DNSPacket::DecodeInternal(
             auto& results = aTypeResult.as<TypeRecordHTTPSSVC>();
             results.AppendElement(parsed);
           }
+
+          aTTL = TTL;
           break;
         }
         default:
@@ -853,10 +910,7 @@ nsresult DNSPacket::DecodeInternal(
 
     auto parseRecord = [&]() {
       LOG(("Parsing additional record type: %u", type));
-      auto& entry = aAdditionalRecords.GetOrInsert(qname);
-      if (!entry) {
-        entry.reset(new DOHresp());
-      }
+      auto* entry = aAdditionalRecords.GetOrInsertNew(qname);
 
       switch (type) {
         case TRRTYPE_A:
@@ -954,10 +1008,11 @@ nsresult DNSPacket::DecodeInternal(
       aTypeResult.is<TypeRecordEmpty>()) {
     // no entries were stored!
     LOG(("TRR: No entries were stored!\n"));
+
     if (extendedError != UINT16_MAX && hardFail(extendedError)) {
       return NS_ERROR_DEFINITIVE_UNKNOWN_HOST;
     }
-    return NS_ERROR_FAILURE;
+    return NS_ERROR_UNKNOWN_HOST;
   }
 
   // https://tools.ietf.org/html/draft-ietf-dnsop-svcb-httpssvc-03#page-14
@@ -977,13 +1032,15 @@ nsresult DNSPacket::DecodeInternal(
 //
 nsresult DNSPacket::Decode(
     nsCString& aHost, enum TrrType aType, nsCString& aCname, bool aAllowRFC1918,
-    nsHostRecord::TRRSkippedReason& aReason, DOHresp& aResp,
-    TypeRecordResultType& aTypeResult,
+    DOHresp& aResp, TypeRecordResultType& aTypeResult,
     nsClassHashtable<nsCStringHashKey, DOHresp>& aAdditionalRecords,
     uint32_t& aTTL) {
-  return DecodeInternal(aHost, aType, aCname, aAllowRFC1918, aReason, aResp,
-                        aTypeResult, aAdditionalRecords, aTTL, mResponse,
-                        mBodySize);
+  nsresult rv =
+      DecodeInternal(aHost, aType, aCname, aAllowRFC1918, aResp, aTypeResult,
+                     aAdditionalRecords, aTTL, mResponse, mBodySize);
+  SetDNSPacketStatus(NS_SUCCEEDED(rv) ? DNSPacketStatus::Success
+                                      : DNSPacketStatus::DecodeError);
+  return rv;
 }
 
 static SECItem* CreateRawConfig(const ObliviousDoHConfig& aConfig) {
@@ -1025,7 +1082,7 @@ static bool CreateConfigId(ObliviousDoHConfig& aConfig) {
 
   UniquePK11SymKey configKey(PK11_ImportDataKey(slot.get(), CKM_HKDF_DATA,
                                                 PK11_OriginUnwrap, CKA_DERIVE,
-                                                rawConfig.get(), NULL));
+                                                rawConfig.get(), nullptr));
   if (!configKey) {
     return false;
   }
@@ -1059,7 +1116,7 @@ static bool CreateConfigId(ObliviousDoHConfig& aConfig) {
 }
 
 // static
-bool ODoHDNSPacket::ParseODoHConfigs(const nsCString& aRawODoHConfig,
+bool ODoHDNSPacket::ParseODoHConfigs(Span<const uint8_t> aData,
                                      nsTArray<ObliviousDoHConfig>& aOut) {
   // struct {
   //     uint16 kem_id;
@@ -1078,57 +1135,55 @@ bool ODoHDNSPacket::ParseODoHConfigs(const nsCString& aRawODoHConfig,
   //
   //  ObliviousDoHConfig ObliviousDoHConfigs<1..2^16-1>;
 
-  // At least we need two bytes to indicate the total length of ODoHConfig.
-  if (aRawODoHConfig.Length() < 2) {
+  Span<const uint8_t>::const_iterator it = aData.begin();
+  uint16_t length = 0;
+  if (!get16bit(aData, it, length)) {
     return false;
   }
 
-  const unsigned char* data =
-      reinterpret_cast<const unsigned char*>(aRawODoHConfig.BeginReading());
-
-  uint32_t index = 0;
-  uint16_t length = get16bit(data, index);
-  index += 2;
-
-  if (length != aRawODoHConfig.Length() - 2) {
+  if (length != aData.Length() - 2) {
     return false;
   }
 
   nsTArray<ObliviousDoHConfig> result;
-  while (length > 0) {
+  static const uint32_t kMinimumConfigContentLength = 12;
+  while (std::distance(it, aData.cend()) > kMinimumConfigContentLength) {
     ObliviousDoHConfig config;
-    config.mVersion = get16bit(data, index);
-    index += 2;
-    length -= 2;
-
-    config.mLength = get16bit(data, index);
-    index += 2;
-    length -= 2;
-
-    if (config.mLength > length) {
+    if (!get16bit(aData, it, config.mVersion)) {
       return false;
     }
 
-    config.mContents.mKemId = get16bit(data, index);
-    index += 2;
-    length -= 2;
-    config.mContents.mKdfId = get16bit(data, index);
-    index += 2;
-    length -= 2;
-    config.mContents.mAeadId = get16bit(data, index);
-    index += 2;
-    length -= 2;
-
-    uint16_t keyLength = get16bit(data, index);
-    index += 2;
-    length -= 2;
-    if (keyLength > length) {
+    if (!get16bit(aData, it, config.mLength)) {
       return false;
     }
 
-    config.mContents.mPublicKey.AppendElements(Span(data + index, keyLength));
-    index += keyLength;
-    length -= keyLength;
+    if (std::distance(it, aData.cend()) < config.mLength) {
+      return false;
+    }
+
+    if (!get16bit(aData, it, config.mContents.mKemId)) {
+      return false;
+    }
+
+    if (!get16bit(aData, it, config.mContents.mKdfId)) {
+      return false;
+    }
+
+    if (!get16bit(aData, it, config.mContents.mAeadId)) {
+      return false;
+    }
+
+    uint16_t keyLength = 0;
+    if (!get16bit(aData, it, keyLength)) {
+      return false;
+    }
+
+    if (!keyLength || std::distance(it, aData.cend()) < keyLength) {
+      return false;
+    }
+
+    config.mContents.mPublicKey.AppendElements(Span(it, it + keyLength));
+    it += keyLength;
 
     CreateConfigId(config);
 
@@ -1139,6 +1194,8 @@ bool ODoHDNSPacket::ParseODoHConfigs(const nsCString& aRawODoHConfig,
             static_cast<HpkeKdfId>(config.mContents.mKdfId),
             static_cast<HpkeAeadId>(config.mContents.mAeadId)) == SECSuccess) {
       result.AppendElement(std::move(config));
+    } else {
+      LOG(("ODoHDNSPacket::ParseODoHConfigs got an invalid config"));
     }
   }
 
@@ -1153,10 +1210,17 @@ nsresult ODoHDNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
   nsAutoCString queryBody;
   nsresult rv = DNSPacket::EncodeRequest(queryBody, aHost, aType, aDisableECS);
   if (NS_FAILED(rv)) {
+    SetDNSPacketStatus(DNSPacketStatus::EncodeError);
     return rv;
   }
 
-  if (!gODoHService->ODoHConfigs() || gODoHService->ODoHConfigs()->IsEmpty()) {
+  if (!gODoHService->ODoHConfigs()) {
+    SetDNSPacketStatus(DNSPacketStatus::KeyNotAvailable);
+    return NS_ERROR_FAILURE;
+  }
+
+  if (gODoHService->ODoHConfigs()->IsEmpty()) {
+    SetDNSPacketStatus(DNSPacketStatus::KeyNotUsable);
     return NS_ERROR_FAILURE;
   }
 
@@ -1164,7 +1228,9 @@ nsresult ODoHDNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
   const ObliviousDoHConfig& config = (*gODoHService->ODoHConfigs())[0];
 
   ObliviousDoHMessage message;
-  if (!EncryptDNSQuery(queryBody, 2, config, message)) {
+  // The spec didn't recommand padding length for encryption, let's use 0 here.
+  if (!EncryptDNSQuery(queryBody, 0, config, message)) {
+    SetDNSPacketStatus(DNSPacketStatus::EncryptError);
     return NS_ERROR_FAILURE;
   }
 
@@ -1182,6 +1248,7 @@ nsresult ODoHDNSPacket::EncodeRequest(nsCString& aBody, const nsACString& aHost,
       reinterpret_cast<const char*>(message.mEncryptedMessage.Elements()),
       messageLen);
 
+  SetDNSPacketStatus(DNSPacketStatus::Success);
   return NS_OK;
 }
 
@@ -1281,33 +1348,49 @@ bool ODoHDNSPacket::EncryptDNSQuery(const nsACString& aQuery,
 
 nsresult ODoHDNSPacket::Decode(
     nsCString& aHost, enum TrrType aType, nsCString& aCname, bool aAllowRFC1918,
-    nsHostRecord::TRRSkippedReason& aReason, DOHresp& aResp,
-    TypeRecordResultType& aTypeResult,
+    DOHresp& aResp, TypeRecordResultType& aTypeResult,
     nsClassHashtable<nsCStringHashKey, DOHresp>& aAdditionalRecords,
     uint32_t& aTTL) {
-  if (!DecryptDNSResponse()) {
-    return NS_ERROR_FAILURE;
+  // This function could be called multiple times when we are checking CNAME
+  // records, but we only need to decrypt the response once.
+  if (!mDecryptedResponseRange) {
+    if (!DecryptDNSResponse()) {
+      SetDNSPacketStatus(DNSPacketStatus::DecryptError);
+      return NS_ERROR_FAILURE;
+    }
+
+    uint32_t index = 0;
+    uint16_t responseLength = get16bit(mResponse, index);
+    index += 2;
+
+    if (mBodySize < (index + responseLength)) {
+      SetDNSPacketStatus(DNSPacketStatus::DecryptError);
+      return NS_ERROR_ILLEGAL_VALUE;
+    }
+
+    DecryptedResponseRange range;
+    range.mStart = index;
+    range.mLength = responseLength;
+
+    index += responseLength;
+    uint16_t paddingLen = get16bit(mResponse, index);
+
+    if (static_cast<unsigned int>(4 + responseLength + paddingLen) !=
+        mBodySize) {
+      SetDNSPacketStatus(DNSPacketStatus::DecryptError);
+      return NS_ERROR_ILLEGAL_VALUE;
+    }
+
+    mDecryptedResponseRange.emplace(range);
   }
 
-  uint32_t index = 0;
-  uint16_t responseLength = get16bit(mResponse, index);
-  index += 2;
-
-  if (mBodySize < (index + responseLength)) {
-    return NS_ERROR_ILLEGAL_VALUE;
-  }
-  unsigned char* plainResponse = &mResponse[index];
-  index += responseLength;
-
-  uint16_t paddingLen = get16bit(mResponse, index);
-
-  if (static_cast<unsigned int>(4 + responseLength + paddingLen) != mBodySize) {
-    return NS_ERROR_ILLEGAL_VALUE;
-  }
-
-  return DecodeInternal(aHost, aType, aCname, aAllowRFC1918, aReason, aResp,
-                        aTypeResult, aAdditionalRecords, aTTL, plainResponse,
-                        responseLength);
+  nsresult rv = DecodeInternal(aHost, aType, aCname, aAllowRFC1918, aResp,
+                               aTypeResult, aAdditionalRecords, aTTL,
+                               &mResponse[mDecryptedResponseRange->mStart],
+                               mDecryptedResponseRange->mLength);
+  SetDNSPacketStatus(NS_SUCCEEDED(rv) ? DNSPacketStatus::Success
+                                      : DNSPacketStatus::DecodeError);
+  return rv;
 }
 
 static bool CreateObliviousDoHMessage(const unsigned char* aData,
@@ -1348,7 +1431,7 @@ static SECStatus HKDFExtract(SECItem* aSalt, PK11SymKey* aIkm,
   params.bExpand = CK_FALSE;
   params.prfHashMechanism = CKM_SHA256;
   params.ulSaltType = aSalt ? CKF_HKDF_SALT_DATA : CKF_HKDF_SALT_NULL;
-  params.pSalt = aSalt ? (CK_BYTE_PTR)aSalt->data : NULL;
+  params.pSalt = aSalt ? (CK_BYTE_PTR)aSalt->data : nullptr;
   params.ulSaltLen = aSalt ? aSalt->len : 0;
 
   UniquePK11SymKey prk(PK11_Derive(aIkm, CKM_HKDF_DERIVE, &paramsItem,
@@ -1361,9 +1444,8 @@ static SECStatus HKDFExtract(SECItem* aSalt, PK11SymKey* aIkm,
   return SECSuccess;
 }
 
-static SECStatus HKDFExpand(PK11SymKey* aPrk, const SECItem* aInfo,
-                            unsigned int aLen, bool aKey,
-                            UniquePK11SymKey& aOutKey) {
+static SECStatus HKDFExpand(PK11SymKey* aPrk, const SECItem* aInfo, int aLen,
+                            bool aKey, UniquePK11SymKey& aOutKey) {
   CK_HKDF_PARAMS params = {0};
   SECItem paramsItem = {siBuffer, (unsigned char*)&params, sizeof(params)};
 
@@ -1386,16 +1468,17 @@ static SECStatus HKDFExpand(PK11SymKey* aPrk, const SECItem* aInfo,
   return SECSuccess;
 }
 
-/* def decrypt_response_body(context, Q_plain, R_encrypted):
- *    key, nonce = derive_secrets(context, Q_plain)
- *    aad = 0x02 || 0x0000 // 0x0000 represents a 0-length KeyId
- *    R_plain, error = Open(key, nonce, aad, R_encrypted)
- *    return R_plain, error
+/*
+ * def decrypt_response_body(context, Q_plain, R_encrypted, response_nonce):
+ *   aead_key, aead_nonce = derive_secrets(context, Q_plain, response_nonce)
+ *   aad = 0x02 || len(response_nonce) || response_nonce
+ *   R_plain, error = Open(key, nonce, aad, R_encrypted)
+ *   return R_plain, error
  */
 bool ODoHDNSPacket::DecryptDNSResponse() {
   ObliviousDoHMessage message;
   if (!CreateObliviousDoHMessage(mResponse, mBodySize, message)) {
-    LOG(("ODoHDNSPacket::DecryptDNSResponse invalid responce"));
+    LOG(("ODoHDNSPacket::DecryptDNSResponse invalid response"));
     return false;
   }
 
@@ -1403,33 +1486,39 @@ bool ODoHDNSPacket::DecryptDNSResponse() {
     return false;
   }
 
-  // KeyID for response should be empty.
-  if (!message.mKeyId.IsEmpty()) {
+  const unsigned int kResponseNonceLen = 16;
+  // KeyId is actually response_nonce
+  if (message.mKeyId.Length() != kResponseNonceLen) {
     return false;
   }
 
-  // def derive_secrets(context, Q_plain):
-  //    odoh_secret = context.Export("odoh secret", 32)
-  //    odoh_prk = Extract(Q_plain, odoh_secret)
+  // def derive_secrets(context, Q_plain, response_nonce):
+  //    secret = context.Export("odoh response", Nk)
+  //    salt = Q_plain || len(response_nonce) || response_nonce
+  //    prk = Extract(salt, secret)
   //    key = Expand(odoh_prk, "odoh key", Nk)
   //    nonce = Expand(odoh_prk, "odoh nonce", Nn)
   //    return key, nonce
-  const SECItem kODoHSecretInfoItem = {
-      siBuffer, (unsigned char*)kODoHSecret,
-      static_cast<unsigned int>(strlen(kODoHSecret))};
+  const SECItem kODoHResponsetInfoItem = {
+      siBuffer, (unsigned char*)kODoHResponse,
+      static_cast<unsigned int>(strlen(kODoHResponse))};
   const unsigned int kAes128GcmKeyLen = 16;
   const unsigned int kAes128GcmNonceLen = 12;
   PK11SymKey* tmp = nullptr;
-  SECStatus rv =
-      PK11_HPKE_ExportSecret(mContext, &kODoHSecretInfoItem, 32, &tmp);
+  SECStatus rv = PK11_HPKE_ExportSecret(mContext, &kODoHResponsetInfoItem,
+                                        kAes128GcmKeyLen, &tmp);
   if (rv != SECSuccess) {
     LOG(("ODoHDNSPacket::DecryptDNSResponse export secret failed"));
     return false;
   }
   UniquePK11SymKey odohSecret(tmp);
 
-  SECItem* salt(::SECITEM_AllocItem(nullptr, nullptr, mPlainQuery->len));
+  SECItem* salt(::SECITEM_AllocItem(nullptr, nullptr,
+                                    mPlainQuery->len + 2 + kResponseNonceLen));
   memcpy(salt->data, mPlainQuery->data, mPlainQuery->len);
+  NetworkEndian::writeUint16(&salt->data[mPlainQuery->len], kResponseNonceLen);
+  memcpy(salt->data + mPlainQuery->len + 2, message.mKeyId.Elements(),
+         kResponseNonceLen);
   UniqueSECItem st(salt);
   UniquePK11SymKey odohPrk;
   rv = HKDFExtract(salt, odohSecret.get(), odohPrk);
@@ -1467,8 +1556,13 @@ bool ODoHDNSPacket::DecryptDNSResponse() {
     return false;
   }
 
-  // aad = 0x02 || 0x0000
-  uint8_t aad[] = {0x2, 0, 0};
+  // aad = 0x02 || len(response_nonce) || response_nonce
+  SECItem* aadItem(
+      ::SECITEM_AllocItem(nullptr, nullptr, 1 + 2 + kResponseNonceLen));
+  aadItem->data[0] = ODOH_RESPONSE;
+  NetworkEndian::writeUint16(&aadItem->data[1], kResponseNonceLen);
+  memcpy(&aadItem->data[3], message.mKeyId.Elements(), kResponseNonceLen);
+  UniqueSECItem aad(aadItem);
 
   SECItem paramItem;
   CK_GCM_PARAMS param;
@@ -1476,8 +1570,8 @@ bool ODoHDNSPacket::DecryptDNSResponse() {
   param.ulIvLen = derivedItem->len;
   param.ulIvBits = param.ulIvLen * 8;
   param.ulTagBits = 16 * 8;
-  param.pAAD = (CK_BYTE_PTR)aad;
-  param.ulAADLen = 3;
+  param.pAAD = (CK_BYTE_PTR)aad->data;
+  param.ulAADLen = aad->len;
 
   paramItem.type = siBuffer;
   paramItem.data = (unsigned char*)(&param);
@@ -1488,7 +1582,8 @@ bool ODoHDNSPacket::DecryptDNSResponse() {
                     MAX_SIZE, message.mEncryptedMessage.Elements(),
                     message.mEncryptedMessage.Length());
   if (rv != SECSuccess) {
-    LOG(("ODoHDNSPacket::DecryptDNSResponse decrypt failed"));
+    LOG(("ODoHDNSPacket::DecryptDNSResponse decrypt failed %d",
+         PORT_GetError()));
     return false;
   }
 

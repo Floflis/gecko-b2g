@@ -12,7 +12,6 @@
 
 #include "jit/JitFrames.h"
 #include "jit/MacroAssembler.h"
-#include "jit/MoveEmitter.h"
 #include "js/ScalarType.h"  // js::Scalar::Type
 
 #include "jit/MacroAssembler-inl.h"
@@ -285,24 +284,6 @@ void MacroAssemblerX86Shared::minMaxFloat32(FloatRegister first,
   bind(&done);
 }
 
-#ifdef ENABLE_WASM_SIMD
-bool MacroAssembler::MustScalarizeShiftSimd128(wasm::SimdOp op) {
-  return op == wasm::SimdOp::I64x2ShrS;
-}
-
-bool MacroAssembler::MustMaskShiftCountSimd128(wasm::SimdOp op, int32_t* mask) {
-  if (op == wasm::SimdOp::I64x2ShrS) {
-    *mask = 63;
-    return true;
-  }
-  return false;
-}
-
-bool MacroAssembler::MustScalarizeShiftSimd128(wasm::SimdOp op, Imm32 imm) {
-  return op == wasm::SimdOp::I64x2ShrS && (imm.value & 63) > 31;
-}
-#endif
-
 //{{{ check_macroassembler_style
 // ===============================================================
 // MacroAssembler high-level usage.
@@ -411,7 +392,14 @@ void MacroAssembler::flexibleRemainder32(
 // ===============================================================
 // Stack manipulation functions.
 
+size_t MacroAssembler::PushRegsInMaskSizeInBytes(LiveRegisterSet set) {
+  FloatRegisterSet fpuSet(set.fpus().reduceSetForPush());
+  return set.gprs().size() * sizeof(intptr_t) + fpuSet.getPushSizeInBytes();
+}
+
 void MacroAssembler::PushRegsInMask(LiveRegisterSet set) {
+  mozilla::DebugOnly<size_t> framePushedInitial = framePushed();
+
   FloatRegisterSet fpuSet(set.fpus().reduceSetForPush());
   unsigned numFpu = fpuSet.size();
   int32_t diffF = fpuSet.getPushSizeInBytes();
@@ -424,6 +412,7 @@ void MacroAssembler::PushRegsInMask(LiveRegisterSet set) {
     Push(*iter);
   }
   MOZ_ASSERT(diffG == 0);
+  (void)diffG;
 
   reserveStack(diffF);
   for (FloatRegisterBackwardIterator iter(fpuSet); iter.more(); ++iter) {
@@ -442,14 +431,26 @@ void MacroAssembler::PushRegsInMask(LiveRegisterSet set) {
     }
   }
   MOZ_ASSERT(numFpu == 0);
+  (void)numFpu;
+
   // x64 padding to keep the stack aligned on uintptr_t. Keep in sync with
   // GetPushSizeInBytes.
-  diffF -= diffF % sizeof(uintptr_t);
+  size_t alignExtra = ((size_t)diffF) % sizeof(uintptr_t);
+  MOZ_ASSERT_IF(sizeof(uintptr_t) == 8, alignExtra == 0 || alignExtra == 4);
+  MOZ_ASSERT_IF(sizeof(uintptr_t) == 4, alignExtra == 0);
+  diffF -= alignExtra;
   MOZ_ASSERT(diffF == 0);
+
+  // The macroassembler will keep the stack sizeof(uintptr_t)-aligned, so
+  // we don't need to take into account `alignExtra` here.
+  MOZ_ASSERT(framePushed() - framePushedInitial ==
+             PushRegsInMaskSizeInBytes(set));
 }
 
 void MacroAssembler::storeRegsInMask(LiveRegisterSet set, Address dest,
                                      Register) {
+  mozilla::DebugOnly<size_t> offsetInitial = dest.offset;
+
   FloatRegisterSet fpuSet(set.fpus().reduceSetForPush());
   unsigned numFpu = fpuSet.size();
   int32_t diffF = fpuSet.getPushSizeInBytes();
@@ -463,6 +464,7 @@ void MacroAssembler::storeRegsInMask(LiveRegisterSet set, Address dest,
     storePtr(*iter, dest);
   }
   MOZ_ASSERT(diffG == 0);
+  (void)diffG;
 
   for (FloatRegisterBackwardIterator iter(fpuSet); iter.more(); ++iter) {
     FloatRegister reg = *iter;
@@ -480,14 +482,27 @@ void MacroAssembler::storeRegsInMask(LiveRegisterSet set, Address dest,
     }
   }
   MOZ_ASSERT(numFpu == 0);
+  (void)numFpu;
+
   // x64 padding to keep the stack aligned on uintptr_t. Keep in sync with
-  // GetPushBytesInSize.
-  diffF -= diffF % sizeof(uintptr_t);
+  // GetPushSizeInBytes.
+  size_t alignExtra = ((size_t)diffF) % sizeof(uintptr_t);
+  MOZ_ASSERT_IF(sizeof(uintptr_t) == 8, alignExtra == 0 || alignExtra == 4);
+  MOZ_ASSERT_IF(sizeof(uintptr_t) == 4, alignExtra == 0);
+  diffF -= alignExtra;
   MOZ_ASSERT(diffF == 0);
+
+  // What this means is: if `alignExtra` is nonzero, then the save area size
+  // actually used is `alignExtra` bytes smaller than what
+  // PushRegsInMaskSizeInBytes claims.  Hence we need to compensate for that.
+  MOZ_ASSERT(alignExtra + offsetInitial - dest.offset ==
+             PushRegsInMaskSizeInBytes(set));
 }
 
 void MacroAssembler::PopRegsInMaskIgnore(LiveRegisterSet set,
                                          LiveRegisterSet ignore) {
+  mozilla::DebugOnly<size_t> framePushedInitial = framePushed();
+
   FloatRegisterSet fpuSet(set.fpus().reduceSetForPush());
   unsigned numFpu = fpuSet.size();
   int32_t diffG = set.gprs().size() * sizeof(intptr_t);
@@ -516,6 +531,7 @@ void MacroAssembler::PopRegsInMaskIgnore(LiveRegisterSet set,
   }
   freeStack(reservedF);
   MOZ_ASSERT(numFpu == 0);
+  (void)numFpu;
   // x64 padding to keep the stack aligned on uintptr_t. Keep in sync with
   // GetPushBytesInSize.
   diffF -= diffF % sizeof(uintptr_t);
@@ -540,6 +556,9 @@ void MacroAssembler::PopRegsInMaskIgnore(LiveRegisterSet set,
     freeStack(reservedG);
   }
   MOZ_ASSERT(diffG == 0);
+
+  MOZ_ASSERT(framePushedInitial - framePushed() ==
+             PushRegsInMaskSizeInBytes(set));
 }
 
 void MacroAssembler::Push(const Operand op) {
@@ -686,19 +705,18 @@ uint32_t MacroAssembler::pushFakeReturnAddress(Register scratch) {
 CodeOffset MacroAssembler::wasmTrapInstruction() { return ud2(); }
 
 void MacroAssembler::wasmBoundsCheck32(Condition cond, Register index,
-                                       Register boundsCheckLimit,
-                                       Label* label) {
+                                       Register boundsCheckLimit, Label* ok) {
   cmp32(index, boundsCheckLimit);
-  j(cond, label);
+  j(cond, ok);
   if (JitOptions.spectreIndexMasking) {
     cmovCCl(cond, Operand(boundsCheckLimit), index);
   }
 }
 
 void MacroAssembler::wasmBoundsCheck32(Condition cond, Register index,
-                                       Address boundsCheckLimit, Label* label) {
+                                       Address boundsCheckLimit, Label* ok) {
   cmp32(index, Operand(boundsCheckLimit));
-  j(cond, label);
+  j(cond, ok);
   if (JitOptions.spectreIndexMasking) {
     cmovCCl(cond, Operand(boundsCheckLimit), index);
   }

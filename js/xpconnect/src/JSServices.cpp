@@ -5,10 +5,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "xpcprivate.h"
-#include "GeckoProfiler.h"
 #include "StaticComponents.h"
 #include "mozilla/ErrorResult.h"
-#include "js/String.h"  // JS::LinearStringHasLatin1Chars
+#include "mozilla/ProfilerLabels.h"
+#include "js/PropertyAndElement.h"  // JS_DefineProperty, JS_DefinePropertyById
+#include "js/String.h"              // JS::LinearStringHasLatin1Chars
 #include "nsJSUtils.h"
 
 using namespace mozilla;

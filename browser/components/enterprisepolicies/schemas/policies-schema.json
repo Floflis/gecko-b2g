@@ -17,6 +17,10 @@
       }
     },
 
+    "AllowedDomainsForApps": {
+      "type": "string"
+    },
+
     "AppAutoUpdate": {
       "type": "boolean"
     },
@@ -77,6 +81,29 @@
           "type": "boolean"
         }
       }
+    },
+
+    "AutoLaunchProtocolsFromOrigins": {
+      "type": ["JSON", "array"],
+      "items": {
+        "type": "object",
+        "properties": {
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "origin"
+            }
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "required": ["allowed_origins", "protocol"]
+        }
+      }
+    },
+
+    "BackgroundAppUpdate": {
+      "type": "boolean"
     },
 
     "BlockAboutAddons": {
@@ -477,6 +504,9 @@
             },
             "blocked_install_message": {
               "type": "string"
+            },
+            "updates_disabled": {
+              "type": "boolean"
             }
           }
         }
@@ -1145,6 +1175,10 @@
       }
     },
 
+    "ShowHomeButton": {
+      "type": "boolean"
+    },
+
     "SSLVersionMax": {
       "type": "string",
       "enum": ["tls1", "tls1.1", "tls1.2", "tls1.3"]
@@ -1212,6 +1246,10 @@
           }
         }
       }
+    },
+
+    "WindowsSSO": {
+      "type": "boolean"
     }
   }
 }

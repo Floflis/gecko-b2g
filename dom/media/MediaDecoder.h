@@ -70,6 +70,7 @@ struct MOZ_STACK_CLASS MediaDecoderInit {
   const bool mHasSuspendTaint;
   const bool mLooping;
   const MediaContainerType mContainerType;
+  const nsAutoString mStreamName;
 
   MediaDecoderInit(MediaDecoderOwner* aOwner,
                    TelemetryProbesReporterOwner* aReporterOwner,
@@ -164,6 +165,7 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
   void SetPlaybackRate(double aPlaybackRate);
   void SetPreservesPitch(bool aPreservesPitch);
   void SetLooping(bool aLooping);
+  void SetStreamName(const nsAutoString& aStreamName);
 
   // Set the given device as the output device.
   RefPtr<GenericPromise> SetSink(AudioDeviceInfo* aSinkDevice);
@@ -310,14 +312,6 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
 
   layers::ImageContainer* GetImageContainer();
 
-  // Fire timeupdate events if needed according to the time constraints
-  // outlined in the specification.
-  void FireTimeUpdate();
-
-  // True if we're going to loop back to the head position when media is in
-  // looping.
-  bool IsLoopingBack(double aPrevPos, double aCurPos) const;
-
   // Returns true if we can play the entire media through without stopping
   // to buffer, given the current download and playback rates.
   bool CanPlayThrough();
@@ -342,7 +336,7 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
   void UpdateVideoDecodeMode();
 
   void SetSecondaryVideoContainer(
-      RefPtr<VideoFrameContainer> aSecondaryVideoContainer);
+      const RefPtr<VideoFrameContainer>& aSecondaryVideoContainer);
 
   void SetIsBackgroundVideoDecodingAllowed(bool aAllowed);
 
@@ -468,6 +462,8 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
                               UniquePtr<MetadataTags> aTags,
                               MediaDecoderEventVisibility aEventVisibility);
 
+  void SetLogicalPosition(double aNewPosition);
+
   /******
    * The following members should be accessed with the decoder lock held.
    ******/
@@ -519,7 +515,7 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
   void OnNextFrameStatus(MediaDecoderOwner::NextFrameStatus);
 
   void OnSecondaryVideoContainerInstalled(
-      const RefPtr<VideoFrameContainer>& aSecondaryContainer);
+      const RefPtr<VideoFrameContainer>& aSecondaryVideoContainer);
 
   void OnStoreDecoderBenchmark(const VideoInfo& aInfo);
 
@@ -665,6 +661,8 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
 
   Canonical<bool> mLooping;
 
+  Canonical<nsAutoString> mStreamName;
+
   // The device used with SetSink, or nullptr if no explicit device has been
   // set.
   Canonical<RefPtr<AudioDeviceInfo>> mSinkDevice;
@@ -724,6 +722,9 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
     return &mPreservesPitch;
   }
   AbstractCanonical<bool>* CanonicalLooping() { return &mLooping; }
+  AbstractCanonical<nsAutoString>* CanonicalStreamName() {
+    return &mStreamName;
+  }
   AbstractCanonical<RefPtr<AudioDeviceInfo>>* CanonicalSinkDevice() {
     return &mSinkDevice;
   }
@@ -751,14 +752,34 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
 
   TelemetryProbesReporter::Visibility OwnerVisibility() const;
 
-  // They are used for reporting telemetry related results.
-  double GetTotalPlayTimeInSeconds() const;
+  // Those methods exist to report telemetry related metrics.
+  double GetTotalVideoPlayTimeInSeconds() const;
+  double GetVisibleVideoPlayTimeInSeconds() const;
   double GetInvisibleVideoPlayTimeInSeconds() const;
   double GetVideoDecodeSuspendedTimeInSeconds() const;
+  double GetTotalAudioPlayTimeInSeconds() const;
+  double GetAudiblePlayTimeInSeconds() const;
+  double GetInaudiblePlayTimeInSeconds() const;
+  double GetMutedPlayTimeInSeconds() const;
 
  private:
+  /**
+   * This enum describes the reason why we need to update the logical position.
+   * ePeriodicUpdate : the position grows periodically during playback
+   * eSeamlessLoopingSeeking : the position changes due to demuxer level seek.
+   * eOther : due to normal seeking or other attributes changes, eg. playstate
+   */
+  enum class PositionUpdate {
+    ePeriodicUpdate,
+    eSeamlessLoopingSeeking,
+    eOther,
+  };
+  PositionUpdate GetPositionUpdateReason(double aPrevPos, double aCurPos) const;
+
   // Notify owner when the audible state changed
   void NotifyAudibleStateChanged();
+
+  void NotifyVolumeChanged();
 
   bool mTelemetryReported;
   const MediaContainerType mContainerType;

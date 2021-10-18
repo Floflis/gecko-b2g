@@ -124,32 +124,22 @@ reserved = set(
         "both",
         "child",
         "class",
-        "comparable",
-        "compress",
-        "compressall",
         "from",
         "include",
         "intr",
         "manager",
         "manages",
         "namespace",
-        "nested",
         "nullable",
         "or",
         "parent",
-        "prio",
         "protocol",
-        "refcounted",
-        "moveonly",
         "returns",
         "struct",
         "sync",
-        "tainted",
         "union",
         "UniquePtr",
-        "upto",
         "using",
-        "verify",
     )
 )
 tokens = [
@@ -160,7 +150,7 @@ tokens = [
 
 t_COLONCOLON = "::"
 
-literals = "(){}[]<>;:,?"
+literals = "(){}[]<>;:,?="
 t_ignore = " \f\t\v"
 
 
@@ -301,33 +291,14 @@ def p_UsingKind(p):
     p[0] = p[1] if 2 == len(p) else None
 
 
-def p_MaybeComparable(p):
-    """MaybeComparable : COMPARABLE
-    |"""
-    p[0] = 2 == len(p)
-
-
-def p_MaybeRefcounted(p):
-    """MaybeRefcounted : REFCOUNTED
-    |"""
-    p[0] = 2 == len(p)
-
-
-def p_MaybeMoveOnly(p):
-    """MaybeMoveOnly : MOVEONLY
-    |"""
-    p[0] = 2 == len(p)
-
-
 def p_UsingStmt(p):
-    """UsingStmt : USING MaybeRefcounted MaybeMoveOnly UsingKind CxxType FROM STRING"""
+    """UsingStmt : Attributes USING UsingKind CxxType FROM STRING"""
     p[0] = UsingStmt(
-        locFromTok(p, 1),
-        refcounted=p[2],
-        moveonly=p[3],
-        kind=p[4],
-        cxxTypeSpec=p[5],
-        cxxHeader=p[7],
+        locFromTok(p, 2),
+        attributes=p[1],
+        kind=p[3],
+        cxxTypeSpec=p[4],
+        cxxHeader=p[6],
     )
 
 
@@ -359,8 +330,8 @@ def p_NamespaceThing(p):
 
 
 def p_StructDecl(p):
-    """StructDecl : MaybeComparable STRUCT ID '{' StructFields '}' ';'
-    | MaybeComparable STRUCT ID '{' '}' ';'"""
+    """StructDecl : Attributes STRUCT ID '{' StructFields '}' ';'
+    | Attributes STRUCT ID '{' '}' ';'"""
     if 8 == len(p):
         p[0] = StructDecl(locFromTok(p, 2), p[3], p[5], p[1])
     else:
@@ -383,7 +354,7 @@ def p_StructField(p):
 
 
 def p_UnionDecl(p):
-    """UnionDecl : MaybeComparable UNION ID '{' ComponentTypes  '}' ';'"""
+    """UnionDecl : Attributes UNION ID '{' ComponentTypes  '}' ';'"""
     p[0] = UnionDecl(locFromTok(p, 2), p[3], p[5], p[1])
 
 
@@ -398,14 +369,13 @@ def p_ComponentTypes(p):
 
 
 def p_ProtocolDefn(p):
-    """ProtocolDefn : OptionalProtocolSendSemanticsQual MaybeRefcounted \
+    """ProtocolDefn : Attributes OptionalSendSemantics \
                       PROTOCOL ID '{' ProtocolBody '}' ';'"""
     protocol = p[6]
     protocol.loc = locFromTok(p, 3)
     protocol.name = p[4]
-    protocol.nested = p[1][0]
-    protocol.sendSemantics = p[1][1]
-    protocol.refcounted = p[2]
+    protocol.attributes = p[1]
+    protocol.sendSemantics = p[2]
     p[0] = protocol
 
     if Parser.current.type == "header":
@@ -506,11 +476,10 @@ def p_MessageDirectionLabel(p):
 
 
 def p_MessageDecl(p):
-    """MessageDecl : SendSemanticsQual MessageBody"""
-    msg = p[2]
-    msg.nested = p[1][0]
-    msg.prio = p[1][1]
-    msg.sendSemantics = p[1][2]
+    """MessageDecl : Attributes SendSemantics MessageBody"""
+    msg = p[3]
+    msg.attributes = p[1]
+    msg.sendSemantics = p[2]
 
     if Parser.current.direction is None:
         _error(msg.loc, "missing message direction")
@@ -520,14 +489,13 @@ def p_MessageDecl(p):
 
 
 def p_MessageBody(p):
-    """MessageBody : ID MessageInParams MessageOutParams OptionalMessageModifiers"""
+    """MessageBody : ID MessageInParams MessageOutParams"""
     # FIXME/cjones: need better loc info: use one of the quals
     name = p[1]
     msg = MessageDecl(locFromTok(p, 1))
     msg.name = name
     msg.addInParams(p[2])
     msg.addOutParams(p[3])
-    msg.addModifiers(p[4])
 
     p[0] = msg
 
@@ -546,137 +514,65 @@ def p_MessageOutParams(p):
         p[0] = p[3]
 
 
-def p_OptionalMessageModifiers(p):
-    """OptionalMessageModifiers : OptionalMessageModifiers MessageModifier
-    | MessageModifier
+# --------------------
+# Attributes
+def p_Attributes(p):
+    """Attributes : '[' AttributeList ']'
+    |"""
+    p[0] = {}
+    if 4 == len(p):
+        for attr in p[2]:
+            if attr.name in p[0]:
+                _error(attr.loc, "Repeated extended attribute `%s'", attr.name)
+            p[0][attr.name] = attr
+
+
+def p_AttributeList(p):
+    """AttributeList : Attribute ',' AttributeList
+    | Attribute"""
+    p[0] = [p[1]]
+    if 4 == len(p):
+        p[0] += p[3]
+
+
+def p_Attribute(p):
+    """Attribute : ID AttributeValue"""
+    p[0] = Attribute(locFromTok(p, 1), p[1], p[2])
+
+
+def p_AttributeValue(p):
+    """AttributeValue : '=' ID
     |"""
     if 1 == len(p):
-        p[0] = []
-    elif 2 == len(p):
-        p[0] = [p[1]]
+        p[0] = None
     else:
-        p[1].append(p[2])
-        p[0] = p[1]
+        p[0] = p[2]
 
 
-def p_MessageModifier(p):
-    """MessageModifier : MessageVerify
-    | MessageCompress
-    | MessageTainted"""
-    p[0] = p[1]
-
-
-def p_MessageVerify(p):
-    """MessageVerify : VERIFY"""
-    p[0] = p[1]
-
-
-def p_MessageCompress(p):
-    """MessageCompress : COMPRESS
-    | COMPRESSALL"""
-    p[0] = p[1]
-
-
-def p_MessageTainted(p):
-    """MessageTainted : TAINTED"""
-    p[0] = p[1]
-
-
-# --------------------
-# Minor stuff
-def p_Nested(p):
-    """Nested : ID"""
-    kinds = {"not": 1, "inside_sync": 2, "inside_cpow": 3}
-    if p[1] not in kinds:
-        _error(
-            locFromTok(p, 1), "Expected not, inside_sync, or inside_cpow for nested()"
-        )
-
-    p[0] = {"nested": kinds[p[1]]}
-
-
-def p_Priority(p):
-    """Priority : ID"""
-    kinds = {"normal": 1, "input": 2, "high": 3, "mediumhigh": 4}
-    if p[1] not in kinds:
-        _error(
-            locFromTok(p, 1), "Expected normal, input, high or mediumhigh for prio()"
-        )
-
-    p[0] = {"prio": kinds[p[1]]}
-
-
-def p_SendQualifier(p):
-    """SendQualifier : NESTED '(' Nested ')'
-    | PRIO '(' Priority ')'"""
-    p[0] = p[3]
-
-
-def p_SendQualifierList(p):
-    """SendQualifierList : SendQualifier SendQualifierList
-    |"""
-    if len(p) > 1:
-        p[0] = p[1]
-        p[0].update(p[2])
-    else:
-        p[0] = {}
-
-
-def p_SendSemanticsQual(p):
-    """SendSemanticsQual : SendQualifierList ASYNC
-    | SendQualifierList SYNC
+def p_SendSemantics(p):
+    """SendSemantics : ASYNC
+    | SYNC
     | INTR"""
-    quals = {}
-    if len(p) == 3:
-        quals = p[1]
-        mtype = p[2]
+    if p[1] == "async":
+        p[0] = ASYNC
+    elif p[1] == "sync":
+        p[0] = SYNC
     else:
-        mtype = "intr"
-
-    if mtype == "async":
-        mtype = ASYNC
-    elif mtype == "sync":
-        mtype = SYNC
-    elif mtype == "intr":
-        mtype = INTR
-    else:
-        assert 0
-
-    p[0] = [quals.get("nested", NOT_NESTED), quals.get("prio", NORMAL_PRIORITY), mtype]
+        assert p[1] == "intr"
+        p[0] = INTR
 
 
-def p_OptionalProtocolSendSemanticsQual(p):
-    """OptionalProtocolSendSemanticsQual : ProtocolSendSemanticsQual
+def p_OptionalSendSemantics(p):
+    """OptionalSendSemantics : SendSemantics
     |"""
     if 2 == len(p):
         p[0] = p[1]
     else:
-        p[0] = [NOT_NESTED, ASYNC]
+        p[0] = ASYNC
 
 
-def p_ProtocolSendSemanticsQual(p):
-    """ProtocolSendSemanticsQual : ASYNC
-    | SYNC
-    | NESTED '(' UPTO Nested ')' ASYNC
-    | NESTED '(' UPTO Nested ')' SYNC
-    | INTR"""
-    if p[1] == "nested":
-        mtype = p[6]
-        nested = p[4]
-    else:
-        mtype = p[1]
-        nested = NOT_NESTED
-
-    if mtype == "async":
-        mtype = ASYNC
-    elif mtype == "sync":
-        mtype = SYNC
-    elif mtype == "intr":
-        mtype = INTR
-    else:
-        assert 0
-
-    p[0] = [nested, mtype]
+# --------------------
+# Minor stuff
 
 
 def p_ParamList(p):
@@ -693,8 +589,8 @@ def p_ParamList(p):
 
 
 def p_Param(p):
-    """Param : Type ID"""
-    p[0] = Param(locFromTok(p, 1), p[1], p[2])
+    """Param : Attributes Type ID"""
+    p[0] = Param(locFromTok(p, 2), p[2], p[3], p[1])
 
 
 def p_Type(p):

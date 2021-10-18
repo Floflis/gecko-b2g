@@ -1010,8 +1010,18 @@ nsresult nsWindowWatcher::OpenWindowInternal(
     // when its BrowsingContext was created, in order to ensure that the context
     // is loaded within the correct BrowsingContextGroup.
     if (windowIsNew && newBC->IsContent()) {
-      MOZ_RELEASE_ASSERT(newBC->GetOpenerId() == parentBC->Id());
-      MOZ_RELEASE_ASSERT(!!parentBC == newBC->HadOriginalOpener());
+      if (parentBC->IsDiscarded()) {
+        // If the parent BC was discarded in a nested event loop before we got
+        // to this point, we can't set it as the opener. Ideally we would still
+        // set `HadOriginalOpener()` in that case, but that's somewhat
+        // nontrivial, and not worth the effort given the nature of the corner
+        // case (see comment in `nsFrameLoader::CreateBrowsingContext`.
+        MOZ_RELEASE_ASSERT(newBC->GetOpenerId() == parentBC->Id() ||
+                           newBC->GetOpenerId() == 0);
+      } else {
+        MOZ_RELEASE_ASSERT(newBC->GetOpenerId() == parentBC->Id());
+        MOZ_RELEASE_ASSERT(newBC->HadOriginalOpener());
+      }
     } else {
       // Update the opener for an existing or chrome BC.
       newBC->SetOpener(parentBC);
@@ -1038,22 +1048,21 @@ nsresult nsWindowWatcher::OpenWindowInternal(
 
   RefPtr<nsGlobalWindowOuter> win(
       nsGlobalWindowOuter::Cast(newBC->GetDOMWindow()));
-  if (win) {
-    if (windowIsNew) {
 #ifdef DEBUG
-      // Assert that we're not loading things right now.  If we are, when
-      // that load completes it will clobber whatever principals we set up
-      // on this new window!
-      nsCOMPtr<nsIChannel> chan;
-      newDocShell->GetDocumentChannel(getter_AddRefs(chan));
-      MOZ_ASSERT(!chan, "Why is there a document channel?");
-#endif
+  if (win && windowIsNew) {
+    // Assert that we're not loading things right now.  If we are, when
+    // that load completes it will clobber whatever principals we set up
+    // on this new window!
+    nsCOMPtr<nsIChannel> chan;
+    newDocShell->GetDocumentChannel(getter_AddRefs(chan));
+    MOZ_ASSERT(!chan, "Why is there a document channel?");
 
-      if (RefPtr<Document> doc = win->GetExtantDoc()) {
-        doc->SetIsInitialDocument(true);
-      }
+    if (RefPtr<Document> doc = win->GetExtantDoc()) {
+      MOZ_ASSERT(doc->IsInitialDocument(),
+                 "New window's document should be an initial document");
     }
   }
+#endif
 
   MOZ_ASSERT(win || !windowIsNew, "New windows are always created in-process");
 
@@ -1187,6 +1196,7 @@ nsresult nsWindowWatcher::OpenWindowInternal(
     loadState = new nsDocShellLoadState(uriToLoad);
 
     loadState->SetSourceBrowsingContext(parentBC);
+    loadState->SetAllowFocusMove(true);
     loadState->SetHasValidUserGestureActivation(
         context && context->HasValidTransientUserGestureActivation());
     if (parentBC) {
@@ -1269,6 +1279,9 @@ nsresult nsWindowWatcher::OpenWindowInternal(
   }
 
   if (uriToLoad && aNavigate) {
+    // XXXBFCache Per spec this should effectively use
+    // LOAD_FLAGS_DISALLOW_INHERIT_PRINCIPAL when noopener is passed to
+    // window.open(). Bug 1694993.
     loadState->SetLoadFlags(
         windowIsNew
             ? static_cast<uint32_t>(nsIWebNavigation::LOAD_FLAGS_FIRST_LOAD)

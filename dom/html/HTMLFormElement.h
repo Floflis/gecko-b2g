@@ -12,8 +12,8 @@
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/PopupBlocker.h"
+#include "mozilla/dom/RadioGroupManager.h"
 #include "nsCOMPtr.h"
-#include "nsIForm.h"
 #include "nsIFormControl.h"
 #include "nsGenericHTMLElement.h"
 #include "nsIRadioGroupContainer.h"
@@ -21,7 +21,7 @@
 #include "nsThreadUtils.h"
 #include "nsInterfaceHashtable.h"
 #include "nsRefPtrHashtable.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "js/friend/DOMProxy.h"  // JS::ExpandoAndGeneration
 
 class nsIMutableArray;
@@ -31,13 +31,15 @@ namespace mozilla {
 class EventChainPostVisitor;
 class EventChainPreVisitor;
 namespace dom {
+class DialogFormSubmission;
 class HTMLFormControlsCollection;
+class HTMLFormSubmission;
 class HTMLImageElement;
 class FormData;
 
 class HTMLFormElement final : public nsGenericHTMLElement,
-                              public nsIForm,
-                              public nsIRadioGroupContainer {
+                              public nsIRadioGroupContainer,
+                              RadioGroupManager {
   friend class HTMLFormControlsCollection;
 
  public:
@@ -51,11 +53,8 @@ class HTMLFormElement final : public nsGenericHTMLElement,
   // nsISupports
   NS_DECL_ISUPPORTS_INHERITED
 
-  // nsIForm
-  NS_IMETHOD_(nsIFormControl*) GetElementAt(int32_t aIndex) const override;
-  NS_IMETHOD_(uint32_t) GetElementCount() const override;
-  NS_IMETHOD_(int32_t) IndexOfControl(nsIFormControl* aControl) override;
-  NS_IMETHOD_(nsIFormControl*) GetDefaultSubmitElement() const override;
+  int32_t IndexOfContent(nsIContent* aContent);
+  nsGenericHTMLFormElement* GetDefaultSubmitElement() const;
 
   // nsIRadioGroupContainer
   void SetCurrentRadioButton(const nsAString& aName,
@@ -64,8 +63,8 @@ class HTMLFormElement final : public nsGenericHTMLElement,
   NS_IMETHOD GetNextRadioButton(const nsAString& aName, const bool aPrevious,
                                 HTMLInputElement* aFocusedRadio,
                                 HTMLInputElement** aRadioOut) override;
-  NS_IMETHOD WalkRadioGroup(const nsAString& aName, nsIRadioVisitor* aVisitor,
-                            bool aFlushContent) override;
+  NS_IMETHOD WalkRadioGroup(const nsAString& aName,
+                            nsIRadioVisitor* aVisitor) override;
   void AddToRadioGroup(const nsAString& aName,
                        HTMLInputElement* aRadio) override;
   void RemoveFromRadioGroup(const nsAString& aName,
@@ -96,11 +95,6 @@ class HTMLFormElement final : public nsGenericHTMLElement,
   virtual nsresult BeforeSetAttr(int32_t aNamespaceID, nsAtom* aName,
                                  const nsAttrValueOrString* aValue,
                                  bool aNotify) override;
-  virtual nsresult AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
-                                const nsAttrValue* aValue,
-                                const nsAttrValue* aOldValue,
-                                nsIPrincipal* aSubjectPrincipal,
-                                bool aNotify) override;
 
   /**
    * Forget all information about the current submission (and the fact that we
@@ -207,19 +201,19 @@ class HTMLFormElement final : public nsGenericHTMLElement,
   bool ImplicitSubmissionIsDisabled() const;
 
   /**
-   * Check whether a given nsIFormControl is the last single line input control
-   * that is not disabled. aControl is expected to not be null.
+   * Check whether a given nsGenericHTMLFormElement is the last single line
+   * input control that is not disabled. aElement is expected to not be null.
    */
-  bool IsLastActiveElement(const nsIFormControl* aControl) const;
+  bool IsLastActiveElement(const nsGenericHTMLFormElement* aElement) const;
 
   /**
-   * Check whether a given nsIFormControl is the default submit
+   * Check whether a given nsGenericHTMLFormElement is the default submit
    * element.  This is different from just comparing to
    * GetDefaultSubmitElement() in certain situations inside an update
-   * when GetDefaultSubmitElement() might not be up to date.  aControl
+   * when GetDefaultSubmitElement() might not be up to date. aElement
    * is expected to not be null.
    */
-  bool IsDefaultSubmitElement(const nsIFormControl* aControl) const;
+  bool IsDefaultSubmitElement(const nsGenericHTMLFormElement* aElement) const;
 
   /**
    * Flag the form to know that a button or image triggered scripted form
@@ -406,8 +400,10 @@ class HTMLFormElement final : public nsGenericHTMLElement,
                              JS::Handle<JSObject*> aGivenProto) override;
 
   void PostPasswordEvent();
+  void PostPossibleUsernameEvent();
 
   RefPtr<AsyncEventDispatcher> mFormPasswordEventDispatcher;
+  RefPtr<AsyncEventDispatcher> mFormPossibleUsernameEventDispatcher;
 
   class RemoveElementRunnable;
   friend class RemoveElementRunnable;
@@ -488,8 +484,7 @@ class HTMLFormElement final : public nsGenericHTMLElement,
    * Find form controls in this form with the correct value in the name
    * attribute.
    */
-  already_AddRefed<nsISupports> DoResolveName(const nsAString& aName,
-                                              bool aFlushContent);
+  already_AddRefed<nsISupports> DoResolveName(const nsAString& aName);
 
   /**
    * Check the form validity following this algorithm:
@@ -555,21 +550,9 @@ class HTMLFormElement final : public nsGenericHTMLElement,
   //
   /** The list of controls (form.elements as well as stuff not in elements) */
   RefPtr<HTMLFormControlsCollection> mControls;
-  /** The currently selected radio button of each group */
-  nsRefPtrHashtable<nsStringHashKey, HTMLInputElement> mSelectedRadioButtons;
-  /** The number of required radio button of each group */
-  nsDataHashtable<nsStringCaseInsensitiveHashKey, uint32_t>
-      mRequiredRadioButtonCounts;
-  /** The value missing state of each group */
-  nsDataHashtable<nsStringCaseInsensitiveHashKey, bool>
-      mValueMissingRadioGroups;
 
   /** The pending submission object */
   UniquePtr<HTMLFormSubmission> mPendingSubmission;
-  /** The request currently being submitted */
-  nsCOMPtr<nsIRequest> mSubmittingRequest;
-  /** The web progress object we are currently listening to */
-  nsWeakPtr mWebProgress;
 
   /** The target browsing context, if any. */
   RefPtr<BrowsingContext> mTargetContext;
@@ -642,6 +625,13 @@ class HTMLFormElement final : public nsGenericHTMLElement,
   bool IsSubmitting() const;
 
   NotNull<const Encoding*> GetSubmitEncoding();
+
+  /**
+   * Fire an event when the form is removed from the DOM tree. This is now only
+   * used by the password manager.
+   */
+  void MaybeFireFormRemoved();
+
   ~HTMLFormElement();
 };
 

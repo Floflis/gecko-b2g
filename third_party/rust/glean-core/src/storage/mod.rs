@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value as JsonValue};
 
+use crate::coverage::record_coverage;
 use crate::database::Database;
 use crate::metrics::Metric;
 use crate::Lifetime;
@@ -85,7 +86,7 @@ impl StorageManager {
         let mut snapshotter = |metric_id: &[u8], metric: &Metric| {
             let metric_id = String::from_utf8_lossy(metric_id).into_owned();
             if metric_id.contains('/') {
-                snapshot_labeled_metrics(&mut snapshot, &metric_id, &metric);
+                snapshot_labeled_metrics(&mut snapshot, &metric_id, metric);
             } else {
                 let map = snapshot
                     .entry(metric.ping_section().into())
@@ -94,9 +95,9 @@ impl StorageManager {
             }
         };
 
-        storage.iter_store_from(Lifetime::Ping, &store_name, None, &mut snapshotter);
-        storage.iter_store_from(Lifetime::Application, &store_name, None, &mut snapshotter);
-        storage.iter_store_from(Lifetime::User, &store_name, None, &mut snapshotter);
+        storage.iter_store_from(Lifetime::Ping, store_name, None, &mut snapshotter);
+        storage.iter_store_from(Lifetime::Application, store_name, None, &mut snapshotter);
+        storage.iter_store_from(Lifetime::User, store_name, None, &mut snapshotter);
 
         if clear_store {
             if let Err(e) = storage.clear_ping_lifetime_storage(store_name) {
@@ -112,8 +113,6 @@ impl StorageManager {
     }
 
     /// Gets the current value of a single metric identified by name.
-    ///
-    /// This look for a value in stores for all lifetimes.
     ///
     /// # Arguments
     ///
@@ -140,9 +139,34 @@ impl StorageManager {
             }
         };
 
-        storage.iter_store_from(metric_lifetime, &store_name, None, &mut snapshotter);
+        storage.iter_store_from(metric_lifetime, store_name, None, &mut snapshotter);
 
         snapshot
+    }
+
+    /// Gets the current value of a single metric identified by name.
+    ///
+    /// Use this API, rather than `snapshot_metric` within the testing API, so
+    /// that the usage will be reported in coverage, if enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - The database to get data from.
+    /// * `store_name` - The store name to look into.
+    /// * `metric_id` - The full metric identifier.
+    ///
+    /// # Returns
+    ///
+    /// The decoded metric or `None` if no data is found.
+    pub fn snapshot_metric_for_test(
+        &self,
+        storage: &Database,
+        store_name: &str,
+        metric_id: &str,
+        metric_lifetime: Lifetime,
+    ) -> Option<Metric> {
+        record_coverage(metric_id);
+        self.snapshot_metric(storage, store_name, metric_id, metric_lifetime)
     }
 
     ///  Snapshots the experiments.

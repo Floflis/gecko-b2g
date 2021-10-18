@@ -36,7 +36,7 @@ DIRS += [
     "downloads",
     "enterprisepolicies",
     "extensions",
-    "fxmonitor",
+    "pagedata",
     "migration",
     "newtab",
     "originattributes",
@@ -49,13 +49,15 @@ DIRS += [
     "protections",
     "protocolhandler",
     "resistfingerprinting",
+    "screenshots",
     "search",
     "sessionstore",
     "shell",
     "syncedtabs",
+    "tabunloader",
+    "translation",
     "uitour",
     "urlbar",
-    "translation",
 ]
 
 DIRS += ["build"]

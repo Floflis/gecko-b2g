@@ -9,7 +9,7 @@ const {
   createFactory,
 } = require("devtools/client/shared/vendor/react");
 const dom = require("devtools/client/shared/vendor/react-dom-factories");
-const { div } = dom;
+const { div, input, label, span, h2 } = dom;
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 
 const {
@@ -49,9 +49,6 @@ const {
 } = require("devtools/client/netmonitor/src/selectors/index");
 
 // Components
-const Accordion = createFactory(
-  require("devtools/client/shared/components/Accordion")
-);
 const RawData = createFactory(
   require("devtools/client/netmonitor/src/components/messages/RawData")
 );
@@ -60,6 +57,8 @@ loader.lazyGetter(this, "PropertiesView", function() {
     require("devtools/client/netmonitor/src/components/request-details/PropertiesView")
   );
 });
+
+const RAW_DATA = L10N.getStr("netmonitor.response.raw");
 
 /**
  * Shows the full payload of a message.
@@ -82,7 +81,11 @@ class MessagePayload extends Component {
       isFormattedData: false,
       formattedData: {},
       formattedDataTitle: "",
+      rawDataDisplayed: false,
     };
+
+    this.toggleRawData = this.toggleRawData.bind(this);
+    this.renderRawDataBtn = this.renderRawDataBtn.bind(this);
   }
 
   componentDidMount() {
@@ -199,8 +202,16 @@ class MessagePayload extends Component {
     // json payload
     let { json } = parseJSON(payload);
     if (json) {
-      const actionCablePayload = this.parseActionCable(json);
-      if (actionCablePayload) {
+      const { data, identifier } = json;
+      // A json payload MAY be an "Action cable" if it
+      // contains either a `data` or an `identifier` property
+      // which are also json strings and would need to be parsed.
+      // See https://medium.com/codequest/actioncable-in-rails-api-f087b65c860d
+      if (
+        (data && typeof data == "string") ||
+        (identifier && typeof identifier == "string")
+      ) {
+        const actionCablePayload = this.parseActionCable(json);
         return {
           formattedData: actionCablePayload,
           formattedDataTitle: "Action Cable",
@@ -288,9 +299,7 @@ class MessagePayload extends Component {
   parseActionCable(payload) {
     const identifier = payload.identifier && parseJSON(payload.identifier).json;
     const data = payload.data && parseJSON(payload.data).json;
-    if (!data && !identifier) {
-      return null;
-    }
+
     if (identifier) {
       payload.identifier = identifier;
     }
@@ -300,43 +309,71 @@ class MessagePayload extends Component {
     return payload;
   }
 
+  toggleRawData() {
+    this.setState({
+      rawDataDisplayed: !this.state.rawDataDisplayed,
+    });
+  }
+
+  renderRawDataBtn(key, checked, onChange) {
+    return [
+      label(
+        {
+          key: `${key}RawDataBtn`,
+          className: "raw-data-toggle",
+          htmlFor: `raw-${key}-checkbox`,
+          onClick: event => {
+            // stop the header click event
+            event.stopPropagation();
+          },
+        },
+        span({ className: "raw-data-toggle-label" }, RAW_DATA),
+        span(
+          { className: "raw-data-toggle-input" },
+          input({
+            id: `raw-${key}-checkbox`,
+            checked,
+            className: "devtools-checkbox-toggle",
+            onChange,
+            type: "checkbox",
+          })
+        )
+      ),
+    ];
+  }
+
+  renderData(component, componentProps) {
+    return component(componentProps);
+  }
+
   render() {
-    let { payload } = this.state;
+    let component;
+    let componentProps;
+    let dataLabel;
+    let { payload, rawDataDisplayed } = this.state;
     let isTruncated = false;
     if (this.state.payload.length >= MESSAGE_DATA_LIMIT) {
       payload = payload.substring(0, MESSAGE_DATA_LIMIT);
       isTruncated = true;
     }
 
-    const items = [
-      {
-        className: "rawData",
-        component: RawData,
-        componentProps: { payload },
-        header: L10N.getFormatStrWithNumbers(
-          "netmonitor.ws.rawData.header",
-          getFormattedSize(this.state.payload.length)
-        ),
-        id: "message-rawData",
-        opened: true,
-      },
-    ];
-    if (!isTruncated && this.state.isFormattedData) {
-      /**
-       * Push the JSON section (formatted data) at the begging of the array
-       * before the raw data section. Note that the JSON section will be
-       * auto-expanded while the raw data auto-collapsed.
-       */
-      items.unshift({
-        className: "formattedData",
-        component: PropertiesView,
-        componentProps: {
-          object: this.state.formattedData,
-        },
-        header: this.state.formattedDataTitle,
-        id: "message-formattedData",
-        opened: true,
-      });
+    if (
+      !isTruncated &&
+      this.state.isFormattedData &&
+      !this.state.rawDataDisplayed
+    ) {
+      component = PropertiesView;
+      componentProps = {
+        object: this.state.formattedData,
+      };
+      dataLabel = this.state.formattedDataTitle;
+    } else {
+      component = RawData;
+      componentProps = { payload };
+      dataLabel = L10N.getFormatStrWithNumbers(
+        "netmonitor.ws.rawData.header",
+        getFormattedSize(this.state.payload.length)
+      );
     }
 
     return div(
@@ -350,9 +387,13 @@ class MessagePayload extends Component {
           },
           MESSAGE_DATA_TRUNCATED
         ),
-      Accordion({
-        items,
-      })
+      h2({ className: "data-header", role: "heading" }, [
+        span({ key: "data-label", className: "data-label" }, dataLabel),
+        !isTruncated &&
+          this.state.isFormattedData &&
+          this.renderRawDataBtn("data", rawDataDisplayed, this.toggleRawData),
+      ]),
+      this.renderData(component, componentProps)
     );
   }
 }

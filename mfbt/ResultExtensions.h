@@ -16,10 +16,12 @@
 
 namespace mozilla {
 
+struct ErrorPropagationTag;
+
 // Allow nsresult errors to automatically convert to nsresult values, so MOZ_TRY
 // can be used in XPCOM methods with Result<T, nserror> results.
 template <>
-class MOZ_MUST_USE_TYPE GenericErrorResult<nsresult> {
+class [[nodiscard]] GenericErrorResult<nsresult> {
   nsresult mErrorValue;
 
   template <typename V, typename E2>
@@ -30,11 +32,15 @@ class MOZ_MUST_USE_TYPE GenericErrorResult<nsresult> {
     MOZ_ASSERT(NS_FAILED(aErrorValue));
   }
 
+  GenericErrorResult(nsresult aErrorValue, const ErrorPropagationTag&)
+      : GenericErrorResult(aErrorValue) {}
+
   operator nsresult() const { return mErrorValue; }
 };
 
 // Allow MOZ_TRY to handle `PRStatus` values.
-inline Result<Ok, nsresult> ToResult(PRStatus aValue);
+template <typename E = nsresult>
+inline Result<Ok, E> ToResult(PRStatus aValue);
 
 }  // namespace mozilla
 
@@ -42,18 +48,28 @@ inline Result<Ok, nsresult> ToResult(PRStatus aValue);
 
 namespace mozilla {
 
-inline Result<Ok, nsresult> ToResult(nsresult aValue) {
+template <typename ResultType>
+struct ResultTypeTraits;
+
+template <>
+struct ResultTypeTraits<nsresult> {
+  static nsresult From(nsresult aValue) { return aValue; }
+};
+
+template <typename E>
+inline Result<Ok, E> ToResult(nsresult aValue) {
   if (NS_FAILED(aValue)) {
-    return Err(aValue);
+    return Err(ResultTypeTraits<E>::From(aValue));
   }
   return Ok();
 }
 
-inline Result<Ok, nsresult> ToResult(PRStatus aValue) {
+template <typename E>
+inline Result<Ok, E> ToResult(PRStatus aValue) {
   if (aValue == PR_SUCCESS) {
     return Ok();
   }
-  return Err(NS_ERROR_FAILURE);
+  return Err(ResultTypeTraits<E>::From(NS_ERROR_FAILURE));
 }
 
 namespace detail {
@@ -100,11 +116,12 @@ struct outparam_as_reference<T*> {
 
 template <typename R, template <typename> typename RArg, typename Func,
           typename... Args>
-using to_result_retval_t = decltype(
-    std::declval<Func&>()(std::declval<Args&&>()...,
-                          std::declval<typename RArg<decltype(
-                              ResultRefAsParam(std::declval<R&>()))>::type>()),
-    Result<R, nsresult>(Err(NS_ERROR_FAILURE)));
+using to_result_retval_t =
+    decltype(std::declval<Func&>()(
+                 std::declval<Args&&>()...,
+                 std::declval<typename RArg<decltype(ResultRefAsParam(
+                     std::declval<R&>()))>::type>()),
+             Result<R, nsresult>(Err(NS_ERROR_FAILURE)));
 
 // There are two ToResultInvokeSelector overloads, which cover the cases of a) a
 // pointer-typed output parameter, and b) a reference-typed output parameter,

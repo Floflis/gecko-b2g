@@ -81,10 +81,8 @@ if [ -n "$rev" ]; then
     echo "Updating moz.yaml failed."
     exit 1
   fi
-  rm moz.yaml.bak
+  rm -f moz.yaml.bak
   [[ -n "$commits" ]] && echo -e "Pick commits:\n$commits"
 else
   echo "Remember to update moz.yaml with the version details."
 fi
-
-patch -p3 < ./aaudio_by_default.patch

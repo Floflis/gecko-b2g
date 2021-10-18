@@ -21,7 +21,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   BrowserUIUtils: "resource:///modules/BrowserUIUtils.jsm",
   JsonSchemaValidator:
     "resource://gre/modules/components-utils/JsonSchemaValidator.jsm",
-  Services: "resource://gre/modules/Services.jsm",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.jsm",
   UrlbarUtils: "resource:///modules/UrlbarUtils.jsm",
 });
@@ -60,10 +59,6 @@ class UrlbarResult {
 
     // UrlbarView is responsible for updating this.
     this.rowIndex = -1;
-
-    // This is an optional hint to the Muxer that can be set by a provider to
-    // suggest a specific position among the results.
-    this.suggestedIndex = -1;
 
     // May be used to indicate an heuristic result. Heuristic results can bypass
     // source filters in the ProvidersManager, that otherwise may skip them.
@@ -118,6 +113,14 @@ class UrlbarResult {
       case UrlbarUtils.RESULT_TYPE.URL:
       case UrlbarUtils.RESULT_TYPE.OMNIBOX:
       case UrlbarUtils.RESULT_TYPE.REMOTE_TAB:
+        if (this.payload.qsSuggestion) {
+          return [
+            // We will initially only be targetting en-US users with this experiment
+            // but will need to change this to work properly with l10n.
+            this.payload.qsSuggestion + " — " + this.payload.title,
+            this.payloadHighlights.qsSuggestion,
+          ];
+        }
         return this.payload.title
           ? [this.payload.title, this.payloadHighlights.title]
           : [this.payload.url || "", this.payloadHighlights.url || []];
@@ -142,6 +145,16 @@ class UrlbarResult {
    */
   get icon() {
     return this.payload.icon;
+  }
+
+  /**
+   * Returns whether the result's `suggestedIndex` property is defined.
+   * `suggestedIndex` is an optional hint to the muxer that can be set to
+   * suggest a specific position among the results.
+   * @returns {boolean} Whether `suggestedIndex` is defined.
+   */
+  get hasSuggestedIndex() {
+    return typeof this.suggestedIndex == "number";
   }
 
   /**
@@ -234,7 +247,7 @@ class UrlbarResult {
           }
         }
       }
-      payloadInfo.displayUrl[0] = Services.textToSubURI.unEscapeURIForUI(url);
+      payloadInfo.displayUrl[0] = UrlbarUtils.unEscapeURIForUI(url);
     }
 
     // For performance reasons limit excessive string lengths, to reduce the

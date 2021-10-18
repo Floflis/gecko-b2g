@@ -13,8 +13,7 @@
 #include "nsTreeSanitizer.h"
 #include "Sanitizer.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(Sanitizer, mGlobal)
 
@@ -33,23 +32,21 @@ JSObject* Sanitizer::WrapObject(JSContext* aCx,
 
 /* static */
 already_AddRefed<Sanitizer> Sanitizer::Constructor(
-    const GlobalObject& aGlobal, const SanitizerOptions& aOptions,
+    const GlobalObject& aGlobal, const SanitizerConfig& aOptions,
     ErrorResult& aRv) {
-  // Note: Later, aOptions will be interpreted and stored as a member.
-  // We'll just ignore it for now.
   nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(aGlobal.GetAsSupports());
-  RefPtr<Sanitizer> sanitizer = new Sanitizer(global);
+  RefPtr<Sanitizer> sanitizer = new Sanitizer(global, aOptions);
   AutoTArray<nsString, 1> params = {};
   sanitizer->LogLocalizedString("SanitizerOptionsDiscarded", params,
                                 nsIScriptError::infoFlag);
+
   return sanitizer.forget();
 }
 
 /* static */
 already_AddRefed<DocumentFragment> Sanitizer::InputToNewFragment(
-    const Optional<mozilla::dom::StringOrDocumentFragmentOrDocument>& aInput,
-    ErrorResult& aRv) {
-  // turns an StringOrDocumentFragmentOrDocument into a DocumentFragment for
+    const mozilla::dom::DocumentFragmentOrDocument& aInput, ErrorResult& aRv) {
+  // turns an DocumentFragmentOrDocument into a new DocumentFragment for
   // internal use with nsTreeSanitizer
 
   nsCOMPtr<nsPIDOMWindowInner> window = do_QueryInterface(mGlobal);
@@ -58,29 +55,19 @@ already_AddRefed<DocumentFragment> Sanitizer::InputToNewFragment(
     aRv.Throw(NS_ERROR_FAILURE);
     return nullptr;
   }
-  if (!aInput.WasPassed()) {
-    AutoTArray<nsString, 1> params = {};
-    LogLocalizedString("SanitizerRcvdNoInput", params,
-                       nsIScriptError::warningFlag);
 
-    RefPtr<DocumentFragment> emptyFragment =
-        window->GetDoc()->CreateDocumentFragment();
-    return emptyFragment.forget();
-  }
   // We need to create a new docfragment based on the input
   // and can't use a live document (possibly with mutation observershandlers)
   nsAutoString innerHTML;
-  if (aInput.Value().IsDocumentFragment()) {
-    RefPtr<DocumentFragment> inFragment =
-        &aInput.Value().GetAsDocumentFragment();
+  if (aInput.IsDocumentFragment()) {
+    RefPtr<DocumentFragment> inFragment = &aInput.GetAsDocumentFragment();
     inFragment->GetInnerHTML(innerHTML);
-  } else if (aInput.Value().IsString()) {
-    innerHTML.Assign(aInput.Value().GetAsString());
-  } else if (aInput.Value().IsDocument()) {
-    RefPtr<Document> doc = &aInput.Value().GetAsDocument();
+  } else if (aInput.IsDocument()) {
+    RefPtr<Document> doc = &aInput.GetAsDocument();
     nsCOMPtr<Element> docElement = doc->GetDocumentElement();
-
-    docElement->GetInnerHTML(innerHTML, IgnoreErrors());
+    if (docElement) {
+      docElement->GetInnerHTML(innerHTML, IgnoreErrors());
+    }
   }
   if (innerHTML.IsEmpty()) {
     AutoTArray<nsString, 1> params = {};
@@ -91,9 +78,17 @@ already_AddRefed<DocumentFragment> Sanitizer::InputToNewFragment(
         window->GetDoc()->CreateDocumentFragment();
     return emptyFragment.forget();
   }
+  // Create an inert HTML document, loaded as data.
+  // this ensures we do not cause any requests.
+  RefPtr<Document> emptyDoc =
+      nsContentUtils::CreateInertHTMLDocument(window->GetDoc());
+  if (!emptyDoc) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
   // We don't have a context element yet. let's create a mock HTML body element
   RefPtr<mozilla::dom::NodeInfo> info =
-      window->GetDoc()->NodeInfoManager()->GetNodeInfo(
+      emptyDoc->NodeInfoManager()->GetNodeInfo(
           nsGkAtoms::body, nullptr, kNameSpaceID_XHTML, nsINode::ELEMENT_NODE);
 
   nsCOMPtr<nsINode> context = NS_NewHTMLBodyElement(
@@ -101,60 +96,90 @@ already_AddRefed<DocumentFragment> Sanitizer::InputToNewFragment(
   RefPtr<DocumentFragment> fragment = nsContentUtils::CreateContextualFragment(
       context, innerHTML, true /* aPreventScriptExecution */, aRv);
   if (aRv.Failed()) {
-    aRv.Throw(NS_ERROR_FAILURE);
+    aRv.ThrowInvalidStateError("Could not parse input");
     return nullptr;
   }
   return fragment.forget();
 }
 
 already_AddRefed<DocumentFragment> Sanitizer::Sanitize(
-    const Optional<mozilla::dom::StringOrDocumentFragmentOrDocument>& aInput,
-    ErrorResult& aRv) {
+    const mozilla::dom::DocumentFragmentOrDocument& aInput, ErrorResult& aRv) {
   nsCOMPtr<nsPIDOMWindowInner> window = do_QueryInterface(mGlobal);
   if (!window || !window->GetDoc()) {
     aRv.Throw(NS_ERROR_FAILURE);
     return nullptr;
   }
-  if (!aInput.WasPassed()) {
-    AutoTArray<nsString, 1> params = {};
-    LogLocalizedString("SanitizerRcvdNoInput", params,
-                       nsIScriptError::warningFlag);
-    RefPtr<DocumentFragment> fragment =
-        window->GetDoc()->CreateDocumentFragment();
-    return fragment.forget();
-  }
-  ErrorResult error;
   RefPtr<DocumentFragment> fragment =
-      Sanitizer::InputToNewFragment(aInput, error);
-  if (error.Failed()) {
-    return fragment.forget();
+      Sanitizer::InputToNewFragment(aInput, aRv);
+  if (aRv.Failed()) {
+    return nullptr;
   }
-  nsTreeSanitizer treeSanitizer(mSanitizationFlags);
 
-  treeSanitizer.Sanitize(fragment);
+  mTreeSanitizer.Sanitize(fragment);
   return fragment.forget();
 }
 
-void Sanitizer::SanitizeToString(
-    const Optional<StringOrDocumentFragmentOrDocument>& aInput,
-    nsAString& outSanitized, ErrorResult& aRv) {
-  outSanitized.Truncate();
-  if (!aInput.WasPassed()) {
-    AutoTArray<nsString, 1> params = {};
-    LogLocalizedString("SanitizerRcvdNoInput", params,
-                       nsIScriptError::warningFlag);
-    return;
+RefPtr<DocumentFragment> Sanitizer::SanitizeFragment(
+    RefPtr<DocumentFragment> aFragment, ErrorResult& aRv) {
+  nsCOMPtr<nsPIDOMWindowInner> window = do_QueryInterface(mGlobal);
+  if (!window || !window->GetDoc()) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
   }
-  ErrorResult error;
-  RefPtr<DocumentFragment> fragment =
-      Sanitizer::InputToNewFragment(aInput, error);
-  if (error.Failed()) {
-    return;
-  }
-  nsTreeSanitizer treeSanitizer(mSanitizationFlags);
+  // FIXME(freddyb)
+  // (how) can we assert that the supplied doc is indeed inert?
+  mTreeSanitizer.Sanitize(aFragment);
+  return aFragment.forget();
+}
 
-  treeSanitizer.Sanitize(fragment);
-  fragment->GetInnerHTML(outSanitized);
+already_AddRefed<Element> Sanitizer::SanitizeFor(const nsAString& aElement,
+                                                 const nsAString& aInput,
+                                                 ErrorResult& aRv) {
+  aRv = nsContentUtils::CheckQName(aElement, false);
+  if (aRv.Failed()) {
+    return nullptr;
+  }
+  RefPtr<nsAtom> elemName = NS_Atomize(aElement);
+  // FIXME(freddyb): Invalid parameters for SanitizeFor should throw, just like
+  // Element.setHTML does. Cf. https://github.com/WICG/sanitizer-api/issues/125
+  if (elemName == nsGkAtoms::script) {
+    // aRv.ThrowTypeError("This does not work on <script> elements");
+    return nullptr;
+  }
+  if (elemName == nsGkAtoms::object) {
+    // aRv.ThrowTypeError("This does not work on <object> elements");
+    return nullptr;
+  }
+  if (elemName == nsGkAtoms::iframe) {
+    // aRv.ThrowTypeError("This does not work on <iframe> elements");
+    return nullptr;
+  }
+  RefPtr<Document> inertDoc = nsContentUtils::CreateInertHTMLDocument(nullptr);
+  if (!inertDoc) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+  RefPtr<DocumentFragment> fragment = new (inertDoc->NodeInfoManager())
+      DocumentFragment(inertDoc->NodeInfoManager());
+
+  aRv = nsContentUtils::ParseFragmentHTML(aInput, fragment, elemName,
+                                          kNameSpaceID_XHTML, false, true);
+
+  if (aRv.Failed()) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+  mTreeSanitizer.Sanitize(fragment);
+  nsCOMPtr<nsPIDOMWindowInner> window = do_QueryInterface(mGlobal);
+  if (!window || !window->GetDoc()) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+  RefPtr<mozilla::dom::Element> element =
+      window->GetDoc()->CreateHTMLElement(elemName);
+  element->AppendChild(*fragment, aRv);
+
+  return element.forget();
 }
 
 /* ------ Logging ------ */
@@ -199,5 +224,4 @@ void Sanitizer::LogMessage(const nsAString& aMessage, uint32_t aFlags,
   }
 }
 
-}  // namespace dom
-}  // namespace mozilla
+}  // namespace mozilla::dom

@@ -28,6 +28,8 @@ class RecordedTextureData final : public TextureData {
 
   already_AddRefed<gfx::DrawTarget> BorrowDrawTarget() final;
 
+  void EndDraw() final;
+
   already_AddRefed<gfx::SourceSurface> BorrowSnapshot() final;
 
   void Deallocate(LayersIPCChannel* aAllocator) final;
@@ -49,6 +51,7 @@ class RecordedTextureData final : public TextureData {
   gfx::SurfaceFormat mFormat;
   RefPtr<gfx::DrawTarget> mDT;
   RefPtr<gfx::SourceSurface> mSnapshot;
+  OpenMode mLockedMode;
 };
 
 }  // namespace layers

@@ -8,7 +8,7 @@
 #import "mozSelectableElements.h"
 #import "MOXWebAreaAccessible.h"
 #import "MacUtils.h"
-#include "Accessible-inl.h"
+#include "LocalAccessible-inl.h"
 #include "nsCocoaUtils.h"
 
 using namespace mozilla::a11y;
@@ -75,10 +75,10 @@ using namespace mozilla::a11y;
     return;
   }
 
-  if (Accessible* acc = mGeckoAccessible.AsAccessible()) {
+  if (LocalAccessible* acc = mGeckoAccessible->AsLocal()) {
     acc->SetSelected([selected boolValue]);
   } else {
-    mGeckoAccessible.AsProxy()->SetSelected([selected boolValue]);
+    mGeckoAccessible->AsRemote()->SetSelected([selected boolValue]);
   }
 
   // We need to invalidate the state because the accessibility service
@@ -177,7 +177,7 @@ using namespace mozilla::a11y;
   }
 
   if ([parent isKindOfClass:[mozMenuItemAccessible class]] &&
-      [parent geckoAccessible].Role() == roles::PARENT_MENUITEM) {
+      [parent geckoAccessible]->Role() == roles::PARENT_MENUITEM) {
     // We are a submenu. If our parent menu item is in an open menu
     // we should not be ignored
     id grandparent = [parent moxParent];
@@ -204,7 +204,7 @@ using namespace mozilla::a11y;
       filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(
                                                    mozAccessible* child,
                                                    NSDictionary* bindings) {
-        if (Accessible* acc = [child geckoAccessible].AsAccessible()) {
+        if (LocalAccessible* acc = [child geckoAccessible]->AsLocal()) {
           if (acc->IsContent() && acc->GetContent()->IsXULElement()) {
             return ((acc->VisibilityState() & states::INVISIBLE) == 0);
           }
@@ -261,12 +261,14 @@ using namespace mozilla::a11y;
   // Because moxChildren does ignore filtering, and because
   // our base ignore method filters out invisible accessibles,
   // we override this method.
-  AccessibleOrProxy parentAcc = [parent geckoAccessible];
-  if (!parentAcc.IsNull()) {
-    mozAccessible* directGrandparent =
-        GetNativeFromGeckoAccessible(parentAcc.Parent());
-    if ([directGrandparent isKindOfClass:[MOXWebAreaAccessible class]]) {
-      return [parent moxIgnoreWithParent:directGrandparent];
+  Accessible* parentAcc = [parent geckoAccessible];
+  if (parentAcc) {
+    Accessible* grandparentAcc = parentAcc->Parent();
+    if (mozAccessible* directGrandparent =
+            GetNativeFromGeckoAccessible(grandparentAcc)) {
+      if ([directGrandparent isKindOfClass:[MOXWebAreaAccessible class]]) {
+        return [parent moxIgnoreWithParent:directGrandparent];
+      }
     }
   }
 
@@ -274,7 +276,7 @@ using namespace mozilla::a11y;
   if ([grandparent isKindOfClass:[mozMenuItemAccessible class]]) {
     mozMenuItemAccessible* acc =
         static_cast<mozMenuItemAccessible*>(grandparent);
-    if ([acc geckoAccessible].Role() == roles::PARENT_MENUITEM) {
+    if ([acc geckoAccessible]->Role() == roles::PARENT_MENUITEM) {
       mozMenuAccessible* parentMenu = static_cast<mozMenuAccessible*>(parent);
       // if we are a menu item in a submenu, display only when
       // parent menu item is open
@@ -288,7 +290,7 @@ using namespace mozilla::a11y;
 }
 
 - (NSString*)moxMenuItemMarkChar {
-  Accessible* acc = mGeckoAccessible.AsAccessible();
+  LocalAccessible* acc = mGeckoAccessible->AsLocal();
   if (acc && acc->IsContent() &&
       acc->GetContent()->IsXULElement(nsGkAtoms::menuitem)) {
     // We need to provide a marker character. This is the visible "√" you see
@@ -297,9 +299,9 @@ using namespace mozilla::a11y;
     // We do this only with XUL menuitems that conform to the native theme, and
     // not with aria menu items that might have a pseudo element or something.
     if (acc->ChildCount() == 1 &&
-        acc->FirstChild()->Role() == roles::STATICTEXT) {
+        acc->LocalFirstChild()->Role() == roles::STATICTEXT) {
       nsAutoString marker;
-      acc->FirstChild()->Name(marker);
+      acc->LocalFirstChild()->Name(marker);
       if (marker.Length() == 1) {
         return nsCocoaUtils::ToNSString(marker);
       }
@@ -317,6 +319,7 @@ using namespace mozilla::a11y;
 - (void)handleAccessibleEvent:(uint32_t)eventType {
   switch (eventType) {
     case nsIAccessibleEvent::EVENT_FOCUS:
+      [self invalidateState];
       // Our focused state is equivelent to native selected states for menus.
       mozAccessible* parent = (mozAccessible*)[self moxUnignoredParent];
       [parent moxPostNotification:
@@ -325,6 +328,13 @@ using namespace mozilla::a11y;
   }
 
   [super handleAccessibleEvent:eventType];
+}
+
+- (void)moxPerformPress {
+  [super moxPerformPress];
+  // when a menu item is pressed (chosen), we need to tell
+  // VoiceOver about it, so we send this notification
+  [self moxPostNotification:@"AXMenuItemSelected"];
 }
 
 @end

@@ -12,6 +12,13 @@ const {
 } = require("devtools/shared/protocol.js");
 const { inspectorSpec } = require("devtools/shared/specs/inspector");
 
+loader.lazyRequireGetter(
+  this,
+  "captureScreenshot",
+  "devtools/client/shared/screenshot",
+  true
+);
+
 const TELEMETRY_EYEDROPPER_OPENED = "DEVTOOLS_EYEDROPPER_OPENED_COUNT";
 const TELEMETRY_EYEDROPPER_OPENED_MENU =
   "DEVTOOLS_MENU_EYEDROPPER_OPENED_COUNT";
@@ -36,12 +43,36 @@ class InspectorFront extends FrontClassWithSpec(inspectorSpec) {
 
     // Map of highlighter types to unsettled promises to create a highlighter of that type
     this._pendingGetHighlighterMap = new Map();
+
+    this.noopStylesheetListener = () => {};
   }
 
   // async initialization
   async initialize() {
     if (this.initialized) {
       return this.initialized;
+    }
+
+    // If the server-side support for stylesheet resources is enabled, we need to start
+    // to watch for them before instanciating the pageStyle actor (which does use the
+    // watcher and assume we're already watching for stylesheets).
+    const { resourceCommand } = this.targetFront;
+    if (
+      resourceCommand?.hasResourceCommandSupport(
+        resourceCommand.TYPES.STYLESHEET
+      )
+    ) {
+      // Store `resourceCommand` on the inspector front as we need it later, and we might not be able to retrieve it from
+      // the targetFront as its resourceCommand property is nullified by ResourceCommand.onTargetDestroyed.
+      this.resourceCommand = resourceCommand;
+      await resourceCommand.watchResources([resourceCommand.TYPES.STYLESHEET], {
+        // we simply want to start the watcher, we don't have to do anything with those resources.
+        onAvailable: this.noopStylesheetListener,
+      });
+      // Bail out if the inspector is closed while watchResources was pending
+      if (this.isDestroyed()) {
+        return null;
+      }
     }
 
     this.initialized = await Promise.all([
@@ -83,7 +114,22 @@ class InspectorFront extends FrontClassWithSpec(inspectorSpec) {
   }
 
   destroy() {
+    if (this.isDestroyed()) {
+      return;
+    }
     this._compatibility = null;
+
+    // We might not have started watching for STYLESHEET if the debugged context
+    // doesn't support the watcher codepath
+    if (this.resourceCommand) {
+      const { resourceCommand } = this;
+      resourceCommand.unwatchResources([resourceCommand.TYPES.STYLESHEET], {
+        onAvailable: this.noopStylesheetListener,
+      });
+      this.resourceCommand = null;
+    }
+    this.walker = null;
+
     // CustomHighlighter fronts are managed by InspectorFront and so will be
     // automatically destroyed. But we have to clear the `_highlighters`
     // Map as well as explicitly call `finalize` request on all of them.
@@ -156,7 +202,38 @@ class InspectorFront extends FrontClassWithSpec(inspectorSpec) {
   }
 
   async pickColorFromPage(options) {
-    await super.pickColorFromPage(options);
+    let screenshot = null;
+
+    // @backward-compat { version 87 } ScreenshotContentActor was only added in 87.
+    //                  When connecting to older server, the eyedropper will  use drawWindow
+    //                  to retrieve the screenshot of the page (that's a decent fallback,
+    //                  even if it doesn't handle remote frames).
+    if (this.targetFront.hasActor("screenshotContent")) {
+      try {
+        // We use the screenshot actors as it can retrieve an image of the current viewport,
+        // handling remote frame if need be.
+        const { data } = await captureScreenshot(this.targetFront, {
+          browsingContextID: this.targetFront.browsingContextID,
+          disableFlash: true,
+          ignoreDprForFileScale: true,
+        });
+        screenshot = data;
+      } catch (e) {
+        // We simply log the error and still call pickColorFromPage as it will default to
+        // use drawWindow in order to get the screenshot of the page (that's a decent
+        // fallback, even if it doesn't handle remote frames).
+        console.error(
+          "Error occured when taking a screenshot for the eyedropper",
+          e
+        );
+      }
+    }
+
+    await super.pickColorFromPage({
+      ...options,
+      screenshot,
+    });
+
     if (options?.fromMenu) {
       telemetry.getHistogramById(TELEMETRY_EYEDROPPER_OPENED_MENU).add(true);
     } else {
@@ -187,7 +264,7 @@ class InspectorFront extends FrontClassWithSpec(inspectorSpec) {
 
     // If the contentDomReference has a different browsing context than the current one,
     // we are either in Fission or in the Multiprocess Browser Toolbox, so we need to
-    // retrieve the walker of the BrowsingContextTarget.
+    // retrieve the walker of the WindowGlobalTarget.
     // Get the target for this remote frame element
     const { descriptorFront } = this.targetFront;
 
@@ -196,7 +273,7 @@ class InspectorFront extends FrontClassWithSpec(inspectorSpec) {
     let target;
     if (descriptorFront && descriptorFront.traits.watcher) {
       const watcherFront = await descriptorFront.getWatcher();
-      target = await watcherFront.getBrowsingContextTarget(browsingContextId);
+      target = await watcherFront.getWindowGlobalTarget(browsingContextId);
     } else {
       // For descriptors which don't expose a watcher (e.g. WebExtension)
       // we used to call RootActor::getBrowsingContextDescriptor, but it was

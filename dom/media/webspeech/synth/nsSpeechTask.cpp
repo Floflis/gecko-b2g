@@ -26,8 +26,7 @@ public:
   explicit SynthStreamListener(nsSpeechTask* aSpeechTask,
                                MediaTrack* aStream) :
     mSpeechTask(aSpeechTask),
-    mStream(aStream),
-    mStarted(false) {}
+    mStream(aStream) {}
 
   void DoNotifyStarted() {
     if (mSpeechTask && !mStream->IsDestroyed()) {
@@ -43,13 +42,13 @@ public:
   }
 
   void NotifyEnded(MediaTrackGraph* aGraph) override {
-    if (!mStarted) {
-      mStarted = true;
-      aGraph->DispatchToMainThreadStableState(NS_NewRunnableFunction(
-        "NotifyEnded startRunnable", [this]() { DoNotifyStarted(); }));
-    }
     aGraph->DispatchToMainThreadStableState(NS_NewRunnableFunction(
-      "NotifyEnded endRunnable", [this]() { DoNotifyFinished(); }));
+      "NotifyEnded endRunnable",
+      [self = RefPtr<SynthStreamListener>(this)] {
+        if (self) {
+          self->DoNotifyFinished();
+        }
+      }));
   }
 
   void NotifyRemoved(MediaTrackGraph* aGraph) override {
@@ -64,8 +63,6 @@ private:
   nsSpeechTask* mSpeechTask;
   // This is KungFuDeathGrip for MediaTrack
   RefPtr<MediaTrack> mStream;
-
-  bool mStarted;
 };
 
 // nsSpeechTask
@@ -107,7 +104,18 @@ nsSpeechTask::nsSpeechTask(float aVolume, const nsAString& aText,
       mIsChrome(aIsChrome),
       mState(STATE_PENDING) {}
 
-nsSpeechTask::~nsSpeechTask() { LOG(LogLevel::Debug, ("~nsSpeechTask")); }
+nsSpeechTask::~nsSpeechTask() {
+  LOG(LogLevel::Debug, ("~nsSpeechTask"));
+  if (mStream) {
+    if (!mStream->IsDestroyed()) {
+      mStream->Destroy();
+    }
+
+    // This will finally destroyed by SynthStreamListener becasue
+    // MediaStream::Destroy() is async.
+    mStream = nullptr;
+  }
+}
 
 void nsSpeechTask::Init() { mInited = true; }
 
@@ -137,12 +145,12 @@ nsSpeechTask::SetupAudioNative(nsISpeechTaskCallback* aCallback, uint32_t aRate)
       /*OutputDeviceID*/ nullptr);
   mStream = g1->CreateSourceTrack(MediaSegment::AUDIO);
 
-  MOZ_ASSERT(!mStream);
-
-  mStream->AddListener(new SynthStreamListener(this, mStream));
+  MOZ_ASSERT(mStream);
+  SynthStreamListener* listener = new SynthStreamListener(this, mStream);
+  mStream->AddListener(listener);
   mStream->AddAudioOutput(this);
   mStream->SetAudioOutputVolume(this, mVolume);
-
+  listener->DoNotifyStarted();
   mCallback = aCallback;
 
   return NS_OK;

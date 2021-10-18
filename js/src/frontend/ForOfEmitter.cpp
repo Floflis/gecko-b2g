@@ -9,6 +9,7 @@
 #include "frontend/BytecodeEmitter.h"
 #include "frontend/EmitterScope.h"
 #include "frontend/IfEmitter.h"
+#include "frontend/ParserAtom.h"  // TaggedParserAtomIndex
 #include "frontend/SourceNotes.h"
 #include "vm/Opcodes.h"
 #include "vm/Scope.h"
@@ -17,7 +18,6 @@
 using namespace js;
 using namespace js::frontend;
 
-using mozilla::Maybe;
 using mozilla::Nothing;
 
 ForOfEmitter::ForOfEmitter(BytecodeEmitter* bce,
@@ -42,7 +42,7 @@ bool ForOfEmitter::emitIterated() {
   return true;
 }
 
-bool ForOfEmitter::emitInitialize(const Maybe<uint32_t>& forPos) {
+bool ForOfEmitter::emitInitialize(uint32_t forPos) {
   MOZ_ASSERT(state_ == State::Iterated);
 
   tdzCacheForIteratedValue_.reset();
@@ -100,10 +100,8 @@ bool ForOfEmitter::emitInitialize(const Maybe<uint32_t>& forPos) {
 #endif
 
   // Make sure this code is attributed to the "for".
-  if (forPos) {
-    if (!bce_->updateSourceCoordNotes(*forPos)) {
-      return false;
-    }
+  if (!bce_->updateSourceCoordNotes(forPos)) {
+    return false;
   }
 
   if (!bce_->emit1(JSOp::Dup2)) {
@@ -111,7 +109,8 @@ bool ForOfEmitter::emitInitialize(const Maybe<uint32_t>& forPos) {
     return false;
   }
 
-  if (!bce_->emitIteratorNext(forPos, iterKind_, allowSelfHostedIter_)) {
+  if (!bce_->emitIteratorNext(mozilla::Some(forPos), iterKind_,
+                              allowSelfHostedIter_)) {
     //              [stack] NEXT ITER RESULT
     return false;
   }
@@ -120,7 +119,8 @@ bool ForOfEmitter::emitInitialize(const Maybe<uint32_t>& forPos) {
     //              [stack] NEXT ITER RESULT RESULT
     return false;
   }
-  if (!bce_->emitAtomOp(JSOp::GetProp, bce_->cx->parserNames().done)) {
+  if (!bce_->emitAtomOp(JSOp::GetProp,
+                        TaggedParserAtomIndex::WellKnown::done())) {
     //              [stack] NEXT ITER RESULT DONE
     return false;
   }
@@ -128,7 +128,7 @@ bool ForOfEmitter::emitInitialize(const Maybe<uint32_t>& forPos) {
   // if (done) break;
   MOZ_ASSERT(bce_->innermostNestableControl == loopInfo_.ptr(),
              "must be at the top-level of the loop");
-  if (!bce_->emitJump(JSOp::IfNe, &loopInfo_->breaks)) {
+  if (!bce_->emitJump(JSOp::JumpIfTrue, &loopInfo_->breaks)) {
     //              [stack] NEXT ITER RESULT
     return false;
   }
@@ -137,7 +137,8 @@ bool ForOfEmitter::emitInitialize(const Maybe<uint32_t>& forPos) {
   //
   // Note that ES 13.7.5.13, step 5.c says getting result.value does not
   // call IteratorClose, so start TryNoteKind::ForOfIterClose after the GetProp.
-  if (!bce_->emitAtomOp(JSOp::GetProp, bce_->cx->parserNames().value)) {
+  if (!bce_->emitAtomOp(JSOp::GetProp,
+                        TaggedParserAtomIndex::WellKnown::value())) {
     //              [stack] NEXT ITER VALUE
     return false;
   }
@@ -165,7 +166,7 @@ bool ForOfEmitter::emitBody() {
   return true;
 }
 
-bool ForOfEmitter::emitEnd(const Maybe<uint32_t>& iteratedPos) {
+bool ForOfEmitter::emitEnd(uint32_t iteratedPos) {
   MOZ_ASSERT(state_ == State::Body);
 
   MOZ_ASSERT(bce_->bytecodeSection().stackDepth() == loopDepth_ + 1,
@@ -185,10 +186,8 @@ bool ForOfEmitter::emitEnd(const Maybe<uint32_t>& iteratedPos) {
   // which corresponds to the iteration protocol.
   // This is a bit misleading for 2nd and later iterations and might need
   // some fix (bug 1482003).
-  if (iteratedPos) {
-    if (!bce_->updateSourceCoordNotes(*iteratedPos)) {
-      return false;
-    }
+  if (!bce_->updateSourceCoordNotes(iteratedPos)) {
+    return false;
   }
 
   if (!bce_->emit1(JSOp::Pop)) {

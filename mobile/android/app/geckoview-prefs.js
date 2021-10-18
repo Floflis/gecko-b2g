@@ -20,12 +20,6 @@ pref("privacy.trackingprotection.pbmode.enabled", false);
 pref("browser.tabs.remote.autostart", true);
 pref("dom.ipc.keepProcessesAlive.web", 1);
 
-#ifdef RELEASE_OR_BETA
-  pref("dom.ipc.processCount", 1);
-#else
-  pref("dom.ipc.processCount", 3);
-#endif
-
 pref("dom.ipc.processPrelaunch.enabled", false);
 
 // Don't create the hidden window during startup.
@@ -51,8 +45,8 @@ pref("dom.push.enabled", true);
 // enable external storage API
 pref("dom.storageManager.enabled", true);
 
-// enable Visual Viewport API
-pref("dom.visualviewport.enabled", true);
+// enable storage access API
+pref("dom.storage_access.enabled", true);
 
 // Inherit locale from the OS, used for multi-locale builds
 pref("intl.locale.requested", "");
@@ -69,9 +63,6 @@ pref("browser.safebrowsing.features.trackingProtection.update", true);
 pref("browser.safebrowsing.features.cryptomining.update", true);
 // Enable fingerprinting protection blocklist updates
 pref("browser.safebrowsing.features.fingerprinting.update", true);
-
-// Treat mouse as touch only on TV-ish devices
-pref("ui.android.mouse_as_touch", 2);
 
 // Enable autoplay permission prompts
 pref("media.geckoview.autoplay.request", true);
@@ -90,3 +81,17 @@ pref("toolkit.autocomplete.delegate", true);
 // Android doesn't support the new sync storage yet, we will have our own in
 // Bug 1625257.
 pref("webextensions.storage.sync.kinto", true);
+
+// This value is derived from the calculation:
+// MOZ_ANDROID_CONTENT_SERVICE_COUNT - dom.ipc.processCount
+// (dom.ipc.processCount is set in GeckoRuntimeSettings.java)
+#ifdef NIGHTLY_BUILD
+  pref("dom.ipc.processCount.webCOOP+COEP", 38);
+#endif
+
+// Form autofill prefs.
+pref("extensions.formautofill.addresses.capture.enabled", true);
+
+// Debug prefs.
+pref("browser.formfill.debug", false);
+pref("extensions.formautofill.loglevel", "Warn");

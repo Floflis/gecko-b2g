@@ -14,6 +14,11 @@ namespace dom {
 
 class RemoteWorkerController;
 
+/**
+ * PBackground-managed parent actor that is mutually associated with a single
+ * RemoteWorkerController.  Relays error/close events to the controller and in
+ * turns is told life-cycle events.
+ */
 class RemoteWorkerParent final : public PRemoteWorkerParent {
   friend class PRemoteWorkerParent;
 
@@ -22,7 +27,7 @@ class RemoteWorkerParent final : public PRemoteWorkerParent {
 
   RemoteWorkerParent();
 
-  void Initialize(bool aAlreadyRegistered = false);
+  void Initialize(nsIURI* aScriptURL, bool aAlreadyRegistered = false);
 
   void SetController(RemoteWorkerController* aController);
 
@@ -49,6 +54,7 @@ class RemoteWorkerParent final : public PRemoteWorkerParent {
 
   bool mDeleteSent = false;
   RefPtr<RemoteWorkerController> mController;
+  RefPtr<nsIURI> mScriptURL;
 };
 
 }  // namespace dom

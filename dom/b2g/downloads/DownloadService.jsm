@@ -19,12 +19,13 @@ const { OS } = ChromeUtils.import("resource://gre/modules/osfile.jsm");
  * shell.js
  */
 
+const DEBUG = Services.prefs.getBoolPref("dom.downloads.debug", false);
 function debug(aStr) {
   dump("-*- DownloadService.jsm : " + aStr + "\n");
 }
 
 function sendPromiseMessage(aMm, aMessageName, aData, aError) {
-  debug("sendPromiseMessage " + aMessageName);
+  DEBUG && debug("sendPromiseMessage " + aMessageName);
   let msg = {
     id: aData.id,
     promiseId: aData.promiseId,
@@ -39,7 +40,7 @@ function sendPromiseMessage(aMm, aMessageName, aData, aError) {
 
 var DownloadService = {
   init() {
-    debug("init");
+    DEBUG && debug("init");
 
     this._ids = new WeakMap(); // Maps toolkit download objects to ids.
     this._index = {}; // Maps ids to downloads.
@@ -58,9 +59,27 @@ var DownloadService = {
     let self = this;
     (async function() {
       let list = await Downloads.getList(Downloads.ALL);
-      await list.addView(self);
 
-      debug("view added to download list.");
+      // At the first time of calling Downloads.getList(), DownloadStore.load()
+      // loads persistent downloads from the file, and calls download.start()
+      // on the downloads which were in progress.
+      // On b2g, we choose to cancel these downloads, and let user restart the
+      // downloads manually, to avoid unexpected storage or network consumption.
+      let downloads = await list.getAll();
+      downloads.forEach(aDownload => {
+        if (!aDownload.succeeded && !aDownload.canceled && !aDownload.error) {
+          DEBUG &&
+            debug(
+              `cancel download on init ${JSON.stringify(
+                self.jsonDownload(aDownload)
+              )}`
+            );
+          aDownload.cancel();
+        }
+      });
+
+      await list.addView(self);
+      DEBUG && debug("view added to download list.");
     })().then(null, Cu.reportError);
 
     this._currentId = 0;
@@ -88,16 +107,22 @@ var DownloadService = {
    * send to the DOM side.
    */
   jsonDownload(aDownload) {
+    let referrer = "";
+    if (
+      aDownload.source.referrerInfo &&
+      aDownload.source.referrerInfo.originalReferrer instanceof Ci.nsIURI
+    ) {
+      referrer = aDownload.source.referrerInfo.originalReferrer.prePath;
+    }
+
     let res = {
       totalBytes: aDownload.totalBytes,
       currentBytes: aDownload.currentBytes,
       url: aDownload.source.url,
+      referrer,
       path: aDownload.target.path,
       contentType: aDownload.contentType,
       startTime: aDownload.startTime.getTime(),
-      sourceAppManifestURL:
-        aDownload._unknownProperties &&
-        aDownload._unknownProperties.sourceAppManifestURL,
     };
 
     if (aDownload.error) {
@@ -144,12 +169,14 @@ var DownloadService = {
 
   onDownloadChanged(aDownload) {
     let download = this.jsonDownload(aDownload);
-    debug("onDownloadChanged " + uneval(download));
+    if (DEBUG || download.state !== "downloading") {
+      debug("onDownloadChanged " + uneval(download));
+    }
     Services.ppmm.broadcastAsyncMessage("Downloads:Changed", download);
   },
 
   receiveMessage(aMessage) {
-    debug("message: " + aMessage.name);
+    DEBUG && debug("message: " + aMessage.name);
 
     switch (aMessage.name) {
       case "Downloads:GetList":
@@ -171,12 +198,12 @@ var DownloadService = {
         this.adoptDownload(aMessage.data, aMessage.target);
         break;
       default:
-        debug("Invalid message: " + aMessage.name);
+        DEBUG && debug("Invalid message: " + aMessage.name);
     }
   },
 
   getList(aData, aMm) {
-    debug("getList called!");
+    DEBUG && debug("getList");
     let self = this;
     (async function() {
       let list = await Downloads.getList(Downloads.ALL);
@@ -190,7 +217,7 @@ var DownloadService = {
   },
 
   clearAllDone(aData, aMm) {
-    debug("clearAllDone called!");
+    debug("clearAllDone");
     (async function() {
       let list = await Downloads.getList(Downloads.ALL);
       list.removeFinished();
@@ -198,7 +225,7 @@ var DownloadService = {
   },
 
   remove(aData, aMm) {
-    debug("remove id " + aData.id);
+    DEBUG && debug("remove id " + aData.id);
     let download = this.getDownloadById(aData.id);
     if (!download) {
       sendPromiseMessage(
@@ -285,10 +312,12 @@ var DownloadService = {
    * our "jsonDownload" normalizer and add it to the list of downloads.
    */
   adoptDownload(aData, aMm) {
-    let adoptJsonRep = aData.jsonDownload;
-    debug("adoptDownload " + uneval(adoptJsonRep));
-
     (async function() {
+      let adoptJsonRep = aData.jsonDownload;
+      debug(
+        `adoptDownload ${adoptJsonRep?.path} ${adoptJsonRep?.url} ${adoptJsonRep?.referrer}`
+      );
+
       // Verify that the file exists on disk.  This will result in a rejection
       // if the file does not exist.  We will also use this information for the
       // file size to avoid weird inconsistencies.  We ignore the filesystem
@@ -300,6 +329,21 @@ var DownloadService = {
         throw new Error("AdoptFileIsDirectory");
       }
 
+      let referrerInfo = null;
+      if (adoptJsonRep.referrer) {
+        try {
+          referrerInfo = Cc["@mozilla.org/referrer-info;1"].createInstance(
+            Ci.nsIReferrerInfo
+          );
+          referrerInfo.init(
+            Ci.nsIReferrerInfo.NO_REFERRER,
+            false,
+            Services.io.newURI(adoptJsonRep.referrer)
+          );
+        } catch (e) {
+          debug(`convert referrer error: ${adoptJsonRep.referrer} ${e}`);
+        }
+      }
       // We need to create a Download instance to add to the list.  Create a
       // serialized representation and then from there the instance.
       let serializedRep = {
@@ -308,6 +352,7 @@ var DownloadService = {
           url: adoptJsonRep.url,
           // This is where isPrivate would go if adoption supported private
           // browsing.
+          referrerInfo,
         },
         target: {
           path: adoptJsonRep.path,
@@ -319,7 +364,6 @@ var DownloadService = {
         contentType: adoptJsonRep.contentType,
         // unknown properties added/used by the DownloadService
         currentBytes: fileInfo.size,
-        sourceAppManifestURL: adoptJsonRep.sourceAppManifestURL,
       };
 
       let download = await Downloads.createDownload(serializedRep);
@@ -336,7 +380,7 @@ var DownloadService = {
       // subscribed to the PUBLIC list and will save the download.
       await allDownloadList.add(download);
 
-      debug("download adopted");
+      DEBUG && debug("download adopted");
       // The notification above occurred synchronously, and so we will have
       // already dispatched an added notification for our download to the child
       // process in question.  As such, we only need to relay the download id

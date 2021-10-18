@@ -6,21 +6,30 @@
 
 var EXPORTED_SYMBOLS = ["TargetActorRegistry"];
 
-// Keep track of all BrowsingContext target actors.
+// Keep track of all WindowGlobal target actors.
 // This is especially used to track the actors using Message manager connector,
 // or the ones running in the parent process.
 // Top level actors, like tab's top level target or parent process target
 // are still using message manager in order to avoid being destroyed on navigation.
 // And because of this, these actors aren't using JS Window Actor.
-const browsingContextTargetActors = new Set();
+const windowGlobalTargetActors = new Set();
+let xpcShellTargetActor = null;
 
 var TargetActorRegistry = {
   registerTargetActor(targetActor) {
-    browsingContextTargetActors.add(targetActor);
+    windowGlobalTargetActors.add(targetActor);
   },
 
   unregisterTargetActor(targetActor) {
-    browsingContextTargetActors.delete(targetActor);
+    windowGlobalTargetActors.delete(targetActor);
+  },
+
+  registerXpcShellTargetActor(targetActor) {
+    xpcShellTargetActor = targetActor;
+  },
+
+  unregisterXpcShellTargetActor(targetActor) {
+    xpcShellTargetActor = null;
   },
 
   /**
@@ -50,7 +59,7 @@ var TargetActorRegistry = {
    */
   getTargetActors(browserId, connectionPrefix) {
     const actors = [];
-    for (const actor of browsingContextTargetActors) {
+    for (const actor of windowGlobalTargetActors) {
       if (
         ((!connectionPrefix || actor.actorID.startsWith(connectionPrefix)) &&
           actor.browserId == browserId) ||
@@ -68,10 +77,16 @@ var TargetActorRegistry = {
    * @returns {TargetActor|null}
    */
   getParentProcessTargetActor() {
-    for (const actor of browsingContextTargetActors) {
+    for (const actor of windowGlobalTargetActors) {
       if (actor.typeName === "parentProcessTarget") {
         return actor;
       }
+    }
+
+    // The xpcshell target actor also lives in the "parent process", even if it
+    // is an instance of ContentProcessTargetActor.
+    if (xpcShellTargetActor) {
+      return xpcShellTargetActor;
     }
 
     return null;

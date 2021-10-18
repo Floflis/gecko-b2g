@@ -956,21 +956,12 @@ int32_t LineBreaker::WordMove(const char16_t* aText, uint32_t aLen,
 }
 
 int32_t LineBreaker::Next(const char16_t* aText, uint32_t aLen, uint32_t aPos) {
-  NS_ASSERTION(aText, "aText shouldn't be null");
-  NS_ASSERTION(aLen > aPos,
-               "Bad position passed to nsJISx4051LineBreaker::Next");
+  MOZ_ASSERT(aText);
 
-  int32_t nextPos = WordMove(aText, aLen, aPos, 1);
-  return nextPos < int32_t(aLen) ? nextPos : NS_LINEBREAKER_NEED_MORE_TEXT;
-}
-
-int32_t LineBreaker::Prev(const char16_t* aText, uint32_t aLen, uint32_t aPos) {
-  NS_ASSERTION(aText, "aText shouldn't be null");
-  NS_ASSERTION(aLen >= aPos && aPos > 0,
-               "Bad position passed to nsJISx4051LineBreaker::Prev");
-
-  int32_t prevPos = WordMove(aText, aLen, aPos, -1);
-  return prevPos > 0 ? prevPos : NS_LINEBREAKER_NEED_MORE_TEXT;
+  if (aPos >= aLen) {
+    return NS_LINEBREAKER_NEED_MORE_TEXT;
+  }
+  return WordMove(aText, aLen, aPos, 1);
 }
 
 static bool SuppressBreakForKeepAll(uint32_t aPrev, uint32_t aCh) {
@@ -1014,24 +1005,25 @@ void LineBreaker::GetJISx4051Breaks(const char16_t* aChars, uint32_t aLength,
     uint32_t chLen = ch > 0xFFFFu ? 2 : 1;
     int8_t cl;
 
-    if (NEED_CONTEXTUAL_ANALYSIS(ch)) {
-      char32_t prev, next;
-      if (cur > 0) {
-        // not using state.GetUnicodeCharAt() here because we're looking back
-        // rather than forward for possible surrogates
-        prev = aChars[cur - 1];
-        if (cur > 1 && NS_IS_SURROGATE_PAIR(aChars[cur - 2], prev)) {
-          prev = SURROGATE_TO_UCS4(aChars[cur - 2], prev);
-        }
-      } else {
-        prev = 0;
+    auto prev = [=]() -> char32_t {
+      if (!cur) {
+        return 0;
       }
+      char32_t c = aChars[cur - 1];
+      if (cur > 1 && NS_IS_SURROGATE_PAIR(aChars[cur - 2], c)) {
+        c = SURROGATE_TO_UCS4(aChars[cur - 2], c);
+      }
+      return c;
+    };
+
+    if (NEED_CONTEXTUAL_ANALYSIS(ch)) {
+      char32_t next;
       if (cur + chLen < aLength) {
         next = state.GetUnicodeCharAt(cur + chLen);
       } else {
         next = 0;
       }
-      cl = ContextualAnalysis(prev, ch, next, state, aLevel,
+      cl = ContextualAnalysis(prev(), ch, next, state, aLevel,
                               aIsChineseOrJapanese);
     } else {
       if (ch == U_EQUAL) state.NotifySeenEqualsSign();
@@ -1064,18 +1056,24 @@ void LineBreaker::GetJISx4051Breaks(const char16_t* aChars, uint32_t aLength,
     if (cur > 0) {
       NS_ASSERTION(CLASS_COMPLEX != lastClass || CLASS_COMPLEX != cl,
                    "Loop should have prevented adjacent complex chars here");
-      auto prev = [=]() {
-        char32_t c = aChars[cur - 1];
-        if (cur > 1 && NS_IS_SURROGATE_PAIR(aChars[cur - 2], c)) {
-          c = SURROGATE_TO_UCS4(aChars[cur - 2], c);
-        }
-        return c;
-      };
       allowBreak =
           (state.UseConservativeBreaking() ? GetPairConservative(lastClass, cl)
-                                           : GetPair(lastClass, cl)) &&
-          (aWordBreak != WordBreak::KeepAll ||
-           !SuppressBreakForKeepAll(prev(), ch));
+                                           : GetPair(lastClass, cl));
+      // Special cases where a normally-allowed break is suppressed:
+      if (allowBreak) {
+        // word-break:keep-all suppresses breaks between certain line-break
+        // classes.
+        if (aWordBreak == WordBreak::KeepAll &&
+            SuppressBreakForKeepAll(prev(), ch)) {
+          allowBreak = false;
+        }
+        // We also don't allow a break within a run of U+3000 chars unless
+        // word-break:break-all is in effect.
+        if (ch == 0x3000 && prev() == 0x3000 &&
+            aWordBreak != WordBreak::BreakAll) {
+          allowBreak = false;
+        }
+      }
     }
     aBreakBefore[cur] = allowBreak;
     if (allowBreak) state.NotifyBreakBefore();

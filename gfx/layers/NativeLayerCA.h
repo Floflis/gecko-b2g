@@ -10,6 +10,7 @@
 
 #include <deque>
 #include <unordered_map>
+#include <ostream>
 
 #include "mozilla/Mutex.h"
 
@@ -76,6 +77,8 @@ class NativeLayerRootCA : public NativeLayerRoot {
  public:
   static already_AddRefed<NativeLayerRootCA> CreateForCALayer(CALayer* aLayer);
 
+  virtual NativeLayerRootCA* AsNativeLayerRootCA() override { return this; }
+
   // Can be called on any thread at any point. Returns whether comitting was
   // successful. Will return false if called off the main thread while
   // off-main-thread commits are suspended.
@@ -96,6 +99,8 @@ class NativeLayerRootCA : public NativeLayerRoot {
 
   bool AreOffMainThreadCommitsSuspended();
 
+  void DumpLayerTreeToFile(const char* aPath);
+
   enum class WhichRepresentation : uint8_t { ONSCREEN, OFFSCREEN };
 
   // Overridden methods
@@ -113,6 +118,8 @@ class NativeLayerRootCA : public NativeLayerRoot {
   already_AddRefed<NativeLayer> CreateLayerForExternalTexture(
       bool aIsOpaque) override;
 
+  void SetWindowIsFullscreen(bool aFullscreen);
+
  protected:
   explicit NativeLayerRootCA(CALayer* aLayer);
   ~NativeLayerRootCA() override;
@@ -121,7 +128,11 @@ class NativeLayerRootCA : public NativeLayerRoot {
     explicit Representation(CALayer* aRootCALayer);
     ~Representation();
     void Commit(WhichRepresentation aRepresentation,
-                const nsTArray<RefPtr<NativeLayerCA>>& aSublayers);
+                const nsTArray<RefPtr<NativeLayerCA>>& aSublayers,
+                bool aWindowIsFullscreen);
+    CALayer* FindVideoLayerToIsolate(
+        WhichRepresentation aRepresentation,
+        const nsTArray<RefPtr<NativeLayerCA>>& aSublayers);
     CALayer* mRootCALayer = nullptr;  // strong
     bool mMutated = false;
   };
@@ -148,6 +159,10 @@ class NativeLayerRootCA : public NativeLayerRoot {
   // indicates that CommitToScreen() needs to be called at the next available
   // opportunity.
   bool mCommitPending = false;
+
+  // Updated by the layer's view's window to match the fullscreen state
+  // of that window.
+  bool mWindowIsFullscreen = false;
 };
 
 class RenderSourceNLRS;
@@ -220,7 +235,13 @@ class NativeLayerCA : public NativeLayer {
   void SetSurfaceIsFlipped(bool aIsFlipped) override;
   bool SurfaceIsFlipped() override;
 
+  void DumpLayer(std::ostream& aOutputStream);
+
   void AttachExternalImage(wr::RenderTextureHost* aExternalImage) override;
+
+  bool IsVideo();
+  bool ShouldSpecializeVideo();
+  void SetRootWindowIsFullscreen(bool aFullscreen);
 
  protected:
   friend class NativeLayerRootCA;
@@ -238,22 +259,19 @@ class NativeLayerCA : public NativeLayer {
   // used from multiple threads, callers need to make sure that they still only
   // call NextSurface and NotifySurfaceReady alternatingly and not in any other
   // order.
-  bool NextSurface(const MutexAutoLock&);
+  bool NextSurface(const MutexAutoLock& aProofOfLock);
 
   // To be called by NativeLayerRootCA:
   typedef NativeLayerRootCA::WhichRepresentation WhichRepresentation;
   CALayer* UnderlyingCALayer(WhichRepresentation aRepresentation);
   void ApplyChanges(WhichRepresentation aRepresentation);
+  bool HasUpdate(WhichRepresentation aRepresentation);
   void SetBackingScale(float aBackingScale);
 
   // Invalidates the specified region in all surfaces that are tracked by this
   // layer.
-  void InvalidateRegionThroughoutSwapchain(const MutexAutoLock&,
+  void InvalidateRegionThroughoutSwapchain(const MutexAutoLock& aProofOfLock,
                                            const gfx::IntRegion& aRegion);
-
-  GLuint GetOrCreateFramebufferForSurface(const MutexAutoLock&,
-                                          CFTypeRefPtr<IOSurfaceRef> aSurface,
-                                          bool aNeedsDepth);
 
   // Invalidate aUpdateRegion and make sure that mInProgressSurface retains any
   // valid content from the previous surface outside of aUpdateRegion, so that
@@ -262,7 +280,7 @@ class NativeLayerCA : public NativeLayer {
   // aCopyFn: Fn(CFTypeRefPtr<IOSurfaceRef> aValidSourceIOSurface,
   //             const gfx::IntRegion& aCopyRegion) -> void
   template <typename F>
-  void HandlePartialUpdate(const MutexAutoLock&,
+  void HandlePartialUpdate(const MutexAutoLock& aProofOfLock,
                            const gfx::IntRect& aDisplayRect,
                            const gfx::IntRegion& aUpdateRegion, F&& aCopyFn);
 
@@ -277,13 +295,16 @@ class NativeLayerCA : public NativeLayer {
   };
 
   Maybe<SurfaceWithInvalidRegion> GetUnusedSurfaceAndCleanUp(
-      const MutexAutoLock&);
+      const MutexAutoLock& aProofOfLock);
 
   // Wraps one CALayer representation of this NativeLayer.
   struct Representation {
+    Representation();
     ~Representation();
 
     CALayer* UnderlyingCALayer() { return mWrappingCALayer; }
+
+    bool EnqueueSurface(IOSurfaceRef aSurfaceRef);
 
     // Applies buffered changes to the native CALayers. The contract with the
     // caller is as follows: If any of these values have changed since the last
@@ -296,7 +317,17 @@ class NativeLayerCA : public NativeLayer {
                       const Maybe<gfx::IntRect>& aClipRect, float aBackingScale,
                       bool aSurfaceIsFlipped,
                       gfx::SamplingFilter aSamplingFilter,
+                      bool aSpecializeVideo,
                       CFTypeRefPtr<IOSurfaceRef> aFrontSurface);
+
+    // Return whether any aspects of this layer representation have been mutated
+    // since the last call to ApplyChanges, i.e. whether ApplyChanges needs to
+    // be called.
+    // This is used to optimize away a CATransaction commit if no layers have
+    // changed.
+    bool HasUpdate();
+
+    bool CanSpecializeSurface(IOSurfaceRef surface);
 
     // Lazily initialized by first call to ApplyChanges. mWrappingLayer is the
     // layer that applies the intersection of mDisplayRect and mClipRect (if
@@ -307,15 +338,16 @@ class NativeLayerCA : public NativeLayer {
     CALayer* mContentCALayer = nullptr;       // strong
     CALayer* mOpaquenessTintLayer = nullptr;  // strong
 
-    bool mMutatedPosition = true;
-    bool mMutatedTransform = true;
-    bool mMutatedDisplayRect = true;
-    bool mMutatedClipRect = true;
-    bool mMutatedBackingScale = true;
-    bool mMutatedSize = true;
-    bool mMutatedSurfaceIsFlipped = true;
-    bool mMutatedFrontSurface = true;
-    bool mMutatedSamplingFilter = true;
+    bool mMutatedPosition : 1;
+    bool mMutatedTransform : 1;
+    bool mMutatedDisplayRect : 1;
+    bool mMutatedClipRect : 1;
+    bool mMutatedBackingScale : 1;
+    bool mMutatedSize : 1;
+    bool mMutatedSurfaceIsFlipped : 1;
+    bool mMutatedFrontSurface : 1;
+    bool mMutatedSamplingFilter : 1;
+    bool mMutatedSpecializeVideo : 1;
   };
 
   Representation& GetRepresentation(WhichRepresentation aRepresentation);
@@ -388,6 +420,7 @@ class NativeLayerCA : public NativeLayer {
   float mBackingScale = 1.0f;
   bool mSurfaceIsFlipped = false;
   const bool mIsOpaque = false;
+  bool mRootWindowIsFullscreen = false;
 };
 
 }  // namespace layers

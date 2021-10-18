@@ -13,7 +13,6 @@
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/Filters.h"
 #include "mozilla/gfx/RecordedEvent.h"
-#include "nsRefPtrHashtable.h"
 
 class nsDeviceContext;
 
@@ -37,12 +36,6 @@ class PrintTranslator final : public Translator {
   explicit PrintTranslator(nsDeviceContext* aDeviceContext);
 
   bool TranslateRecording(PRFileDescStream& aRecording);
-
-  void SetDependentSurfaces(
-      nsRefPtrHashtable<nsUint64HashKey, RecordedDependentSurface>&&
-          aDependentSurfaces) {
-    mDependentSurfaces = std::move(aDependentSurfaces);
-  }
 
   DrawTarget* LookupDrawTarget(ReferencePtr aRefPtr) final {
     DrawTarget* result = mDrawTargets.GetWeak(aRefPtr);
@@ -68,10 +61,9 @@ class PrintTranslator final : public Translator {
     return result;
   }
 
-  GradientStops* LookupGradientStops(ReferencePtr aRefPtr) final {
-    GradientStops* result = mGradientStops.GetWeak(aRefPtr);
-    MOZ_ASSERT(result);
-    return result;
+  already_AddRefed<GradientStops> LookupGradientStops(
+      ReferencePtr aRefPtr) final {
+    return mGradientStops.Get(aRefPtr);
   }
 
   ScaledFont* LookupScaledFont(ReferencePtr aRefPtr) final {
@@ -92,40 +84,38 @@ class PrintTranslator final : public Translator {
     return result;
   }
 
-  already_AddRefed<SourceSurface> LookupExternalSurface(uint64_t aKey) final;
-
   void AddDrawTarget(ReferencePtr aRefPtr, DrawTarget* aDT) final {
-    mDrawTargets.Put(aRefPtr, RefPtr{aDT});
+    mDrawTargets.InsertOrUpdate(aRefPtr, RefPtr{aDT});
   }
 
   void AddPath(ReferencePtr aRefPtr, Path* aPath) final {
-    mPaths.Put(aRefPtr, RefPtr{aPath});
+    mPaths.InsertOrUpdate(aRefPtr, RefPtr{aPath});
   }
 
   void AddSourceSurface(ReferencePtr aRefPtr, SourceSurface* aSurface) final {
-    mSourceSurfaces.Put(aRefPtr, RefPtr{aSurface});
+    mSourceSurfaces.InsertOrUpdate(aRefPtr, RefPtr{aSurface});
   }
 
   void AddFilterNode(ReferencePtr aRefPtr, FilterNode* aFilter) final {
-    mFilterNodes.Put(aRefPtr, RefPtr{aFilter});
+    mFilterNodes.InsertOrUpdate(aRefPtr, RefPtr{aFilter});
   }
 
   void AddGradientStops(ReferencePtr aRefPtr, GradientStops* aStops) final {
-    mGradientStops.Put(aRefPtr, RefPtr{aStops});
+    mGradientStops.InsertOrUpdate(aRefPtr, RefPtr{aStops});
   }
 
   void AddScaledFont(ReferencePtr aRefPtr, ScaledFont* aScaledFont) final {
-    mScaledFonts.Put(aRefPtr, RefPtr{aScaledFont});
+    mScaledFonts.InsertOrUpdate(aRefPtr, RefPtr{aScaledFont});
   }
 
   void AddUnscaledFont(ReferencePtr aRefPtr,
                        UnscaledFont* aUnscaledFont) final {
-    mUnscaledFonts.Put(aRefPtr, RefPtr{aUnscaledFont});
+    mUnscaledFonts.InsertOrUpdate(aRefPtr, RefPtr{aUnscaledFont});
   }
 
   void AddNativeFontResource(uint64_t aKey,
                              NativeFontResource* aScaledFontResouce) final {
-    mNativeFontResources.Put(aKey, RefPtr{aScaledFontResouce});
+    mNativeFontResources.InsertOrUpdate(aKey, RefPtr{aScaledFontResouce});
   }
 
   void RemoveDrawTarget(ReferencePtr aRefPtr) final {
@@ -172,8 +162,6 @@ class PrintTranslator final : public Translator {
   nsRefPtrHashtable<nsPtrHashKey<void>, ScaledFont> mScaledFonts;
   nsRefPtrHashtable<nsPtrHashKey<void>, UnscaledFont> mUnscaledFonts;
   nsRefPtrHashtable<nsUint64HashKey, NativeFontResource> mNativeFontResources;
-  nsRefPtrHashtable<nsUint64HashKey, RecordedDependentSurface>
-      mDependentSurfaces;
 };
 
 }  // namespace layout

@@ -26,10 +26,10 @@
 #include "nsTArray.h"          // for nsTArray
 #include "mozilla/Atomics.h"
 #include "mozilla/gfx/2D.h"
-#include "nsDataHashtable.h"
 #include "mozilla/EnumeratedArray.h"
 #include "mozilla/UniquePtr.h"
 #include "MediaInfo.h"
+#include "nsTHashMap.h"
 
 #ifdef XP_WIN
 struct ID3D10Texture2D;
@@ -56,6 +56,7 @@ class TextureClient;
 class TextureClientRecycleAllocator;
 class KnowsCompositor;
 class NVImage;
+class MemoryOrShmem;
 #ifdef XP_WIN
 class D3D11YCbCrRecycleAllocator;
 #endif
@@ -664,7 +665,7 @@ struct PlanarYCbCrData {
   gfx::IntSize mPicSize = gfx::IntSize(0, 0);
   StereoMode mStereoMode = StereoMode::MONO;
   gfx::ColorDepth mColorDepth = gfx::ColorDepth::COLOR_8;
-  gfx::YUVColorSpace mYUVColorSpace = gfx::YUVColorSpace::UNKNOWN;
+  gfx::YUVColorSpace mYUVColorSpace = gfx::YUVColorSpace::Default;
   gfx::ColorRange mColorRange = gfx::ColorRange::LIMITED;
 
   gfx::IntRect GetPictureRect() const {
@@ -674,12 +675,11 @@ struct PlanarYCbCrData {
 
 // This type is currently only used for AVIF and therefore makes some
 // AVIF-specific assumptions (e.g., Alpha's bpc and stride is equal to Y's one)
-struct PlanarYCbCrAData : PlanarYCbCrData {
-  uint8_t* mAlphaChannel = nullptr;
-  gfx::IntSize mAlphaSize = gfx::IntSize(0, 0);
-  bool mPremultipliedAlpha = false;
-
-  bool hasAlpha() { return mAlphaChannel; }
+struct PlanarAlphaData {
+  uint8_t* mChannel = nullptr;
+  gfx::IntSize mSize = gfx::IntSize(0, 0);
+  gfx::ColorDepth mDepth = gfx::ColorDepth::COLOR_8;
+  bool mPremultiplied = false;
 };
 
 /****** Image subtypes for the different formats ******/
@@ -771,12 +771,12 @@ class PlanarYCbCrImage : public Image {
   PlanarYCbCrImage* AsPlanarYCbCrImage() override { return this; }
 
   /**
-   * Build a SurfaceDescriptorBuffer with this image.  The provided
-   * SurfaceDescriptorBuffer must already have a valid MemoryOrShmem set
-   * with a capacity large enough to hold |GetDataSize|.
+   * Build a SurfaceDescriptorBuffer with this image.  A function to allocate
+   * a MemoryOrShmem with the given capacity must be provided.
    */
   virtual nsresult BuildSurfaceDescriptorBuffer(
-      SurfaceDescriptorBuffer& aSdBuffer);
+      SurfaceDescriptorBuffer& aSdBuffer,
+      const std::function<MemoryOrShmem(uint32_t)>& aAllocate);
 
  protected:
   already_AddRefed<gfx::SourceSurface> GetAsSourceSurface() override;
@@ -880,7 +880,7 @@ class SourceSurfaceImage final : public Image {
  private:
   gfx::IntSize mSize;
   RefPtr<gfx::SourceSurface> mSourceSurface;
-  nsDataHashtable<nsUint32HashKey, RefPtr<TextureClient>> mTextureClients;
+  nsTHashMap<uint32_t, RefPtr<TextureClient>> mTextureClients;
   TextureFlags mTextureFlags;
 };
 

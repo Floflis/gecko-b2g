@@ -34,8 +34,11 @@ enum {
   JOF_BIGINT = 20,      /* uint32_t index for BigInt value */
   JOF_ICINDEX = 21,     /* uint32_t IC index */
   JOF_LOOPHEAD = 22,    /* JSOp::LoopHead, combines JOF_ICINDEX and JOF_UINT8 */
-  JOF_CLASS_CTOR = 23,  /* uint32_t atom index, sourceStart, sourceEnd */
-  JOF_TWO_UINT8 = 24,   /* A pair of unspecified uint8_t arguments */
+  JOF_TWO_UINT8 = 23,   /* A pair of unspecified uint8_t arguments */
+  JOF_DEBUGCOORD = 24,  /* An embedded ScopeCoordinate immediate that may
+                           traverse DebugEnvironmentProxies*/
+  JOF_SHAPE = 25,       /* uint32_t shape index */
+  JOF_STRING = 26,      /* uint32_t constant index */
   JOF_TYPEMASK = 0xFF,  /* mask for above immediate types */
 
   JOF_NAME = 1 << 8,        /* name operation */

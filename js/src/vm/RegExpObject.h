@@ -9,7 +9,6 @@
 #ifndef vm_RegExpObject_h
 #define vm_RegExpObject_h
 
-#include "mozilla/Attributes.h"
 #include "mozilla/MemoryReporting.h"
 
 #include "builtin/SelfHostingDefines.h"
@@ -93,34 +92,38 @@ class RegExpObject : public NativeObject {
   static unsigned lastIndexSlot() { return LAST_INDEX_SLOT; }
 
   static bool isInitialShape(RegExpObject* rx) {
-    Shape* shape = rx->lastProperty();
-    if (shape->isEmptyShape() || !shape->isDataProperty()) {
+    ShapePropertyIter<NoGC> iter(rx->shape());
+    if (iter.done() || !iter->isDataProperty()) {
       return false;
     }
-    if (shape->maybeSlot() != LAST_INDEX_SLOT) {
+    if (iter->slot() != LAST_INDEX_SLOT) {
       return false;
     }
     return true;
   }
 
-  const Value& getLastIndex() const { return getSlot(LAST_INDEX_SLOT); }
+  const Value& getLastIndex() const { return getReservedSlot(LAST_INDEX_SLOT); }
 
-  void setLastIndex(double d) { setSlot(LAST_INDEX_SLOT, NumberValue(d)); }
+  void setLastIndex(double d) {
+    setReservedSlot(LAST_INDEX_SLOT, NumberValue(d));
+  }
 
   void zeroLastIndex(JSContext* cx) {
     MOZ_ASSERT(lookupPure(cx->names().lastIndex)->writable(),
                "can't infallibly zero a non-writable lastIndex on a "
                "RegExp that's been exposed to script");
-    setSlot(LAST_INDEX_SLOT, Int32Value(0));
+    setReservedSlot(LAST_INDEX_SLOT, Int32Value(0));
   }
 
   static JSLinearString* toString(JSContext* cx, Handle<RegExpObject*> obj);
 
   JSAtom* getSource() const {
-    return &getSlot(SOURCE_SLOT).toString()->asAtom();
+    return &getReservedSlot(SOURCE_SLOT).toString()->asAtom();
   }
 
-  void setSource(JSAtom* source) { setSlot(SOURCE_SLOT, StringValue(source)); }
+  void setSource(JSAtom* source) {
+    setReservedSlot(SOURCE_SLOT, StringValue(source));
+  }
 
   /* Flags. */
 
@@ -133,6 +136,7 @@ class RegExpObject : public NativeObject {
     setFixedSlot(FLAGS_SLOT, Int32Value(flags.value()));
   }
 
+  bool hasIndices() const { return getFlags().hasIndices(); }
   bool global() const { return getFlags().global(); }
   bool ignoreCase() const { return getFlags().ignoreCase(); }
   bool multiline() const { return getFlags().multiline(); }
@@ -166,9 +170,9 @@ class RegExpObject : public NativeObject {
                             JSContext* cx);
 
 #ifdef DEBUG
-  static MOZ_MUST_USE bool dumpBytecode(JSContext* cx,
-                                        Handle<RegExpObject*> regexp,
-                                        HandleLinearString input);
+  [[nodiscard]] static bool dumpBytecode(JSContext* cx,
+                                         Handle<RegExpObject*> regexp,
+                                         HandleLinearString input);
 #endif
 
  private:
@@ -201,12 +205,6 @@ inline RegExpShared* RegExpToShared(JSContext* cx, HandleObject obj) {
 
   return Proxy::regexp_toShared(cx, obj);
 }
-
-template <XDRMode mode>
-XDRResult XDRScriptRegExpObject(XDRState<mode>* xdr,
-                                MutableHandle<RegExpObject*> objp);
-
-extern JSObject* CloneScriptRegExpObject(JSContext* cx, RegExpObject& re);
 
 /* Escape all slashes and newlines in the given string. */
 extern JSLinearString* EscapeRegExpPattern(JSContext* cx, HandleAtom src);

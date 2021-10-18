@@ -4,43 +4,31 @@
 
 "use strict";
 
-const { AppConstants } = ChromeUtils.import(
-  "resource://gre/modules/AppConstants.jsm"
-);
-const { Log } = ChromeUtils.import("resource://gre/modules/Log.jsm");
-
-this.EXPORTED_SYMBOLS = ["AlarmDB"];
-
-function getLogger() {
-  var logger = Log.repository.getLogger("AlarmDB");
-  logger.addAppender(new Log.DumpAppender(new Log.BasicFormatter()));
-  logger.level = Log.Level.Debug;
-  return logger;
-}
-
-const logger = getLogger();
-
-function debug(aStr) {
-  AppConstants.DEBUG_ALARM && logger.debug(aStr);
-}
+const EXPORTED_SYMBOLS = ["AlarmDB"];
 
 const { IndexedDBHelper } = ChromeUtils.import(
   "resource://gre/modules/IndexedDBHelper.jsm"
 );
+const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 
 const ALARMDB_NAME = "alarms";
 const ALARMDB_VERSION = 1;
 const ALARMSTORE_NAME = "alarms";
 
+const DEBUG = Services.prefs.getBoolPref("dom.alarm.debug", false);
+function debug(aMsg) {
+  console.log(`AlarmDB: ${aMsg}`);
+}
+
 this.AlarmDB = function AlarmDB() {
-  debug("AlarmDB()");
+  DEBUG && debug("AlarmDB()");
 };
 
 AlarmDB.prototype = {
   __proto__: IndexedDBHelper.prototype,
 
   init: function init() {
-    debug("init()");
+    DEBUG && debug("init()");
 
     this.initDBHelper(ALARMDB_NAME, ALARMDB_VERSION, [ALARMSTORE_NAME]);
   },
@@ -51,7 +39,7 @@ AlarmDB.prototype = {
     aOldVersion,
     aNewVersion
   ) {
-    debug("upgradeSchema()");
+    DEBUG && debug("upgradeSchema()");
 
     let objStore = aDb.createObjectStore(ALARMSTORE_NAME, {
       keyPath: "id",
@@ -62,10 +50,9 @@ AlarmDB.prototype = {
     objStore.createIndex("ignoreTimezone", "ignoreTimezone", { unique: false });
     objStore.createIndex("timezoneOffset", "timezoneOffset", { unique: false });
     objStore.createIndex("data", "data", { unique: false });
-    objStore.createIndex("pageURL", "pageURL", { unique: false });
-    objStore.createIndex("manifestURL", "manifestURL", { unique: false });
+    objStore.createIndex("url", "url", { unique: false });
 
-    debug("Created object stores and indexes");
+    DEBUG && debug("Created object stores and indexes");
   },
 
   /**
@@ -77,16 +64,16 @@ AlarmDB.prototype = {
    *        Callback function to invoke when there was an error.
    */
   add: function add(aAlarm, aSuccessCb, aErrorCb) {
-    debug("add()");
+    DEBUG && debug("add()");
 
     this.newTxn(
       "readwrite",
       ALARMSTORE_NAME,
       function txnCb(aTxn, aStore) {
-        debug("Going to add " + JSON.stringify(aAlarm));
+        DEBUG && debug("Going to add " + JSON.stringify(aAlarm));
         aStore.put(aAlarm).onsuccess = function setTxnResult(aEvent) {
           aTxn.result = aEvent.target.result;
-          debug("Request successful. New record ID: " + aTxn.result);
+          DEBUG && debug("Request successful. New record ID: " + aTxn.result);
         };
       },
       aSuccessCb,
@@ -97,8 +84,8 @@ AlarmDB.prototype = {
   /**
    * @param aId
    *        The ID of record to be removed.
-   * @param aManifestURL
-   *        The manifest URL of the app that alarm belongs to.
+   * @param aUrl
+   *        The url of the app that alarm belongs to.
    *        If null, directly remove the ID record; otherwise,
    *        need to check if the alarm belongs to this app.
    * @param aSuccessCb
@@ -106,27 +93,27 @@ AlarmDB.prototype = {
    * @param aErrorCb [optional]
    *        Callback function to invoke when there was an error.
    */
-  remove: function remove(aId, aManifestURL, aSuccessCb, aErrorCb) {
-    debug("remove()");
+  remove: function remove(aId, aUrl, aSuccessCb, aErrorCb) {
+    DEBUG && debug("remove()");
 
     this.newTxn(
       "readwrite",
       ALARMSTORE_NAME,
       function txnCb(aTxn, aStore) {
-        debug("Going to remove " + aId);
+        DEBUG && debug("Going to remove " + aId);
 
-        // Look up the existing record and compare the manifestURL
+        // Look up the existing record and compare the url
         // to see if the alarm to be removed belongs to this app.
         aStore.get(aId).onsuccess = function doRemove(aEvent) {
           let alarm = aEvent.target.result;
 
           if (!alarm) {
-            debug("Alarm doesn't exist. No need to remove it.");
+            DEBUG && debug("Alarm doesn't exist. No need to remove it.");
             return;
           }
 
-          if (aManifestURL && aManifestURL != alarm.manifestURL) {
-            debug("Cannot remove the alarm added by other apps.");
+          if (aUrl && aUrl != alarm.url) {
+            DEBUG && debug("Cannot remove the alarm added by other apps.");
             return;
           }
 
@@ -139,8 +126,8 @@ AlarmDB.prototype = {
   },
 
   /**
-   * @param aManifestURL
-   *        The manifest URL of the app that alarms belong to.
+   * @param aUrl
+   *        The url of the app that alarms belong to.
    *        If null, directly return all alarms; otherwise,
    *        only return the alarms that belong to this app.
    * @param aSuccessCb
@@ -148,8 +135,8 @@ AlarmDB.prototype = {
    * @param aErrorCb [optional]
    *        Callback function to invoke when there was an error.
    */
-  getAll: function getAll(aManifestURL, aSuccessCb, aErrorCb) {
-    debug("getAll()");
+  getAll: function getAll(aUrl, aSuccessCb, aErrorCb) {
+    DEBUG && debug("getAll()");
 
     this.newTxn(
       "readonly",
@@ -159,12 +146,11 @@ AlarmDB.prototype = {
           aTxn.result = [];
         }
 
-        let index = aStore.index("manifestURL");
-        index.mozGetAll(aManifestURL).onsuccess = function setTxnResult(
-          aEvent
-        ) {
+        let index = aStore.index("url");
+        index.mozGetAll(aUrl).onsuccess = function setTxnResult(aEvent) {
           aTxn.result = aEvent.target.result;
-          debug("Request successful. Record count: " + aTxn.result.length);
+          DEBUG &&
+            debug("Request successful. Record count: " + aTxn.result.length);
         };
       },
       aSuccessCb,

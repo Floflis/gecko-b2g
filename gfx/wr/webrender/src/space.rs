@@ -7,10 +7,10 @@
 
 use std::fmt;
 
-use euclid::{Transform3D, Rect, Point2D, Vector2D};
+use euclid::{Transform3D, Box2D, Point2D, Vector2D};
 
 use api::units::*;
-use crate::spatial_tree::{SpatialTree, CoordinateSpaceMapping, SpatialNodeIndex, VisibleFace};
+use crate::spatial_tree::{SpatialTree, CoordinateSpaceMapping, SpatialNodeIndex, VisibleFace, SpatialNodeContainer};
 use crate::util::project_rect;
 use crate::util::{MatrixHelpers, ScaleOffset, RectHelpers, PointHelpers};
 
@@ -20,14 +20,14 @@ pub struct SpaceMapper<F, T> {
     kind: CoordinateSpaceMapping<F, T>,
     pub ref_spatial_node_index: SpatialNodeIndex,
     pub current_target_spatial_node_index: SpatialNodeIndex,
-    pub bounds: Rect<f32, T>,
+    pub bounds: Box2D<f32, T>,
     visible_face: VisibleFace,
 }
 
 impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
     pub fn new(
         ref_spatial_node_index: SpatialNodeIndex,
-        bounds: Rect<f32, T>,
+        bounds: Box2D<f32, T>,
     ) -> Self {
         SpaceMapper {
             kind: CoordinateSpaceMapping::Local,
@@ -41,7 +41,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
     pub fn new_with_target(
         ref_spatial_node_index: SpatialNodeIndex,
         target_node_index: SpatialNodeIndex,
-        bounds: Rect<f32, T>,
+        bounds: Box2D<f32, T>,
         spatial_tree: &SpatialTree,
     ) -> Self {
         let mut mapper = Self::new(ref_spatial_node_index, bounds);
@@ -58,8 +58,8 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
             return
         }
 
-        let ref_spatial_node = &spatial_tree.spatial_nodes[self.ref_spatial_node_index.0 as usize];
-        let target_spatial_node = &spatial_tree.spatial_nodes[target_node_index.0 as usize];
+        let ref_spatial_node = spatial_tree.get_spatial_node(self.ref_spatial_node_index);
+        let target_spatial_node = spatial_tree.get_spatial_node(target_node_index);
         self.visible_face = VisibleFace::Front;
 
         self.kind = if self.ref_spatial_node_index == target_node_index {
@@ -72,7 +72,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
         } else {
             let transform = spatial_tree
                 .get_relative_transform_with_face(
-                    target_node_index, 
+                    target_node_index,
                     self.ref_spatial_node_index,
                     Some(&mut self.visible_face),
                 )
@@ -99,7 +99,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
         }
     }
 
-    pub fn unmap(&self, rect: &Rect<f32, T>) -> Option<Rect<f32, F>> {
+    pub fn unmap(&self, rect: &Box2D<f32, T>) -> Option<Box2D<f32, F>> {
         match self.kind {
             CoordinateSpaceMapping::Local => {
                 Some(rect.cast_unit())
@@ -113,7 +113,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
         }
     }
 
-    pub fn map(&self, rect: &Rect<f32, F>) -> Option<Rect<f32, T>> {
+    pub fn map(&self, rect: &Box2D<f32, F>) -> Option<Box2D<f32, T>> {
         match self.kind {
             CoordinateSpaceMapping::Local => {
                 Some(rect.cast_unit())
@@ -136,7 +136,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
     }
 
     // Attempt to return a rect that is contained in the mapped rect.
-    pub fn map_inner_bounds(&self, rect: &Rect<f32, F>) -> Option<Rect<f32, T>> {
+    pub fn map_inner_bounds(&self, rect: &Box2D<f32, F>) -> Option<Box2D<f32, T>> {
         match self.kind {
             CoordinateSpaceMapping::Local => {
                 Some(rect.cast_unit())
@@ -170,71 +170,71 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
 
 #[derive(Clone, Debug)]
 pub struct SpaceSnapper {
-    pub ref_spatial_node_index: SpatialNodeIndex,
+    ref_spatial_node_index: SpatialNodeIndex,
     current_target_spatial_node_index: SpatialNodeIndex,
     snapping_transform: Option<ScaleOffset>,
-    pub device_pixel_scale: DevicePixelScale,
+    raster_pixel_scale: RasterPixelScale,
 }
 
 impl SpaceSnapper {
     pub fn new(
         ref_spatial_node_index: SpatialNodeIndex,
-        device_pixel_scale: DevicePixelScale,
+        raster_pixel_scale: RasterPixelScale,
     ) -> Self {
         SpaceSnapper {
             ref_spatial_node_index,
             current_target_spatial_node_index: SpatialNodeIndex::INVALID,
             snapping_transform: None,
-            device_pixel_scale,
+            raster_pixel_scale,
         }
     }
 
-    pub fn new_with_target(
+    pub fn new_with_target<S: SpatialNodeContainer>(
         ref_spatial_node_index: SpatialNodeIndex,
         target_node_index: SpatialNodeIndex,
-        device_pixel_scale: DevicePixelScale,
-        spatial_tree: &SpatialTree,
+        raster_pixel_scale: RasterPixelScale,
+        spatial_tree: &S,
     ) -> Self {
         let mut snapper = SpaceSnapper {
             ref_spatial_node_index,
             current_target_spatial_node_index: SpatialNodeIndex::INVALID,
             snapping_transform: None,
-            device_pixel_scale,
+            raster_pixel_scale,
         };
 
         snapper.set_target_spatial_node(target_node_index, spatial_tree);
         snapper
     }
 
-    pub fn set_target_spatial_node(
+    pub fn set_target_spatial_node<S: SpatialNodeContainer>(
         &mut self,
         target_node_index: SpatialNodeIndex,
-        spatial_tree: &SpatialTree,
+        spatial_tree: &S,
     ) {
         if target_node_index == self.current_target_spatial_node_index {
             return
         }
 
-        let ref_spatial_node = &spatial_tree.spatial_nodes[self.ref_spatial_node_index.0 as usize];
-        let target_spatial_node = &spatial_tree.spatial_nodes[target_node_index.0 as usize];
+        let ref_snap = spatial_tree.get_node_info(self.ref_spatial_node_index).snapping_transform;
+        let target_snap = spatial_tree.get_node_info(target_node_index).snapping_transform;
 
         self.current_target_spatial_node_index = target_node_index;
-        self.snapping_transform = match (ref_spatial_node.snapping_transform, target_spatial_node.snapping_transform) {
+        self.snapping_transform = match (ref_snap, target_snap) {
             (Some(ref ref_scale_offset), Some(ref target_scale_offset)) => {
                 Some(ref_scale_offset
                     .inverse()
                     .accumulate(target_scale_offset)
-                    .scale(self.device_pixel_scale.0))
+                    .scale(self.raster_pixel_scale.0))
             }
             _ => None,
         };
     }
 
-    pub fn snap_rect<F>(&self, rect: &Rect<f32, F>) -> Rect<f32, F> where F: fmt::Debug {
+    pub fn snap_rect<F>(&self, rect: &Box2D<f32, F>) -> Box2D<f32, F> where F: fmt::Debug {
         debug_assert!(self.current_target_spatial_node_index != SpatialNodeIndex::INVALID);
         match self.snapping_transform {
             Some(ref scale_offset) => {
-                let snapped_device_rect : DeviceRect = scale_offset.map_rect(rect).snap();
+                let snapped_device_rect: DeviceRect = scale_offset.map_rect(rect).snap();
                 scale_offset.unmap_rect(&snapped_device_rect)
             }
             None => *rect,

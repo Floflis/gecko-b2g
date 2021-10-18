@@ -5,7 +5,7 @@
 "use strict";
 
 const TEST_COM_URI =
-  URL_ROOT_COM + "examples/doc_dbg-fission-frame-sources.html";
+  URL_ROOT_COM_SSL + "examples/doc_dbg-fission-frame-sources.html";
 
 add_task(async function() {
   // Simply load a test page with a remote frame and wait for both sources to
@@ -17,26 +17,28 @@ add_task(async function() {
     "simple2.js"
   );
 
-  const doc = dbg.win.document;
-
   const rootNodes = dbg.win.document.querySelectorAll(
     selectors.sourceTreeRootNode
   );
 
   info("Expands the main root node");
-  expandAll(dbg, rootNodes[0]);
+  await expandAllSourceNodes(dbg, rootNodes[0]);
 
   // We need to assert the actual DOM nodes in the source tree, because the
   // state can contain simple1.js and simple2.js, but only show one of them.
   info("Waiting for simple1.js from example.com (parent page)");
   await waitUntil(() => findSourceNodeWithText(dbg, "simple1.js"));
 
-  // If fission is enabled, the second source is under another root node.
-  if (isFissionEnabled()) {
-    is(rootNodes.length, 2, "Found 2 sourceview root nodes when fission is on");
+  // If fission or EFT is enabled, the second source is under another root node.
+  if (isFissionEnabled() || isEveryFrameTargetEnabled()) {
+    is(
+      rootNodes.length,
+      2,
+      "Found 2 sourceview root nodes when iframe has dedicated target"
+    );
 
     info("Expands the remote frame root node");
-    expandAll(dbg, rootNodes[1]);
+    await expandAllSourceNodes(dbg, rootNodes[1]);
   }
 
   info("Waiting for simple2.js from example.org (frame)");
@@ -44,14 +46,3 @@ add_task(async function() {
 
   await dbg.toolbox.closeToolbox();
 });
-
-function findSourceNodeWithText(dbg, text) {
-  return [...findAllElements(dbg, "sourceNodes")].some(el => {
-    return el.textContent.includes(text);
-  });
-}
-
-function expandAll(dbg, treeNode) {
-  rightClickEl(dbg, treeNode);
-  selectContextMenuItem(dbg, "#node-menu-expand-all");
-}

@@ -10,7 +10,8 @@ varying vec2 vUv;
 flat varying vec4 vUvRect;
 flat varying vec2 vOffsetScale;
 // The number of pixels on each end that we apply the blur filter over.
-flat varying int vSupport;
+// Packed in to vector to work around bug 1630356.
+flat varying ivec2 vSupport;
 flat varying vec2 vGaussCoefficients;
 
 #ifdef WR_VERTEX_SHADER
@@ -25,7 +26,7 @@ PER_INSTANCE in int aBlurSourceTaskAddress;
 PER_INSTANCE in int aBlurDirection;
 
 struct BlurTask {
-    RenderTaskCommonData common_data;
+    RectWithEndpoint task_rect;
     float blur_radius;
     vec2 blur_region;
 };
@@ -34,7 +35,7 @@ BlurTask fetch_blur_task(int address) {
     RenderTaskData task_data = fetch_render_task_data(address);
 
     BlurTask task = BlurTask(
-        task_data.common_data,
+        task_data.task_rect,
         task_data.user_data.x,
         task_data.user_data.yz
     );
@@ -53,7 +54,7 @@ void calculate_gauss_coefficients(float sigma) {
     vec3 gauss_coefficient = vec3(vGaussCoefficients,
                                   vGaussCoefficients.y * vGaussCoefficients.y);
     float gauss_coefficient_total = gauss_coefficient.x;
-    for (int i = 1; i <= vSupport; i += 2) {
+    for (int i = 1; i <= vSupport.x; i += 2) {
         gauss_coefficient.xy *= gauss_coefficient.yz;
         float gauss_coefficient_subtotal = gauss_coefficient.x;
         gauss_coefficient.xy *= gauss_coefficient.yz;
@@ -68,21 +69,20 @@ void calculate_gauss_coefficients(float sigma) {
 
 void main(void) {
     BlurTask blur_task = fetch_blur_task(aBlurRenderTaskAddress);
-    RenderTaskCommonData src_task = fetch_render_task_common_data(aBlurSourceTaskAddress);
+    RectWithEndpoint src_rect = fetch_render_task_rect(aBlurSourceTaskAddress);
 
-    RectWithSize src_rect = src_task.task_rect;
-    RectWithSize target_rect = blur_task.common_data.task_rect;
+    RectWithEndpoint target_rect = blur_task.task_rect;
 
-    vec2 texture_size = vec2(textureSize(sColor0, 0).xy);
+    vec2 texture_size = vec2(TEX_SIZE(sColor0).xy);
 
     // Ensure that the support is an even number of pixels to simplify the
     // fragment shader logic.
     //
     // TODO(pcwalton): Actually make use of this fact and use the texture
     // hardware for linear filtering.
-    vSupport = int(ceil(1.5 * blur_task.blur_radius)) * 2;
+    vSupport.x = int(ceil(1.5 * blur_task.blur_radius)) * 2;
 
-    if (vSupport > 0) {
+    if (vSupport.x > 0) {
         calculate_gauss_coefficients(blur_task.blur_radius);
     } else {
         // The gauss function gets NaNs when blur radius is zero.
@@ -104,10 +104,10 @@ void main(void) {
                    src_rect.p0 + blur_task.blur_region - vec2(0.5));
     vUvRect /= texture_size.xyxy;
 
-    vec2 pos = target_rect.p0 + target_rect.size * aPosition.xy;
+    vec2 pos = mix(target_rect.p0, target_rect.p1, aPosition.xy);
 
     vec2 uv0 = src_rect.p0 / texture_size;
-    vec2 uv1 = (src_rect.p0 + src_rect.size) / texture_size;
+    vec2 uv1 = src_rect.p1 / texture_size;
     vUv = mix(uv0, uv1, aPosition.xy);
 
     gl_Position = uTransform * vec4(pos, 0.0, 1.0);
@@ -155,8 +155,12 @@ void main(void) {
     //
     // for some t. So we can let `t = k1/(k0 + k1)` and effectively evaluate
     // Equation 1 with a single texture lookup.
-
-    for (int i = 1; i <= vSupport; i += 2) {
+    //
+    // Clamp loop condition variable to a statically known value to workaround
+    // driver bug on Adreno 3xx. vSupport should not exceed 300 anyway, due to
+    // the max blur radius being 100. See bug 1720841 for details.
+    int support = min(vSupport.x, 300);
+    for (int i = 1; i <= support; i += 2) {
         gauss_coefficient.xy *= gauss_coefficient.yz;
 
         float gauss_coefficient_subtotal = gauss_coefficient.x;
@@ -175,24 +179,16 @@ void main(void) {
     oFragColor = vec4(avg_color);
 }
 
-#ifdef SWGL
+#ifdef SWGL_DRAW_SPAN
     #ifdef WR_FEATURE_COLOR_TARGET
 void swgl_drawSpanRGBA8() {
-    if (!swgl_isTextureRGBA8(sColor0)) {
-        return;
-    }
-
     swgl_commitGaussianBlurRGBA8(sColor0, vUv, vUvRect, vOffsetScale.x != 0.0,
-                                 vSupport, vGaussCoefficients, 0);
+                                 vSupport.x, vGaussCoefficients);
 }
     #else
 void swgl_drawSpanR8() {
-    if (!swgl_isTextureR8(sColor0)) {
-        return;
-    }
-
     swgl_commitGaussianBlurR8(sColor0, vUv, vUvRect, vOffsetScale.x != 0.0,
-                              vSupport, vGaussCoefficients, 0);
+                              vSupport.x, vGaussCoefficients);
 }
     #endif
 #endif

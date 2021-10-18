@@ -216,10 +216,16 @@ namespace mozilla {
 
 void PeerConnectionAutoTimer::RegisterConnection() { mRefCnt++; }
 
-void PeerConnectionAutoTimer::UnregisterConnection() {
+void PeerConnectionAutoTimer::UnregisterConnection(bool aContainedAV) {
   MOZ_ASSERT(mRefCnt);
   mRefCnt--;
+  mUsedAV |= aContainedAV;
   if (mRefCnt == 0) {
+    if (mUsedAV) {
+      Telemetry::Accumulate(
+          Telemetry::WEBRTC_AV_CALL_DURATION,
+          static_cast<uint32_t>((TimeStamp::Now() - mStart).ToSeconds()));
+    }
     Telemetry::Accumulate(
         Telemetry::WEBRTC_CALL_DURATION,
         static_cast<uint32_t>((TimeStamp::Now() - mStart).ToSeconds()));
@@ -341,8 +347,9 @@ PeerConnectionImpl::~PeerConnectionImpl() {
     destroy_timecard(mTimeCard);
     mTimeCard = nullptr;
   }
-  // This aborts if not on main thread (in Debug builds)
-  PC_AUTO_ENTER_API_CALL_NO_CHECK();
+
+  MOZ_ASSERT(NS_IsMainThread());
+
   if (mWindow && mActiveOnWindow) {
     mWindow->RemovePeerConnection();
     // No code is supposed to observe the assignment below, but
@@ -1847,17 +1854,24 @@ PeerConnectionImpl::ReplaceTrackNoRenegotiation(TransceiverImpl& aTransceiver,
   if (aTransceiver.IsVideo()) {
     // We update the media pipelines here so we can apply different codec
     // settings for different sources (e.g. screensharing as opposed to camera.)
-    MediaSourceEnum oldSource = oldSendTrack
-                                    ? oldSendTrack->GetSource().GetMediaSource()
-                                    : MediaSourceEnum::Camera;
-    MediaSourceEnum newSource = aWithTrack
-                                    ? aWithTrack->GetSource().GetMediaSource()
-                                    : MediaSourceEnum::Camera;
-    if (oldSource != newSource) {
+    Maybe<MediaSourceEnum> oldType;
+    Maybe<MediaSourceEnum> newType;
+    if (oldSendTrack) {
+      oldType = Some(oldSendTrack->GetSource().GetMediaSource());
+    }
+    if (aWithTrack) {
+      newType = Some(aWithTrack->GetSource().GetMediaSource());
+    }
+    if (oldType != newType) {
       if (NS_WARN_IF(NS_FAILED(rv = aTransceiver.UpdateConduit()))) {
         CSFLogError(LOGTAG, "Error Updating VideoConduit");
         return rv;
       }
+    }
+  } else if (!oldSendTrack != !aWithTrack) {
+    if (NS_WARN_IF(NS_FAILED(rv = aTransceiver.UpdateConduit()))) {
+      CSFLogError(LOGTAG, "Error Updating AudioConduit");
+      return rv;
     }
   }
 
@@ -2078,7 +2092,8 @@ void PeerConnectionImpl::RecordEndOfCallTelemetry() {
   MOZ_RELEASE_ASSERT(mWindow);
   auto found = sCallDurationTimers.find(mWindow->WindowID());
   if (found != sCallDurationTimers.end()) {
-    found->second.UnregisterConnection();
+    found->second.UnregisterConnection((type & kAudioTypeMask) ||
+                                       (type & kVideoTypeMask));
     if (found->second.IsStopped()) {
       sCallDurationTimers.erase(found);
     }
@@ -2121,7 +2136,7 @@ nsresult PeerConnectionImpl::CloseInt() {
 }
 
 void PeerConnectionImpl::ShutdownMedia() {
-  PC_AUTO_ENTER_API_CALL_NO_CHECK();
+  MOZ_ASSERT(NS_IsMainThread());
 
   if (!mMedia) return;
 

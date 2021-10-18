@@ -87,10 +87,10 @@ function PeerConnectionTest(options) {
   }
 
   if (iceServersArray.length) {
-    if (!options.turn_disabled_local) {
+    if (!options.turn_disabled_local && !options.config_local.iceServers) {
       options.config_local.iceServers = iceServersArray;
     }
-    if (!options.turn_disabled_remote) {
+    if (!options.turn_disabled_remote && !options.config_remote.iceServers) {
       options.config_remote.iceServers = iceServersArray;
     }
   } else if (typeof turnServers !== "undefined") {
@@ -548,32 +548,20 @@ PeerConnectionTest.prototype.updateChainSteps = function() {
 /**
  * Start running the tests as assigned to the command chain.
  */
-PeerConnectionTest.prototype.run = function() {
+PeerConnectionTest.prototype.run = async function() {
   /* We have to modify the chain here to allow tests which modify the default
    * test chain instantiating a PeerConnectionTest() */
   this.updateChainSteps();
-  var finished = () => {
-    if (window.SimpleTest) {
-      networkTestFinished();
-    } else {
-      finish();
-    }
-  };
-  return this.chain
-    .execute()
-    .then(() => this.close())
-    .catch(e =>
-      ok(
-        false,
-        "Error in test execution: " +
-          e +
-          (typeof e.stack === "string"
-            ? " " + e.stack.split("\n").join(" ... ")
-            : "")
-      )
-    )
-    .then(() => finished())
-    .catch(e => ok(false, "Error in finished()"));
+  try {
+    await this.chain.execute();
+    await this.close();
+  } catch (e) {
+    const stack =
+      typeof e.stack === "string"
+        ? ` ${e.stack.split("\n").join(" ... ")}`
+        : "";
+    ok(false, `Error in test execution: ${e} (${stack})`);
+  }
 };
 
 /**
@@ -1173,6 +1161,7 @@ PeerConnectionWrapper.prototype = {
   },
 
   async getUserMedia(constraints) {
+    SpecialPowers.wrap(document).notifyUserGestureActivation();
     var stream = await getUserMedia(constraints);
     if (constraints.audio) {
       stream.getAudioTracks().forEach(track => {
@@ -1912,14 +1901,48 @@ PeerConnectionWrapper.prototype = {
       }
       return report;
     };
+    // Returns true if there is proof in aStats of rtcp flow for all remote stats
+    // objects, compared to baseStats.
+    const hasAllRtcpUpdated = (baseStats, stats) => {
+      let hasRtcpStats = false;
+      for (const v of stats.values()) {
+        if (v.type == "remote-outbound-rtp") {
+          hasRtcpStats = true;
+          if (!v.remoteTimestamp) {
+            // `remoteTimestamp` is 0 or not present.
+            return false;
+          }
+          if (v.remoteTimestamp <= baseStats.get(v.id)?.remoteTimestamp) {
+            // `remoteTimestamp` has not advanced further than the base stats,
+            // i.e., no new sender report has been received.
+            return false;
+          }
+        } else if (v.type == "remote-inbound-rtp") {
+          hasRtcpStats = true;
+          // The ideal thing here would be to check `reportsReceived`, but it's
+          // not yet implemented.
+          if (!v.packetsReceived) {
+            // `packetsReceived` is 0 or not present.
+            return false;
+          }
+          if (v.packetsReceived <= baseStats.get(v.id)?.packetsReceived) {
+            // `packetsReceived` has not advanced further than the base stats,
+            // i.e., no new receiver report has been received.
+            return false;
+          }
+        }
+      }
+      return hasRtcpStats;
+    };
     let attempts = 0;
+    const baseStats = await this._pc.getStats();
     // Time-units are MS
     const waitPeriod = 100;
     const maxTime = 20000;
     for (let totalTime = maxTime; totalTime > 0; totalTime -= waitPeriod) {
       try {
         let syncedStats = await ensureSyncedRtcp();
-        if (syncedStats) {
+        if (syncedStats && hasAllRtcpUpdated(baseStats, syncedStats)) {
           return syncedStats;
         }
       } catch (e) {
@@ -2257,6 +2280,10 @@ PeerConnectionWrapper.prototype = {
       candidateType = "relay-tcp";
     }
 
+    if (lCand.relayProtocol === "tls" && candidateType === "relay") {
+      candidateType = "relay-tls";
+    }
+
     if (expectedLocalCandidateType === "srflx" && candidateType === "prflx") {
       // Be forgiving of prflx when expecting srflx, since that can happen due
       // to timing.
@@ -2415,7 +2442,6 @@ function loadScript(...scripts) {
 // Ensure SimpleTest.js is loaded before other scripts.
 var scriptsReady = loadScript("/tests/SimpleTest/SimpleTest.js").then(() => {
   return loadScript(
-    "../../../test/manifest.js",
     "head.js",
     "templates.js",
     "turnConfig.js",
@@ -2535,5 +2561,6 @@ async function runNetworkTest(testFunction, fixtureOptions = {}) {
       });
     }
     await testFunction(options);
+    await networkTestFinished();
   });
 }

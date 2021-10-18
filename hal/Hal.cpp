@@ -73,7 +73,9 @@ void AssertMainProcess() {
 bool WindowIsActive(nsPIDOMWindowInner* aWindow) {
   dom::Document* document = aWindow->GetDoc();
   NS_ENSURE_TRUE(document, false);
-  return !document->Hidden();
+  auto principal = document->NodePrincipal();
+  NS_ENSURE_TRUE(principal, false);
+  return !document->Hidden() || principal->IsSystemPrincipal();
 }
 
 StaticAutoPtr<WindowIdentifier::IDArrayType> gLastIDToVibrate;
@@ -697,10 +699,6 @@ void NotifySwitchChange(const SwitchEvent& aEvent) {
 
   SwitchObserverList& observer = GetSwitchObserverList(aEvent.device());
   observer.Broadcast(aEvent);
-}
-
-bool SetProcessPrioritySupported() {
-  RETURN_PROXY_IF_SANDBOXED(SetProcessPrioritySupported(), false);
 }
 
 static AlarmObserver* sAlarmObserver;

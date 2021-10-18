@@ -28,20 +28,33 @@ with Files("*CompositorWidget*"):
 with Files("*Gfx*"):
     BUG_COMPONENT = ("Core", "Graphics")
 
-with Files("*WindowSurface*"):
-    BUG_COMPONENT = ("Core", "Graphics")
-
 with Files("*FontRange*"):
     BUG_COMPONENT = ("Core", "Widget: Cocoa")
 
 toolkit = CONFIG["MOZ_WIDGET_TOOLKIT"]
 
-if toolkit in ("cocoa", "android", "uikit", "gonk"):
+if toolkit in ("android", "cocoa", "gonk", "gtk", "uikit", "windows"):
     DIRS += [toolkit]
 
-if toolkit == "windows":
-    DIRS += ["windows"]
-
+if toolkit == "cocoa":
+    XPIDL_SOURCES += [
+        "nsIMacDockSupport.idl",
+        "nsIMacFinderProgress.idl",
+        "nsIMacSharingService.idl",
+        "nsIMacWebAppUtils.idl",
+        "nsIStandaloneNativeMenu.idl",
+        "nsITaskbarProgress.idl",
+        "nsITouchBarHelper.idl",
+        "nsITouchBarInput.idl",
+        "nsITouchBarUpdater.idl",
+    ]
+elif toolkit == "gtk":
+    XPIDL_SOURCES += [
+        "nsIApplicationChooser.idl",
+        "nsIGtkTaskbarProgress.idl",
+        "nsITaskbarProgress.idl",
+    ]
+elif toolkit == "windows":
     XPIDL_SOURCES += [
         "nsIJumpListBuilder.idl",
         "nsIJumpListItem.idl",
@@ -56,21 +69,6 @@ if toolkit == "windows":
         "nsIWindowsUIUtils.idl",
         "nsIWinTaskbar.idl",
     ]
-elif toolkit == "cocoa":
-    XPIDL_SOURCES += [
-        "nsIMacDockSupport.idl",
-        "nsIMacFinderProgress.idl",
-        "nsIMacSharingService.idl",
-        "nsIMacWebAppUtils.idl",
-        "nsIStandaloneNativeMenu.idl",
-        "nsITaskbarProgress.idl",
-        "nsITouchBarHelper.idl",
-        "nsITouchBarInput.idl",
-        "nsITouchBarUpdater.idl",
-    ]
-    EXPORTS += [
-        "nsINativeMenuService.h",
-    ]
 
 TEST_DIRS += ["tests", "tests/gtest"]
 
@@ -82,13 +80,6 @@ DIRS += ["headless"]
 # multiple implementations of widget can be built on the same
 # source tree.
 #
-if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
-    DIRS += ["gtk"]
-
-    XPIDL_SOURCES += [
-        "nsIGtkTaskbarProgress.idl",
-        "nsITaskbarProgress.idl",
-    ]
 
 XPIDL_SOURCES += [
     "nsIAppShell.idl",
@@ -135,7 +126,6 @@ EXPORTS += [
     "nsBaseScreen.h",
     "nsBaseWidget.h",
     "nsIDeviceContextSpec.h",
-    "nsIPluginWidget.h",
     "nsIPrintDialogService.h",
     "nsIRollupListener.h",
     "nsIWidget.h",
@@ -175,6 +165,7 @@ EXPORTS.mozilla.widget += [
     "IMEData.h",
     "InProcessCompositorWidget.h",
     "MediaKeysEventSourceFactory.h",
+    "NativeMenu.h",
     "nsAutoRollup.h",
     "nsXPLookAndFeel.h",
     "PuppetBidiKeyboard.h",
@@ -183,7 +174,7 @@ EXPORTS.mozilla.widget += [
     "ScreenManager.h",
     "ThemeChangeKind.h",
     "WidgetMessageUtils.h",
-    "WindowSurface.h",
+    "WindowOcclusionState.h",
 ]
 
 UNIFIED_SOURCES += [
@@ -208,6 +199,8 @@ UNIFIED_SOURCES += [
     "nsHTMLFormatConverter.cpp",
     "nsIWidgetListener.cpp",
     "nsNativeBasicTheme.cpp",
+    # Android non-native theme is built on all platforms for RDM.
+    "nsNativeBasicThemeAndroid.cpp",
     "nsPrimitiveHelpers.cpp",
     "nsPrintSettingsImpl.cpp",
     "nsSoundProxy.cpp",
@@ -270,19 +263,6 @@ EXPORTS.ipc = ["nsGUIEventIPC.h"]
 
 if CONFIG["MOZ_X11"]:
     DIRS += ["x11"]
-    SOURCES += [
-        "GfxInfoX11.cpp",
-        "nsShmImage.cpp",
-        "WindowSurfaceX11SHM.cpp",
-    ]
-
-if toolkit == "windows":
-    EXPORTS += [
-        "PluginWidgetProxy.h",
-    ]
-    SOURCES += [
-        "PluginWidgetProxy.cpp",
-    ]
 
 if toolkit in ("cocoa", "windows"):
     UNIFIED_SOURCES += [
@@ -297,10 +277,6 @@ if toolkit in {"gtk", "cocoa", "windows", "android", "uikit", "gonk"}:
 if toolkit in ("gtk", "windows", "cocoa", "android", "gonk"):
     UNIFIED_SOURCES += [
         "nsNativeTheme.cpp",
-    ]
-if toolkit == "gtk":
-    XPIDL_SOURCES += [
-        "nsIApplicationChooser.idl",
     ]
 
 DEFINES["MOZ_CROSS_PROCESS_IME"] = True
@@ -360,3 +336,5 @@ if CONFIG["MOZ_ENABLE_D3D10_LAYER"]:
 CXXFLAGS += CONFIG["TK_CFLAGS"]
 if CONFIG["MOZ_WAYLAND"]:
     CXXFLAGS += CONFIG["MOZ_WAYLAND_CFLAGS"]
+
+REQUIRES_UNIFIED_BUILD = True

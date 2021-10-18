@@ -2,14 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{ColorF, DocumentId, ExternalImageId, PrimitiveFlags};
+use api::{ColorF, DocumentId, ExternalImageId, PrimitiveFlags, Parameter, RenderReasons};
 use api::{ImageFormat, NotificationRequest, Shadow, FilterOp, ImageBufferKind};
 use api::units::*;
 use api;
 use crate::render_api::DebugCommand;
 use crate::composite::NativeSurfaceOperation;
 use crate::device::TextureFilter;
-use crate::renderer::PipelineInfo;
+use crate::renderer::{FullFrameStats, PipelineInfo};
 use crate::gpu_cache::GpuCacheUpdateList;
 use crate::frame_builder::Frame;
 use crate::profiler::TransactionProfile;
@@ -22,6 +22,7 @@ use std::f32;
 use std::hash::BuildHasherDefault;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{UNIX_EPOCH, SystemTime};
 
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::capture::CaptureConfig;
@@ -32,6 +33,137 @@ use crate::capture::PlainExternalImage;
 
 pub type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 pub type FastHashSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
+
+#[derive(Copy, Clone, Hash, MallocSizeOf, PartialEq, PartialOrd, Debug, Eq, Ord)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct FrameId(usize);
+
+impl FrameId {
+    /// Returns a FrameId corresponding to the first frame.
+    ///
+    /// Note that we use 0 as the internal id here because the current code
+    /// increments the frame id at the beginning of the frame, rather than
+    /// at the end, and we want the first frame to be 1. It would probably
+    /// be sensible to move the advance() call to after frame-building, and
+    /// then make this method return FrameId(1).
+    pub fn first() -> Self {
+        FrameId(0)
+    }
+
+    /// Returns the backing usize for this FrameId.
+    pub fn as_usize(&self) -> usize {
+        self.0
+    }
+
+    /// Advances this FrameId to the next frame.
+    pub fn advance(&mut self) {
+        self.0 += 1;
+    }
+
+    /// An invalid sentinel FrameId, which will always compare less than
+    /// any valid FrameId.
+    pub const INVALID: FrameId = FrameId(0);
+}
+
+impl Default for FrameId {
+    fn default() -> Self {
+        FrameId::INVALID
+    }
+}
+
+impl ::std::ops::Add<usize> for FrameId {
+    type Output = Self;
+    fn add(self, other: usize) -> FrameId {
+        FrameId(self.0 + other)
+    }
+}
+
+impl ::std::ops::Sub<usize> for FrameId {
+    type Output = Self;
+    fn sub(self, other: usize) -> FrameId {
+        assert!(self.0 >= other, "Underflow subtracting FrameIds");
+        FrameId(self.0 - other)
+    }
+}
+
+/// Identifier to track a sequence of frames.
+///
+/// This is effectively a `FrameId` with a ridealong timestamp corresponding
+/// to when advance() was called, which allows for more nuanced cache eviction
+/// decisions. As such, we use the `FrameId` for equality and comparison, since
+/// we should never have two `FrameStamps` with the same id but different
+/// timestamps.
+#[derive(Copy, Clone, Debug, MallocSizeOf)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct FrameStamp {
+    id: FrameId,
+    time: SystemTime,
+    document_id: DocumentId,
+}
+
+impl Eq for FrameStamp {}
+
+impl PartialEq for FrameStamp {
+    fn eq(&self, other: &Self) -> bool {
+        // We should not be checking equality unless the documents are the same
+        debug_assert!(self.document_id == other.document_id);
+        self.id == other.id
+    }
+}
+
+impl PartialOrd for FrameStamp {
+    fn partial_cmp(&self, other: &Self) -> Option<::std::cmp::Ordering> {
+        self.id.partial_cmp(&other.id)
+    }
+}
+
+impl FrameStamp {
+    /// Gets the FrameId in this stamp.
+    pub fn frame_id(&self) -> FrameId {
+        self.id
+    }
+
+    /// Gets the time associated with this FrameStamp.
+    pub fn time(&self) -> SystemTime {
+        self.time
+    }
+
+    /// Gets the DocumentId in this stamp.
+    pub fn document_id(&self) -> DocumentId {
+        self.document_id
+    }
+
+    pub fn is_valid(&self) -> bool {
+        // If any fields are their default values, the whole struct should equal INVALID
+        debug_assert!((self.time != UNIX_EPOCH && self.id != FrameId(0) && self.document_id != DocumentId::INVALID) ||
+                      *self == Self::INVALID);
+        self.document_id != DocumentId::INVALID
+    }
+
+    /// Returns a FrameStamp corresponding to the first frame.
+    pub fn first(document_id: DocumentId) -> Self {
+        FrameStamp {
+            id: FrameId::first(),
+            time: SystemTime::now(),
+            document_id,
+        }
+    }
+
+    /// Advances to a new frame.
+    pub fn advance(&mut self) {
+        self.id.advance();
+        self.time = SystemTime::now();
+    }
+
+    /// An invalid sentinel FrameStamp.
+    pub const INVALID: FrameStamp = FrameStamp {
+        id: FrameId(0),
+        time: UNIX_EPOCH,
+        document_id: DocumentId::INVALID,
+    };
+}
 
 /// Custom field embedded inside the Polygon struct of the plane-split crate.
 #[derive(Copy, Clone, Debug)]
@@ -61,6 +193,11 @@ impl Default for PlaneSplitAnchor {
 
 /// A concrete plane splitter type used in WebRender.
 pub type PlaneSplitter = BspSplitter<f64, WorldPixel, PlaneSplitAnchor>;
+
+/// An index into the scene's list of plane splitters
+#[derive(Debug, Copy, Clone)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+pub struct PlaneSplitterIndex(pub usize);
 
 /// An arbitrary number which we assume opacity is invisible below.
 const OPACITY_EPSILON: f32 = 0.001;
@@ -239,19 +376,6 @@ impl CacheTextureId {
     pub const INVALID: CacheTextureId = CacheTextureId(!0);
 }
 
-/// Canonical type for texture layer indices.
-///
-/// WebRender is currently not very consistent about layer index types. Some
-/// places use i32 (since that's the type used in various OpenGL APIs), some
-/// places use u32 (since having it be signed is non-sensical, but the
-/// underlying graphics APIs generally operate on 32-bit integers) and some
-/// places use usize (since that's most natural in Rust).
-///
-/// Going forward, we aim to us usize throughout the codebase, since that allows
-/// operations like indexing without a cast, and convert to the required type in
-/// the device module when making calls into the platform layer.
-pub type LayerIndex = usize;
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -326,12 +450,22 @@ pub struct TextureCacheAllocation {
     pub kind: TextureCacheAllocationKind,
 }
 
+/// A little bit of extra information to make memory reports more useful
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub enum TextureCacheCategory {
+    Atlas,
+    Standalone,
+    PictureTile,
+    RenderTarget,
+}
+
 /// Information used when allocating / reallocating.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TextureCacheAllocInfo {
     pub width: i32,
     pub height: i32,
-    pub layer_count: i32,
     pub format: ImageFormat,
     pub filter: TextureFilter,
     pub target: ImageBufferKind,
@@ -339,6 +473,7 @@ pub struct TextureCacheAllocInfo {
     pub is_shared_cache: bool,
     /// If true, this texture requires a depth target.
     pub has_depth: bool,
+    pub category: TextureCacheCategory
 }
 
 /// Sub-operation-specific information for allocation operations.
@@ -358,7 +493,6 @@ pub struct TextureCacheUpdate {
     pub rect: DeviceIntRect,
     pub stride: Option<i32>,
     pub offset: i32,
-    pub layer_index: i32,
     pub format_override: Option<ImageFormat>,
     pub source: TextureUpdateSource,
 }
@@ -418,15 +552,13 @@ impl TextureUpdateList {
         origin: DeviceIntPoint,
         width: i32,
         height: i32,
-        layer_index: usize
     ) {
         let size = DeviceIntSize::new(width, height);
-        let rect = DeviceIntRect::new(origin, size);
+        let rect = DeviceIntRect::from_origin_and_size(origin, size);
         self.push_update(id, TextureCacheUpdate {
             rect,
             stride: None,
             offset: 0,
-            layer_index: layer_index as i32,
             format_override: None,
             source: TextureUpdateSource::DebugClear,
         });
@@ -521,11 +653,11 @@ pub struct RenderedDocument {
     pub frame: Frame,
     pub is_new_scene: bool,
     pub profile: TransactionProfile,
+    pub render_reasons: RenderReasons,
+    pub frame_stats: Option<FullFrameStats>
 }
 
 pub enum DebugOutput {
-    FetchDocuments(String),
-    FetchClipScrollTree(String),
     #[cfg(feature = "capture")]
     SaveCapture(CaptureConfig, Vec<ExternalCaptureImage>),
     #[cfg(feature = "replay")]
@@ -549,6 +681,7 @@ pub enum ResultMsg {
         ResourceUpdateList,
     ),
     AppendNotificationRequests(Vec<NotificationRequest>),
+    SetParameter(Parameter),
     ForceRedraw,
 }
 

@@ -115,9 +115,9 @@ interface Element : Node {
   boolean mozMatchesSelector(UTF8String selector);
 
   // Pointer events methods.
-  [Throws]
+  [UseCounter, Throws]
   void setPointerCapture(long pointerId);
-  [Throws]
+  [UseCounter, Throws]
   void releasePointerCapture(long pointerId);
   boolean hasPointerCapture(long pointerId);
 
@@ -130,14 +130,14 @@ interface Element : Node {
    * element.
    *
    */
-  [UseCounter]
+  [Deprecated=ElementSetCapture, Pref="dom.mouse_capture.enabled"]
   void setCapture(optional boolean retargetToElement = false);
 
   /**
    * If this element has captured the mouse, release the capture. If another
    * element has captured the mouse, this method has no effect.
    */
-  [UseCounter]
+  [Deprecated=ElementReleaseCapture, Pref="dom.mouse_capture.enabled"]
   void releaseCapture();
 
   /*
@@ -169,6 +169,9 @@ interface Element : Node {
 // https://html.spec.whatwg.org/#focus-management-apis
 dictionary FocusOptions {
   boolean preventScroll = false;
+  // Prevents the focus ring if this is not a text control / editable element.
+  [Func="nsContentUtils::IsCallerChromeOrErrorPage"]
+  boolean preventFocusRing = false;
 };
 
 interface mixin HTMLOrForeignElement {
@@ -239,9 +242,9 @@ partial interface Element {
 // http://domparsing.spec.whatwg.org/#extensions-to-the-element-interface
 partial interface Element {
   [CEReactions, SetterNeedsSubjectPrincipal=NonSystem, Pure, SetterThrows, GetterCanOOM]
-  attribute [TreatNullAs=EmptyString] DOMString innerHTML;
+  attribute [LegacyNullToEmptyString] DOMString innerHTML;
   [CEReactions, Pure, SetterThrows]
-  attribute [TreatNullAs=EmptyString] DOMString outerHTML;
+  attribute [LegacyNullToEmptyString] DOMString outerHTML;
   [CEReactions, Throws]
   void insertAdjacentHTML(DOMString position, DOMString text);
 };
@@ -257,6 +260,10 @@ partial interface Element {
 // https://dom.spec.whatwg.org/#dictdef-shadowrootinit
 dictionary ShadowRootInit {
   required ShadowRootMode mode;
+  [Pref="dom.shadowdom.delegatesFocus.enabled"]
+  boolean delegatesFocus = false;
+  [Pref="dom.shadowdom.slot.assign.enabled"]
+  SlotAssignmentMode slotAssignment = "named";
 };
 
 // https://dom.spec.whatwg.org/#element
@@ -372,4 +379,15 @@ partial interface Element {
   // height. If the direction is vertical, it represents box's width.
   [ChromeOnly]
   readonly attribute double firstLineBoxBSize;
+};
+
+
+// Sanitizer API, https://wicg.github.io/sanitizer-api/
+dictionary SetHTMLOptions {
+  Sanitizer sanitizer;
+};
+
+partial interface Element {
+  [Throws, Pref="dom.security.sanitizer.enabled"]
+    void setHTML(DOMString aInnerHTML, optional SetHTMLOptions options = {});
 };

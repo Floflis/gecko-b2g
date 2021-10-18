@@ -13,9 +13,6 @@ const ENGINE_ID = "enginetest@example.com";
 let xpi;
 let profile = do_get_profile().clone();
 
-Services.prefs.setIntPref("extensions.autoDisableScopes", 0);
-SearchTestUtils.initXPCShellAddonManager(this);
-
 add_task(async function setup() {
   await SearchTestUtils.useTestEngines("data1");
   xpi = AddonTestUtils.createTempWebExtensionFile({
@@ -54,7 +51,7 @@ add_task(async function test_removeAddonOnStartup() {
   // Now remove it, reset the search service and start up the add-on manager.
   // Note: the saved settings will have the engine in. If this didn't work,
   // the engine would still be present.
-  await OS.File.remove(
+  await IOUtils.remove(
     OS.Path.join(profile.path, "extensions", `${ENGINE_ID}.xpi`)
   );
 

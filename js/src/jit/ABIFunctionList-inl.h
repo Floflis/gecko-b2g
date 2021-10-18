@@ -42,6 +42,7 @@
 #include "proxy/Proxy.h"  // js::ProxyGetProperty
 
 #include "vm/ArgumentsObject.h"  // js::ArgumentsObject::finishForIonPure
+#include "vm/Interpreter.h"      // js::TypeOfObject
 #include "vm/NativeObject.h"     // js::NativeObject
 #include "vm/RegExpShared.h"     // js::ExecuteRegExpAtomRaw
 #include "vm/TraceLogging.h"     // js::TraceLogStartEventPrivate,
@@ -104,12 +105,16 @@ namespace jit {
   _(js::jit::AllocateBigIntNoGC)                                      \
   _(js::jit::AllocateFatInlineString)                                 \
   _(js::jit::AllocateString)                                          \
+  _(js::jit::AssertMapObjectHash)                                     \
+  _(js::jit::AssertSetObjectHash)                                     \
   _(js::jit::AssertValidBigIntPtr)                                    \
   _(js::jit::AssertValidObjectPtr)                                    \
   _(js::jit::AssertValidStringPtr)                                    \
   _(js::jit::AssertValidSymbolPtr)                                    \
   _(js::jit::AssertValidValue)                                        \
   _(js::jit::AssumeUnreachable)                                       \
+  _(js::jit::AtomicsStore64)                                          \
+  _(js::jit::AtomizeStringNoGC)                                       \
   _(js::jit::Bailout)                                                 \
   _(js::jit::BigIntNumberEqual<EqualityKind::Equal>)                  \
   _(js::jit::BigIntNumberEqual<EqualityKind::NotEqual>)               \
@@ -121,6 +126,7 @@ namespace jit {
   _(js::jit::EqualStringsHelperPure)                                  \
   _(js::jit::FinishBailoutToBaseline)                                 \
   _(js::jit::FrameIsDebuggeeCheck)                                    \
+  _(js::jit::GetContextSensitiveInterpreterStub)                      \
   _(js::jit::GetIndexFromString)                                      \
   _(js::jit::GetInt32FromStringPure)                                  \
   _(js::jit::GetNativeDataPropertyByValuePure)                        \
@@ -147,7 +153,7 @@ namespace jit {
   _(js::jit::Printf1)                                                 \
   _(js::jit::SetNativeDataPropertyPure)                               \
   _(js::jit::StringFromCharCodeNoGC)                                  \
-  _(js::jit::TypeOfObject)                                            \
+  _(js::jit::TypeOfNameObject)                                        \
   _(js::jit::WrapObjectPure)                                          \
   _(js::MapIteratorObject::next)                                      \
   _(js::NativeObject::addDenseElementPure)                            \
@@ -162,7 +168,8 @@ namespace jit {
   _(js::SetIteratorObject::next)                                      \
   _(js::StringToNumberPure)                                           \
   _(js::TraceLogStartEventPrivate)                                    \
-  _(js::TraceLogStopEventPrivate)
+  _(js::TraceLogStopEventPrivate)                                     \
+  _(js::TypeOfObject)
 
 // List of all ABI functions to be used with callWithABI, which are
 // overloaded. Each entry stores the fully qualified name of the C++ function,
@@ -177,23 +184,22 @@ namespace jit {
 
 // List of all ABI function signature which are using a computed function
 // pointer instead of a statically known function pointer.
-#define ABIFUNCTIONSIG_LIST(_)                       \
-  _(AtomicsCompareExchangeFn)                        \
-  _(AtomicsReadWriteModifyFn)                        \
-  _(bool (*)(BigInt*, BigInt*))                      \
-  _(bool (*)(BigInt*, double))                       \
-  _(bool (*)(double, BigInt*))                       \
-  _(float (*)(float))                                \
-  _(JSJitGetterOp)                                   \
-  _(JSJitMethodOp)                                   \
-  _(JSJitSetterOp)                                   \
-  _(JSNative)                                        \
-  _(js::UnaryMathFunctionType)                       \
-  _(void (*)(js::gc::StoreBuffer*, js::gc::Cell**))  \
-  _(void (*)(JSRuntime * rt, JSObject * *objp))      \
-  _(void (*)(JSRuntime * rt, JSString * *stringp))   \
-  _(void (*)(JSRuntime * rt, ObjectGroup * *groupp)) \
-  _(void (*)(JSRuntime * rt, Shape * *shapep))       \
+#define ABIFUNCTIONSIG_LIST(_)                      \
+  _(AtomicsCompareExchangeFn)                       \
+  _(AtomicsReadWriteModifyFn)                       \
+  _(bool (*)(BigInt*, BigInt*))                     \
+  _(bool (*)(BigInt*, double))                      \
+  _(bool (*)(double, BigInt*))                      \
+  _(float (*)(float))                               \
+  _(JSJitGetterOp)                                  \
+  _(JSJitMethodOp)                                  \
+  _(JSJitSetterOp)                                  \
+  _(JSNative)                                       \
+  _(js::UnaryMathFunctionType)                      \
+  _(void (*)(js::gc::StoreBuffer*, js::gc::Cell**)) \
+  _(void (*)(JSRuntime * rt, JSObject * *objp))     \
+  _(void (*)(JSRuntime * rt, JSString * *stringp))  \
+  _(void (*)(JSRuntime * rt, Shape * *shapep))      \
   _(void (*)(JSRuntime * rt, Value * vp))
 
 // GCC warns when the signature does not have matching attributes (for example

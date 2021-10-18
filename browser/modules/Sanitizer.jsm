@@ -99,23 +99,34 @@ var Sanitizer = {
   shouldSanitizeNewTabContainer: false,
 
   /**
-   * Shows a sanitization dialog to the user.
+   * Shows a sanitization dialog to the user. Returns after the dialog box has
+   * closed.
    *
-   * @param [optional] parentWindow the window to use as
-   *                   parent for the created dialog.
+   * @param parentWindow the browser window to use as parent for the created
+   *        dialog.
+   * @throws if parentWindow is undefined or doesn't have a gDialogBox.
    */
   showUI(parentWindow) {
-    let win =
-      AppConstants.platform == "macosx"
-        ? null // make this an app-modal window on Mac
-        : parentWindow;
-    Services.ww.openWindow(
-      win,
-      "chrome://browser/content/sanitize.xhtml",
-      "Sanitize",
-      "chrome,titlebar,dialog,centerscreen,modal",
-      null
-    );
+    // Treat the hidden window as not being a parent window:
+    if (
+      parentWindow?.document.documentURI ==
+      "chrome://browser/content/hiddenWindowMac.xhtml"
+    ) {
+      parentWindow = null;
+    }
+    if (parentWindow?.gDialogBox) {
+      parentWindow.gDialogBox.open("chrome://browser/content/sanitize.xhtml", {
+        inBrowserWindow: true,
+      });
+    } else {
+      Services.ww.openWindow(
+        parentWindow,
+        "chrome://browser/content/sanitize.xhtml",
+        "Sanitize",
+        "chrome,titlebar,dialog,centerscreen,modal",
+        { needNativeUI: true }
+      );
+    }
   },
 
   /**
@@ -359,7 +370,6 @@ var Sanitizer = {
         await clearData(
           range,
           Ci.nsIClearDataService.CLEAR_COOKIES |
-            Ci.nsIClearDataService.CLEAR_PLUGIN_DATA |
             Ci.nsIClearDataService.CLEAR_MEDIA_DEVICES
         );
         TelemetryStopwatch.finish("FX_SANITIZE_COOKIES_2", refObj);
@@ -656,9 +666,7 @@ var Sanitizer = {
     },
 
     pluginData: {
-      async clear(range) {
-        await clearData(range, Ci.nsIClearDataService.CLEAR_PLUGIN_DATA);
-      },
+      async clear(range) {},
     },
   },
 };
@@ -978,8 +986,7 @@ async function sanitizeSessionPrincipal(progress, principal) {
         Ci.nsIClearDataService.CLEAR_COOKIES |
         Ci.nsIClearDataService.CLEAR_DOM_STORAGES |
         Ci.nsIClearDataService.CLEAR_SECURITY_SETTINGS |
-        Ci.nsIClearDataService.CLEAR_EME |
-        Ci.nsIClearDataService.CLEAR_PLUGIN_DATA,
+        Ci.nsIClearDataService.CLEAR_EME,
       resolve
     );
   });

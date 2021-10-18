@@ -310,18 +310,9 @@ release-flatpak-repackage
 -------------------------
 Generate an installer using Flathub's Flatpak format.
 
-release-snap-push
------------------
-Pushes Snap repackage on Snap store.
-
 release-flatpak-push
 --------------------
 Pushes Flatpak repackage on Flathub
-
-release-secondary-snap-push
----------------------------
-Performs the same function as `release-snap-push`, except for the beta channel as part of RC
-Releases.
 
 release-secondary-flatpak-push
 ------------------------------
@@ -575,15 +566,36 @@ repackage-signing-msi
 ---------------------
 Repackage-signing-msi takes the repackaged msi installers and signs them.
 
+repackage-msix
+--------------
+Repackage-msix takes a (possibly unsigned) package and produces a Windows MSIX package containing no langpacks using the
+```./mach repackage``` command.
+
+These tasks are supposed intended for rapid iteration in ```try```.
+
+repackage-shippable-l10n-msix
+-----------------------------
+Repackage-msix takes a signed package and a list of signed langpacks and produces a Windows MSIX package using the
+```./mach repackage``` command.
+
+The signed langpacks are produced on Linux, since langpacks are platform agnostic.
+
+These tasks are for releases; they are complete, and therefore slower, and not intended for rapid iteration in
+```try```.
+
+repackage-signing-msix
+----------------------
+Repackage-signing-msix takes Windows MSIX packages produced in ```repackage-msix``` and signs them.
+
+repackage-signing-shippable-l10n-msix
+-------------------------------------
+Repackage-signing-shippable-l10n-msix takes Windows MSIX packages produced in
+```repackage-signing-shippable-l10n-msix``` and signs them.
+
 repo-update
 -----------
 Repo-Update tasks are tasks that perform some action on the project repo itself,
 in order to update its state in some way.
-
-python-dependency-update
-------------------------
-Python-dependency-update runs `pip-compile --generate-hashes` against the specified `requirements.in` and
-submits patches to Phabricator.
 
 partials
 --------
@@ -648,11 +660,6 @@ webrender
 Tasks used to do testing of WebRender standalone (without gecko). The
 WebRender code lives in gfx/wr and has its own testing infrastructure.
 
-wgpu
----------
-Tasks used to do testing of WebGPU standalone (without gecko). The
-WebGPU code lives in gfx/wgpu and has its own testing infrastructure.
-
 github-sync
 ------------
 Tasks used to do synchronize parts of Gecko that have downstream GitHub
@@ -705,6 +712,10 @@ merge-automation
 ----------------
 Hook-driven tasks that automate "Merge Day" tasks during the release cycle.
 
+sentry
+------
+Interact with Sentry, such as by publishing new project releases.
+
 system-symbols
 --------------
 Generate missing macOS and windows system symbols from crash reports.
@@ -725,3 +736,20 @@ fuzzing
 -------
 
 Performs fuzzing smoke tests
+
+startup-test
+------------
+
+Runs Firefox for a short period of time to see if it crashes
+
+l10n-cross-channel
+------------------
+
+Compiles a set of en-US strings from all shipping release trains and pushes to
+the quarantine strings repo.
+
+fxrecord
+--------
+
+Visual metrics computation of desktop Firefox startup. The performance team
+monitors this task to watch for regressions in Firefox startup performance.

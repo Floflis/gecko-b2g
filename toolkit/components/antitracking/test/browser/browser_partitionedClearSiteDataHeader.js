@@ -144,10 +144,7 @@ async function runClearSiteDataTest(
   if (clearDataContext == "firstParty") {
     // Open in new tab so we keep our current test tab intact. The
     // post-clear-callback might need it.
-    await BrowserTestUtils.withNewTab(
-      (browserA, CLEAR_SITE_DATA_URL_ORIGIN_A),
-      () => {}
-    );
+    await BrowserTestUtils.withNewTab(CLEAR_SITE_DATA_URL_ORIGIN_A, () => {});
   } else if (clearDataContext == "thirdPartyPartitioned") {
     // Navigate frame to path with clear-site-data header
     await SpecialPowers.spawn(
@@ -216,7 +213,7 @@ function setStorageEntry(storageType, originNoSuffix, firstParty, key, value) {
   let origin = getOrigin(originNoSuffix, firstParty);
 
   if (storageType == "cookie") {
-    SiteDataTestUtils.addToCookies(origin, key, value);
+    SiteDataTestUtils.addToCookies({ origin, name: key, value });
     return;
   }
   // localStorage
@@ -381,6 +378,10 @@ add_task(async function setup() {
       ["dom.storage_access.enabled", true],
       [
         "network.cookie.cookieBehavior",
+        Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN,
+      ],
+      [
+        "network.cookie.cookieBehavior.pbmode",
         Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN,
       ],
       ["privacy.trackingprotection.enabled", false],

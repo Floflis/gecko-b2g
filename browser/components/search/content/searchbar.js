@@ -24,24 +24,22 @@
     static get markup() {
       return `
         <stringbundle src="chrome://browser/locale/search.properties"></stringbundle>
-        <hbox class="searchbar-search-button" tooltiptext="&searchIcon.tooltip;">
+        <hbox class="searchbar-search-button" data-l10n-id="searchbar-icon">
           <image class="searchbar-search-icon"></image>
           <image class="searchbar-search-icon-overlay"></image>
         </hbox>
-        <html:input class="searchbar-textbox" is="autocomplete-input" type="search" placeholder="&searchInput.placeholder;" autocompletepopup="PopupSearchAutoComplete" autocompletesearch="search-autocomplete" autocompletesearchparam="searchbar-history" maxrows="10" completeselectedindex="true" minresultsforpopup="0"/>
+        <html:input class="searchbar-textbox" is="autocomplete-input" type="search" data-l10n-id="searchbar-input" autocompletepopup="PopupSearchAutoComplete" autocompletesearch="search-autocomplete" autocompletesearchparam="searchbar-history" maxrows="10" completeselectedindex="true" minresultsforpopup="0"/>
         <menupopup class="textbox-contextmenu"></menupopup>
         <hbox class="search-go-container">
-          <image class="search-go-button urlbar-icon" hidden="true" onclick="handleSearchCommand(event);" tooltiptext="&contentSearchSubmit.tooltip;"></image>
+          <image class="search-go-button urlbar-icon" hidden="true" onclick="handleSearchCommand(event);" data-l10n-id="searchbar-submit"></image>
         </hbox>
       `;
     }
 
-    static get entities() {
-      return ["chrome://browser/locale/browser.dtd"];
-    }
-
     constructor() {
       super();
+
+      MozXULElement.insertFTLIfNeeded("browser/search.ftl");
 
       this.destroy = this.destroy.bind(this);
       this._setupEventListeners();
@@ -485,6 +483,10 @@
       this.addEventListener(
         "blur",
         event => {
+          // Reset the flag since we can't capture enter keyup event if the event happens
+          // after moving the focus.
+          this._needBrowserFocusAtEnterKeyUp = false;
+
           // If the input field is still focused then a different window has
           // received focus, ignore the next focus event.
           this._ignoreFocus = document.activeElement == this._textbox;
@@ -692,14 +694,22 @@
         }
 
         let popup = this.textbox.popup;
-        if (!popup.popupOpen) {
-          return false;
+        if (popup.popupOpen) {
+          let suggestionsHidden =
+            popup.richlistbox.getAttribute("collapsed") == "true";
+          let numItems = suggestionsHidden ? 0 : popup.matchCount;
+          return popup.oneOffButtons.handleKeyDown(aEvent, numItems, true);
+        } else if (aEvent.keyCode == KeyEvent.DOM_VK_ESCAPE) {
+          let undoCount = this.textbox.editor.transactionManager
+            .numberOfUndoItems;
+          if (undoCount) {
+            this.textbox.editor.undo(undoCount);
+          } else {
+            this.textbox.select();
+          }
+          return true;
         }
-
-        let suggestionsHidden =
-          popup.richlistbox.getAttribute("collapsed") == "true";
-        let numItems = suggestionsHidden ? 0 : popup.matchCount;
-        return popup.oneOffButtons.handleKeyDown(aEvent, numItems, true);
+        return false;
       };
 
       // This method overrides the autocomplete binding's openPopup (essentially
@@ -734,18 +744,16 @@
           // clear any previous selection, see bugs 400671 and 488357
           popup.selectedIndex = -1;
 
-          document.popupNode = null;
-
           // Ensure the panel has a meaningful initial size and doesn't grow
           // unconditionally.
           requestAnimationFrame(() => {
             let { width } = window.windowUtils.getBoundsWithoutFlushing(this);
             if (popup.oneOffButtons) {
               // We have a min-width rule on search-panel-one-offs to show at
-              // least 3 buttons, so take that into account here.
-              width = Math.max(width, popup.oneOffButtons.buttonWidth * 3);
+              // least 4 buttons, so take that into account here.
+              width = Math.max(width, popup.oneOffButtons.buttonWidth * 4);
             }
-            popup.style.width = width + "px";
+            popup.style.setProperty("--panel-width", width + "px");
           });
 
           popup._invalidate();
@@ -781,6 +789,8 @@
 
       // override |onTextEntered| in autocomplete.xml
       this.textbox.onTextEntered = event => {
+        this.textbox.editor.transactionManager.clearUndoStack();
+
         let engine;
         let oneOff = this.textbox.selectedButton;
         if (oneOff) {
@@ -811,13 +821,13 @@
     _buildContextMenu() {
       const raw = `
         <menuitem data-l10n-id="text-action-undo" cmd="cmd_undo"/>
+        <menuitem data-l10n-id="text-action-redo" cmd="cmd_redo"/>
         <menuseparator/>
         <menuitem data-l10n-id="text-action-cut" cmd="cmd_cut"/>
         <menuitem data-l10n-id="text-action-copy" cmd="cmd_copy"/>
         <menuitem data-l10n-id="text-action-paste" cmd="cmd_paste"/>
         <menuitem class="searchbar-paste-and-search"/>
         <menuitem data-l10n-id="text-action-delete" cmd="cmd_delete"/>
-        <menuseparator/>
         <menuitem data-l10n-id="text-action-select-all" cmd="cmd_selectAll"/>
         <menuseparator/>
         <menuitem class="searchbar-clear-history"/>

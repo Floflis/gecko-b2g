@@ -248,8 +248,7 @@ void JsepTrack::AddToMsection(const std::vector<JsConstraints>& constraintsList,
     msection->GetAttributeList().SetAttribute(rids.release());
   }
 
-  bool requireRtxSsrcs =
-      rtxEnabled && msection->IsSending() && !mStreamIds.empty();
+  bool requireRtxSsrcs = rtxEnabled && msection->IsSending();
 
   if (mType != SdpMediaSection::kApplication && mDirection == sdp::kSend) {
     UpdateSsrcs(ssrcGenerator, constraintsList.size());
@@ -258,7 +257,8 @@ void JsepTrack::AddToMsection(const std::vector<JsConstraints>& constraintsList,
       MOZ_ASSERT(mSsrcs.size() == mSsrcToRtxSsrc.size());
       std::vector<uint32_t> allSsrcs;
       UniquePtr<SdpSsrcGroupAttributeList> group(new SdpSsrcGroupAttributeList);
-      for (const auto& [ssrc, rtxSsrc] : mSsrcToRtxSsrc) {
+      for (const auto& ssrc : mSsrcs) {
+        const auto rtxSsrc = mSsrcToRtxSsrc[ssrc];
         allSsrcs.push_back(ssrc);
         allSsrcs.push_back(rtxSsrc);
         group->PushEntry(SdpSsrcGroupAttributeList::kFid, {ssrc, rtxSsrc});
@@ -409,8 +409,9 @@ std::vector<UniquePtr<JsepCodecDescription>> JsepTrack::NegotiateCodecs(
       // First codec of ours that matches. See if we can negotiate it.
       UniquePtr<JsepCodecDescription> clone(codec->Clone());
       if (clone->Negotiate(fmt, remote, isOffer)) {
-        // If negotiation changed the payload type, remember that for later
-        codec->mDefaultPt = clone->mDefaultPt;
+        // If negotiation succeeded, remember the payload type the other side
+        // used for reoffers.
+        codec->mDefaultPt = fmt;
 
         // Remember whether we negotiated rtx and the associated pt for later.
         if (codec->mType == SdpMediaSection::kVideo) {

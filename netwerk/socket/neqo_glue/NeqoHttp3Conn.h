@@ -5,6 +5,7 @@
 #ifndef NeqoHttp3Conn_h__
 #define NeqoHttp3Conn_h__
 
+#include <cstdint>
 #include "mozilla/net/neqo_glue_ffi_generated.h"
 
 namespace mozilla {
@@ -15,10 +16,12 @@ class NeqoHttp3Conn final {
   static nsresult Init(const nsACString& aOrigin, const nsACString& aAlpn,
                        const nsACString& aLocalAddr,
                        const nsACString& aRemoteAddr, uint32_t aMaxTableSize,
-                       uint16_t aMaxBlockedStreams, const nsACString& aQlogDir,
+                       uint16_t aMaxBlockedStreams, uint64_t aMaxData,
+                       uint64_t aMaxStreamData, const nsACString& aQlogDir,
                        NeqoHttp3Conn** aConn) {
     return neqo_http3conn_new(&aOrigin, &aAlpn, &aLocalAddr, &aRemoteAddr,
-                              aMaxTableSize, aMaxBlockedStreams, &aQlogDir,
+                              aMaxTableSize, aMaxBlockedStreams, aMaxData,
+                              aMaxStreamData, &aQlogDir,
                               (const mozilla::net::NeqoHttp3Conn**)aConn);
   }
 
@@ -36,17 +39,16 @@ class NeqoHttp3Conn final {
     neqo_http3conn_authenticated(this, aError);
   }
 
-  void ProcessInput(uint8_t* aPacket, uint32_t aLen) {
-    neqo_http3conn_process_input(this, aPacket, aLen);
+  nsresult ProcessInput(const nsACString* aRemoteAddr,
+                        const nsTArray<uint8_t>& aPacket) {
+    return neqo_http3conn_process_input(this, aRemoteAddr, &aPacket);
   }
 
-  uint64_t ProcessOutput() { return neqo_http3conn_process_output(this); }
-
-  bool HasDataToSend() { return neqo_http3conn_has_data_to_send(this); }
-
-  nsresult GetDataToSend(nsTArray<uint8_t>& aData) {
+  bool ProcessOutput(nsACString* aRemoteAddr, uint16_t* aPort,
+                     nsTArray<uint8_t>& aData, uint64_t* aTimeout) {
     aData.TruncateLength(0);
-    return neqo_http3conn_get_data_to_send(this, &aData);
+    return neqo_http3conn_process_output(this, aRemoteAddr, aPort, &aData,
+                                         aTimeout);
   }
 
   nsresult GetEvent(Http3Event* aEvent, nsTArray<uint8_t>& aData) {
@@ -55,9 +57,10 @@ class NeqoHttp3Conn final {
 
   nsresult Fetch(const nsACString& aMethod, const nsACString& aScheme,
                  const nsACString& aHost, const nsACString& aPath,
-                 const nsACString& aHeaders, uint64_t* aStreamId) {
+                 const nsACString& aHeaders, uint64_t* aStreamId,
+                 uint8_t aUrgency, bool aIncremental) {
     return neqo_http3conn_fetch(this, &aMethod, &aScheme, &aHost, &aPath,
-                                &aHeaders, aStreamId);
+                                &aHeaders, aStreamId, aUrgency, aIncremental);
   }
 
   nsresult SendRequestBody(uint64_t aStreamId, const uint8_t* aBuf,
@@ -83,6 +86,10 @@ class NeqoHttp3Conn final {
 
   void SetResumptionToken(nsTArray<uint8_t>& aToken) {
     neqo_http3conn_set_resumption_token(this, &aToken);
+  }
+
+  void SetEchConfig(nsTArray<uint8_t>& aEchConfig) {
+    neqo_http3conn_set_ech_config(this, &aEchConfig);
   }
 
   bool IsZeroRtt() { return neqo_http3conn_is_zero_rtt(this); }

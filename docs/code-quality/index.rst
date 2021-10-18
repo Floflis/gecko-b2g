@@ -10,7 +10,7 @@ In this document, we try to list these all tools.
   :maxdepth: 1
   :glob:
 
-  static-analysis.rst
+  static-analysis/index.rst
   lint/index.rst
   coding-style/index.rst
 
@@ -31,7 +31,7 @@ In this document, we try to list these all tools.
    * - Clang-Tidy
      - Yes
      - `bug 712350 <https://bugzilla.mozilla.org/show_bug.cgi?id=712350>`__
-     - :ref:`Static analysis <Mach static analysis>`
+     - :ref:`Static analysis <Static Analysis>`
      - https://clang.llvm.org/extra/clang-tidy/checks/list.html
    * - Clang analyzer
      -
@@ -136,21 +136,6 @@ In this document, we try to list these all tools.
      - `bug 1361342 <https://bugzilla.mozilla.org/show_bug.cgi?id=1361342>`__
      - :ref:`clippy`
      - https://github.com/rust-lang/rust-clippy
-
-.. list-table:: Java
-   :widths: 20 20 20 20 20
-   :header-rows: 1
-
-   * - Tools
-     - Has autofixes
-     - Meta bug
-     - More info
-     - Upstream
-   * - Infer
-     -
-     - `bug 1175203 <https://bugzilla.mozilla.org/show_bug.cgi?id=1175203>`__
-     -
-     - https://github.com/facebook/infer
 
 .. list-table:: Others
    :widths: 20 20 20 20 20

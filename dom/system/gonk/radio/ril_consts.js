@@ -2793,6 +2793,7 @@ this.GECKO_CARDLOCK_PCK_PUK = 21;
 this.GECKO_CARDLOCK_RCCK_PUK = 22;
 this.GECKO_CARDLOCK_RSPCK_PUK = 23;
 this.GECKO_CARDLOCK_FDN = 24;
+this.GECKO_CARDLOCK_ALL = 65535;
 
 this.GECKO_CARDLOCK_TO_FACILITY = {};
 GECKO_CARDLOCK_TO_FACILITY[GECKO_CARDLOCK_PIN] = ICC_CB_FACILITY_SIM;
@@ -3131,7 +3132,11 @@ this.GECKO_CALL_ERROR_REMOTE_CALL_DECLINE = "RemoteCallDecline";
 this.GECKO_CALL_ERROR_DATA_LIMIT_REACHED = "DataLimitReached";
 this.GECKO_CALL_ERROR_DATA_DISABLED = "DataDisabled";
 this.GECKO_CALL_ERROR_WIFI_LOST = "WifiLost";
+this.GECKO_CALL_ERROR_RETRY_ON_IMS_WITHOUT_RTT = "RetryOnImsWithoutRtt";
 this.GECKO_CALL_ERROR_UNSPECIFIED = "Unspecified";
+
+this.GECKO_CONF_CALL_ERROR_ADD = "add";
+this.GECKO_CONF_CALL_ERROR_REMOVE = "remove";
 
 this.RIL_CALL_FAILCAUSE_TO_GECKO_CALL_ERROR = {};
 RIL_CALL_FAILCAUSE_TO_GECKO_CALL_ERROR[
@@ -3706,6 +3711,9 @@ RIL_IMSCALL_FAILCAUSE_TO_GECKO_CALL_ERROR[
 RIL_IMSCALL_FAILCAUSE_TO_GECKO_CALL_ERROR[
   Ci.nsIImsReasonInfo.CODE_WIFI_LOST
 ] = GECKO_CALL_ERROR_WIFI_LOST;
+RIL_IMSCALL_FAILCAUSE_TO_GECKO_CALL_ERROR[
+  Ci.nsIImsReasonInfo.CODE_RETRY_ON_IMS_WITHOUT_RTT
+] = GECKO_CALL_ERROR_RETRY_ON_IMS_WITHOUT_RTT;
 // Map to unspecified first.
 RIL_IMSCALL_FAILCAUSE_TO_GECKO_CALL_ERROR[
   Ci.nsIImsReasonInfo.CODE_IKEV2_AUTH_FAILURE
@@ -3954,6 +3962,56 @@ this.GECKO_RADIO_TECH = [
   "iwlan",
   "lte_ca",
 ];
+
+this.GECKO_3GPP_TECH = [
+  null,
+  "gprs",
+  "edge",
+  "umts",
+  null,
+  null,
+  null,
+  null,
+  null,
+  "hsdpa",
+  "hsupa",
+  "hspa",
+  null,
+  null,
+  "lte",
+  "hspa+",
+  "gsm",
+  "tdscdma",
+  "iwlan",
+  "lte_ca",
+];
+
+this.GECKO_3GPP2_TECH = [
+  null,
+  null,
+  null,
+  null,
+  "is95a",
+  "is95b",
+  "1xrtt",
+  "evdo0",
+  "evdoa",
+  null,
+  null,
+  null,
+  "evdob",
+  "ehrpd",
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+];
+
+this.GECKO_PROFILE_INFO_TYPE_COMMON = 0;
+this.GECKO_PROFILE_INFO_TYPE_3GPP = 1;
+this.GECKO_PROFILE_INFO_TYPE_3GPP2 = 2;
 
 this.GECKO_VOICEMAIL_MESSAGE_COUNT_UNKNOWN = -1;
 
@@ -4343,5 +4401,15 @@ this.CDMA_OTA_PROVISION_STATUS_TO_GECKO = [
   GECKO_OTA_STATUS_OTAPA_ABORTED,
 ];
 
+// Sim refresh type
+this.SIM_FILE_UPDATE = 0; // A file on SIM has been updated.
+this.SIM_INIT = 1; // SIM initialized. All files should be re-read.
+this.SIM_RESET = 2; // SIM reset. SIM power required, SIM may be locked a
+
+this.GEOMETRY_TYPE_UNKNOW = 0;
+this.GEOMETRY_TYPE_POLYGON = 1;
+this.GEOMETRY_TYPE_CIRCLE = 2;
+
+this.GEO_FENCING_MAXIMUM_WAIT_TIME_NOT_SET = 255;
 // Allow this file to be imported via Components.utils.import().
 this.EXPORTED_SYMBOLS = Object.keys(this);

@@ -8,6 +8,7 @@
 #include "SharedSurfacesParent.h"
 #include "CompositorManagerChild.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/image/SourceSurfaceBlobImage.h"
 #include "mozilla/layers/IpcResourceUpdateQueue.h"
 #include "mozilla/layers/SourceSurfaceSharedData.h"
 #include "mozilla/layers/WebRenderBridgeChild.h"
@@ -371,6 +372,43 @@ nsresult SharedSurfacesChild::Share(ImageContainer* aContainer,
 }
 
 /* static */
+nsresult SharedSurfacesChild::ShareBlob(ImageContainer* aContainer,
+                                        RenderRootStateManager* aManager,
+                                        wr::IpcResourceUpdateQueue& aResources,
+                                        wr::BlobImageKey& aKey) {
+  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_ASSERT(aContainer);
+  MOZ_ASSERT(aManager);
+
+  if (aContainer->IsAsync()) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+
+  AutoTArray<ImageContainer::OwningImage, 4> images;
+  aContainer->GetCurrentImages(&images);
+  if (images.IsEmpty()) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+
+  RefPtr<gfx::SourceSurface> surface = images[0].mImage->GetAsSourceSurface();
+  if (!surface || surface->GetType() != SurfaceType::BLOB_IMAGE) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+
+  auto* blobSurface =
+      static_cast<image::SourceSurfaceBlobImage*>(surface.get());
+
+  Maybe<wr::BlobImageKey> key =
+      blobSurface->UpdateKey(aManager->LayerManager(), aResources);
+  if (!key) {
+    return NS_ERROR_FAILURE;
+  }
+
+  aKey = key.value();
+  return NS_OK;
+}
+
+/* static */
 nsresult SharedSurfacesChild::Share(SourceSurface* aSurface,
                                     wr::ExternalImageId& aId) {
   MOZ_ASSERT(NS_IsMainThread());
@@ -416,20 +454,11 @@ void SharedSurfacesChild::Unshare(const wr::ExternalImageId& aId,
     return;
   }
 
-  if (manager->OtherPid() == base::GetCurrentProcId()) {
-    // We are in the combined UI/GPU process. Call directly to it to remove its
-    // wrapper surface to free the underlying buffer, but only if the external
-    // image ID is owned by the manager. It can be different if the surface was
-    // last shared with the GPU process, which crashed several times, and its
-    // job was moved into the parent process.
-    if (manager->OwnsExternalImageId(aId)) {
-      SharedSurfacesParent::RemoveSameProcess(aId);
-    }
-  } else if (manager->OwnsExternalImageId(aId)) {
-    // Only attempt to release current mappings in the GPU process. It is
-    // possible we had a surface that was previously shared, the GPU process
-    // crashed / was restarted, and then we freed the surface. In that case
-    // we know the mapping has already been freed.
+  if (manager->OwnsExternalImageId(aId)) {
+    // Only attempt to release current mappings in the compositor process. It is
+    // possible we had a surface that was previously shared, the compositor
+    // process crashed / was restarted, and then we freed the surface. In that
+    // case we know the mapping has already been freed.
     manager->SendRemoveSharedSurface(aId);
   }
 }

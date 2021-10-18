@@ -63,7 +63,8 @@ nsHttpConnectionInfo::nsHttpConnectionInfo(
   mEndToEndSSL = true;  // so DefaultPort() works
   mRoutedPort = routedPort == -1 ? DefaultPort() : routedPort;
 
-  if (!originHost.Equals(routedHost) || (originPort != routedPort)) {
+  if (!originHost.Equals(routedHost) || (originPort != routedPort) ||
+      aIsHttp3) {
     mRoutedHost = routedHost;
   }
   Init(originHost, originPort, npnToken, username, proxyInfo, originAttributes,
@@ -129,7 +130,7 @@ void nsHttpConnectionInfo::BuildHashKey() {
     keyPort = OriginPort();
   }
 
-  // The hashkey has 4 fields followed by host connection info
+  // The hashkey has 9 fields followed by host connection info
   // byte 0 is P/T/. {P,T} for Plaintext/TLS Proxy over HTTP
   // byte 1 is S/. S is for end to end ssl such as https:// uris
   // byte 2 is A/. A is for an anonymous channel (no cookies, etc..)
@@ -137,11 +138,16 @@ void nsHttpConnectionInfo::BuildHashKey() {
   // byte 4 is I/. I is for insecure scheme on TLS for http:// uris
   // byte 5 is X/. X is for disallow_spdy flag
   // byte 6 is C/. C is for be Conservative
+  // byte 7 is B/. B is for allowing client certs on an anonymous channel
+  // byte 8 is F/. F is for indicating a fallback connection
   // Note: when adding/removing fields from this list which do not have
   // corresponding data fields on the object itself, you may also need to
   // modify RebuildHashKey.
 
-  mHashKey.AssignLiteral(".......[tlsflags0x00000000]");
+  const auto keyTemplate =
+      std::string(UnderlyingIndex(HashKeyIndex::End), '.') +
+      std::string("[tlsflags0x00000000]");
+  mHashKey.Assign(keyTemplate.c_str());
 
   mHashKey.Append(keyHost);
   mHashKey.Append(':');
@@ -153,12 +159,12 @@ void nsHttpConnectionInfo::BuildHashKey() {
   }
 
   if (mUsingHttpsProxy) {
-    mHashKey.SetCharAt('T', 0);
+    SetHashCharAt('T', HashKeyIndex::Proxy);
   } else if (mUsingHttpProxy) {
-    mHashKey.SetCharAt('P', 0);
+    SetHashCharAt('P', HashKeyIndex::Proxy);
   }
   if (mEndToEndSSL) {
-    mHashKey.SetCharAt('S', 1);
+    SetHashCharAt('S', HashKeyIndex::EndToEndSSL);
   }
 
   // NOTE: for transparent proxies (e.g., SOCKS) we need to encode the proxy
@@ -254,6 +260,8 @@ void nsHttpConnectionInfo::RebuildHashKey() {
   bool isInsecureScheme = GetInsecureScheme();
   bool isNoSpdy = GetNoSpdy();
   bool isBeConservative = GetBeConservative();
+  bool isAnonymousAllowClientCert = GetAnonymousAllowClientCert();
+  bool isFallback = GetFallbackConnection();
 
   BuildHashKey();
 
@@ -263,6 +271,8 @@ void nsHttpConnectionInfo::RebuildHashKey() {
   SetInsecureScheme(isInsecureScheme);
   SetNoSpdy(isNoSpdy);
   SetBeConservative(isBeConservative);
+  SetAnonymousAllowClientCert(isAnonymousAllowClientCert);
+  SetFallbackConnection(isFallback);
 }
 
 void nsHttpConnectionInfo::SetOriginServer(const nsACString& host,
@@ -297,6 +307,8 @@ already_AddRefed<nsHttpConnectionInfo> nsHttpConnectionInfo::Clone() const {
   clone->SetInsecureScheme(GetInsecureScheme());
   clone->SetNoSpdy(GetNoSpdy());
   clone->SetBeConservative(GetBeConservative());
+  clone->SetAnonymousAllowClientCert(GetAnonymousAllowClientCert());
+  clone->SetFallbackConnection(GetFallbackConnection());
   clone->SetTlsFlags(GetTlsFlags());
   clone->SetIsTrrServiceChannel(GetIsTrrServiceChannel());
   clone->SetTRRMode(GetTRRMode());
@@ -322,10 +334,10 @@ nsHttpConnectionInfo::CloneAndAdoptHTTPSSVCRecord(
   // Try to get the port and Alpn. If this record has SvcParamKeyPort defined,
   // the new port will be used as mRoutedPort.
   Maybe<uint16_t> port = aRecord->GetPort();
-  Maybe<Tuple<nsCString, bool>> alpn = aRecord->GetAlpn();
+  Maybe<Tuple<nsCString, SupportedAlpnType>> alpn = aRecord->GetAlpn();
 
   // Let the new conn info learn h3 will be used.
-  bool isHttp3 = alpn ? Get<1>(*alpn) : false;
+  bool isHttp3 = alpn ? Get<1>(*alpn) == SupportedAlpnType::HTTP_3 : false;
 
   LOG(("HTTPSSVC: use new routed host (%s) and new npnToken (%s)", name.get(),
        alpn ? Get<0>(*alpn).get() : "None"));
@@ -349,6 +361,8 @@ nsHttpConnectionInfo::CloneAndAdoptHTTPSSVCRecord(
   clone->SetInsecureScheme(GetInsecureScheme());
   clone->SetNoSpdy(GetNoSpdy());
   clone->SetBeConservative(GetBeConservative());
+  clone->SetAnonymousAllowClientCert(GetAnonymousAllowClientCert());
+  clone->SetFallbackConnection(GetFallbackConnection());
   clone->SetTlsFlags(GetTlsFlags());
   clone->SetIsTrrServiceChannel(GetIsTrrServiceChannel());
   clone->SetTRRMode(GetTRRMode());
@@ -384,6 +398,7 @@ void nsHttpConnectionInfo::SerializeHttpConnectionInfo(
   aArgs.insecureScheme() = aInfo->GetInsecureScheme();
   aArgs.noSpdy() = aInfo->GetNoSpdy();
   aArgs.beConservative() = aInfo->GetBeConservative();
+  aArgs.anonymousAllowClientCert() = aInfo->GetAnonymousAllowClientCert();
   aArgs.tlsFlags() = aInfo->GetTlsFlags();
   aArgs.isTrrServiceChannel() = aInfo->GetTRRMode();
   aArgs.trrMode() = aInfo->GetTRRMode();
@@ -428,6 +443,8 @@ nsHttpConnectionInfo::DeserializeHttpConnectionInfoCloneArgs(
   cinfo->SetInsecureScheme(aInfoArgs.insecureScheme());
   cinfo->SetNoSpdy(aInfoArgs.noSpdy());
   cinfo->SetBeConservative(aInfoArgs.beConservative());
+  cinfo->SetAnonymousAllowClientCert(aInfoArgs.anonymousAllowClientCert());
+  cinfo->SetFallbackConnection(aInfoArgs.fallbackConnection());
   cinfo->SetTlsFlags(aInfoArgs.tlsFlags());
   cinfo->SetIsTrrServiceChannel(aInfoArgs.isTrrServiceChannel());
   cinfo->SetTRRMode(static_cast<nsIRequest::TRRMode>(aInfoArgs.trrMode()));
@@ -440,24 +457,20 @@ nsHttpConnectionInfo::DeserializeHttpConnectionInfoCloneArgs(
 }
 
 void nsHttpConnectionInfo::CloneAsDirectRoute(nsHttpConnectionInfo** outCI) {
-  if (mRoutedHost.IsEmpty()) {
-    RefPtr<nsHttpConnectionInfo> clone = Clone();
-    // Explicitly set mIsHttp3 to false, since CloneAsDirectRoute() is used to
-    // create a non-http3 connection info.
-    clone->mIsHttp3 = false;
-    clone.forget(outCI);
-    return;
-  }
-
-  RefPtr<nsHttpConnectionInfo> clone =
-      new nsHttpConnectionInfo(mOrigin, mOriginPort, ""_ns, mUsername,
-                               mProxyInfo, mOriginAttributes, mEndToEndSSL);
+  // Explicitly use an empty npnToken when |mIsHttp3| is true, since we want to
+  // create a non-http3 connection info.
+  RefPtr<nsHttpConnectionInfo> clone = new nsHttpConnectionInfo(
+      mOrigin, mOriginPort,
+      (mRoutedHost.IsEmpty() && !mIsHttp3) ? mNPNToken : ""_ns, mUsername,
+      mProxyInfo, mOriginAttributes, mEndToEndSSL);
   // Make sure the anonymous, insecure-scheme, and private flags are transferred
   clone->SetAnonymous(GetAnonymous());
   clone->SetPrivate(GetPrivate());
   clone->SetInsecureScheme(GetInsecureScheme());
   clone->SetNoSpdy(GetNoSpdy());
   clone->SetBeConservative(GetBeConservative());
+  clone->SetAnonymousAllowClientCert(GetAnonymousAllowClientCert());
+  clone->SetFallbackConnection(GetFallbackConnection());
   clone->SetTlsFlags(GetTlsFlags());
   clone->SetIsTrrServiceChannel(GetIsTrrServiceChannel());
   clone->SetTRRMode(GetTRRMode());
@@ -511,8 +524,9 @@ void nsHttpConnectionInfo::SetIPv6Disabled(bool aNoIPv6) {
 
 void nsHttpConnectionInfo::SetTlsFlags(uint32_t aTlsFlags) {
   mTlsFlags = aTlsFlags;
-
-  mHashKey.Replace(18, 8, nsPrintfCString("%08x", mTlsFlags));
+  const uint32_t tlsFlagsIndex =
+      UnderlyingIndex(HashKeyIndex::End) + strlen("[tlsflags0x");
+  mHashKey.Replace(tlsFlagsIndex, 8, nsPrintfCString("%08x", mTlsFlags));
 }
 
 bool nsHttpConnectionInfo::UsingProxy() {
@@ -521,16 +535,12 @@ bool nsHttpConnectionInfo::UsingProxy() {
 }
 
 bool nsHttpConnectionInfo::HostIsLocalIPLiteral() const {
-  PRNetAddr prAddr;
+  NetAddr netAddr;
   // If the host/proxy host is not an IP address literal, return false.
-  if (ProxyHost()) {
-    if (PR_StringToNetAddr(ProxyHost(), &prAddr) != PR_SUCCESS) {
-      return false;
-    }
-  } else if (PR_StringToNetAddr(Origin(), &prAddr) != PR_SUCCESS) {
+  nsAutoCString host(ProxyHost() ? ProxyHost() : Origin());
+  if (NS_FAILED(netAddr.InitFromString(host))) {
     return false;
   }
-  NetAddr netAddr(&prAddr);
   return netAddr.IsIPAddrLocal();
 }
 

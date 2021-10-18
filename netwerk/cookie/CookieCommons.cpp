@@ -11,6 +11,7 @@
 #include "mozilla/ConsoleReportCollector.h"
 #include "mozilla/ContentBlockingNotifier.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/StaticPrefs_network.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/nsMixedContentBlocker.h"
 #include "mozilla/net/CookieJarSettings.h"
@@ -23,6 +24,7 @@
 #include "nsIWebProgressListener.h"
 #include "nsNetUtil.h"
 #include "nsScriptSecurityManager.h"
+#include "ThirdPartyUtil.h"
 
 constexpr auto CONSOLE_SCHEMEFUL_CATEGORY = "cookieSchemeful"_ns;
 
@@ -68,11 +70,7 @@ bool CookieCommons::PathMatches(Cookie* aCookie, const nsACString& aPath) {
   // of the request path that is not included in the cookie path is a %x2F ("/")
   // character, they match.
   uint32_t cookiePathLen = cookiePath.Length();
-  if (isPrefix && aPath[cookiePathLen] == '/') {
-    return true;
-  }
-
-  return false;
+  return isPrefix && aPath[cookiePathLen] == '/';
 }
 
 // Get the base domain for aHostURI; e.g. for "www.bbc.co.uk", this would be
@@ -320,9 +318,17 @@ CookieStatus CookieStatusForWindow(nsPIDOMWindowInner* aWindow,
   MOZ_ASSERT(aWindow);
   MOZ_ASSERT(aDocumentURI);
 
-  if (!nsContentUtils::IsThirdPartyWindowOrChannel(aWindow, nullptr,
-                                                   aDocumentURI)) {
-    return STATUS_ACCEPTED;
+  ThirdPartyUtil* thirdPartyUtil = ThirdPartyUtil::GetInstance();
+  if (thirdPartyUtil) {
+    bool isThirdParty = true;
+
+    nsresult rv = thirdPartyUtil->IsThirdPartyWindow(
+        aWindow->GetOuterWindow(), aDocumentURI, &isThirdParty);
+    NS_WARNING_ASSERTION(NS_SUCCEEDED(rv), "Third-party window check failed.");
+
+    if (NS_SUCCEEDED(rv) && !isThirdParty) {
+      return STATUS_ACCEPTED;
+    }
   }
 
   if (StaticPrefs::network_cookie_thirdparty_sessionOnly()) {
@@ -457,7 +463,7 @@ already_AddRefed<nsICookieJarSettings> CookieCommons::GetCookieJarSettings(
       cookieJarSettings = CookieJarSettings::GetBlockingAll();
     }
   } else {
-    cookieJarSettings = CookieJarSettings::Create();
+    cookieJarSettings = CookieJarSettings::Create(CookieJarSettings::eRegular);
   }
 
   MOZ_ASSERT(cookieJarSettings);

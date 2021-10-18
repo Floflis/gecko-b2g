@@ -6,7 +6,6 @@
 
 #![cfg_attr(feature = "deny-warnings", deny(warnings))]
 #![warn(clippy::pedantic)]
-#![allow(clippy::pub_enum_variant_names)]
 
 mod client_events;
 mod connection;
@@ -15,10 +14,14 @@ mod connection_server;
 mod control_stream_local;
 mod control_stream_remote;
 pub mod hframe;
+mod priority;
 mod push_controller;
 mod push_stream;
 mod qlog;
+mod qpack_decoder_receiver;
+mod qpack_encoder_receiver;
 mod recv_message;
+pub mod request_target;
 mod send_message;
 pub mod server;
 mod server_connection_events;
@@ -26,24 +29,32 @@ mod server_events;
 mod settings;
 mod stream_type_reader;
 
-use neqo_qpack::decoder::QPackDecoder;
 use neqo_qpack::Error as QpackError;
 pub use neqo_transport::Output;
 use neqo_transport::{AppError, Connection, Error as TransportError};
 use std::fmt::Debug;
 
+use crate::priority::PriorityHandler;
 pub use client_events::Http3ClientEvent;
 pub use connection::Http3State;
 pub use connection_client::Http3Client;
 pub use connection_client::Http3Parameters;
-pub use hframe::HFrameReader;
-pub use neqo_qpack::Header;
+pub use hframe::{HFrame, HFrameReader};
+pub use neqo_common::Header;
+pub use priority::Priority;
 pub use server::Http3Server;
 pub use server_events::{ClientRequestStream, Http3ServerEvent};
+pub use settings::HttpZeroRttChecker;
+pub use stream_type_reader::NewStreamType;
 
 type Res<T> = Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    renamed_and_removed_lints,
+    clippy::pub_enum_variant_names,
+    clippy::enum_variant_names
+)]
 pub enum Error {
     HttpNoError,
     HttpGeneralProtocol,
@@ -70,21 +81,22 @@ pub enum Error {
     AlreadyClosed,
     AlreadyInitialized,
     DecodingFrame,
+    FatalError,
     HttpGoaway,
     Internal,
+    InvalidHeader,
+    InvalidInput,
+    InvalidRequestTarget,
     InvalidResumptionToken,
-    InvalidStreamId,
     InvalidState,
+    InvalidStreamId,
     NoMoreData,
     NotEnoughData,
+    StreamLimitError,
     TransportError(TransportError),
+    TransportStreamDoesNotExist,
     Unavailable,
     Unexpected,
-    StreamLimitError,
-    TransportStreamDoesNotExist,
-    InvalidInput,
-    FatalError,
-    InvalidHeader,
 }
 
 impl Error {
@@ -139,6 +151,8 @@ impl Error {
         matches!(self, Self::HttpGeneralProtocolStream | Self::InvalidHeader)
     }
 
+    /// # Panics
+    /// On unexpected errors, in debug mode.
     #[must_use]
     pub fn map_stream_send_errors(err: &TransportError) -> Self {
         match err {
@@ -153,6 +167,8 @@ impl Error {
         }
     }
 
+    /// # Panics
+    /// On unexpected errors, in debug mode.
     #[must_use]
     pub fn map_stream_create_errors(err: &TransportError) -> Self {
         match err {
@@ -165,6 +181,8 @@ impl Error {
         }
     }
 
+    /// # Panics
+    /// On unexpected errors, in debug mode.
     #[must_use]
     pub fn map_stream_recv_errors(err: &TransportError) -> Self {
         match err {
@@ -192,12 +210,14 @@ impl Error {
 
     /// # Errors
     ///   Any error is mapped to the indicated type.
+    /// # Panics
+    /// On internal errors, in debug mode.
     fn map_error<R>(r: Result<R, impl Into<Self>>, err: Self) -> Result<R, Self> {
-        Ok(r.map_err(|e| {
+        r.map_err(|e| {
             debug_assert!(!matches!(e.into(), Self::HttpInternal(..)));
             debug_assert!(!matches!(err, Self::HttpInternal(..)));
             err
-        })?)
+        })
     }
 }
 
@@ -258,23 +278,47 @@ impl ::std::fmt::Display for Error {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Http3StreamType {
+    Control,
+    Decoder,
+    Encoder,
+    NewStream,
+    Http,
+    Push,
+    Unknown,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum ReceiveOutput {
+    NoOutput,
+    PushStream,
+    ControlFrames(Vec<HFrame>),
+    UnblockedStreams(Vec<u64>),
+    NewStream(NewStreamType),
+}
+
 pub trait RecvStream: Debug {
-    fn stream_reset(&self, error: AppError, decoder: &mut QPackDecoder, reset_type: ResetType);
+    /// # Errors
+    /// An error may happen while reading a stream, e.g. early close, etc.
+    fn stream_reset(&mut self, error: AppError, reset_type: ResetType) -> Res<()>;
     /// # Errors
     /// An error may happen while reading a stream, e.g. early close, protocol error, etc.
-    fn receive(&mut self, conn: &mut Connection, decoder: &mut QPackDecoder) -> Res<()>;
-    /// # Errors
-    /// An error may happen while reading a stream, e.g. early close, protocol error, etc.
-    fn header_unblocked(&mut self, conn: &mut Connection, decoder: &mut QPackDecoder) -> Res<()>;
+    fn receive(&mut self, conn: &mut Connection) -> Res<ReceiveOutput>;
     fn done(&self) -> bool;
+    fn stream_type(&self) -> Http3StreamType;
+    fn http_stream(&mut self) -> Option<&mut dyn HttpRecvStream>;
+}
+
+pub trait HttpRecvStream: RecvStream {
     /// # Errors
     /// An error may happen while reading a stream, e.g. early close, protocol error, etc.
-    fn read_data(
-        &mut self,
-        conn: &mut Connection,
-        decoder: &mut QPackDecoder,
-        buf: &mut [u8],
-    ) -> Res<(usize, bool)>;
+    fn header_unblocked(&mut self, conn: &mut Connection) -> Res<()>;
+    /// # Errors
+    /// An error may happen while reading a stream, e.g. early close, protocol error, etc.
+    fn read_data(&mut self, conn: &mut Connection, buf: &mut [u8]) -> Res<(usize, bool)>;
+
+    fn priority_handler_mut(&mut self) -> &mut PriorityHandler;
 }
 
 pub(crate) trait RecvMessageEvents: Debug {

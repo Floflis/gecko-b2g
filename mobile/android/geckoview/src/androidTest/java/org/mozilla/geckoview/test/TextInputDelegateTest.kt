@@ -6,12 +6,15 @@ package org.mozilla.geckoview.test
 
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
+import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSession.TextInputDelegate
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.WithDisplay
-import org.mozilla.geckoview.test.util.Callbacks
 
 import androidx.test.filters.MediumTest
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.KeyEvent
 import android.view.View
@@ -26,9 +29,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 import org.junit.runners.Parameterized.Parameter
-import org.mozilla.geckoview.test.util.UiThreadUtils
-import java.util.*
-import java.util.concurrent.atomic.AtomicBoolean
 
 @MediumTest
 @RunWith(Parameterized::class)
@@ -196,7 +196,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         mainSession.waitForPageStop()
 
         mainSession.evaluateJS("document.querySelector('$id').focus()")
-        mainSession.waitUntilCalled(object : Callbacks.TextInputDelegate {
+        mainSession.waitUntilCalled(object : TextInputDelegate {
             @AssertCalled(count = 1)
             override fun restartInput(session: GeckoSession, reason: Int) {
                 assertThat("Reason should be correct",
@@ -205,7 +205,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         })
 
         mainSession.evaluateJS("document.querySelector('$id').blur()")
-        mainSession.waitUntilCalled(object : Callbacks.TextInputDelegate {
+        mainSession.waitUntilCalled(object : TextInputDelegate {
             @AssertCalled(count = 1)
             override fun restartInput(session: GeckoSession, reason: Int) {
                 assertThat("Reason should be correct",
@@ -240,7 +240,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         mainSession.pressKey(KeyEvent.KEYCODE_CTRL_LEFT)
         mainSession.evaluateJS("document.querySelector('$id').focus()")
 
-        mainSession.waitUntilCalled(object : Callbacks.TextInputDelegate {
+        mainSession.waitUntilCalled(object : TextInputDelegate {
             @AssertCalled(count = 1, order = [1])
             override fun restartInput(session: GeckoSession, reason: Int) {
                 assertThat("Reason should be correct",
@@ -249,12 +249,10 @@ class TextInputDelegateTest : BaseSessionTest() {
 
             @AssertCalled(count = 1, order = [2])
             override fun showSoftInput(session: GeckoSession) {
-                super.showSoftInput(session)
             }
 
             @AssertCalled(count = 0)
             override fun hideSoftInput(session: GeckoSession) {
-                super.hideSoftInput(session)
             }
         })
     }
@@ -276,7 +274,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         // but only one showSoftInput call and no hideSoftInput call.
         mainSession.evaluateJS("document.querySelector('$id').blur(); document.querySelector('$id').focus()")
 
-        mainSession.waitUntilCalled(object : Callbacks.TextInputDelegate {
+        mainSession.waitUntilCalled(object : TextInputDelegate {
             @AssertCalled(count = 2, order = [1])
             override fun restartInput(session: GeckoSession, reason: Int) {
                 assertThat("Reason should be correct", reason, equalTo(forEachCall(
@@ -305,7 +303,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         mainSession.pressKey(KeyEvent.KEYCODE_CTRL_LEFT)
 
         mainSession.evaluateJS("document.querySelector('$id').focus()")
-        mainSession.waitUntilCalled(object : Callbacks.TextInputDelegate {
+        mainSession.waitUntilCalled(object : TextInputDelegate {
             @AssertCalled(count = 1, order = [1])
             override fun restartInput(session: GeckoSession, reason: Int) {
             }
@@ -320,7 +318,7 @@ class TextInputDelegateTest : BaseSessionTest() {
         })
 
         mainSession.evaluateJS("document.querySelector('$id').blur()")
-        mainSession.waitUntilCalled(object : Callbacks.TextInputDelegate {
+        mainSession.waitUntilCalled(object : TextInputDelegate {
             @AssertCalled(count = 1, order = [1])
             override fun restartInput(session: GeckoSession, reason: Int) {
             }
@@ -580,8 +578,11 @@ class TextInputDelegateTest : BaseSessionTest() {
         pressKey(ic, KeyEvent.KEYCODE_DPAD_LEFT)
         ic.sendKeyEvent(KeyEvent.changeAction(shiftKey, KeyEvent.ACTION_UP))
         promise.value
-        assertTextAndSelection("Can select using key event", ic,
-                               "frabar", 6, 5)
+
+        // TODO(m_kato)
+        // Since geckoview-junit doesn't attach View, there is no way to wait for correct selection data
+        // assertTextAndSelection("Can select using key event", ic,
+        //                        "frabar", 6, 5)
 
         promise = mainSession.evaluatePromiseJS(
             when (id) {
@@ -609,6 +610,17 @@ class TextInputDelegateTest : BaseSessionTest() {
         finishComposingText(ic)
         assertTextAndSelectionAt("Multiple setComposingText don't commit composition string",
                                  ic, "aab", 3)
+    }
+
+    // Test for setting large text on text box.
+    @WithDisplay(width = 512, height = 512) // Child process updates require having a display.
+    @Test fun inputConnection_largeText() {
+        val content = (1..1024000).map {
+            ('a'..'z').random()
+        }.joinToString("")
+        setupContent(content)
+        val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
+        assertText("Can set large initial text", ic, content, /* checkGecko */ false)
     }
 
     // Bug 1133802, duplication when setting the same composing text more than once.
@@ -780,6 +792,60 @@ class TextInputDelegateTest : BaseSessionTest() {
     }
 
     @WithDisplay(width = 512, height = 512) // Child process updates require having a display.
+    @Test fun editorInfo_defaultByInputType() {
+        assumeThat("type attribute is input element only", id, equalTo("#input"))
+        // Disable this with WebRender due to unexpected abort by mozilla::gl::GLContext::fTexSubImage2D
+        // (Bug 1706688, Bug 1710060 and etc)
+        assumeThat(sessionRule.env.isWebrender and sessionRule.env.isDebugBuild, equalTo(false))
+
+        mainSession.textInput.view = View(InstrumentationRegistry.getInstrumentation().targetContext)
+        mainSession.loadTestPath(FORMS5_HTML_PATH)
+        mainSession.waitForPageStop()
+
+        for (inputType in listOf("#email1", "#pass1", "#search1", "#tel1", "#url1")) {
+            mainSession.evaluateJS("document.querySelector('$inputType').focus()")
+            mainSession.waitUntilCalled(GeckoSession.TextInputDelegate::class, "restartInput")
+
+            // IC will be updated asynchronously, so spin event loop
+            processChildEvents()
+            processParentEvents()
+
+            val editorInfo = EditorInfo()
+            val ic = mainSession.textInput.onCreateInputConnection(editorInfo)!!
+            assertThat("InputConnection is created correctly", ic, notNullValue())
+
+            // Even if we get IC, new EditorInfo isn't updated yet.
+            // We post and wait for empty job to IC thread to flush all IC's job.
+            val result = object : GeckoResult<Boolean>() {
+                init {
+                    val icHandler = mainSession.textInput.getHandler(Handler(Looper.getMainLooper()))
+                    icHandler.post({
+                        complete(true)
+                    })
+                }
+            }
+            sessionRule.waitForResult(result)
+            mainSession.textInput.onCreateInputConnection(editorInfo)
+
+            assertThat("EditorInfo.inputType of $inputType", editorInfo.inputType, equalTo(
+                when (inputType) {
+                    "#email1" -> InputType.TYPE_CLASS_TEXT or
+                                 InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                    "#pass1" -> InputType.TYPE_CLASS_TEXT or
+                                InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    "#search1" -> InputType.TYPE_CLASS_TEXT or
+                                  InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or
+                                  InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE or
+                                  InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                    "#tel1" -> InputType.TYPE_CLASS_PHONE
+                    "#url1" -> InputType.TYPE_CLASS_TEXT or
+                               InputType.TYPE_TEXT_VARIATION_URI
+                    else -> 0
+                }))
+        }
+    }
+
+    @WithDisplay(width = 512, height = 512) // Child process updates require having a display.
     @Test fun editorInfo_enterKeyHint() {
         // no way to set enterkeyhint on designmode.
         assumeThat("Not in designmode", id, not(equalTo("#designmode")))
@@ -922,5 +988,31 @@ class TextInputDelegateTest : BaseSessionTest() {
         pressKey(ic, KeyEvent.KEYCODE_R)
         assertText("Can set input string by keypress after calling blur and focus",
                    ic, "bar")
+    }
+
+    @WithDisplay(width = 512, height = 512) // Child process updates require having a display.
+    @Test fun inputConnection_bug1650705() {
+        // no way on designmode.
+        assumeThat("Not in designmode", id, not(equalTo("#designmode")))
+
+        setupContent("")
+        val ic = mainSession.textInput.onCreateInputConnection(EditorInfo())!!
+
+        commitText(ic, "foo", 1)
+        ic.setSelection(0, 3)
+
+        mainSession.evaluateJS("""
+            input_event_count = 0;
+            document.querySelector('$id').addEventListener('input', () => {
+                input_event_count++;
+            })
+        """)
+
+        setComposingText(ic, "barbaz", 1)
+
+        val count = mainSession.evaluateJS("input_event_count") as Double;
+        assertThat("input event is once", count, equalTo(1.0))
+
+        finishComposingText(ic)
     }
 }

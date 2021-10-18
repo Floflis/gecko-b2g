@@ -8,7 +8,9 @@
 #![warn(clippy::use_self)]
 
 use neqo_common::qinfo;
+use neqo_crypto::Error as CryptoError;
 
+mod ackrate;
 mod addr_valid;
 mod cc;
 mod cid;
@@ -16,19 +18,22 @@ mod connection;
 mod crypto;
 mod dump;
 mod events;
-mod flow_mgr;
+mod fc;
 mod frame;
 mod pace;
 mod packet;
 mod path;
 mod qlog;
+mod quic_datagrams;
 mod recovery;
 mod recv_stream;
+mod rtt;
 mod send_stream;
 mod sender;
 pub mod server;
 mod stats;
 pub mod stream_id;
+pub mod streams;
 pub mod tparams;
 mod tracking;
 
@@ -37,11 +42,12 @@ pub use self::cid::{
     ConnectionId, ConnectionIdDecoder, ConnectionIdGenerator, ConnectionIdRef,
     EmptyConnectionIdGenerator, RandomConnectionIdGenerator,
 };
-pub use self::connection::{params::ConnectionParameters, Connection, Output, State, ZeroRttState};
+pub use self::connection::{
+    params::ConnectionParameters, params::ACK_RATIO_SCALE, Connection, Output, State, ZeroRttState,
+};
 pub use self::events::{ConnectionEvent, ConnectionEvents};
 pub use self::frame::CloseError;
 pub use self::packet::QuicVersion;
-pub use self::sender::PacketSender;
 pub use self::stats::Stats;
 pub use self::stream_id::{StreamId, StreamType};
 
@@ -53,7 +59,6 @@ const ERROR_APPLICATION_CLOSE: TransportError = 12;
 const ERROR_AEAD_LIMIT_REACHED: TransportError = 15;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Eq)]
-#[allow(clippy::pub_enum_variant_names)]
 pub enum Error {
     NoError,
     // Each time tihe error is return a different parameter is supply.
@@ -69,9 +74,10 @@ pub enum Error {
     ProtocolViolation,
     InvalidToken,
     ApplicationError,
-    CryptoError(neqo_crypto::Error),
+    CryptoError(CryptoError),
     QlogError,
     CryptoAlert(u8),
+    EchRetry(Vec<u8>),
 
     // All internal errors from here.  Please keep these sorted.
     AckedUnsentPacket,
@@ -111,6 +117,7 @@ pub enum Error {
     UnknownFrameType,
     VersionNegotiation,
     WrongRole,
+    NotAvailable,
 }
 
 impl Error {
@@ -133,16 +140,22 @@ impl Error {
             Self::ApplicationError => ERROR_APPLICATION_CLOSE,
             Self::NoAvailablePath => 16,
             Self::CryptoAlert(a) => 0x100 + u64::from(*a),
+            // As we have a special error code for ECH fallbacks, we lose the alert.
+            // Send the server "ech_required" directly.
+            Self::EchRetry(_) => 0x100 + 121,
             // All the rest are internal errors.
             _ => 1,
         }
     }
 }
 
-impl From<neqo_crypto::Error> for Error {
-    fn from(err: neqo_crypto::Error) -> Self {
+impl From<CryptoError> for Error {
+    fn from(err: CryptoError) -> Self {
         qinfo!("Crypto operation failed {:?}", err);
-        Self::CryptoError(err)
+        match err {
+            CryptoError::EchRetry(config) => Self::EchRetry(config),
+            _ => Self::CryptoError(err),
+        }
     }
 }
 

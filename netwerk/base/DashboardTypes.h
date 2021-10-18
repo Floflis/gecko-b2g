@@ -20,15 +20,15 @@ struct SocketInfo {
   uint64_t received;
   uint16_t port;
   bool active;
-  bool tcp;
+  nsCString type;
 };
 
 inline bool operator==(const SocketInfo& a, const SocketInfo& b) {
   return a.host == b.host && a.sent == b.sent && a.received == b.received &&
-         a.port == b.port && a.active == b.active && a.tcp == b.tcp;
+         a.port == b.port && a.active == b.active && a.type == b.type;
 }
 
-struct HalfOpenSockets {
+struct DnsAndConnectSockets {
   bool speculative;
 };
 
@@ -54,7 +54,7 @@ struct HttpRetParams {
   nsCString host;
   CopyableTArray<HttpConnInfo> active;
   CopyableTArray<HttpConnInfo> idle;
-  CopyableTArray<HalfOpenSockets> halfOpens;
+  CopyableTArray<DnsAndConnectSockets> dnsAndSocks;
   uint32_t counter;
   uint16_t port;
   nsCString httpVersion;
@@ -76,7 +76,7 @@ struct ParamTraits<mozilla::net::SocketInfo> {
     WriteParam(aMsg, aParam.received);
     WriteParam(aMsg, aParam.port);
     WriteParam(aMsg, aParam.active);
-    WriteParam(aMsg, aParam.tcp);
+    WriteParam(aMsg, aParam.type);
   }
 
   static bool Read(const Message* aMsg, PickleIterator* aIter,
@@ -86,7 +86,7 @@ struct ParamTraits<mozilla::net::SocketInfo> {
            ReadParam(aMsg, aIter, &aResult->received) &&
            ReadParam(aMsg, aIter, &aResult->port) &&
            ReadParam(aMsg, aIter, &aResult->active) &&
-           ReadParam(aMsg, aIter, &aResult->tcp);
+           ReadParam(aMsg, aIter, &aResult->type);
   }
 };
 
@@ -115,8 +115,8 @@ struct ParamTraits<mozilla::net::DNSCacheEntries> {
 };
 
 template <>
-struct ParamTraits<mozilla::net::HalfOpenSockets> {
-  typedef mozilla::net::HalfOpenSockets paramType;
+struct ParamTraits<mozilla::net::DnsAndConnectSockets> {
+  typedef mozilla::net::DnsAndConnectSockets paramType;
 
   static void Write(Message* aMsg, const paramType& aParam) {
     WriteParam(aMsg, aParam.speculative);
@@ -154,7 +154,7 @@ struct ParamTraits<mozilla::net::HttpRetParams> {
     WriteParam(aMsg, aParam.host);
     WriteParam(aMsg, aParam.active);
     WriteParam(aMsg, aParam.idle);
-    WriteParam(aMsg, aParam.halfOpens);
+    WriteParam(aMsg, aParam.dnsAndSocks);
     WriteParam(aMsg, aParam.counter);
     WriteParam(aMsg, aParam.port);
     WriteParam(aMsg, aParam.httpVersion);
@@ -166,7 +166,7 @@ struct ParamTraits<mozilla::net::HttpRetParams> {
     return ReadParam(aMsg, aIter, &aResult->host) &&
            ReadParam(aMsg, aIter, &aResult->active) &&
            ReadParam(aMsg, aIter, &aResult->idle) &&
-           ReadParam(aMsg, aIter, &aResult->halfOpens) &&
+           ReadParam(aMsg, aIter, &aResult->dnsAndSocks) &&
            ReadParam(aMsg, aIter, &aResult->counter) &&
            ReadParam(aMsg, aIter, &aResult->port) &&
            ReadParam(aMsg, aIter, &aResult->httpVersion) &&

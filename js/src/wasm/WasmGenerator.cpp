@@ -21,24 +21,24 @@
 #include "mozilla/CheckedInt.h"
 #include "mozilla/EnumeratedRange.h"
 #include "mozilla/SHA1.h"
-#include "mozilla/Unused.h"
 
 #include <algorithm>
-#include <thread>
 
+#include "jit/Assembler.h"
+#include "jit/JitOptions.h"
+#include "js/Printf.h"
 #include "util/Memory.h"
 #include "util/Text.h"
-#include "vm/HelperThreadState.h"
+#include "vm/HelperThreads.h"
 #include "vm/Time.h"
 #include "vm/TraceLogging.h"
 #include "vm/TraceLoggingTypes.h"
 #include "wasm/WasmBaselineCompile.h"
 #include "wasm/WasmCompile.h"
 #include "wasm/WasmCraneliftCompile.h"
+#include "wasm/WasmGC.h"
 #include "wasm/WasmIonCompile.h"
 #include "wasm/WasmStubs.h"
-
-#include "jit/MacroAssembler-inl.h"
 
 using namespace js;
 using namespace js::jit;
@@ -46,7 +46,6 @@ using namespace js::wasm;
 
 using mozilla::CheckedInt;
 using mozilla::MakeEnumeratedRange;
-using mozilla::Unused;
 
 bool CompiledCode::swap(MacroAssembler& masm) {
   MOZ_ASSERT(bytes.empty());
@@ -58,6 +57,9 @@ bool CompiledCode::swap(MacroAssembler& masm) {
   callSiteTargets.swap(masm.callSiteTargets());
   trapSites.swap(masm.trapSites());
   symbolicAccesses.swap(masm.symbolicAccesses());
+#ifdef ENABLE_WASM_EXCEPTIONS
+  tryNotes.swap(masm.tryNotes());
+#endif
   codeLabels.swap(masm.codeLabels());
   return true;
 }
@@ -82,9 +84,11 @@ ModuleGenerator::ModuleGenerator(const CompileArgs& args,
                                  ModuleEnvironment* moduleEnv,
                                  CompilerEnvironment* compilerEnv,
                                  const Atomic<bool>* cancelled,
-                                 UniqueChars* error)
+                                 UniqueChars* error,
+                                 UniqueCharsVector* warnings)
     : compileArgs_(&args),
       error_(error),
+      warnings_(warnings),
       cancelled_(cancelled),
       moduleEnv_(moduleEnv),
       compilerEnv_(compilerEnv),
@@ -166,11 +170,8 @@ bool ModuleGenerator::allocateGlobalBytes(uint32_t bytes, uint32_t align,
   return true;
 }
 
-bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata,
-                           JSTelemetrySender telemetrySender) {
+bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata) {
   // Perform fallible metadata, linkdata, assumption allocations.
-
-  telemetrySender_ = telemetrySender;
 
   MOZ_ASSERT(isAsmJS() == !!maybeAsmJSMetadata);
   if (maybeAsmJSMetadata) {
@@ -230,16 +231,16 @@ bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata,
 
   size_t estimatedCodeSize =
       1.2 * EstimateCompiledCodeSize(tier(), codeSectionSize);
-  Unused << masm_.reserve(std::min(estimatedCodeSize, MaxCodeBytesPerProcess));
+  (void)masm_.reserve(std::min(estimatedCodeSize, MaxCodeBytesPerProcess));
 
-  Unused << metadataTier_->codeRanges.reserve(2 * moduleEnv_->numFuncDefs());
+  (void)metadataTier_->codeRanges.reserve(2 * moduleEnv_->numFuncDefs());
 
   const size_t ByteCodesPerCallSite = 50;
-  Unused << metadataTier_->callSites.reserve(codeSectionSize /
-                                             ByteCodesPerCallSite);
+  (void)metadataTier_->callSites.reserve(codeSectionSize /
+                                         ByteCodesPerCallSite);
 
   const size_t ByteCodesPerOOBTrap = 10;
-  Unused << metadataTier_->trapSites[Trap::OutOfBounds].reserve(
+  (void)metadataTier_->trapSites[Trap::OutOfBounds].reserve(
       codeSectionSize / ByteCodesPerOOBTrap);
 
   // Allocate space in TlsData for declarations that need it.
@@ -277,9 +278,9 @@ bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata,
     // Copy type definitions to metadata that are required at runtime,
     // allocating global data so that codegen can find the type id's at
     // runtime.
-    for (uint32_t typeIndex = 0; typeIndex < moduleEnv_->types.length();
+    for (uint32_t typeIndex = 0; typeIndex < moduleEnv_->types->length();
          typeIndex++) {
-      const TypeDef& typeDef = moduleEnv_->types[typeIndex];
+      const TypeDef& typeDef = (*moduleEnv_->types)[typeIndex];
       TypeIdDesc& typeId = moduleEnv_->typeIds[typeIndex];
 
       if (TypeIdDesc::isGlobal(typeDef)) {
@@ -309,22 +310,26 @@ bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata,
     // types that fit in an immediate.
     if (moduleEnv_->functionReferencesEnabled()) {
       // Do a linear pass to create a map from src index to dest index.
-      RenumberMap map;
+      RenumberVector renumbering;
+      if (!renumbering.reserve(moduleEnv_->types->length())) {
+        return false;
+      }
       for (uint32_t srcIndex = 0, destIndex = 0;
-           srcIndex < moduleEnv_->types.length(); srcIndex++) {
-        const TypeDef& typeDef = moduleEnv_->types[srcIndex];
+           srcIndex < moduleEnv_->types->length(); srcIndex++) {
+        const TypeDef& typeDef = (*moduleEnv_->types)[srcIndex];
         if (!TypeIdDesc::isGlobal(typeDef)) {
+          renumbering.infallibleAppend(UINT32_MAX);
           continue;
         }
-        if (!map.put(srcIndex, destIndex++)) {
-          return false;
-        }
+        MOZ_ASSERT(renumbering.length() == srcIndex);
+        renumbering.infallibleAppend(destIndex++);
       }
 
-      // Apply the map
+      // Apply the renumbering
       for (TypeDefWithId& typeDef : metadata_->types) {
-        typeDef.renumber(map);
+        typeDef.renumber(renumbering);
       }
+      metadata_->typesRenumbering = std::move(renumbering);
     }
   }
 
@@ -348,114 +353,45 @@ bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata,
   // - explicitly marked as such;
   // - implicitly exported by being an element of function tables;
   // - implicitly exported by being the start function;
-  // The FuncExportVector stored in Metadata needs to be sorted (to allow
-  // O(log(n)) lookup at runtime) and deduplicated. Use a vector with invalid
-  // entries for every single function, that we'll fill as we go through the
-  // exports, and in which we'll remove invalid entries after the fact.
+  // - implicitly exported by being used in global ref.func initializer
+  // ModuleEnvironment accumulates this information for us during decoding,
+  // transfer it to the FuncExportVector stored in Metadata.
 
-  static_assert(((uint64_t(MaxFuncs) << 1) | 1) < uint64_t(UINT32_MAX),
-                "bit packing won't work in ExportedFunc");
-
-  class ExportedFunc {
-    uint32_t value;
-
-   public:
-    ExportedFunc() : value(UINT32_MAX) {}
-    ExportedFunc(uint32_t index, bool isExplicit)
-        : value((index << 1) | (isExplicit ? 1 : 0)) {}
-    uint32_t index() const { return value >> 1; }
-    bool isExplicit() const { return value & 0x1; }
-    bool operator<(const ExportedFunc& other) const {
-      return index() < other.index();
+  uint32_t exportedFuncCount = 0;
+  for (const FuncDesc& func : moduleEnv_->funcs) {
+    if (func.isExported()) {
+      exportedFuncCount++;
     }
-    bool operator==(const ExportedFunc& other) const {
-      return index() == other.index();
-    }
-    bool isInvalid() const { return value == UINT32_MAX; }
-    void mergeExplicit(bool explicitBit) {
-      if (!isExplicit() && explicitBit) {
-        value |= 0x1;
-      }
-    }
-  };
-
-  Vector<ExportedFunc, 8, SystemAllocPolicy> exportedFuncs;
-  if (!exportedFuncs.resize(moduleEnv_->numFuncs())) {
+  }
+  if (!metadataTier_->funcExports.reserve(exportedFuncCount)) {
     return false;
   }
 
-  auto addOrMerge = [&exportedFuncs](ExportedFunc newEntry) {
-    uint32_t index = newEntry.index();
-    if (exportedFuncs[index].isInvalid()) {
-      exportedFuncs[index] = newEntry;
-    } else {
-      exportedFuncs[index].mergeExplicit(newEntry.isExplicit());
+  for (uint32_t funcIndex = 0; funcIndex < moduleEnv_->funcs.length();
+       funcIndex++) {
+    const FuncDesc& func = moduleEnv_->funcs[funcIndex];
+
+    if (!func.isExported()) {
+      continue;
     }
-  };
 
-  for (const Export& exp : moduleEnv_->exports) {
-    if (exp.kind() == DefinitionKind::Function) {
-      addOrMerge(ExportedFunc(exp.funcIndex(), true));
-    }
-  }
-
-  if (moduleEnv_->startFuncIndex) {
-    addOrMerge(ExportedFunc(*moduleEnv_->startFuncIndex, true));
-  }
-
-  for (const ElemSegment* seg : moduleEnv_->elemSegments) {
-    // For now, the segments always carry function indices regardless of the
-    // segment's declared element type; this works because the only legal
-    // element types are funcref and externref and the only legal values are
-    // functions and null.  We always add functions in segments as exported
-    // functions, regardless of the segment's type.  In the future, if we make
-    // the representation of AnyRef segments different, we will have to consider
-    // function values in those segments specially.
-    bool isAsmJS = seg->active() && moduleEnv_->tables[seg->tableIndex].isAsmJS;
-    if (!isAsmJS) {
-      for (uint32_t funcIndex : seg->elemFuncIndices) {
-        if (funcIndex != NullFuncIndex) {
-          addOrMerge(ExportedFunc(funcIndex, false));
-        }
-      }
-    }
-  }
-
-  for (const GlobalDesc& global : moduleEnv_->globals) {
-    if (global.isVariable() &&
-        global.initExpr().kind() == InitExpr::Kind::RefFunc) {
-      addOrMerge(ExportedFunc(global.initExpr().refFuncIndex(), false));
-    }
-  }
-
-  auto* newEnd =
-      std::remove_if(exportedFuncs.begin(), exportedFuncs.end(),
-                     [](const ExportedFunc& exp) { return exp.isInvalid(); });
-  exportedFuncs.erase(newEnd, exportedFuncs.end());
-
-  if (!metadataTier_->funcExports.reserve(exportedFuncs.length())) {
-    return false;
-  }
-
-  for (const ExportedFunc& funcIndex : exportedFuncs) {
     FuncType funcType;
-    if (!funcType.clone(*moduleEnv_->funcs[funcIndex.index()].type)) {
+    if (!funcType.clone(*func.type)) {
       return false;
     }
-    metadataTier_->funcExports.infallibleEmplaceBack(
-        std::move(funcType), funcIndex.index(), funcIndex.isExplicit());
+    metadataTier_->funcExports.infallibleEmplaceBack(std::move(funcType),
+                                                     funcIndex, func.isEager());
   }
 
   // Determine whether parallel or sequential compilation is to be used and
   // initialize the CompileTasks that will be used in either mode.
 
-  GlobalHelperThreadState& threads = HelperThreadState();
-  MOZ_ASSERT(threads.threadCount > 1);
+  MOZ_ASSERT(GetHelperThreadCount() > 1);
 
   uint32_t numTasks;
-  if (CanUseExtraThreads() && threads.cpuCount > 1) {
+  if (CanUseExtraThreads() && GetHelperThreadCPUCount() > 1) {
     parallel_ = true;
-    numTasks = 2 * threads.maxWasmCompilationThreads();
+    numTasks = 2 * GetMaxWasmCompilationThreads();
   } else {
     numTasks = 1;
   }
@@ -465,8 +401,7 @@ bool ModuleGenerator::init(Metadata* maybeAsmJSMetadata,
   }
   for (size_t i = 0; i < numTasks; i++) {
     tasks_.infallibleEmplaceBack(*moduleEnv_, *compilerEnv_, taskState_,
-                                 COMPILATION_LIFO_DEFAULT_CHUNK_SIZE,
-                                 telemetrySender);
+                                 COMPILATION_LIFO_DEFAULT_CHUNK_SIZE);
   }
 
   if (!freeTasks_.reserve(numTasks)) {
@@ -520,12 +455,14 @@ static bool InRange(uint32_t caller, uint32_t callee) {
   return caller - callee < range;
 }
 
-typedef HashMap<uint32_t, uint32_t, DefaultHasher<uint32_t>, SystemAllocPolicy>
-    OffsetMap;
-typedef EnumeratedArray<Trap, Trap::Limit, Maybe<uint32_t>>
-    TrapMaybeOffsetArray;
+using OffsetMap =
+    HashMap<uint32_t, uint32_t, DefaultHasher<uint32_t>, SystemAllocPolicy>;
+using TrapMaybeOffsetArray =
+    EnumeratedArray<Trap, Trap::Limit, Maybe<uint32_t>>;
 
 bool ModuleGenerator::linkCallSites() {
+  AutoCreatedBy acb(masm_, "linkCallSites");
+
   masm_.haltingAlign(CodeAlignment);
 
   // Create far jumps for calls that have relative offsets that may otherwise
@@ -673,6 +610,8 @@ static bool AppendForEach(Vec* dstVec, const Vec& srcVec, Op op) {
 }
 
 bool ModuleGenerator::linkCompiledCode(CompiledCode& code) {
+  AutoCreatedBy acb(masm_, "ModuleGenerator::linkCompiledCode");
+
   // Before merging in new code, if calls in a prior code range might go out of
   // range, insert far jumps to extend the range.
 
@@ -753,17 +692,21 @@ bool ModuleGenerator::linkCompiledCode(CompiledCode& code) {
     }
   }
 
+#ifdef ENABLE_WASM_EXCEPTIONS
+  auto tryNoteOp = [=](uint32_t, WasmTryNote* tn) {
+    tn->offsetBy(offsetInModule);
+  };
+  if (!AppendForEach(&metadataTier_->tryNotes, code.tryNotes, tryNoteOp)) {
+    return false;
+  }
+#endif
+
   return true;
 }
 
 static bool ExecuteCompileTask(CompileTask* task, UniqueChars* error) {
   MOZ_ASSERT(task->lifo.isEmpty());
   MOZ_ASSERT(task->output.empty());
-
-#ifdef ENABLE_SPIDERMONKEY_TELEMETRY
-  int64_t startTime = PRMJ_Now();
-  int compileTimeTelemetryID;
-#endif
 
   switch (task->compilerEnv.tier()) {
     case Tier::Optimized:
@@ -774,9 +717,6 @@ static bool ExecuteCompileTask(CompileTask* task, UniqueChars* error) {
                                          &task->output, error)) {
             return false;
           }
-#ifdef ENABLE_SPIDERMONKEY_TELEMETRY
-          compileTimeTelemetryID = JS_TELEMETRY_WASM_COMPILE_TIME_CRANELIFT_US;
-#endif
           break;
         case OptimizedBackend::Ion:
           if (!IonCompileFunctions(task->moduleEnv, task->compilerEnv,
@@ -784,9 +724,6 @@ static bool ExecuteCompileTask(CompileTask* task, UniqueChars* error) {
                                    error)) {
             return false;
           }
-#ifdef ENABLE_SPIDERMONKEY_TELEMETRY
-          compileTimeTelemetryID = JS_TELEMETRY_WASM_COMPILE_TIME_ION_US;
-#endif
           break;
       }
       break;
@@ -796,18 +733,8 @@ static bool ExecuteCompileTask(CompileTask* task, UniqueChars* error) {
                                     error)) {
         return false;
       }
-#ifdef ENABLE_SPIDERMONKEY_TELEMETRY
-      compileTimeTelemetryID = JS_TELEMETRY_WASM_COMPILE_TIME_BASELINE_US;
-#endif
       break;
   }
-
-#ifdef ENABLE_SPIDERMONKEY_TELEMETRY
-  int64_t endTime = PRMJ_Now();
-  int64_t compileTimeMicros = endTime - startTime;
-
-  task->telemetrySender.addTelemetry(compileTimeTelemetryID, compileTimeMicros);
-#endif
 
   MOZ_ASSERT(task->lifo.isEmpty());
   MOZ_ASSERT(task->inputs.length() == task->output.codeRanges.length());
@@ -840,6 +767,18 @@ void CompileTask::runHelperThreadTask(AutoLockHelperThreadState& lock) {
   state.condVar().notify_one(); /* failed or finished */
 }
 
+ThreadType CompileTask::threadType() {
+  switch (compilerEnv.mode()) {
+    case CompileMode::Once:
+    case CompileMode::Tier1:
+      return ThreadType::THREAD_TYPE_WASM_COMPILE_TIER1;
+    case CompileMode::Tier2:
+      return ThreadType::THREAD_TYPE_WASM_COMPILE_TIER2;
+    default:
+      MOZ_CRASH();
+  }
+}
+
 bool ModuleGenerator::locallyCompileCurrentTask() {
   if (!ExecuteCompileTask(currentTask_, error_)) {
     return false;
@@ -853,6 +792,8 @@ bool ModuleGenerator::locallyCompileCurrentTask() {
 }
 
 bool ModuleGenerator::finishTask(CompileTask* task) {
+  AutoCreatedBy acb(masm_, "ModuleGenerator::finishTask");
+
   masm_.haltingAlign(CodeAlignment);
 
   if (!linkCompiledCode(task->output)) {
@@ -1011,6 +952,9 @@ bool ModuleGenerator::finishCodegen() {
   MOZ_ASSERT(masm_.callSiteTargets().empty());
   MOZ_ASSERT(masm_.trapSites().empty());
   MOZ_ASSERT(masm_.symbolicAccesses().empty());
+#ifdef ENABLE_WASM_EXCEPTIONS
+  MOZ_ASSERT(masm_.tryNotes().empty());
+#endif
   MOZ_ASSERT(masm_.codeLabels().empty());
 
   masm_.finish();
@@ -1018,12 +962,17 @@ bool ModuleGenerator::finishCodegen() {
 }
 
 bool ModuleGenerator::finishMetadataTier() {
-  // The stack maps aren't yet sorted.  Do so now, since we'll need to
+  // The stackmaps aren't yet sorted.  Do so now, since we'll need to
   // binary-search them at GC time.
   metadataTier_->stackMaps.sort();
 
+  // The try notes also need to be sorted to simplify lookup.
+#ifdef ENABLE_WASM_EXCEPTIONS
+  std::sort(metadataTier_->tryNotes.begin(), metadataTier_->tryNotes.end());
+#endif
+
 #ifdef DEBUG
-  // Check that the stack map contains no duplicates, since that could lead to
+  // Check that the stackmap contains no duplicates, since that could lead to
   // ambiguities about stack slot pointerness.
   uint8_t* previousNextInsnAddr = nullptr;
   for (size_t i = 0; i < metadataTier_->stackMaps.length(); i++) {
@@ -1060,6 +1009,17 @@ bool ModuleGenerator::finishMetadataTier() {
     MOZ_ASSERT(debugTrapFarJumpOffset >= last);
     last = debugTrapFarJumpOffset;
   }
+
+  // Try notes should be sorted so that the end of ranges are in rising order
+  // so that the innermost catch handler is chosen.
+#  ifdef ENABLE_WASM_EXCEPTIONS
+  last = 0;
+  for (const WasmTryNote& tryNote : metadataTier_->tryNotes) {
+    MOZ_ASSERT(tryNote.end >= last);
+    MOZ_ASSERT(tryNote.end > tryNote.begin);
+    last = tryNote.end;
+  }
+#  endif
 #endif
 
   // These Vectors can get large and the excess capacity can be significant,
@@ -1070,6 +1030,9 @@ bool ModuleGenerator::finishMetadataTier() {
   metadataTier_->callSites.shrinkStorageToFit();
   metadataTier_->trapSites.shrinkStorageToFit();
   metadataTier_->debugTrapFarJumpOffsets.shrinkStorageToFit();
+#ifdef ENABLE_WASM_EXCEPTIONS
+  metadataTier_->tryNotes.shrinkStorageToFit();
+#endif
   for (Trap trap : MakeEnumeratedRange(Trap::Limit)) {
     metadataTier_->trapSites[trap].shrinkStorageToFit();
   }
@@ -1120,17 +1083,18 @@ UniqueCodeTier ModuleGenerator::finishCodeTier() {
   UniqueModuleSegment segment =
       ModuleSegment::create(tier(), masm_, *linkData_);
   if (!segment) {
+    warnf("failed to allocate executable memory for module");
     return nullptr;
   }
 
   metadataTier_->stackMaps.offsetBy(uintptr_t(segment->base()));
 
 #ifdef DEBUG
-  // Check that each stack map is associated with a plausible instruction.
+  // Check that each stackmap is associated with a plausible instruction.
   for (size_t i = 0; i < metadataTier_->stackMaps.length(); i++) {
     MOZ_ASSERT(IsValidStackMapKey(compilerEnv_->debugEnabled(),
                                   metadataTier_->stackMaps.get(i).nextInsnAddr),
-               "wasm stack map does not reference a valid insn");
+               "wasm stackmap does not reference a valid insn");
   }
 #endif
 
@@ -1144,21 +1108,17 @@ SharedMetadata ModuleGenerator::finishMetadata(const Bytes& bytecode) {
 
   // Copy over data from the ModuleEnvironment.
 
-  metadata_->memoryUsage = moduleEnv_->memoryUsage;
-  metadata_->minMemoryLength = moduleEnv_->minMemoryLength;
-  metadata_->maxMemoryLength = moduleEnv_->maxMemoryLength;
+  metadata_->memory = moduleEnv_->memory;
   metadata_->startFuncIndex = moduleEnv_->startFuncIndex;
   metadata_->tables = std::move(moduleEnv_->tables);
   metadata_->globals = std::move(moduleEnv_->globals);
 #ifdef ENABLE_WASM_EXCEPTIONS
-  metadata_->events = std::move(moduleEnv_->events);
+  metadata_->tags = std::move(moduleEnv_->tags);
 #endif
   metadata_->nameCustomSectionIndex = moduleEnv_->nameCustomSectionIndex;
   metadata_->moduleName = moduleEnv_->moduleName;
   metadata_->funcNames = std::move(moduleEnv_->funcNames);
   metadata_->omitsBoundsChecks = moduleEnv_->hugeMemoryEnabled();
-  metadata_->v128Enabled = moduleEnv_->v128Enabled();
-  metadata_->usesDuplicateImports = moduleEnv_->usesDuplicateImports;
 
   // Copy over additional debug information.
 
@@ -1224,12 +1184,11 @@ SharedModule ModuleGenerator::finishModule(
     return nullptr;
   }
   for (const DataSegmentEnv& srcSeg : moduleEnv_->dataSegments) {
-    MutableDataSegment dstSeg = js_new<DataSegment>(srcSeg);
+    MutableDataSegment dstSeg = js_new<DataSegment>();
     if (!dstSeg) {
       return nullptr;
     }
-    if (!dstSeg->bytes.append(bytecode.begin() + srcSeg.bytecodeOffset,
-                              srcSeg.length)) {
+    if (!dstSeg->init(bytecode, srcSeg)) {
       return nullptr;
     }
     dataSegments.infallibleAppend(std::move(dstSeg));
@@ -1307,8 +1266,7 @@ SharedModule ModuleGenerator::finishModule(
   }
 
   if (mode() == CompileMode::Tier1) {
-    module->startTier2(*compileArgs_, bytecode, maybeTier2Listener,
-                       telemetrySender_);
+    module->startTier2(*compileArgs_, bytecode, maybeTier2Listener);
   } else if (tier() == Tier::Serialized && maybeTier2Listener) {
     module->serialize(*linkData_, *maybeTier2Listener);
   }
@@ -1333,10 +1291,26 @@ bool ModuleGenerator::finishTier2(const Module& module) {
   if (MOZ_UNLIKELY(JitOptions.wasmDelayTier2)) {
     // Introduce an artificial delay when testing wasmDelayTier2, since we
     // want to exercise both tier1 and tier2 code in this case.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ThisThread::SleepMilliseconds(500);
   }
 
   return module.finishTier2(*linkData_, std::move(codeTier));
+}
+
+void ModuleGenerator::warnf(const char* msg, ...) {
+  if (!warnings_) {
+    return;
+  }
+
+  va_list ap;
+  va_start(ap, msg);
+  UniqueChars str(JS_vsmprintf(msg, ap));
+  va_end(ap);
+  if (!str) {
+    return;
+  }
+
+  (void)warnings_->append(std::move(str));
 }
 
 size_t CompiledCode::sizeOfExcludingThis(
@@ -1351,6 +1325,9 @@ size_t CompiledCode::sizeOfExcludingThis(
          callSites.sizeOfExcludingThis(mallocSizeOf) +
          callSiteTargets.sizeOfExcludingThis(mallocSizeOf) + trapSitesSize +
          symbolicAccesses.sizeOfExcludingThis(mallocSizeOf) +
+#ifdef ENABLE_WASM_EXCEPTIONS
+         tryNotes.sizeOfExcludingThis(mallocSizeOf) +
+#endif
          codeLabels.sizeOfExcludingThis(mallocSizeOf);
 }
 

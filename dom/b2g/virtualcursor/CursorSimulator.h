@@ -42,18 +42,21 @@ enum ECursorMovePhases { CURSOR_MOVE_PHASES };
 
 class nsIVirtualCursor;
 class CursorSimulator final : public nsIDOMEventListener,
-                              public nsITimerCallback {
+                              public nsITimerCallback,
+                              public nsINamed {
   enum class CursorDirection { UP, DOWN, LEFT, RIGHT, NONE };
 
  public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIDOMEVENTLISTENER
   NS_DECL_NSITIMERCALLBACK
+  NS_DECL_NSINAMED
 
   CursorSimulator(nsPIDOMWindowOuter* aWindow, nsIVirtualCursor* aDelegate);
   void Enable();
   void Disable();
   bool isEnabled() { return mEnabled; }
+  void UpdateScreenSize(int32_t aWidth, int32_t aHeight);
   void UpdateChromeOffset(const LayoutDeviceIntPoint& aChromeOffset);
   void UpdatePos();
   void CenterizeCursorIfNecessary();
@@ -117,6 +120,8 @@ class CursorSimulator final : public nsIDOMEventListener,
 
   LayoutDeviceIntPoint mDevCursorPos;
   LayoutDeviceIntPoint mChromeOffset;
+  int32_t mScreenWidth;
+  int32_t mScreenHeight;
 
   CursorDirection mDirection;
 

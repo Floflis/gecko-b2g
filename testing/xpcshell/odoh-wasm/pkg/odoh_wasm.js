@@ -1,7 +1,7 @@
 let imports = {};
 imports['__wbindgen_placeholder__'] = module.exports;
 let wasm;
-const { TextDecoder } = require(String.raw`util`);
+const { TextDecoder } = require(`util`);
 
 const heap = new Array(32).fill(undefined);
 
@@ -93,22 +93,22 @@ module.exports.__wbg_log_b3f203d9e6882397 = function(arg0, arg1) {
     console.log(getStringFromWasm0(arg0, arg1));
 };
 
-module.exports.__wbg_buffer_bc64154385c04ac4 = function(arg0) {
+module.exports.__wbg_buffer_eb2155f17856c20b = function(arg0) {
     var ret = getObject(arg0).buffer;
     return addHeapObject(ret);
 };
 
-module.exports.__wbg_newwithbyteoffsetandlength_3c8748473807c7cf = function(arg0, arg1, arg2) {
+module.exports.__wbg_newwithbyteoffsetandlength_7d07f77c6d0d8e26 = function(arg0, arg1, arg2) {
     var ret = new Uint8Array(getObject(arg0), arg1 >>> 0, arg2 >>> 0);
     return addHeapObject(ret);
 };
 
-module.exports.__wbg_new_22a33711cf65b661 = function(arg0) {
+module.exports.__wbg_new_ff8b26f7b2d7e2fb = function(arg0) {
     var ret = new Uint8Array(getObject(arg0));
     return addHeapObject(ret);
 };
 
-module.exports.__wbg_newwithlength_48451d71403bfede = function(arg0) {
+module.exports.__wbg_newwithlength_a49b32b2030b93c3 = function(arg0) {
     var ret = new Uint8Array(arg0 >>> 0);
     return addHeapObject(ret);
 };

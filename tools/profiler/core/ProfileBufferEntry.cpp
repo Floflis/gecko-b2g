@@ -10,6 +10,7 @@
 #include "platform.h"
 #include "ProfileBuffer.h"
 #include "ProfilerBacktrace.h"
+#include "ProfilerRustBindings.h"
 
 #include "js/ProfilingFrameIterator.h"
 #include "jsapi.h"
@@ -69,6 +70,13 @@ ProfileBufferEntry::ProfileBufferEntry(Kind aKind, uint64_t aUint64)
   memcpy(mStorage, &aUint64, sizeof(aUint64));
 }
 
+ProfileBufferEntry::ProfileBufferEntry(Kind aKind, ProfilerThreadId aThreadId)
+    : mKind(aKind) {
+  static_assert(std::is_trivially_copyable_v<ProfilerThreadId>);
+  static_assert(sizeof(aThreadId) <= sizeof(mStorage));
+  memcpy(mStorage, &aThreadId, sizeof(aThreadId));
+}
+
 const char* ProfileBufferEntry::GetString() const {
   const char* result;
   memcpy(&result, mStorage, sizeof(result));
@@ -101,6 +109,13 @@ int64_t ProfileBufferEntry::GetInt64() const {
 
 uint64_t ProfileBufferEntry::GetUint64() const {
   uint64_t result;
+  memcpy(&result, mStorage, sizeof(result));
+  return result;
+}
+
+ProfilerThreadId ProfileBufferEntry::GetThreadId() const {
+  ProfilerThreadId result;
+  static_assert(std::is_trivially_copyable_v<ProfilerThreadId>);
   memcpy(&result, mStorage, sizeof(result));
   return result;
 }
@@ -168,6 +183,11 @@ class MOZ_RAII AutoArraySchemaWriter {
   void DoubleElement(uint32_t aIndex, double aValue) {
     FillUpTo(aIndex);
     mJSONWriter.DoubleElement(aValue);
+  }
+
+  void TimeMsElement(uint32_t aIndex, double aTime_ms) {
+    FillUpTo(aIndex);
+    mJSONWriter.TimeDoubleMsElement(aTime_ms);
   }
 
   void BoolElement(uint32_t aIndex, bool aValue) {
@@ -518,8 +538,9 @@ void JITFrameInfo::AddInfoForRange(
 }
 
 struct ProfileSample {
-  uint32_t mStack;
-  double mTime;
+  uint32_t mStack = 0;
+  bool mStackIsEmpty = false;
+  double mTime = 0.0;
   Maybe<double> mResponsiveness;
   RunningTimes mRunningTimes;
 };
@@ -546,7 +567,7 @@ static void WriteSample(SpliceableJSONWriter& aWriter,
 
   writer.IntElement(STACK, aSample.mStack);
 
-  writer.DoubleElement(TIME, aSample.mTime);
+  writer.TimeMsElement(TIME, aSample.mTime);
 
   if (aSample.mResponsiveness.isSome()) {
     writer.DoubleElement(EVENT_DELAY, *aSample.mResponsiveness);
@@ -648,6 +669,7 @@ class EntryGetter {
 //   ( /* Samples */
 //     ThreadId
 //     TimeBeforeCompactStack
+//     RunningTimes?
 //     UnresponsivenessDurationMs?
 //     CompactStack
 //         /* internally including:
@@ -658,6 +680,12 @@ class EntryGetter {
 //           )+
 //         */
 //   )
+//   | ( /* Reference to a previous identical sample */
+//       ThreadId
+//       TimeBeforeSameSample
+//       RunningTimes?
+//       SameSample
+//     )
 //   | Marker
 //   | ( /* Counters */
 //       CounterId
@@ -775,9 +803,9 @@ class EntryGetter {
     continue;                                              \
   }
 
-int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
-                                       int aThreadId, double aSinceTime,
-                                       UniqueStacks& aUniqueStacks) const {
+ProfilerThreadId ProfileBuffer::StreamSamplesToJSON(
+    SpliceableJSONWriter& aWriter, ProfilerThreadId aThreadId,
+    double aSinceTime, UniqueStacks& aUniqueStacks) const {
   UniquePtr<char[]> dynStrBuf = MakeUnique<char[]>(kMaxFrameKeyLength);
 
   return mEntries.Read([&](ProfileChunkedBuffer::Reader* aReader) {
@@ -785,7 +813,12 @@ int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
                "ProfileChunkedBuffer cannot be out-of-session when sampler is "
                "running");
 
-    int processedThreadId = 0;
+    ProfilerThreadId processedThreadId;
+
+    // This ProfileSample object gets filled with relevant data related to each
+    // sample. Parts of it may be reused from one sample to the next, in
+    // particular when stacks are identical in `SameSample` entries.
+    ProfileSample sample;
 
     EntryGetter e(*aReader);
 
@@ -816,18 +849,17 @@ int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
       // must be a ThreadId entry.
       MOZ_ASSERT(e.Get().IsThreadId());
 
-      int threadId = e.Get().GetInt();
+      ProfilerThreadId threadId = e.Get().GetThreadId();
       e.Next();
 
       // Ignore samples that are for the wrong thread.
-      if (threadId != aThreadId && aThreadId != 0) {
+      if (threadId != aThreadId && aThreadId.IsSpecified()) {
         continue;
       }
 
-      MOZ_ASSERT(aThreadId != 0 || processedThreadId == 0,
-                 "aThreadId==0 should only be used with 1-sample buffer");
-
-      ProfileSample sample;
+      MOZ_ASSERT(
+          aThreadId.IsSpecified() || !processedThreadId.IsSpecified(),
+          "Unspecified aThreadId should only be used with 1-sample buffer");
 
       auto ReadStack = [&](EntryGetter& e, uint64_t entryPosition,
                            const Maybe<double>& unresponsiveDuration,
@@ -980,15 +1012,18 @@ int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
           }
         }
 
-        if (numFrames == 0) {
+        // Even if this stack is considered empty, it contains the root frame,
+        // which needs to be in the JSON output because following "same samples"
+        // may refer to it when reusing this sample.mStack.
+        sample.mStack = aUniqueStacks.GetOrAddStackIndex(stack);
+        sample.mStackIsEmpty = (numFrames == 0);
+
+        if (sample.mStackIsEmpty && aRunningTimes.IsEmpty()) {
           // It is possible to have empty stacks if native stackwalking is
-          // disabled. Skip samples with empty stacks. (See Bug 1497985).
-          // Thus, don't use ERROR_AND_CONTINUE, but just continue by returning
-          // from this lambda.
+          // disabled. Skip samples with empty stacks, unless we have useful
+          // running times.
           return;
         }
-
-        sample.mStack = aUniqueStacks.GetOrAddStackIndex(stack);
 
         if (unresponsiveDuration.isSome()) {
           sample.mResponsiveness = unresponsiveDuration;
@@ -1054,11 +1089,9 @@ int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
               MOZ_ASSERT(aReader,
                          "Local ProfileChunkedBuffer cannot be out-of-session");
               EntryGetter stackEntryGetter(*aReader);
-              if (stackEntryGetter.Has()) {
-                ReadStack(stackEntryGetter,
-                          it.CurrentBlockIndex().ConvertToProfileBufferIndex(),
-                          unresponsiveDuration, runningTimes);
-              }
+              ReadStack(stackEntryGetter,
+                        it.CurrentBlockIndex().ConvertToProfileBufferIndex(),
+                        unresponsiveDuration, runningTimes);
             });
             mWorkerChunkManager.Reset(tempBuffer.GetAllChunks());
             break;
@@ -1067,6 +1100,63 @@ int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
           MOZ_ASSERT(kind >= ProfileBufferEntry::Kind::LEGACY_LIMIT,
                      "There should be no legacy entries between "
                      "TimeBeforeCompactStack and CompactStack");
+          er.SetRemainingBytes(0);
+        }
+
+        e.Next();
+      } else if (e.Has() && e.Get().IsTimeBeforeSameSample()) {
+        if (sample.mTime == 0.0) {
+          // We don't have any full sample yet, we cannot duplicate a "previous"
+          // one. This should only happen at most once per thread, for the very
+          // first sample.
+          continue;
+        }
+
+        // Keep the same `mStack` as previously output.
+        // Note that it may be empty, this is checked below before writing it.
+        (void)sample.mStack;
+
+        sample.mTime = e.Get().GetDouble();
+
+        // Ignore samples that are too old.
+        if (sample.mTime < aSinceTime) {
+          e.Next();
+          continue;
+        }
+
+        sample.mResponsiveness = Nothing{};
+
+        sample.mRunningTimes.Clear();
+
+        ProfileChunkedBuffer::BlockIterator it = e.Iterator();
+        for (;;) {
+          ++it;
+          if (it.IsAtEnd()) {
+            break;
+          }
+          ProfileBufferEntryReader er = *it;
+          ProfileBufferEntry::Kind kind =
+              er.ReadObject<ProfileBufferEntry::Kind>();
+
+          // There may be running times before the SameSample.
+          if (kind == ProfileBufferEntry::Kind::RunningTimes) {
+            er.ReadIntoObject(sample.mRunningTimes);
+            continue;
+          }
+
+          if (kind == ProfileBufferEntry::Kind::SameSample) {
+            if (sample.mStackIsEmpty && sample.mRunningTimes.IsEmpty()) {
+              // Skip samples with empty stacks, unless we have useful running
+              // times.
+              break;
+            }
+            WriteSample(aWriter, sample);
+            break;
+          }
+
+          MOZ_ASSERT(kind >= ProfileBufferEntry::Kind::LEGACY_LIMIT,
+                     "There should be no legacy entries between "
+                     "TimeBeforeSameSample and SameSample");
           er.SetRemainingBytes(0);
         }
 
@@ -1080,7 +1170,8 @@ int ProfileBuffer::StreamSamplesToJSON(SpliceableJSONWriter& aWriter,
   });
 }
 
-void ProfileBuffer::AddJITInfoForRange(uint64_t aRangeStart, int aThreadId,
+void ProfileBuffer::AddJITInfoForRange(uint64_t aRangeStart,
+                                       ProfilerThreadId aThreadId,
                                        JSContext* aContext,
                                        JITFrameInfo& aJITFrameInfo) const {
   // We can only process JitReturnAddr entries if we have a JSContext.
@@ -1110,7 +1201,7 @@ void ProfileBuffer::AddJITInfoForRange(uint64_t aRangeStart, int aThreadId,
             }
 
             MOZ_ASSERT(e.Get().IsThreadId());
-            int threadId = e.Get().GetInt();
+            ProfilerThreadId threadId = e.Get().GetThreadId();
             e.Next();
 
             // Ignore samples that are for a different thread.
@@ -1166,6 +1257,9 @@ void ProfileBuffer::AddJITInfoForRange(uint64_t aRangeStart, int aThreadId,
               }
 
               e.Next();
+            } else if (e.Has() && e.Get().IsTimeBeforeSameSample()) {
+              // Sample index, nothing to do.
+
             } else {
               ERROR_AND_CONTINUE("expected a Time entry");
             }
@@ -1175,7 +1269,7 @@ void ProfileBuffer::AddJITInfoForRange(uint64_t aRangeStart, int aThreadId,
 }
 
 void ProfileBuffer::StreamMarkersToJSON(SpliceableJSONWriter& aWriter,
-                                        int aThreadId,
+                                        ProfilerThreadId aThreadId,
                                         const TimeStamp& aProcessStartTime,
                                         double aSinceTime,
                                         UniqueStacks& aUniqueStacks) const {
@@ -1194,6 +1288,27 @@ void ProfileBuffer::StreamMarkersToJSON(SpliceableJSONWriter& aWriter,
               [&](ProfileChunkedBuffer& aChunkedBuffer) {
                 ProfilerBacktrace backtrace("", &aChunkedBuffer);
                 backtrace.StreamJSON(aWriter, aProcessStartTime, aUniqueStacks);
+              },
+              [&](mozilla::base_profiler_markers_detail::Streaming::
+                      DeserializerTag aTag) {
+                size_t payloadSize = aER.RemainingBytes();
+
+                ProfileBufferEntryReader::DoubleSpanOfConstBytes spans =
+                    aER.ReadSpans(payloadSize);
+                if (MOZ_LIKELY(spans.IsSingleSpan())) {
+                  // Only a single span, we can just refer to it directly
+                  // instead of copying it.
+                  profiler::ffi::gecko_profiler_serialize_marker_for_tag(
+                      aTag, spans.mFirstOrOnly.Elements(), payloadSize,
+                      &aWriter);
+                } else {
+                  // Two spans, we need to concatenate them by copying.
+                  uint8_t* payloadBuffer = new uint8_t[payloadSize];
+                  spans.CopyBytesTo(payloadBuffer);
+                  profiler::ffi::gecko_profiler_serialize_marker_for_tag(
+                      aTag, payloadBuffer, payloadSize, &aWriter);
+                  delete[] payloadBuffer;
+                }
               });
     }
 
@@ -1291,7 +1406,7 @@ void ProfileBuffer::StreamProfilerOverheadToJSON(
           threads.Count(thread);
 
           AutoArraySchemaWriter writer(aWriter);
-          writer.DoubleElement(TIME, time);
+          writer.TimeMsElement(TIME, time);
           writer.DoubleElement(LOCKING, locking);
           writer.DoubleElement(MARKER_CLEANING, cleaning);
           writer.DoubleElement(COUNTERS, counter);
@@ -1503,7 +1618,7 @@ void ProfileBuffer::StreamCountersToJSON(SpliceableJSONWriter& aWriter,
                          uint64_t(std::numeric_limits<int64_t>::max()));
 
               AutoArraySchemaWriter writer(aWriter);
-              writer.DoubleElement(TIME, samples[i].mTime);
+              writer.TimeMsElement(TIME, samples[i].mTime);
               writer.IntElement(
                   NUMBER,
                   static_cast<int64_t>(samples[i].mNumber - previousNumber));
@@ -1531,12 +1646,12 @@ static void AddPausedRange(SpliceableJSONWriter& aWriter, const char* aReason,
                            const Maybe<double>& aEndTime) {
   aWriter.Start();
   if (aStartTime) {
-    aWriter.DoubleProperty("startTime", *aStartTime);
+    aWriter.TimeDoubleMsProperty("startTime", *aStartTime);
   } else {
     aWriter.NullProperty("startTime");
   }
   if (aEndTime) {
-    aWriter.DoubleProperty("endTime", *aEndTime);
+    aWriter.TimeDoubleMsProperty("endTime", *aEndTime);
   } else {
     aWriter.NullProperty("endTime");
   }
@@ -1584,12 +1699,61 @@ void ProfileBuffer::StreamPausedRangesToJSON(SpliceableJSONWriter& aWriter,
   });
 }
 
-bool ProfileBuffer::DuplicateLastSample(int aThreadId, double aSampleTimeMs,
+bool ProfileBuffer::DuplicateLastSample(ProfilerThreadId aThreadId,
+                                        double aSampleTimeMs,
                                         Maybe<uint64_t>& aLastSample,
                                         const RunningTimes& aRunningTimes) {
   if (!aLastSample) {
     return false;
   }
+
+  if (mEntries.IsIndexInCurrentChunk(ProfileBufferIndex{*aLastSample})) {
+    // The last (fully-written) sample is in this chunk, we can refer to it.
+
+    // Note that between now and when we write the SameSample below, another
+    // chunk could have been started, so the SameSample will in fact refer to a
+    // block in a previous chunk. This is okay, because:
+    // - When serializing to JSON, if that chunk is still there, we'll still be
+    //   able to find that old stack, so nothing will be lost.
+    // - If unfortunately that chunk has been destroyed, we will lose this
+    //   sample. But this will only happen to the first sample (per thread) in
+    //   in the whole JSON output, because the next time we're here to duplicate
+    //   the same sample again, IsIndexInCurrentChunk will say `false` and we
+    //   will fall back to the normal copy or even re-sample. Losing the first
+    //   sample out of many in a whole recording is acceptable.
+    //
+    // |---| = chunk, S = Sample, D = Duplicate, s = same sample
+    // |---S-s-s--| |s-D--s--s-| |s-D--s---s|
+    // Later, the first chunk is destroyed/recycled:
+    //              |s-D--s--s-| |s-D--s---s| |-...
+    // Output:       ^ ^  ^       ^
+    //               `-|--|-------|--- Same but no previous -> lost.
+    //                 `--|-------|--- Full duplicate sample.
+    //                    `-------|--- Same with previous -> okay.
+    //                            `--- Same but now we have a previous -> okay!
+
+    AUTO_PROFILER_STATS(DuplicateLastSample_SameSample);
+
+    // Add the thread id first. We don't update `aLastSample` because we are not
+    // writing a full sample.
+    (void)AddThreadIdEntry(aThreadId);
+
+    // Copy the new time, to be followed by a SameSample.
+    AddEntry(ProfileBufferEntry::TimeBeforeSameSample(aSampleTimeMs));
+
+    // Add running times if they have data.
+    if (!aRunningTimes.IsEmpty()) {
+      mEntries.PutObjects(ProfileBufferEntry::Kind::RunningTimes,
+                          aRunningTimes);
+    }
+
+    // Finish with a SameSample entry.
+    mEntries.PutObjects(ProfileBufferEntry::Kind::SameSample);
+
+    return true;
+  }
+
+  AUTO_PROFILER_STATS(DuplicateLastSample_copy);
 
   ProfileChunkedBuffer tempBuffer(
       ProfileChunkedBuffer::ThreadSafety::WithoutMutex, mWorkerChunkManager);
@@ -1612,7 +1776,7 @@ bool ProfileBuffer::DuplicateLastSample(int aThreadId, double aSampleTimeMs,
     }
 
     MOZ_RELEASE_ASSERT(e.Has() && e.Get().IsThreadId() &&
-                       e.Get().GetInt() == aThreadId);
+                       e.Get().GetThreadId() == aThreadId);
 
     e.Next();
 
@@ -1627,6 +1791,7 @@ bool ProfileBuffer::DuplicateLastSample(int aThreadId, double aSampleTimeMs,
         case ProfileBufferEntry::Kind::CollectionStart:
         case ProfileBufferEntry::Kind::CollectionEnd:
         case ProfileBufferEntry::Kind::ThreadId:
+        case ProfileBufferEntry::Kind::TimeBeforeSameSample:
           // We're done.
           return true;
         case ProfileBufferEntry::Kind::Time:

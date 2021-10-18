@@ -15,11 +15,14 @@
 #include "mozilla/dom/CustomElementRegistryBinding.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/dom/ElementInternals.h"
 #include "mozilla/dom/WebComponentsBinding.h"
+#include "mozilla/RefPtr.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsGenericHTMLElement.h"
 #include "nsWrapperCache.h"
 #include "nsContentUtils.h"
+#include "nsTHashSet.h"
 
 namespace mozilla {
 class ErrorResult;
@@ -90,16 +93,15 @@ class CustomElementCallback {
 // Each custom element has an associated callback queue and an element is
 // being created flag.
 struct CustomElementData {
-  NS_INLINE_DECL_REFCOUNTING(CustomElementData)
-
   // https://dom.spec.whatwg.org/#concept-element-custom-element-state
   // CustomElementData is only created on the element which is a custom element
   // or an upgrade candidate, so the state of an element without
   // CustomElementData is "uncustomized".
-  enum class State { eUndefined, eFailed, eCustom };
+  enum class State { eUndefined, eFailed, eCustom, ePrecustomized };
 
   explicit CustomElementData(nsAtom* aType);
   CustomElementData(nsAtom* aType, State aState);
+  ~CustomElementData() = default;
 
   // Custom element state as described in the custom element spec.
   State mState;
@@ -117,6 +119,8 @@ struct CustomElementData {
   void AttachedInternals();
   bool HasAttachedInternals() const { return mIsAttachedInternals; }
 
+  bool IsFormAssociated() const;
+
   void Traverse(nsCycleCollectionTraversalCallback& aCb) const;
   void Unlink();
   size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const;
@@ -127,13 +131,21 @@ struct CustomElementData {
     return aElement->NodeInfo()->NameAtom() == mType ? nullptr : mType.get();
   }
 
- private:
-  virtual ~CustomElementData() = default;
+  ElementInternals* GetElementInternals() const { return mElementInternals; }
 
+  ElementInternals* GetOrCreateElementInternals(HTMLElement* aTarget) {
+    if (!mElementInternals) {
+      mElementInternals = MakeAndAddRef<ElementInternals>(aTarget);
+    }
+    return mElementInternals;
+  }
+
+ private:
   // Custom element type, for <button is="x-button"> or <x-button>
   // this would be x-button.
   RefPtr<nsAtom> mType;
   RefPtr<CustomElementDefinition> mCustomElementDefinition;
+  RefPtr<ElementInternals> mElementInternals;
   bool mIsAttachedInternals = false;
 };
 
@@ -474,7 +486,7 @@ class CustomElementRegistry final : public nsISupports, public nsWrapperCache {
       typeName = aElement->NodeInfo()->NameAtom();
     }
 
-    nsTHashtable<nsRefPtrHashKey<nsIWeakReference>>* elements =
+    nsTHashSet<RefPtr<nsIWeakReference>>* elements =
         mElementCreationCallbacksUpgradeCandidatesMap.Get(typeName);
 
     // If there isn't a table, there won't be a definition added by the
@@ -484,7 +496,7 @@ class CustomElementRegistry final : public nsISupports, public nsWrapperCache {
     }
 
     nsWeakPtr elem = do_GetWeakReference(aElement);
-    elements->PutEntry(elem);
+    elements->Insert(elem);
   }
 
   void TraceDefinitions(JSTracer* aTrc);
@@ -511,7 +523,7 @@ class CustomElementRegistry final : public nsISupports, public nsWrapperCache {
                             CustomElementCreationCallback>
       ElementCreationCallbackMap;
   typedef nsClassHashtable<nsRefPtrHashKey<nsAtom>,
-                           nsTHashtable<nsRefPtrHashKey<nsIWeakReference>>>
+                           nsTHashSet<RefPtr<nsIWeakReference>>>
       CandidateMap;
   typedef JS::GCHashMap<JS::Heap<JSObject*>, RefPtr<nsAtom>,
                         js::MovableCellHasher<JS::Heap<JSObject*>>,

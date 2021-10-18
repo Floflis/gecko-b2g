@@ -31,7 +31,7 @@ namespace layers {
  * and the parent side lives on the main thread in the GPU process. If there
  * is no GPU process, then this protocol is not instantiated.
  */
-sync refcounted protocol PAPZInputBridge
+[RefCounted] sync protocol PAPZInputBridge
 {
 manager PGPU;
 
@@ -67,7 +67,9 @@ parent:
     returns (APZEventResult aOutResult,
              KeyboardInput  aOutEvent);
 
-  async UpdateWheelTransaction(LayoutDeviceIntPoint aRefPoint, EventMessage aEventMessage);
+  async UpdateWheelTransaction(LayoutDeviceIntPoint aRefPoint,
+                               EventMessage aEventMessage,
+                               ScrollableLayerGuid? aTargetGuid);
 
   sync ProcessUnhandledEvent(LayoutDeviceIntPoint aRefPoint)
     returns (LayoutDeviceIntPoint   aOutRefPoint,

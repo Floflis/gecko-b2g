@@ -24,8 +24,6 @@ class DevToolsFrameParent extends JSWindowActorParent {
   constructor() {
     super();
 
-    this._destroyed = false;
-
     // Map of DevToolsServerConnection's used to forward the messages from/to
     // the client. The connections run in the parent process, as this code. We
     // may have more than one when there is more than one client debugging the
@@ -58,25 +56,14 @@ class DevToolsFrameParent extends JSWindowActorParent {
     watcherActorID,
     connectionPrefix,
     browserId,
-    watchedData,
+    sessionData,
   }) {
-    try {
-      await this.sendQuery(
-        "DevToolsFrameParent:instantiate-already-available",
-        {
-          watcherActorID,
-          connectionPrefix,
-          browserId,
-          watchedData,
-        }
-      );
-    } catch (e) {
-      console.warn(
-        "Failed to create DevTools Frame target for browsingContext",
-        this.browsingContext.id
-      );
-      console.warn(e);
-    }
+    await this.sendQuery("DevToolsFrameParent:instantiate-already-available", {
+      watcherActorID,
+      connectionPrefix,
+      browserId,
+      sessionData,
+    });
   }
 
   destroyTarget({ watcherActorID, browserId }) {
@@ -89,9 +76,9 @@ class DevToolsFrameParent extends JSWindowActorParent {
   /**
    * Communicate to the content process that some data have been added.
    */
-  async addWatcherDataEntry({ watcherActorID, browserId, type, entries }) {
+  async addSessionDataEntry({ watcherActorID, browserId, type, entries }) {
     try {
-      await this.sendQuery("DevToolsFrameParent:addWatcherDataEntry", {
+      await this.sendQuery("DevToolsFrameParent:addSessionDataEntry", {
         watcherActorID,
         browserId,
         type,
@@ -99,7 +86,7 @@ class DevToolsFrameParent extends JSWindowActorParent {
       });
     } catch (e) {
       console.warn(
-        "Failed to add watcher data entry for frame targets in browsing context",
+        "Failed to add session data entry for frame targets in browsing context",
         this.browsingContext.id
       );
       console.warn(e);
@@ -109,8 +96,8 @@ class DevToolsFrameParent extends JSWindowActorParent {
   /**
    * Communicate to the content process that some data have been removed.
    */
-  removeWatcherDataEntry({ watcherActorID, browserId, type, entries }) {
-    this.sendAsyncMessage("DevToolsFrameParent:removeWatcherDataEntry", {
+  removeSessionDataEntry({ watcherActorID, browserId, type, entries }) {
+    this.sendAsyncMessage("DevToolsFrameParent:removeSessionDataEntry", {
       watcherActorID,
       browserId,
       type,
@@ -134,7 +121,7 @@ class DevToolsFrameParent extends JSWindowActorParent {
     const transport = new JsWindowActorTransport(this, forwardingPrefix);
     transport.hooks = {
       onPacket: connection.send.bind(connection),
-      onClosed() {},
+      onTransportClosed() {},
     };
     transport.ready();
 
@@ -160,6 +147,7 @@ class DevToolsFrameParent extends JSWindowActorParent {
     if (this._connections.has(prefix)) {
       const { connection } = this._connections.get(prefix);
       this._cleanupConnection(connection);
+      this._connections.delete(connection.prefix);
     }
   }
 
@@ -176,31 +164,31 @@ class DevToolsFrameParent extends JSWindowActorParent {
     }
 
     connection.cancelForwarding(forwardingPrefix);
-    this._connections.delete(connection.prefix);
-    if (!this._connections.size) {
-      this._destroy();
-    }
   }
 
-  _destroy() {
-    if (this._destroyed) {
-      return;
-    }
-    this._destroyed = true;
-
+  /**
+   * Destroy everything that we did related to the current WindowGlobal that
+   * this JSWindow Actor represents:
+   *  - close all transports that were used as bridge to communicate with the
+   *    DevToolsFrameChild, running in the content process
+   *  - unregister these transports from DevToolsServer (cancelForwarding)
+   *  - notify the client, via the WatcherActor that all related targets,
+   *    one per client/connection are all destroyed
+   *
+   * Note that with bfcacheInParent, we may reuse a JSWindowActor pair after closing all connections.
+   * This is can happen outside of the destruction of the actor.
+   * We may reuse a DevToolsFrameParent and DevToolsFrameChild pair.
+   * When navigating away, we will destroy them and call this method.
+   * Then when navigating back, we will reuse the same instances.
+   * So that we should be careful to keep the class fully function and only clear all its state.
+   */
+  _closeAllConnections() {
     for (const { actor, connection, watcher } of this._connections.values()) {
       watcher.notifyTargetDestroyed(actor);
 
-      // XXX: we should probably get rid of this
-      if (actor && connection.transport) {
-        // The FrameTargetActor within the child process doesn't necessary
-        // have time to uninitialize itself when the frame is closed/killed.
-        // So ensure telling the client that the related actor is detached.
-        connection.send({ from: actor.actor, type: "tabDetached" });
-      }
-
       this._cleanupConnection(connection);
     }
+    this._connections.clear();
   }
 
   /**
@@ -221,6 +209,30 @@ class DevToolsFrameParent extends JSWindowActorParent {
         return this.connectFromContent(message.data);
       case "DevToolsFrameChild:packet":
         return this.emit("packet-received", message);
+      case "DevToolsFrameChild:destroy":
+        for (const { form, watcherActorID } of message.data.actors) {
+          const watcher = WatcherRegistry.getWatcher(watcherActorID);
+          watcher.notifyTargetDestroyed(form);
+        }
+        return this._closeAllConnections();
+      case "DevToolsFrameChild:bf-cache-navigation-pageshow":
+        for (const watcherActor of WatcherRegistry.getWatchersForBrowserId(
+          this.browsingContext.browserId
+        )) {
+          watcherActor.emit("bf-cache-navigation-pageshow", {
+            windowGlobal: this.browsingContext.currentWindowGlobal,
+          });
+        }
+        return null;
+      case "DevToolsFrameChild:bf-cache-navigation-pagehide":
+        for (const watcherActor of WatcherRegistry.getWatchersForBrowserId(
+          this.browsingContext.browserId
+        )) {
+          watcherActor.emit("bf-cache-navigation-pagehide", {
+            windowGlobal: this.browsingContext.currentWindowGlobal,
+          });
+        }
+        return null;
       default:
         throw new Error(
           "Unsupported message in DevToolsFrameParent: " + message.name
@@ -229,6 +241,6 @@ class DevToolsFrameParent extends JSWindowActorParent {
   }
 
   didDestroy() {
-    this._destroy();
+    this._closeAllConnections();
   }
 }

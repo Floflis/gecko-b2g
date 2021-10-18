@@ -10,8 +10,7 @@
 #include "mozilla/dom/MediaList.h"
 #include "mozilla/ServoBindings.h"
 
-namespace mozilla {
-namespace dom {
+namespace mozilla::dom {
 
 CSSMediaRule::CSSMediaRule(RefPtr<RawServoMediaRule> aRawRule,
                            StyleSheet* aSheet, css::Rule* aParentRule,
@@ -55,6 +54,19 @@ void CSSMediaRule::DropSheetReference() {
   }
   ConditionRule::DropSheetReference();
 }
+
+void CSSMediaRule::SetRawAfterClone(RefPtr<RawServoMediaRule> aRaw) {
+  mRawRule = std::move(aRaw);
+  if (mMediaList) {
+    mMediaList->SetRawAfterClone(Servo_MediaRule_GetMedia(mRawRule).Consume());
+    mMediaList->SetStyleSheet(nullptr);
+    mMediaList->SetStyleSheet(GetStyleSheet());
+  }
+  css::ConditionRule::SetRawAfterClone(
+      Servo_MediaRule_GetRules(mRawRule).Consume());
+}
+
+StyleCssRuleType CSSMediaRule::Type() const { return StyleCssRuleType::Media; }
 
 #ifdef DEBUG
 /* virtual */
@@ -105,5 +117,4 @@ JSObject* CSSMediaRule::WrapObject(JSContext* aCx,
   return CSSMediaRule_Binding::Wrap(aCx, this, aGivenProto);
 }
 
-}  // namespace dom
-}  // namespace mozilla
+}  // namespace mozilla::dom

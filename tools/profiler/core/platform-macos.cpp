@@ -34,43 +34,13 @@
 
 // this port is based off of v8 svn revision 9837
 
-int profiler_current_process_id() { return getpid(); }
+mozilla::profiler::PlatformData::PlatformData(ProfilerThreadId aThreadId)
+    : mProfiledThread(mach_thread_self()) {}
 
-int profiler_current_thread_id() {
-  return static_cast<int>(static_cast<pid_t>(syscall(SYS_thread_selfid)));
+mozilla::profiler::PlatformData::~PlatformData() {
+  // Deallocate Mach port for thread.
+  mach_port_deallocate(mach_task_self(), mProfiledThread);
 }
-
-void* GetStackTop(void* aGuess) {
-  pthread_t thread = pthread_self();
-  return pthread_get_stackaddr_np(thread);
-}
-
-class PlatformData {
- public:
-  explicit PlatformData(int aThreadId) : mProfiledThread(mach_thread_self()) {
-    MOZ_COUNT_CTOR(PlatformData);
-  }
-
-  ~PlatformData() {
-    // Deallocate Mach port for thread.
-    mach_port_deallocate(mach_task_self(), mProfiledThread);
-
-    MOZ_COUNT_DTOR(PlatformData);
-  }
-
-  thread_act_t ProfiledThread() const { return mProfiledThread; }
-
-  RunningTimes& PreviousThreadRunningTimesRef() {
-    return mPreviousThreadRunningTimes;
-  }
-
- private:
-  // Note: for mProfiledThread Mach primitives are used instead of pthread's
-  // because the latter doesn't provide thread manipulation primitives required.
-  // For details, consult "Mac OS X Internals" book, Section 7.3.
-  thread_act_t mProfiledThread;
-  RunningTimes mPreviousThreadRunningTimes;
-};
 
 ////////////////////////////////////////////////////////////////////////
 // BEGIN Sampler target specifics
@@ -86,18 +56,19 @@ static void StreamMetaPlatformSampleUnits(PSLockRef aLock,
 }
 
 static RunningTimes GetThreadRunningTimesDiff(
-    PSLockRef aLock, const RegisteredThread& aRegisteredThread) {
+    PSLockRef aLock,
+    ThreadRegistration::UnlockedRWForLockedProfiler& aThreadData) {
   AUTO_PROFILER_STATS(GetRunningTimes);
 
-  PlatformData* platformData = aRegisteredThread.GetPlatformData();
-  MOZ_RELEASE_ASSERT(platformData);
+  const mozilla::profiler::PlatformData& platformData =
+      aThreadData.PlatformDataCRef();
 
   const RunningTimes newRunningTimes = GetRunningTimesWithTightTimestamp(
-      [platformData](RunningTimes& aRunningTimes) {
+      [&platformData](RunningTimes& aRunningTimes) {
         AUTO_PROFILER_STATS(GetRunningTimes_thread_info);
         thread_basic_info_data_t threadBasicInfo;
         mach_msg_type_number_t basicCount = THREAD_BASIC_INFO_COUNT;
-        if (thread_info(platformData->ProfiledThread(), THREAD_BASIC_INFO,
+        if (thread_info(platformData.ProfiledThread(), THREAD_BASIC_INFO,
                         reinterpret_cast<thread_info_t>(&threadBasicInfo),
                         &basicCount) == KERN_SUCCESS &&
             basicCount == THREAD_BASIC_INFO_COUNT) {
@@ -115,18 +86,22 @@ static RunningTimes GetThreadRunningTimesDiff(
         }
       });
 
-  const RunningTimes diff =
-      newRunningTimes - platformData->PreviousThreadRunningTimesRef();
-  platformData->PreviousThreadRunningTimesRef() = newRunningTimes;
+  ProfiledThreadData* profiledThreadData =
+      aThreadData.GetProfiledThreadData(aLock);
+  MOZ_ASSERT(profiledThreadData);
+  RunningTimes& previousRunningTimes =
+      profiledThreadData->PreviousThreadRunningTimesRef();
+  const RunningTimes diff = newRunningTimes - previousRunningTimes;
+  previousRunningTimes = newRunningTimes;
   return diff;
 }
 
 template <typename Func>
 void Sampler::SuspendAndSampleAndResumeThread(
-    PSLockRef aLock, const RegisteredThread& aRegisteredThread,
+    PSLockRef aLock,
+    const ThreadRegistration::UnlockedReaderAndAtomicRWOnThread& aThreadData,
     const TimeStamp& aNow, const Func& aProcessRegs) {
-  thread_act_t samplee_thread =
-      aRegisteredThread.GetPlatformData()->ProfiledThread();
+  thread_act_t samplee_thread = aThreadData.PlatformDataCRef().ProfiledThread();
 
   //----------------------------------------------------------------//
   // Suspend the samplee thread and get its context.
@@ -216,7 +191,9 @@ static void* ThreadEntry(void* aArg) {
 }
 
 SamplerThread::SamplerThread(PSLockRef aLock, uint32_t aActivityGeneration,
-                             double aIntervalMilliseconds)
+                             double aIntervalMilliseconds,
+                             bool aStackWalkEnabled,
+                             bool aNoTimerResolutionChange)
     : mSampler(aLock),
       mActivityGeneration(aActivityGeneration),
       mIntervalMicroseconds(
@@ -253,25 +230,15 @@ static void PlatformInit(PSLockRef aLock) {}
 
 #if defined(HAVE_NATIVE_UNWIND)
 void Registers::SyncPopulate() {
-#  if defined(__x86_64__)
-  asm(
-      // Compute caller's %rsp by adding to %rbp:
-      // 8 bytes for previous %rbp, 8 bytes for return address
-      "leaq 0x10(%%rbp), %0\n\t"
-      // Dereference %rbp to get previous %rbp
-      "movq (%%rbp), %1\n\t"
-      : "=r"(mSP), "=r"(mFP));
-#  elif defined(__aarch64__)
-  asm(
-      // Compute caller's sp by adding to fp:
-      // 8 bytes for previous fp, 8 bytes for return address
-      "add %0, x29, #0x10\n\t"
-      // Dereference fp to get previous fp
-      "ldr %1, [x29]\n\t"
-      : "=r"(mSP), "=r"(mFP));
-#  else
-#    error "unknown architecture"
-#  endif
+  // Derive the stack pointer from the frame pointer. The 0x10 offset is
+  // 8 bytes for the previous frame pointer and 8 bytes for the return
+  // address both stored on the stack after at the beginning of the current
+  // frame.
+  mSP = reinterpret_cast<Address>(__builtin_frame_address(0)) + 0x10;
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wframe-address"
+  mFP = reinterpret_cast<Address>(__builtin_frame_address(1));
+#  pragma GCC diagnostic pop
   mPC = reinterpret_cast<Address>(
       __builtin_extract_return_addr(__builtin_return_address(0)));
   mLR = 0;

@@ -17,10 +17,12 @@
 #include "nsCycleCollector.h"
 #include "jsfriendapi.h"
 #include "js/Array.h"  // JS::IsArrayObject
+#include "js/CallAndConstruct.h"  // JS::IsCallable, JS_CallFunctionName, JS_CallFunctionValue
 #include "js/CharacterEncoding.h"
 #include "js/ContextOptions.h"
 #include "js/friend/WindowProxy.h"  // js::ToWindowProxyIfWindow
 #include "js/Object.h"              // JS::GetClass, JS::GetCompartment
+#include "js/PropertyAndElement.h"  // JS_DefineProperty, JS_DefinePropertyById, JS_Enumerate, JS_GetProperty, JS_GetPropertyById, JS_HasProperty, JS_SetProperty, JS_SetPropertyById
 #include "js/SavedFrameAPI.h"
 #include "js/StructuredClone.h"
 #include "mozilla/AppShutdown.h"
@@ -1316,6 +1318,12 @@ nsXPCComponents_Utils::CreateServicesCache(JSContext* aCx,
 }
 
 NS_IMETHODIMP
+nsXPCComponents_Utils::PrintStderr(const nsACString& message) {
+  printf_stderr("%s", PromiseFlatUTF8String(message).get());
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsXPCComponents_Utils::ReportError(HandleValue error, HandleValue stack,
                                    JSContext* cx) {
   // This function shall never fail! Silently eat any failure conditions.
@@ -1617,13 +1625,13 @@ nsXPCComponents_Utils::GetWeakReference(HandleValue object, JSContext* cx,
 NS_IMETHODIMP
 nsXPCComponents_Utils::ForceGC(JSContext* aCx) {
   PrepareForFullGC(aCx);
-  NonIncrementalGC(aCx, GC_NORMAL, GCReason::COMPONENT_UTILS);
+  NonIncrementalGC(aCx, GCOptions::Normal, GCReason::COMPONENT_UTILS);
   return NS_OK;
 }
 
 NS_IMETHODIMP
 nsXPCComponents_Utils::ForceCC(nsICycleCollectorListener* listener) {
-  nsJSContext::CycleCollectNow(listener);
+  nsJSContext::CycleCollectNow(CCReason::API, listener);
   return NS_OK;
 }
 
@@ -1662,7 +1670,7 @@ nsXPCComponents_Utils::ClearMaxCCTime() {
 NS_IMETHODIMP
 nsXPCComponents_Utils::ForceShrinkingGC(JSContext* aCx) {
   PrepareForFullGC(aCx);
-  NonIncrementalGC(aCx, GC_SHRINK, GCReason::COMPONENT_UTILS);
+  NonIncrementalGC(aCx, GCOptions::Shrink, GCReason::COMPONENT_UTILS);
   return NS_OK;
 }
 
@@ -2072,9 +2080,7 @@ NS_IMETHODIMP
 nsXPCComponents_Utils::ExitIfInAutomation() {
   NS_ENSURE_TRUE(xpc::IsInAutomation(), NS_ERROR_FAILURE);
 
-#ifdef MOZ_GECKO_PROFILER
   profiler_shutdown(IsFastShutdown::Yes);
-#endif
 
   mozilla::AppShutdown::DoImmediateExit();
   return NS_OK;

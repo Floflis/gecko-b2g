@@ -7,7 +7,7 @@
 #ifndef mozilla_dom_SpeakerManagerService_h__
 #define mozilla_dom_SpeakerManagerService_h__
 
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsIObserver.h"
 #include "nsTArray.h"
 #include "SpeakerManager.h"
@@ -46,8 +46,8 @@ class SpeakerManagerService : public nsIObserver {
     if (mRegisteredSpeakerManagers.Contains(aSpeakerManager->WindowID())) {
       return NS_ERROR_FAILURE;
     }
-    mRegisteredSpeakerManagers.Put(aSpeakerManager->WindowID(),
-                                   aSpeakerManager);
+    mRegisteredSpeakerManagers.InsertOrUpdate(aSpeakerManager->WindowID(),
+                                              aSpeakerManager);
     return NS_OK;
   }
   nsresult UnRegisterSpeakerManager(SpeakerManager* aSpeakerManager) {
@@ -80,7 +80,7 @@ class SpeakerManagerService : public nsIObserver {
 
   SpeakerManagerService();
 
-  virtual ~SpeakerManagerService();
+  virtual ~SpeakerManagerService() = default;
   // Notify to UA if device speaker status changed
   virtual void Notify();
 
@@ -89,11 +89,12 @@ class SpeakerManagerService : public nsIObserver {
   void UpdateSpeakerStatus();
 
   /**
-   * Shutdown the singleton.
+   * Shutdown the instance.
    */
-  static void Shutdown();
+  virtual void Shutdown();
+
   // Hash map between window ID and registered SpeakerManager
-  nsDataHashtable<nsUint64HashKey, RefPtr<SpeakerManager>>
+  nsTHashMap<nsUint64HashKey, RefPtr<SpeakerManager>>
       mRegisteredSpeakerManagers;
   // The Speaker status assign by UA
   bool mOrgSpeakerStatus;

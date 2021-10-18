@@ -54,7 +54,7 @@ static double sDefStepOffset[] = {CURSOR_MOVE_PHASES};
 #define K_VIRTUALBOUNDARY_PIXEL 20
 #define K_MOVE_STEP_OFFSET_DEFAULT 5.0
 
-NS_IMPL_ISUPPORTS(CursorSimulator, nsIDOMEventListener, nsITimerCallback)
+NS_IMPL_ISUPPORTS(CursorSimulator, nsIDOMEventListener, nsITimerCallback, nsINamed)
 
 CursorSimulator::CursorSimulator(nsPIDOMWindowOuter* aWindow,
                                  nsIVirtualCursor* aDelegate)
@@ -87,10 +87,24 @@ CursorSimulator::~CursorSimulator() {
   MOZ_LOG(gVirtualCursorLog, LogLevel::Debug, ("CursorSimulator destruct\n"));
 }
 
+NS_IMETHODIMP
+CursorSimulator::GetName(nsACString& aName) {
+  aName.AssignLiteral("CursorSimulator");
+  return NS_OK;
+}
+
 void CursorSimulator::UpdatePos() {
   double width, height;
-  mOuterWindow->GetInnerWidth(&width);
-  mOuterWindow->GetInnerHeight(&height);
+  if (StaticPrefs::dom_meta_viewport_enabled()) {
+    RefPtr<Document> doc = mOuterWindow->GetExtantDoc();
+    PresShell* presShell = doc->GetPresShell();
+    width = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().width);
+    height = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().height);
+  } else {
+    mOuterWindow->GetInnerWidth(&width);
+    mOuterWindow->GetInnerHeight(&height);
+  }
+
   CenterizeCursorIfNecessary();
 
   LayoutDeviceIntPoint windowDevSize;
@@ -98,9 +112,10 @@ void CursorSimulator::UpdatePos() {
   CSSToDevPixel(cssSize, windowDevSize);
 
   MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
-          ("CursorSimulator UpdatePos Pos= %d %d window size %d %d active %d",
+          ("CursorSimulator UpdatePos Pos= %d %d window size %d %d screen size "
+           "%d %d active %d",
            mDevCursorPos.x, mDevCursorPos.y, windowDevSize.x, windowDevSize.y,
-           IsActive()));
+           mScreenWidth, mScreenHeight, IsActive()));
   LayoutDeviceIntPoint point = mDevCursorPos + mChromeOffset;
   if (!IsActive() || !mEnabled || point.x < 0 || point.y < 0) {
     return;
@@ -142,6 +157,13 @@ void CursorSimulator::Disable() {
   mTimer->Cancel();
   CursorOut();
 };
+
+void CursorSimulator::UpdateScreenSize(int32_t aWidth, int32_t aHeight) {
+  MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
+          ("CursorSimulator UpdateScreenSize %d %d", aWidth, aHeight));
+  mScreenWidth = aWidth;
+  mScreenHeight = aHeight;
+}
 
 void CursorSimulator::UpdateChromeOffset(
     const LayoutDeviceIntPoint& aChromeOffset) {
@@ -208,7 +230,7 @@ nsresult CursorSimulator::HandleEvent(Event* aEvent) {
       CursorOut();
     }
     if (!mFullScreenElement) {
-      CursorMove();
+      UpdatePos();
     }
     return NS_OK;
   }
@@ -231,10 +253,12 @@ nsresult CursorSimulator::HandleEvent(Event* aEvent) {
         gVirtualCursorLog, LogLevel::Debug,
         ("CursorSimulator element focus, is focused on an editable element=%d",
          focusedOnEditable));
-    if (!focusedOnEditable) {
-      UpdatePos();
-    } else {
+    if (focusedOnEditable ||
+        (mFullScreenElement &&
+         mFullScreenElement->IsHTMLElement(nsGkAtoms::video))) {
       CursorOut();
+    } else {
+      UpdatePos();
     }
     return NS_OK;
   }
@@ -343,8 +367,16 @@ nsresult CursorSimulator::HandleNavigationKey(WidgetKeyboardEvent* aKeyEvent) {
   CSSPoint offset(0, 0);
   // Update window size before caculating offset.
   double width, height;
-  mOuterWindow->GetInnerWidth(&width);
-  mOuterWindow->GetInnerHeight(&height);
+  if (StaticPrefs::dom_meta_viewport_enabled()) {
+    RefPtr<Document> doc = mOuterWindow->GetExtantDoc();
+    PresShell* presShell = doc->GetPresShell();
+    width = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().width);
+    height = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().height);
+  } else {
+    mOuterWindow->GetInnerWidth(&width);
+    mOuterWindow->GetInnerHeight(&height);
+  }
+
   CSSIntSize windowSize;
   windowSize.width = width;
   windowSize.height = height;
@@ -404,8 +436,16 @@ void CursorSimulator::CheckFullScreenElement() {
 
 void CursorSimulator::CenterizeCursorIfNecessary() {
   double width, height;
-  mOuterWindow->GetInnerWidth(&width);
-  mOuterWindow->GetInnerHeight(&height);
+  if (StaticPrefs::dom_meta_viewport_enabled()) {
+    RefPtr<Document> doc = mOuterWindow->GetExtantDoc();
+    PresShell* presShell = doc->GetPresShell();
+    width = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().width);
+    height = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().height);
+  } else {
+    mOuterWindow->GetInnerWidth(&width);
+    mOuterWindow->GetInnerHeight(&height);
+  }
+
   CSSIntSize windowSize;
   windowSize.width = width;
   windowSize.height = height;
@@ -443,8 +483,16 @@ nsresult CursorSimulator::Notify(nsITimer* aTimer) {
   CSSPoint offset(0, 0);
   // Update window size before caculating offset.
   double width, height;
-  mOuterWindow->GetInnerWidth(&width);
-  mOuterWindow->GetInnerHeight(&height);
+  if (StaticPrefs::dom_meta_viewport_enabled()) {
+    RefPtr<Document> doc = mOuterWindow->GetExtantDoc();
+    PresShell* presShell = doc->GetPresShell();
+    width = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().width);
+    height = nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().height);
+  } else {
+    mOuterWindow->GetInnerWidth(&width);
+    mOuterWindow->GetInnerHeight(&height);
+  }
+
   CSSIntSize windowSize;
   windowSize.width = width;
   windowSize.height = height;
@@ -740,7 +788,8 @@ void CursorSimulator::AdjustMoveOffset(CSSIntSize& aWindowSize,
 
   CSSPoint cssSize(aWindowSize.width, aWindowSize.height);
   CSSToDevPixel(cssSize, devSize);
-  LayoutDeviceIntPoint boundaryDevSize(devSize.x - 1, devSize.y - 1);
+  LayoutDeviceIntPoint boundaryDevSize(std::min(devSize.x, mScreenWidth) - 1,
+                                       std::min(devSize.y, mScreenHeight) - 1);
   CSSPoint boundaryCSSSize;
   DevToCSSPixel(boundaryDevSize, boundaryCSSSize);
   CSSPoint cursorPos;
@@ -764,23 +813,20 @@ void CursorSimulator::AdjustMoveOffset(CSSIntSize& aWindowSize,
 nsIScrollableFrame* CursorSimulator::FindScrollableFrame(nsIFrame* aFrame) {
   // Depends on direction to compute ScrollTarget
   CSSPoint directionPt(0, 0);
-  EventStateManager::ComputeScrollTargetOptions options;
+  EventStateManager::ComputeScrollTargetOptions options =
+    EventStateManager::COMPUTE_SCROLLABLE_TARGET_ALONG_X_Y_AXIS;
   switch (mDirection) {
     case CursorDirection::UP:
       directionPt.y = -1;
-      options = EventStateManager::COMPUTE_SCROLLABLE_ANCESTOR_ALONG_Y_AXIS;
       break;
     case CursorDirection::DOWN:
       directionPt.y = 1;
-      options = EventStateManager::COMPUTE_SCROLLABLE_ANCESTOR_ALONG_Y_AXIS;
       break;
     case CursorDirection::LEFT:
       directionPt.x = -1;
-      options = EventStateManager::COMPUTE_SCROLLABLE_ANCESTOR_ALONG_X_AXIS;
       break;
     case CursorDirection::RIGHT:
       directionPt.x = 1;
-      options = EventStateManager::COMPUTE_SCROLLABLE_ANCESTOR_ALONG_X_AXIS;
       break;
     default:
       break;
@@ -815,6 +861,41 @@ void CursorSimulator::CheckScrollable(int32_t& aScrollableX,
   MOZ_LOG(gVirtualCursorLog, LogLevel::Debug,
           ("CursorSimulator::CheckScrollable: scroll:(%d,%d) max:(%d,%d)",
            scrollX, scrollY, scrollRangeMaxX, scrollRangeMaxY));
+
+  if (StaticPrefs::dom_meta_viewport_enabled()) {
+    RefPtr<Document> doc = mOuterWindow->GetExtantDoc();
+    PresShell* presShell = doc->GetPresShell();
+
+    // scrollHeight
+    int32_t scrollHeight = nsPresContext::AppUnitsToIntCSSPixels(
+        aScrollFrame->GetScrollRange().Height() +
+        aScrollFrame->GetScrollPortRect().Height());
+    // scrollWidth
+    int32_t scrollWidth = nsPresContext::AppUnitsToIntCSSPixels(
+        aScrollFrame->GetScrollRange().Width() +
+        aScrollFrame->GetScrollPortRect().Width());
+
+    // visualViewport.pageTop
+    int32_t pageTop =
+        nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportOffset().y);
+    // visualViewport.pageLeft
+    int32_t pageLeft =
+        nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportOffset().x);
+
+    // visualViewport.height
+    int32_t visualViewportHeight =
+        nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().height);
+    // visualViewport.width
+    int32_t visualViewportWidth =
+        nsPresContext::AppUnitsToIntCSSPixels(presShell->GetVisualViewportSize().width);
+
+    if (scrollHeight > visualViewportHeight && scrollWidth > visualViewportHeight) {
+      scrollRangeMaxY = scrollHeight - visualViewportHeight;
+      scrollRangeMaxX = scrollWidth - visualViewportWidth;
+      scrollY = pageTop;
+      scrollX = pageLeft;
+    }
+  }
 
   if (aOffset.x > 0 && scrollRangeMaxX - scrollX > 0) {
     aScrollableX = scrollRangeMaxX - scrollX;
@@ -920,6 +1001,11 @@ void CursorSimulator::CursorMove() {
 
 void CursorSimulator::CursorOut(bool aCheckActive) {
   if (!aCheckActive || IsActive()) {
+    // Move the cursor position to -1,-1 so that it wonldn't hover on something
+    LayoutDeviceIntPoint point;
+    point.x = -1;
+    point.y = -1;
+    mDelegate->UpdatePos(point);
     mDelegate->CursorOut();
   }
 }

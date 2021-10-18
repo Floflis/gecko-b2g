@@ -11,14 +11,15 @@
 var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 var { Downloads } = ChromeUtils.import("resource://gre/modules/Downloads.jsm");
 var { FileUtils } = ChromeUtils.import("resource://gre/modules/FileUtils.jsm");
+var { ShortcutUtils } = ChromeUtils.import(
+  "resource://gre/modules/ShortcutUtils.jsm"
+);
+
 var { TransientPrefs } = ChromeUtils.import(
   "resource:///modules/TransientPrefs.jsm"
 );
 var { AppConstants } = ChromeUtils.import(
   "resource://gre/modules/AppConstants.jsm"
-);
-var { L10nRegistry } = ChromeUtils.import(
-  "resource://gre/modules/L10nRegistry.jsm"
 );
 var { HomePage } = ChromeUtils.import("resource:///modules/HomePage.jsm");
 ChromeUtils.defineModuleGetter(
@@ -69,7 +70,11 @@ const PREF_CONTAINERS_EXTENSION = "privacy.userContext.extension";
 // Strings to identify ExtensionSettingsStore overrides
 const CONTAINERS_KEY = "privacy.containers";
 
-const AUTO_UPDATE_CHANGED_TOPIC = "auto-update-config-change";
+const AUTO_UPDATE_CHANGED_TOPIC =
+  UpdateUtils.PER_INSTALLATION_PREFS["app.update.auto"].observerTopic;
+const BACKGROUND_UPDATE_CHANGED_TOPIC =
+  UpdateUtils.PER_INSTALLATION_PREFS["app.update.background.enabled"]
+    .observerTopic;
 
 const ICON_URL_APP =
   AppConstants.platform == "linux"
@@ -99,7 +104,6 @@ Preferences.addAll([
   // Startup
   { id: "browser.startup.page", type: "int" },
   { id: "browser.privatebrowsing.autostart", type: "bool" },
-  { id: "browser.sessionstore.warnOnQuit", type: "bool" },
 
   // Downloads
   { id: "browser.download.useDownloadDir", type: "bool" },
@@ -122,6 +126,8 @@ Preferences.addAll([
   browser.tabs.warnOnOpen
   - true if the user should be warned if he attempts to open a lot of tabs at
     once (e.g. a large folder of bookmarks), false otherwise
+  browser.warnOnQuitShortcut
+  - true if the user should be warned if they quit using the keyboard shortcut
   browser.taskbar.previews.enable
   - true if tabs are to be shown in the Windows 7 taskbar
   */
@@ -129,8 +135,9 @@ Preferences.addAll([
   { id: "browser.link.open_newwindow", type: "int" },
   { id: "browser.tabs.loadInBackground", type: "bool", inverted: true },
   { id: "browser.tabs.warnOnClose", type: "bool" },
+  { id: "browser.warnOnQuitShortcut", type: "bool" },
   { id: "browser.tabs.warnOnOpen", type: "bool" },
-  { id: "browser.ctrlTab.recentlyUsedOrder", type: "bool" },
+  { id: "browser.ctrlTab.sortByRecentlyUsed", type: "bool" },
 
   // CFR
   {
@@ -235,6 +242,16 @@ if (AppConstants.MOZ_UPDATER) {
   }
 }
 
+XPCOMUtils.defineLazyGetter(this, "gHasWinPackageId", () => {
+  let hasWinPackageId = false;
+  try {
+    hasWinPackageId = Services.sysinfo.getProperty("hasWinPackageId");
+  } catch (_ex) {
+    // The hasWinPackageId property doesn't exist; assume it would be false.
+  }
+  return hasWinPackageId;
+});
+
 // A promise that resolves when the list of application handlers is loaded.
 // We store this in a global so tests can await it.
 var promiseLoadHandlersList;
@@ -248,13 +265,11 @@ function getBundleForLocales(newLocales) {
       Services.locale.lastFallbackLocale,
     ])
   );
-  function generateBundles(resourceIds) {
-    return L10nRegistry.generateBundles(locales, resourceIds);
-  }
   return new Localization(
     ["browser/preferences/preferences.ftl", "branding/brand.ftl"],
     false,
-    { generateBundles }
+    undefined,
+    locales
   );
 }
 
@@ -414,15 +429,29 @@ var gMainPane = {
       } catch (ex) {}
     }
 
-    // The "closing multiple tabs" and "opening multiple tabs might slow down
-    // &brandShortName;" warnings provide options for not showing these
-    // warnings again. When the user disabled them, we provide checkboxes to
-    // re-enable the warnings.
-    if (!TransientPrefs.prefShouldBeVisible("browser.tabs.warnOnClose")) {
-      document.getElementById("warnCloseMultiple").hidden = true;
-    }
+    // The "opening multiple tabs might slow down Firefox" warning provides
+    // an option for not showing this warning again. When the user disables it,
+    // we provide checkboxes to re-enable the warning.
     if (!TransientPrefs.prefShouldBeVisible("browser.tabs.warnOnOpen")) {
       document.getElementById("warnOpenMany").hidden = true;
+    }
+
+    if (AppConstants.platform != "win") {
+      let quitKeyElement = window.browsingContext.topChromeWindow.document.getElementById(
+        "key_quitApplication"
+      );
+      if (quitKeyElement) {
+        let quitKey = ShortcutUtils.prettifyShortcut(quitKeyElement);
+        document.l10n.setAttributes(
+          document.getElementById("warnOnQuitKey"),
+          "confirm-on-quit-with-key",
+          { quitKey }
+        );
+      } else {
+        // If the quit key element does not exist, then the quit key has
+        // been disabled, so just hide the checkbox.
+        document.getElementById("warnOnQuitKey").hidden = true;
+      }
     }
 
     setEventListener("ctrlTabRecentlyUsedOrder", "command", function() {
@@ -496,6 +525,11 @@ var gMainPane = {
       "command",
       gMainPane.showTranslationExceptions
     );
+    setEventListener(
+      "fxtranslateButton",
+      "command",
+      gMainPane.showTranslationExceptions
+    );
     Preferences.get("font.language.group").on(
       "change",
       gMainPane._rebuildFonts.bind(gMainPane)
@@ -536,11 +570,6 @@ var gMainPane = {
         "media-keyboard-control";
       let link = document.getElementById("mediaControlLearnMore");
       link.setAttribute("href", mediaControlLearnMoreUrl);
-      setEventListener(
-        "mediaControlToggleEnabled",
-        "command",
-        gMainPane.updateMediaControlTelemetry
-      );
     }
 
     // Initializes the fonts dropdowns displayed in this pane.
@@ -549,8 +578,8 @@ var gMainPane = {
     this.updateOnScreenKeyboardVisibility();
 
     // Show translation preferences if we may:
-    const prefName = "browser.translation.ui.show";
-    if (Services.prefs.getBoolPref(prefName)) {
+    const translationsPrefName = "browser.translation.ui.show";
+    if (Services.prefs.getBoolPref(translationsPrefName)) {
       let row = document.getElementById("translationBox");
       row.removeAttribute("hidden");
       // Showing attribution only for Bing Translator.
@@ -560,6 +589,13 @@ var gMainPane = {
       if (Translation.translationEngine == "Bing") {
         document.getElementById("bingAttribution").removeAttribute("hidden");
       }
+    }
+
+    // Firefox Translations settings panel
+    const fxtranslationsDisabledPrefName = "extensions.translations.disabled";
+    if (!Services.prefs.getBoolPref(fxtranslationsDisabledPrefName, true)) {
+      let fxtranslationRow = document.getElementById("fxtranslationsBox");
+      fxtranslationRow.hidden = false;
     }
 
     let drmInfoURL =
@@ -647,18 +683,25 @@ var gMainPane = {
     }
 
     if (AppConstants.MOZ_UPDATER) {
-      // XXX Workaround bug 1523453 -- changing selectIndex of a <deck> before
-      // frame construction could confuse nsDeckFrame::RemoveFrame().
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          gAppUpdater = new appUpdater();
-        });
-      });
+      gAppUpdater = new appUpdater();
       setEventListener("showUpdateHistory", "command", gMainPane.showUpdates);
 
       let updateDisabled =
         Services.policies && !Services.policies.isAllowed("appUpdate");
-      if (
+
+      if (gHasWinPackageId) {
+        // When we're running inside an app package, there's no point in
+        // displaying any update content here, and it would get confusing if we
+        // did, because our updater is not enabled.
+        // We can't rely on the hidden attribute for the toplevel elements,
+        // because of the pane hiding/showing code interfering.
+        document
+          .getElementById("updatesCategory")
+          .setAttribute("style", "display: none !important");
+        document
+          .getElementById("updateApp")
+          .setAttribute("style", "display: none !important");
+      } else if (
         updateDisabled ||
         UpdateUtils.appUpdateAutoSettingIsLocked() ||
         gApplicationUpdateService.manualUpdateOnly
@@ -673,12 +716,19 @@ var gMainPane = {
         document.getElementById("autoDesktop").removeAttribute("selected");
         document.getElementById("manualDesktop").removeAttribute("selected");
         // Start reading the correct value from the disk
-        this.updateReadPrefs();
-        setEventListener(
-          "updateRadioGroup",
-          "command",
-          gMainPane.updateWritePrefs
-        );
+        this.readUpdateAutoPref();
+        setEventListener("updateRadioGroup", "command", event => {
+          if (event.target.id == "backgroundUpdate") {
+            this.writeBackgroundUpdatePref();
+          } else {
+            this.writeUpdateAutoPref();
+          }
+        });
+        if (this.isBackgroundUpdateUIAvailable()) {
+          document.getElementById("backgroundUpdate").hidden = false;
+          // Start reading the background update pref's value from the disk.
+          this.readBackgroundUpdatePref();
+        }
       }
 
       if (AppConstants.platform == "win") {
@@ -689,7 +739,9 @@ var gMainPane = {
           "updateSettingsContainer"
         );
         updateContainer.classList.add("updateSettingCrossUserWarningContainer");
-        document.getElementById("updateSettingCrossUserWarning").hidden = false;
+        document.getElementById(
+          "updateSettingCrossUserWarningDesc"
+        ).hidden = false;
       }
 
       if (AppConstants.MOZ_MAINTENANCE_SERVICE) {
@@ -719,6 +771,7 @@ var gMainPane = {
     // Observe preferences that influence what we display so we can rebuild
     // the view when they change.
     Services.obs.addObserver(this, AUTO_UPDATE_CHANGED_TOPIC);
+    Services.obs.addObserver(this, BACKGROUND_UPDATE_CHANGED_TOPIC);
 
     setEventListener("filter", "command", gMainPane.filter);
     setEventListener("typeColumn", "click", gMainPane.sort);
@@ -943,26 +996,12 @@ var gMainPane = {
 
     let newValue;
     let checkbox = document.getElementById("browserRestoreSession");
-    let warnOnQuitCheckbox = document.getElementById(
-      "browserRestoreSessionQuitWarning"
-    );
-    if (pbAutoStartPref.value || startupPref.locked) {
-      checkbox.setAttribute("disabled", "true");
-      warnOnQuitCheckbox.setAttribute("disabled", "true");
-    } else {
-      checkbox.removeAttribute("disabled");
-    }
+    checkbox.disabled = pbAutoStartPref.value || startupPref.locked;
     newValue = pbAutoStartPref.value
       ? false
       : startupPref.value === this.STARTUP_PREF_RESTORE_SESSION;
     if (checkbox.checked !== newValue) {
       checkbox.checked = newValue;
-      let warnOnQuitPref = Preferences.get("browser.sessionstore.warnOnQuit");
-      if (newValue && !warnOnQuitPref.locked && !pbAutoStartPref.value) {
-        warnOnQuitCheckbox.removeAttribute("disabled");
-      } else {
-        warnOnQuitCheckbox.setAttribute("disabled", "true");
-      }
     }
   },
   /**
@@ -1103,6 +1142,18 @@ var gMainPane = {
 
       let description = document.createXULElement("description");
       description.classList.add("message-bar-description");
+
+      // TODO: This should preferably use `Intl.LocaleInfo` when bug 1693576 is fixed.
+      if (
+        i == 0 &&
+        (locales[0] == "ar" ||
+          locales[0] == "ckb" ||
+          locales[0] == "fa" ||
+          locales[0] == "he" ||
+          locales[0] == "ur")
+      ) {
+        description.classList.add("rtl-locale");
+      }
       description.setAttribute("flex", "1");
       description.textContent = messages[i];
       messageContainer.appendChild(description);
@@ -1209,22 +1260,14 @@ var gMainPane = {
     const startupPref = Preferences.get("browser.startup.page");
     let newValue;
 
-    let warnOnQuitCheckbox = document.getElementById(
-      "browserRestoreSessionQuitWarning"
-    );
     if (value) {
       // We need to restore the blank homepage setting in our other pref
       if (startupPref.value === this.STARTUP_PREF_BLANK) {
         HomePage.safeSet("about:blank");
       }
       newValue = this.STARTUP_PREF_RESTORE_SESSION;
-      let warnOnQuitPref = Preferences.get("browser.sessionstore.warnOnQuit");
-      if (!warnOnQuitPref.locked) {
-        warnOnQuitCheckbox.removeAttribute("disabled");
-      }
     } else {
       newValue = this.STARTUP_PREF_HOMEPAGE;
-      warnOnQuitCheckbox.setAttribute("disabled", "true");
     }
     startupPref.value = newValue;
   },
@@ -1245,6 +1288,9 @@ var gMainPane = {
    * browser.tabs.warnOnClose - bool
    *   True - If when closing a window with multiple tabs the user is warned and
    *          allowed to cancel the action, false to just close the window.
+   * browser.warnOnQuitShortcut - bool
+   *   True - If the keyboard shortcut (Ctrl/Cmd+Q) is pressed, the user should
+   *          be warned, false to just quit without prompting.
    * browser.tabs.warnOnOpen - bool
    *   True - Whether the user should be warned when trying to open a lot of
    *          tabs at once (e.g. a large folder of bookmarks), allowing to
@@ -1294,9 +1340,9 @@ var gMainPane = {
         defaultBrowserBox.hidden = true;
         return;
       }
-      let setDefaultPane = document.getElementById("setDefaultPane");
       let isDefault = shellSvc.isDefaultBrowser(false, true);
-      setDefaultPane.selectedIndex = isDefault ? 1 : 0;
+      let setDefaultPane = document.getElementById("setDefaultPane");
+      setDefaultPane.classList.toggle("is-default", isDefault);
       let alwaysCheck = document.getElementById("alwaysCheckDefault");
       let alwaysCheckPref = Preferences.get(
         "browser.shell.checkDefaultBrowser"
@@ -1329,8 +1375,9 @@ var gMainPane = {
         return;
       }
 
-      let selectedIndex = shellSvc.isDefaultBrowser(false, true) ? 1 : 0;
-      document.getElementById("setDefaultPane").selectedIndex = selectedIndex;
+      let isDefault = shellSvc.isDefaultBrowser(false, true);
+      let setDefaultPane = document.getElementById("setDefaultPane");
+      setDefaultPane.classList.toggle("is-default", isDefault);
     }
   },
 
@@ -1542,14 +1589,6 @@ var gMainPane = {
     gotoPref("containers");
   },
 
-  updateMediaControlTelemetry() {
-    const telemetry = Services.telemetry.getHistogramById(
-      "MEDIA_CONTROL_SETTING_CHANGE"
-    );
-    const checkbox = document.getElementById("mediaControlToggleEnabled");
-    telemetry.add(checkbox.checked ? "EnableFromUI" : "DisableFromUI");
-  },
-
   /**
    * ui.osk.enabled
    * - when set to true, subject to other conditions, we may sometimes invoke
@@ -1748,6 +1787,17 @@ var gMainPane = {
   },
 
   buildContentProcessCountMenuList() {
+    if (Services.appinfo.fissionAutostart) {
+      document.getElementById("limitContentProcess").hidden = true;
+      document.getElementById("contentProcessCount").hidden = true;
+      document.getElementById(
+        "contentProcessCountEnabledDescription"
+      ).hidden = true;
+      document.getElementById(
+        "contentProcessCountDisabledDescription"
+      ).hidden = true;
+      return;
+    }
     if (Services.appinfo.browserTabsRemoteAutostart) {
       let processCountPref = Preferences.get("dom.ipc.processCount");
       let defaultProcessCount = processCountPref.defaultValue;
@@ -1784,30 +1834,31 @@ var gMainPane = {
   /**
    * Selects the correct item in the update radio group
    */
-  async updateReadPrefs() {
+  async readUpdateAutoPref() {
     if (
       AppConstants.MOZ_UPDATER &&
-      (!Services.policies || Services.policies.isAllowed("appUpdate"))
+      (!Services.policies || Services.policies.isAllowed("appUpdate")) &&
+      !gHasWinPackageId
     ) {
       let radiogroup = document.getElementById("updateRadioGroup");
+
       radiogroup.disabled = true;
-      try {
-        let enabled = await UpdateUtils.getAppUpdateAutoEnabled();
-        radiogroup.value = enabled;
-        radiogroup.disabled = false;
-      } catch (error) {
-        Cu.reportError(error);
-      }
+      let enabled = await UpdateUtils.getAppUpdateAutoEnabled();
+      radiogroup.value = enabled;
+      radiogroup.disabled = false;
+
+      this.maybeDisableBackgroundUpdateControls();
     }
   },
 
   /**
-   * Writes the value of the update radio group to the disk
+   * Writes the value of the automatic update radio group to the disk
    */
-  async updateWritePrefs() {
+  async writeUpdateAutoPref() {
     if (
       AppConstants.MOZ_UPDATER &&
-      (!Services.policies || Services.policies.isAllowed("appUpdate"))
+      (!Services.policies || Services.policies.isAllowed("appUpdate")) &&
+      !gHasWinPackageId
     ) {
       let radiogroup = document.getElementById("updateRadioGroup");
       let updateAutoValue = radiogroup.value == "true";
@@ -1817,10 +1868,12 @@ var gMainPane = {
         radiogroup.disabled = false;
       } catch (error) {
         Cu.reportError(error);
-        await this.updateReadPrefs();
+        await this.readUpdateAutoPref();
         await this.reportUpdatePrefWriteError(error);
         return;
       }
+
+      this.maybeDisableBackgroundUpdateControls();
 
       // If the value was changed to false the user should be given the option
       // to discard an update if there is one.
@@ -1830,11 +1883,84 @@ var gMainPane = {
     }
   },
 
+  isBackgroundUpdateUIAvailable() {
+    return (
+      Services.prefs.getBoolPref(
+        "app.update.background.scheduling.enabled",
+        false
+      ) &&
+      AppConstants.MOZ_UPDATER &&
+      AppConstants.MOZ_UPDATE_AGENT &&
+      // This UI controls a per-installation pref. It won't necessarily work
+      // properly if per-installation prefs aren't supported.
+      UpdateUtils.PER_INSTALLATION_PREFS_SUPPORTED &&
+      (!Services.policies || Services.policies.isAllowed("appUpdate")) &&
+      !gHasWinPackageId &&
+      !UpdateUtils.appUpdateSettingIsLocked("app.update.background.enabled")
+    );
+  },
+
+  maybeDisableBackgroundUpdateControls() {
+    if (this.isBackgroundUpdateUIAvailable()) {
+      let radiogroup = document.getElementById("updateRadioGroup");
+      let updateAutoEnabled = radiogroup.value == "true";
+
+      // This control is only active if auto update is enabled.
+      document.getElementById("backgroundUpdate").disabled = !updateAutoEnabled;
+    }
+  },
+
+  async readBackgroundUpdatePref() {
+    const prefName = "app.update.background.enabled";
+    if (this.isBackgroundUpdateUIAvailable()) {
+      let backgroundCheckbox = document.getElementById("backgroundUpdate");
+
+      // When the page first loads, the checkbox is unchecked until we finish
+      // reading the config file from the disk. But, ideally, we don't want to
+      // give the user the impression that this setting has somehow gotten
+      // turned off and they need to turn it back on. We also don't want the
+      // user interacting with the control, expecting a particular behavior, and
+      // then have the read complete and change the control in an unexpected
+      // way. So we disable the control while we are reading.
+      // The only entry points for this function are page load and user
+      // interaction with the control. By disabling the control to prevent
+      // further user interaction, we prevent the possibility of entering this
+      // function a second time while we are still reading.
+      backgroundCheckbox.disabled = true;
+
+      let enabled = await UpdateUtils.readUpdateConfigSetting(prefName);
+      backgroundCheckbox.checked = enabled;
+      this.maybeDisableBackgroundUpdateControls();
+    }
+  },
+
+  async writeBackgroundUpdatePref() {
+    const prefName = "app.update.background.enabled";
+    if (this.isBackgroundUpdateUIAvailable()) {
+      let backgroundCheckbox = document.getElementById("backgroundUpdate");
+      backgroundCheckbox.disabled = true;
+      let backgroundUpdateEnabled = backgroundCheckbox.checked;
+      try {
+        await UpdateUtils.writeUpdateConfigSetting(
+          prefName,
+          backgroundUpdateEnabled
+        );
+      } catch (error) {
+        Cu.reportError(error);
+        await this.readBackgroundUpdatePref();
+        await this.reportUpdatePrefWriteError(error);
+        return;
+      }
+
+      this.maybeDisableBackgroundUpdateControls();
+    }
+  },
+
   async reportUpdatePrefWriteError(error) {
     let [title, message] = await document.l10n.formatValues([
-      { id: "update-setting-write-failure-title" },
+      { id: "update-setting-write-failure-title2" },
       {
-        id: "update-setting-write-failure-message",
+        id: "update-setting-write-failure-message2",
         args: { path: error.path },
       },
     ]);
@@ -1898,7 +2024,7 @@ var gMainPane = {
       let aus = Cc["@mozilla.org/updates/update-service;1"].getService(
         Ci.nsIApplicationUpdateService
       );
-      aus.stopDownload();
+      await aus.stopDownload();
       um.cleanupReadyUpdate();
       um.cleanupDownloadingUpdate();
     }
@@ -1915,6 +2041,7 @@ var gMainPane = {
     window.removeEventListener("unload", this);
     Services.prefs.removeObserver(PREF_CONTAINERS_EXTENSION, this);
     Services.obs.removeObserver(this, AUTO_UPDATE_CHANGED_TOPIC);
+    Services.obs.removeObserver(this, BACKGROUND_UPDATE_CHANGED_TOPIC);
   },
 
   // nsISupports
@@ -1935,10 +2062,24 @@ var gMainPane = {
         await this._rebuildView();
       }
     } else if (aTopic == AUTO_UPDATE_CHANGED_TOPIC) {
+      if (!AppConstants.MOZ_UPDATER) {
+        return;
+      }
       if (aData != "true" && aData != "false") {
         throw new Error("Invalid preference value for app.update.auto");
       }
       document.getElementById("updateRadioGroup").value = aData;
+      this.maybeDisableBackgroundUpdateControls();
+    } else if (aTopic == BACKGROUND_UPDATE_CHANGED_TOPIC) {
+      if (!AppConstants.MOZ_UPDATER || !AppConstants.MOZ_UPDATE_AGENT) {
+        return;
+      }
+      if (aData != "true" && aData != "false") {
+        throw new Error(
+          "Invalid preference value for app.update.background.enabled"
+        );
+      }
+      document.getElementById("backgroundUpdate").checked = aData == "true";
     }
   },
 
@@ -2682,7 +2823,7 @@ var gMainPane = {
     var fph = Services.io
       .getProtocolHandler("file")
       .QueryInterface(Ci.nsIFileProtocolHandler);
-    var urlSpec = fph.getURLSpecFromFile(aFile);
+    var urlSpec = fph.getURLSpecFromActualFile(aFile);
 
     return "moz-icon://" + urlSpec + "?size=16";
   },
@@ -2938,19 +3079,19 @@ var gMainPane = {
       downloadFolder.value = currentDirPref.value
         ? `\u2066${currentDirPref.value.path}\u2069`
         : "";
-      iconUrlSpec = fph.getURLSpecFromFile(currentDirPref.value);
+      iconUrlSpec = fph.getURLSpecFromDir(currentDirPref.value);
     } else if (folderIndex == 1) {
       // 'Downloads'
       [downloadFolder.value] = await document.l10n.formatValues([
         { id: "downloads-folder-name" },
       ]);
-      iconUrlSpec = fph.getURLSpecFromFile(await this._indexToFolder(1));
+      iconUrlSpec = fph.getURLSpecFromDir(await this._indexToFolder(1));
     } else {
       // 'Desktop'
       [downloadFolder.value] = await document.l10n.formatValues([
         { id: "desktop-folder-name" },
       ]);
-      iconUrlSpec = fph.getURLSpecFromFile(
+      iconUrlSpec = fph.getURLSpecFromDir(
         await this._getDownloadsFolder("Desktop")
       );
     }

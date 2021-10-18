@@ -68,6 +68,10 @@ void MacroAssembler::move32To64SignExtend(Register src, Register64 dest) {
   ma_sra(dest.high, dest.low, Imm32(31));
 }
 
+void MacroAssembler::move32SignExtendToPtr(Register src, Register dest) {
+  move32(src, dest);
+}
+
 void MacroAssembler::move32ZeroExtendToPtr(Register src, Register dest) {
   move32(src, dest);
 }
@@ -239,6 +243,10 @@ void MacroAssembler::sub64(Imm64 imm, Register64 dest) {
     as_subu(dest.low, dest.low, SecondScratchReg);
   }
   ma_subu(dest.high, dest.high, imm.hi());
+}
+
+void MacroAssembler::mulPtr(Register rhs, Register srcDest) {
+  as_mul(srcDest, srcDest, rhs);
 }
 
 void MacroAssembler::mul64(Imm64 imm, const Register64& dest) {
@@ -634,6 +642,11 @@ void MacroAssembler::cmp32Set(Condition cond, T1 lhs, T2 rhs, Register dest) {
   ma_cmp_set(dest, lhs, rhs, cond);
 }
 
+void MacroAssembler::cmp64Set(Condition cond, Address lhs, Imm64 rhs,
+                              Register dest) {
+  MOZ_CRASH("NYI");
+}
+
 // ===============================================================
 // Bit counting functions
 
@@ -690,28 +703,62 @@ void MacroAssembler::popcnt64(Register64 src, Register64 dest, Register tmp) {
 
 void MacroAssembler::branch64(Condition cond, const Address& lhs, Imm64 val,
                               Label* label) {
-  MOZ_ASSERT(cond == Assembler::NotEqual,
+  MOZ_ASSERT(cond == Assembler::NotEqual || cond == Assembler::Equal,
              "other condition codes not supported");
 
-  branch32(cond, lhs, val.firstHalf(), label);
+  Label done;
+
+  if (cond == Assembler::Equal) {
+    branch32(Assembler::NotEqual, lhs, val.firstHalf(), &done);
+  } else {
+    branch32(Assembler::NotEqual, lhs, val.firstHalf(), label);
+  }
   branch32(cond, Address(lhs.base, lhs.offset + sizeof(uint32_t)),
            val.secondHalf(), label);
+
+  bind(&done);
+}
+
+void MacroAssembler::branch64(Condition cond, const Address& lhs,
+                              Register64 rhs, Label* label) {
+  MOZ_ASSERT(cond == Assembler::NotEqual || cond == Assembler::Equal,
+             "other condition codes not supported");
+
+  Label done;
+
+  if (cond == Assembler::Equal) {
+    branch32(Assembler::NotEqual, lhs, rhs.low, &done);
+  } else {
+    branch32(Assembler::NotEqual, lhs, rhs.low, label);
+  }
+  branch32(cond, Address(lhs.base, lhs.offset + sizeof(uint32_t)), rhs.high,
+           label);
+
+  bind(&done);
 }
 
 void MacroAssembler::branch64(Condition cond, const Address& lhs,
                               const Address& rhs, Register scratch,
                               Label* label) {
-  MOZ_ASSERT(cond == Assembler::NotEqual,
+  MOZ_ASSERT(cond == Assembler::NotEqual || cond == Assembler::Equal,
              "other condition codes not supported");
   MOZ_ASSERT(lhs.base != scratch);
   MOZ_ASSERT(rhs.base != scratch);
 
+  Label done;
+
   load32(rhs, scratch);
-  branch32(cond, lhs, scratch, label);
+  if (cond == Assembler::Equal) {
+    branch32(Assembler::NotEqual, lhs, scratch, &done);
+  } else {
+    branch32(Assembler::NotEqual, lhs, scratch, label);
+  }
 
   load32(Address(rhs.base, rhs.offset + sizeof(uint32_t)), scratch);
   branch32(cond, Address(lhs.base, lhs.offset + sizeof(uint32_t)), scratch,
            label);
+
+  bind(&done);
 }
 
 void MacroAssembler::branch64(Condition cond, Register64 lhs, Imm64 val,
@@ -933,6 +980,17 @@ void MacroAssembler::branchTruncateFloat32MaybeModUint32(FloatRegister src,
 
 //}}} check_macroassembler_style
 // ===============================================================
+
+void MacroAssembler::cmpPtrMovePtr(Condition cond, Register lhs, Register rhs,
+                                   Register src, Register dest) {
+  cmp32Move32(cond, lhs, rhs, src, dest);
+}
+
+void MacroAssembler::cmpPtrMovePtr(Condition cond, Register lhs,
+                                   const Address& rhs, Register src,
+                                   Register dest) {
+  cmp32Move32(cond, lhs, rhs, src, dest);
+}
 
 void MacroAssemblerMIPSCompat::incrementInt32Value(const Address& addr) {
   asMasm().add32(Imm32(1), ToPayload(addr));

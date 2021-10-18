@@ -3,7 +3,6 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 /* -*- indent-tabs-mode: nil; js-indent-level: 4 -*- */
-
 "use strict";
 
 loadRelativeToScript('utility.js');
@@ -27,9 +26,10 @@ printErr("Writing " + gcFunctions_filename);
 redirect(gcFunctions_filename);
 
 for (var name in gcFunctions) {
-    for (let readable of (readableNames[name] || [])) {
+    for (const readable of (readableNames[name] || [name])) {
         print("");
-        print("GC Function: " + name + "$" + readable);
+        const fullname = (name == readable) ? name : name + "$" + readable;
+        print("GC Function: " + fullname);
         let current = name;
         do {
             current = gcFunctions[current];
@@ -72,5 +72,4 @@ for (var block in gcEdges) {
 
 printErr("Writing " + limitedFunctionsList_filename);
 redirect(limitedFunctionsList_filename);
-for (const [name, limits] of Object.entries(limitedFunctions))
-    print(`${limits} ${name}`);
+print(JSON.stringify(limitedFunctions, null, 4));

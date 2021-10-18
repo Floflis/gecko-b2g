@@ -54,13 +54,6 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   XPIInternal: "resource://gre/modules/addons/XPIProvider.jsm",
 });
 
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "uuidGen",
-  "@mozilla.org/uuid-generator;1",
-  "nsIUUIDGenerator"
-);
-
 XPCOMUtils.defineLazyGetter(this, "IconDetails", () => {
   return ChromeUtils.import("resource://gre/modules/ExtensionParent.jsm", {})
     .ExtensionParent.IconDetails;
@@ -626,7 +619,7 @@ function defineSyncGUID(aAddon) {
   // Define .syncGUID as a lazy property which is also settable
   Object.defineProperty(aAddon, "syncGUID", {
     get: () => {
-      aAddon.syncGUID = uuidGen.generateUUID().toString();
+      aAddon.syncGUID = Services.uuid.generateUUID().toString();
       return aAddon.syncGUID;
     },
     set: val => {
@@ -705,6 +698,15 @@ var loadManifest = async function(aPackage, aLocation, aOldAddon) {
 
     await addon.updateBlocklistState();
     addon.appDisabled = !XPIDatabase.isUsableAddon(addon);
+
+    // Always report when there is an attempt to install a blocked add-on.
+    // (transitions from STATE_BLOCKED to STATE_NOT_BLOCKED are checked
+    //  in the individual AddonInstall subclasses).
+    if (addon.blocklistState == nsIBlocklistService.STATE_BLOCKED) {
+      addon.recordAddonBlockChangeTelemetry(
+        aOldAddon ? "addon_update" : "addon_install"
+      );
+    }
   }
 
   defineSyncGUID(addon);
@@ -2055,6 +2057,14 @@ var LocalAddonInstall = class extends AddonInstall {
     this.addon.updateDate = Date.now();
     this.addon.installDate = addon ? addon.installDate : this.addon.updateDate;
 
+    // Report if blocked add-on becomes unblocked through this install.
+    if (
+      addon?.blocklistState === nsIBlocklistService.STATE_BLOCKED &&
+      this.addon.blocklistState === nsIBlocklistService.STATE_NOT_BLOCKED
+    ) {
+      this.addon.recordAddonBlockChangeTelemetry("addon_install");
+    }
+
     if (!this.addon.isCompatible) {
       this.state = AddonManager.STATE_CHECKING_UPDATE;
 
@@ -2510,6 +2520,7 @@ var DownloadAddonInstall = class extends AddonInstall {
    * Notify listeners that the download completed.
    */
   async downloadCompleted() {
+    let wasUpdate = !!this.existingAddon;
     let aAddon = await XPIDatabase.getVisibleAddonForID(this.addon.id);
     if (aAddon) {
       this.existingAddon = aAddon;
@@ -2526,6 +2537,16 @@ var DownloadAddonInstall = class extends AddonInstall {
     }
     this.addon.propagateDisabledState(this.existingAddon);
     await this.addon.updateBlocklistState();
+
+    // Report if blocked add-on becomes unblocked through this install/update.
+    if (
+      aAddon?.blocklistState === nsIBlocklistService.STATE_BLOCKED &&
+      this.addon.blocklistState === nsIBlocklistService.STATE_NOT_BLOCKED
+    ) {
+      this.addon.recordAddonBlockChangeTelemetry(
+        wasUpdate ? "addon_update" : "addon_install"
+      );
+    }
 
     if (this._callInstallListeners("onDownloadEnded")) {
       // If a listener changed our state then do not proceed with the install
@@ -2911,17 +2932,14 @@ UpdateChecker.prototype = {
 
     let update = await AUC.getNewestCompatibleUpdate(
       aUpdates,
+      this.addon,
       this.appVersion,
       this.platformVersion,
       ignoreMaxVersion,
       ignoreStrictCompat
     );
 
-    if (
-      update &&
-      Services.vc.compare(this.addon.version, update.version) < 0 &&
-      !this.addon.location.locked
-    ) {
+    if (update && !this.addon.location.locked) {
       for (let currentInstall of XPIInstall.installs) {
         // Skip installs that don't match the available update
         if (
@@ -3540,7 +3558,7 @@ class SystemAddonInstaller extends DirectoryInstaller {
     newDir.append("blank");
 
     while (true) {
-      newDir.leafName = uuidGen.generateUUID().toString();
+      newDir.leafName = Services.uuid.generateUUID().toString();
       try {
         await OS.File.makeDir(newDir.path, { ignoreExisting: false });
         break;
@@ -3562,7 +3580,15 @@ class SystemAddonInstaller extends DirectoryInstaller {
     for (let addon of aAddons) {
       let install = await createLocalInstall(
         addon._sourceBundle,
-        this.location
+        this.location,
+        // Make sure that system addons being installed for the first time through
+        // Balrog have telemetryInfo associated with them (on the contrary the ones
+        // updated through Balrog but part of the build will already have the same
+        // `source`, but we expect no `method` to be set for them).
+        {
+          source: "system-addon",
+          method: "product-updates",
+        }
       );
       installs.push(install);
     }

@@ -180,6 +180,8 @@ void GonkOffloadPlayer::InitInternal() {
   mMediaPlayer->prepareAsync();
 }
 
+void GonkOffloadPlayer::ShutdownInternal() { ResetInternal(); }
+
 void GonkOffloadPlayer::ResetInternal() {
   if (mNativeWindow) {
     mNativeWindow->setNewFrameCallback(nullptr);
@@ -374,6 +376,7 @@ void GonkOffloadPlayer::PlayStateChanged() {
       mMediaPlayer->pause();
     }
   }
+  UpdateAudibleState();
   MediaOffloadPlayer::PlayStateChanged();
 }
 
@@ -399,6 +402,12 @@ void GonkOffloadPlayer::PlaybackSettingsChanged() {
     rate.mPitch = mPreservesPitch ? 1.0f : (float)mPlaybackRate;
     mMediaPlayer->setPlaybackSettings(rate);
   }
+}
+
+void GonkOffloadPlayer::UpdateAudibleState() {
+  MOZ_ASSERT(OnTaskQueue());
+  mIsAudioDataAudible =
+      mInfo.HasAudio() && mMediaPlayer && mMediaPlayer->isPlaying();
 }
 
 }  // namespace mozilla

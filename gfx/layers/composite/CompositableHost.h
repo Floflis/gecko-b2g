@@ -48,7 +48,6 @@ class CompositableParentManager;
 class WebRenderImageHost;
 class ContentHost;
 class ContentHostTexture;
-class HostLayerManager;
 struct EffectChain;
 
 struct ImageCompositeNotificationInfo {
@@ -89,7 +88,7 @@ class CompositableHost {
   explicit CompositableHost(const TextureInfo& aTextureInfo);
 
   static already_AddRefed<CompositableHost> Create(
-      const TextureInfo& aTextureInfo, bool aUseWebRender);
+      const TextureInfo& aTextureInfo);
 
   virtual CompositableType GetType() = 0;
 
@@ -131,14 +130,6 @@ class CompositableHost {
   }
 
   const TextureInfo& GetTextureInfo() const { return mTextureInfo; }
-
-  /**
-   * Adds a mask effect using this texture as the mask, if possible.
-   * @return true if the effect was added, false otherwise.
-   */
-  bool AddMaskEffect(EffectChain& aEffects, const gfx::Matrix4x4& aTransform);
-
-  void RemoveMaskEffect();
 
   TextureSourceProvider* GetTextureSourceProvider() const;
 
@@ -193,8 +184,6 @@ class CompositableHost {
     return nullptr;
   }
 
-  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) = 0;
-
   struct TimedTexture {
     CompositableTextureHostRef mTexture;
     TimeStamp mTimeStamp;
@@ -206,13 +195,6 @@ class CompositableHost {
   virtual void UseComponentAlphaTextures(TextureHost* aTextureOnBlack,
                                          TextureHost* aTextureOnWhite);
   virtual void RemoveTextureHost(TextureHost* aTexture);
-
-  // Called every time this is composited
-  void BumpFlashCounter() {
-    mFlashCounter = mFlashCounter >= DIAGNOSTIC_FLASH_COUNTER_MAX
-                        ? DIAGNOSTIC_FLASH_COUNTER_MAX
-                        : mFlashCounter + 1;
-  }
 
   uint64_t GetCompositorBridgeID() const { return mCompositorBridgeID; }
 
@@ -240,15 +222,12 @@ class CompositableHost {
   virtual uint32_t GetDroppedFrames() { return 0; }
 
  protected:
-  HostLayerManager* GetLayerManager() const;
-
  protected:
   TextureInfo mTextureInfo;
   AsyncCompositableRef mAsyncRef;
   uint64_t mCompositorBridgeID;
   RefPtr<TextureSourceProvider> mTextureSourceProvider;
   Layer* mLayer;
-  uint32_t mFlashCounter;  // used when the pref "layers.flash-borders" is true.
   bool mAttached;
   bool mKeepAttached;
 };

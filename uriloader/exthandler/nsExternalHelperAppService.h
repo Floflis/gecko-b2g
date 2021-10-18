@@ -14,11 +14,13 @@
 #include "nsIWebProgressListener2.h"
 #include "nsIHelperAppLauncherDialog.h"
 
+#include "nsILoadInfo.h"
 #include "nsIMIMEInfo.h"
 #include "nsIMIMEService.h"
 #include "nsINamed.h"
 #include "nsIStreamListener.h"
 #include "nsIFile.h"
+#include "nsIPermission.h"
 #include "nsString.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsIInterfaceRequestorUtils.h"
@@ -82,7 +84,8 @@ class nsExternalHelperAppService : public nsIExternalHelperAppService,
   NS_IMETHOD GetProtocolHandlerInfo(const nsACString& aScheme,
                                     nsIHandlerInfo** aHandlerInfo) override;
   NS_IMETHOD LoadURI(nsIURI* aURI, nsIPrincipal* aTriggeringPrincipal,
-                     mozilla::dom::BrowsingContext* aBrowsingContext) override;
+                     mozilla::dom::BrowsingContext* aBrowsingContext,
+                     bool aWasTriggeredExternally) override;
   NS_IMETHOD SetProtocolHandlerDefaults(nsIHandlerInfo* aHandlerInfo,
                                         bool aOSHandlerExists) override;
 
@@ -266,6 +269,8 @@ class nsExternalAppHandler final : public nsIStreamListener,
   void SetShouldCloseWindow() { mShouldCloseWindow = true; }
 
  protected:
+  bool IsDownloadSpam(nsIChannel* aChannel);
+
   ~nsExternalAppHandler();
 
   nsCOMPtr<nsIFile> mTempFile;

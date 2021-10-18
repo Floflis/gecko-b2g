@@ -52,30 +52,23 @@ class GeckoMediaPluginService : public mozIGeckoMediaPluginService,
   NS_DECL_THREADSAFE_ISUPPORTS
 
   RefPtr<GetCDMParentPromise> GetCDM(const NodeIdParts& aNodeIdParts,
-                                     nsTArray<nsCString> aTags,
+                                     const nsACString& aKeySystem,
                                      GMPCrashHelper* aHelper);
+
+#if defined(MOZ_SANDBOX) && defined(MOZ_DEBUG) && defined(ENABLE_TESTS)
+  RefPtr<GetGMPContentParentPromise> GetContentParentForTest();
+#endif
 
   // mozIGeckoMediaPluginService
   NS_IMETHOD GetThread(nsIThread** aThread) override;
-  NS_IMETHOD GetDecryptingGMPVideoDecoder(
+  NS_IMETHOD GetGMPVideoDecoder(
       GMPCrashHelper* aHelper, nsTArray<nsCString>* aTags,
       const nsACString& aNodeId,
-      UniquePtr<GetGMPVideoDecoderCallback>&& aCallback,
-      uint32_t aDecryptorId) override;
+      UniquePtr<GetGMPVideoDecoderCallback>&& aCallback) override;
   NS_IMETHOD GetGMPVideoEncoder(
       GMPCrashHelper* aHelper, nsTArray<nsCString>* aTags,
       const nsACString& aNodeId,
       UniquePtr<GetGMPVideoEncoderCallback>&& aCallback) override;
-
-  // Helper for backwards compatibility with WebRTC/tests.
-  NS_IMETHOD
-  GetGMPVideoDecoder(
-      GMPCrashHelper* aHelper, nsTArray<nsCString>* aTags,
-      const nsACString& aNodeId,
-      UniquePtr<GetGMPVideoDecoderCallback>&& aCallback) override {
-    return GetDecryptingGMPVideoDecoder(aHelper, aTags, aNodeId,
-                                        std::move(aCallback), 0);
-  }
 
   NS_IMETHOD RunPluginCrashCallbacks(uint32_t aPluginId,
                                      const nsACString& aPluginName) override;

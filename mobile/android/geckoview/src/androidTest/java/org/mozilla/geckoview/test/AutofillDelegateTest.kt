@@ -23,8 +23,7 @@ import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.WithDisplay
-import org.mozilla.geckoview.test.util.Callbacks
-
+import org.junit.Assume.assumeThat
 
 @RunWith(AndroidJUnit4::class)
 @MediumTest
@@ -37,7 +36,7 @@ class AutofillDelegateTest : BaseSessionTest() {
 
         mainSession.loadTestPath(FORMS_HTML_PATH)
         // Wait for the auto-fill nodes to populate.
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             // For the root document and the iframe document, each has a form group and
             // a group for inputs outside of forms, so the total count is 4.
             @AssertCalled(count = 4)
@@ -61,7 +60,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         // Submit the session.
         mainSession.evaluateJS("document.querySelector('#form1').submit()")
 
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 5)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -101,7 +100,7 @@ class AutofillDelegateTest : BaseSessionTest() {
 
         mainSession.loadTestPath(FORMS_ID_VALUE_HTML_PATH)
         // Wait for the auto-fill nodes to populate.
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -120,7 +119,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         // Submit the session.
         mainSession.evaluateJS("document.querySelector('#form1').submit()")
 
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 2)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -149,7 +148,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         // SessionAccessibility for a11y auto-fill support.
         mainSession.loadTestPath(FORMS_HTML_PATH)
         // Wait for the auto-fill nodes to populate.
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             // For the root document and the iframe document, each has a form group and
             // a group for inputs outside of forms, so the total count is 4.
             @AssertCalled(count = 4)
@@ -172,9 +171,9 @@ class AutofillDelegateTest : BaseSessionTest() {
                     $doc.querySelector('${entry.key}').addEventListener(
                       'input', event => {
                         let eventInterface =
-                          event instanceof InputEvent ? "InputEvent" :
-                          event instanceof UIEvent ? "UIEvent" :
-                          event instanceof Event ? "Event" : "Unknown";
+                          event instanceof $doc.defaultView.InputEvent ? "InputEvent" :
+                          event instanceof $doc.defaultView.UIEvent ? "UIEvent" :
+                          event instanceof $doc.defaultView.Event ? "Event" : "Unknown";
                         resolve([
                           '${entry.key}',
                           event.target.value,
@@ -238,20 +237,41 @@ class AutofillDelegateTest : BaseSessionTest() {
         }
     }
 
+    @Test fun autofillUnknownValue() {
+        // Test parts of the Oreo auto-fill API; there is another autofill test in
+        // SessionAccessibility for a11y auto-fill support.
+        mainSession.loadTestPath(FORMS_HTML_PATH)
+        // Wait for the auto-fill nodes to populate.
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
+            @AssertCalled(count = 1)
+            override fun onAutofill(session: GeckoSession,
+                                    notification: Int,
+                                    node: Autofill.Node?) {
+            }
+        })
+
+        val autofillValues = SparseArray<CharSequence>()
+        autofillValues.append(-1, "lobster")
+        mainSession.autofill(autofillValues)
+    }
+
     private fun countAutofillNodes(cond: (Autofill.Node) -> Boolean =
                                    { it.inputType != Autofill.InputType.NONE },
                            root: Autofill.Node? = null): Int {
         val node = if (root !== null) root else mainSession.autofillSession.root
         return (if (cond(node)) 1 else 0) +
-                node.children.sumBy {
+                node.children.sumOf {
                     countAutofillNodes(cond, it) }
     }
 
     @WithDisplay(width = 100, height = 100)
+
+    // disable test on debug for frequently failing #Bug 1717506
     @Test fun autofillNavigation() {
+    assumeThat(sessionRule.env.isDebugBuild, equalTo(false))
         // Wait for the accessibility nodes to populate.
         mainSession.loadTestPath(FORMS_HTML_PATH)
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 4)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -266,11 +286,11 @@ class AutofillDelegateTest : BaseSessionTest() {
         })
 
         assertThat("Initial auto-fill count should match",
-                   countAutofillNodes(), equalTo(14))
+                   countAutofillNodes(), equalTo(16))
 
         // Now wait for the nodes to clear.
         mainSession.loadTestPath(HELLO_HTML_PATH)
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -287,7 +307,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         // Now wait for the nodes to reappear.
         mainSession.waitForPageStop()
         mainSession.goBack()
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 4)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -301,13 +321,13 @@ class AutofillDelegateTest : BaseSessionTest() {
             }
         })
         assertThat("Should have auto-fill fields again",
-                   countAutofillNodes(), equalTo(14))
+                   countAutofillNodes(), equalTo(16))
         assertThat("Should not have focused field",
                    countAutofillNodes({ it.focused }), equalTo(0))
 
         mainSession.evaluateJS("document.querySelector('#pass2').focus()")
 
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -325,12 +345,12 @@ class AutofillDelegateTest : BaseSessionTest() {
         // Hidden elements are ignored.
         // TODO: Is this actually correct? Should the whole focused branch be
         // visible or just the nodes as described above?
-        assertThat("Should have seven visible nodes",
+        assertThat("Should have nine visible nodes",
                    countAutofillNodes({ node -> node.visible }),
-                   equalTo(6))
+                   equalTo(8))
 
         mainSession.evaluateJS("document.querySelector('#pass2').blur()")
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -349,7 +369,7 @@ class AutofillDelegateTest : BaseSessionTest() {
     @Test fun autofillUserpass() {
         mainSession.loadTestPath(FORMS2_HTML_PATH)
         // Wait for the auto-fill nodes to populate.
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 3)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -392,7 +412,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         // inactive. Likewise, we should focus a node once we return.
         mainSession.loadTestPath(FORMS_HTML_PATH)
         // Wait for the auto-fill nodes to populate.
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             // For the root document and the iframe document, each has a form group and
             // a group for inputs outside of forms, so the total count is 4.
             @AssertCalled(count = 4)
@@ -408,7 +428,7 @@ class AutofillDelegateTest : BaseSessionTest() {
         })
 
         mainSession.evaluateJS("document.querySelector('#pass2').focus()")
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -424,7 +444,7 @@ class AutofillDelegateTest : BaseSessionTest() {
 
         // Make sure we get NODE_BLURRED when inactive
         mainSession.setActive(false)
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -438,7 +458,7 @@ class AutofillDelegateTest : BaseSessionTest() {
 
         // Make sure we get NODE_FOCUSED when active once again
         mainSession.setActive(true)
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 1)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,
@@ -456,7 +476,7 @@ class AutofillDelegateTest : BaseSessionTest() {
     @WithDisplay(width = 100, height = 100)
     @Test fun autofillAutocompleteAttribute() {
         mainSession.loadTestPath(FORMS_AUTOCOMPLETE_HTML_PATH)
-        sessionRule.waitUntilCalled(object : Callbacks.AutofillDelegate {
+        sessionRule.waitUntilCalled(object : Autofill.Delegate {
             @AssertCalled(count = 3)
             override fun onAutofill(session: GeckoSession,
                                     notification: Int,

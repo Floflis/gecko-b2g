@@ -7,6 +7,7 @@
 DIRS += [
     "ime",
     "actors",
+    "sessionstore",
     "test",
     "virtualcursor",
 ]
@@ -18,7 +19,6 @@ EXTRA_COMPONENTS += [
     "HelperAppDialog.js",
     "KillSwitch.js",
     "MailtoProtocolHandler.js",
-    "OMAContentHandler.js",
     "ProcessGlobal.js",
     "SmsProtocolHandler.js",
     "TelProtocolHandler.js",
@@ -55,6 +55,7 @@ EXTRA_JS_MODULES += [
     "B2GProcessSelector.jsm",
     "ChromeNotifications.jsm",
     "ContentPermissionPrompt.jsm",
+    "CustomHeaderInjector.jsm",
     "dbg-browser-actors.js",
     "ErrorPage.jsm",
     "GeckoBridge.jsm",
@@ -67,8 +68,11 @@ EXTRA_JS_MODULES += [
     "Screenshot.jsm",
     "ServiceWorkerAssistant.jsm",
     "SettingsPrefsSync.jsm",
+    "ShareDelegate.jsm",
     "TelURIParser.jsm",
 ]
+
+EXTRA_PP_JS_MODULES += ["MarionetteController.jsm"]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] != "gonk":
     EXTRA_JS_MODULES += ["GlobalSimulatorScreen.jsm"]

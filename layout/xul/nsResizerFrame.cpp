@@ -33,6 +33,13 @@
 
 using namespace mozilla;
 
+#ifdef MOZ_WAYLAND
+#  include "mozilla/WidgetUtilsGtk.h"
+#  define IS_WAYLAND_DISPLAY() mozilla::widget::GdkIsWaylandDisplay()
+#else
+#  define IS_WAYLAND_DISPLAY() false
+#endif
+
 //
 // NS_NewResizerFrame
 //
@@ -191,7 +198,9 @@ nsresult nsResizerFrame::HandleEvent(nsPresContext* aPresContext,
 
         // Don't allow resizing a window or a popup past the edge of the screen,
         // so adjust the rectangle to fit within the available screen area.
-        if (window) {
+        // Don't check it on Wayland as we can't get absolute window position
+        // there.
+        if (window && !IS_WAYLAND_DISPLAY()) {
           nsCOMPtr<nsIScreen> screen;
           nsCOMPtr<nsIScreenManager> sm(
               do_GetService("@mozilla.org/gfx/screenmanager;1"));
@@ -210,7 +219,7 @@ nsresult nsResizerFrame::HandleEvent(nsPresContext* aPresContext,
               rect.IntersectRect(rect, screenRect);
             }
           }
-        } else if (menuPopupFrame) {
+        } else if (menuPopupFrame && !IS_WAYLAND_DISPLAY()) {
           nsRect frameRect = menuPopupFrame->GetScreenRectInAppUnits();
           nsIFrame* rootFrame = aPresContext->PresShell()->GetRootFrame();
           nsRect rootScreenRect = rootFrame->GetScreenRectInAppUnits();
@@ -286,14 +295,7 @@ nsresult nsResizerFrame::HandleEvent(nsPresContext* aPresContext,
 
     case eMouseClick: {
       WidgetMouseEvent* mouseEvent = aEvent->AsMouseEvent();
-      if (mouseEvent->IsLeftClickEvent()
-#ifdef XP_MACOSX
-          // On Mac, ctrl-click will send a context menu event from the widget,
-          // so we don't want to dispatch widget command if it is redispatched
-          // from the mouse event with ctrl key is pressed.
-          && !mouseEvent->IsControl()
-#endif
-      ) {
+      if (mouseEvent->IsLeftClickEvent()) {
         MouseClicked(mouseEvent);
       }
       break;
@@ -512,7 +514,8 @@ nsResizerFrame::Direction nsResizerFrame::GetDirection() {
 void nsResizerFrame::MouseClicked(WidgetMouseEvent* aEvent) {
   // Execute the oncommand event handler.
   nsCOMPtr<nsIContent> content = mContent;
-  nsContentUtils::DispatchXULCommand(
-      content, false, nullptr, nullptr, aEvent->IsControl(), aEvent->IsAlt(),
-      aEvent->IsShift(), aEvent->IsMeta(), aEvent->mInputSource);
+  nsContentUtils::DispatchXULCommand(content, false, nullptr, nullptr,
+                                     aEvent->IsControl(), aEvent->IsAlt(),
+                                     aEvent->IsShift(), aEvent->IsMeta(),
+                                     aEvent->mInputSource, aEvent->mButton);
 }

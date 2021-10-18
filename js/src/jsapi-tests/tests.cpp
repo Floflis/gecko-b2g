@@ -10,8 +10,11 @@
 
 #include <stdio.h>
 
+#include "js/ArrayBuffer.h"
 #include "js/CompilationAndEvaluation.h"  // JS::Evaluate
+#include "js/GlobalObject.h"              // JS_NewGlobalObject
 #include "js/Initialization.h"
+#include "js/PropertyAndElement.h"  // JS_DefineFunction
 #include "js/RootingAPI.h"
 #include "js/SourceText.h"  // JS::Source{Ownership,Text}
 
@@ -30,7 +33,9 @@ bool JSAPITest::init(JSContext* maybeReusableContext) {
   if (!cx) {
     return false;
   }
+
   js::UseInternalJobQueues(cx);
+
   if (!JS::InitSelfHostedCode(cx)) {
     return false;
   }

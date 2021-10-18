@@ -43,7 +43,7 @@ impl Example for App {
         let space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
 
         builder.push_simple_stacking_context(
-            bounds.origin,
+            bounds.min,
             space_and_clip.spatial_id,
             PrimitiveFlags::IS_BACKFACE_VISIBLE,
         );
@@ -52,7 +52,7 @@ impl Example for App {
 
         builder.push_image(
             &CommonItemProperties::new(
-                LayoutRect::new(LayoutPoint::new(100.0, 100.0), image_size),
+                LayoutRect::from_origin_and_size(LayoutPoint::new(100.0, 100.0), image_size),
                 space_and_clip,
             ),
             bounds,
@@ -64,7 +64,7 @@ impl Example for App {
 
         builder.push_image(
             &CommonItemProperties::new(
-                LayoutRect::new(LayoutPoint::new(250.0, 100.0), image_size),
+                LayoutRect::from_origin_and_size(LayoutPoint::new(250.0, 100.0), image_size),
                 space_and_clip,
             ),
             bounds,
@@ -104,7 +104,7 @@ impl Example for App {
                     &DirtyRect::All,
                 );
                 let mut txn = Transaction::new();
-                txn.generate_frame(0);
+                txn.generate_frame(0, RenderReasons::empty());
                 api.send_transaction(document_id, txn);
             }
             _ => {}

@@ -31,9 +31,6 @@ with Files("BRFrame.*"):
 with Files("WBRFrame.*"):
     BUG_COMPONENT = ("Core", "Layout: Block and Inline")
 
-with Files("nsBulletFrame.*"):
-    BUG_COMPONENT = ("Core", "Layout: Block and Inline")
-
 with Files("nsFirstLetterFrame.*"):
     BUG_COMPONENT = ("Core", "Layout: Block and Inline")
 
@@ -173,7 +170,6 @@ UNIFIED_SOURCES += [
     "nsBackdropFrame.cpp",
     "nsBlockFrame.cpp",
     "nsBlockReflowContext.cpp",
-    "nsBulletFrame.cpp",
     "nsCanvasFrame.cpp",
     "nsColumnSetFrame.cpp",
     "nsContainerFrame.cpp",
@@ -257,6 +253,7 @@ LOCAL_INCLUDES += [
     "/dom/base",
     "/dom/html",
     "/dom/xul",
+    "/gfx/cairo/cairo/src",
 ]
 
 JAR_MANIFESTS += ["jar.mn"]
@@ -267,8 +264,6 @@ CONTENT_ACCESSIBLE_FILES.html = [
 
 MOCHITEST_MANIFESTS += ["test/mochitest.ini"]
 MOCHITEST_CHROME_MANIFESTS += ["test/chrome.ini"]
-
-CXXFLAGS += CONFIG["MOZ_CAIRO_CFLAGS"]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     CXXFLAGS += CONFIG["TK_CFLAGS"]

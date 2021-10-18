@@ -15,12 +15,15 @@
 #include "mozilla/NotNull.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/dom/ImageBitmapBinding.h"
 #include "mozilla/dom/ImageBitmapSource.h"
+#include "mozilla/dom/SafeRefPtr.h"
 #include "nsCOMPtr.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsIGlobalObject.h"
 #include "nsISupports.h"
 #include "nsWeakReference.h"
+#include "mozilla/dom/ImageBitmapBinding.h"
 
 #ifdef XP_WIN
 #  undef PostMessage
@@ -31,6 +34,12 @@ class nsISerialEventTarget;
 
 namespace mozilla {
 class ErrorResult;
+
+namespace extensions {
+
+class ExtensionBrowser;
+
+}  // namespace extensions
 
 namespace dom {
 
@@ -51,7 +60,6 @@ class OnErrorEventHandlerNonNull;
 template <typename T>
 class Optional;
 class Performance;
-struct PostMessageOptions;
 class Promise;
 class RequestOrUSVString;
 template <typename T>
@@ -59,6 +67,7 @@ class Sequence;
 class ServiceWorkerDescriptor;
 class ServiceWorkerRegistration;
 class ServiceWorkerRegistrationDescriptor;
+struct StructuredSerializeOptions;
 class WorkerLocation;
 class WorkerNavigator;
 class WorkerPrivate;
@@ -98,6 +107,8 @@ class WorkerGlobalScopeBase : public DOMEventTargetHelper,
 
   bool IsSharedMemoryAllowed() const final;
 
+  StorageAccess GetStorageAccess() final;
+
   Maybe<ClientInfo> GetClientInfo() const final;
 
   Maybe<ServiceWorkerDescriptor> GetController() const final;
@@ -113,6 +124,10 @@ class WorkerGlobalScopeBase : public DOMEventTargetHelper,
   AbstractThread* AbstractMainThreadFor(TaskCategory) final {
     MOZ_CRASH("AbstractMainThreadFor not supported for workers.");
   }
+
+  MOZ_CAN_RUN_SCRIPT
+  void ReportError(JSContext* aCx, JS::Handle<JS::Value> aError,
+                   CallerType aCallerType, ErrorResult& aRv);
 
   // atob, btoa, and dump are declared (separately) by both WorkerGlobalScope
   // and WorkerDebuggerGlobalScope WebIDL interfaces
@@ -251,13 +266,18 @@ class WorkerGlobalScope : public WorkerGlobalScopeBase,
   MOZ_CAN_RUN_SCRIPT
   void ClearInterval(int32_t aHandle);
 
-  already_AddRefed<Promise> CreateImageBitmap(const ImageBitmapSource& aImage,
-                                              ErrorResult& aRv);
+  already_AddRefed<Promise> CreateImageBitmap(
+      const ImageBitmapSource& aImage, const ImageBitmapOptions& aOptions,
+      ErrorResult& aRv);
 
-  already_AddRefed<Promise> CreateImageBitmap(const ImageBitmapSource& aImage,
-                                              int32_t aSx, int32_t aSy,
-                                              int32_t aSw, int32_t aSh,
-                                              ErrorResult& aRv);
+  already_AddRefed<Promise> CreateImageBitmap(
+      const ImageBitmapSource& aImage, int32_t aSx, int32_t aSy, int32_t aSw,
+      int32_t aSh, const ImageBitmapOptions& aOptions, ErrorResult& aRv);
+
+  void StructuredClone(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                       const StructuredSerializeOptions& aOptions,
+                       JS::MutableHandle<JS::Value> aRetval,
+                       ErrorResult& aError);
 
   already_AddRefed<Promise> Fetch(const RequestOrUSVString& aInput,
                                   const RequestInit& aInit,
@@ -317,7 +337,8 @@ class DedicatedWorkerGlobalScope final
                    const Sequence<JSObject*>& aTransferable, ErrorResult& aRv);
 
   void PostMessage(JSContext* aCx, JS::Handle<JS::Value> aMessage,
-                   const PostMessageOptions& aOptions, ErrorResult& aRv);
+                   const StructuredSerializeOptions& aOptions,
+                   ErrorResult& aRv);
 
   void Close();
 
@@ -367,6 +388,8 @@ class ServiceWorkerGlobalScope final : public WorkerGlobalScope {
 
   already_AddRefed<Promise> SkipWaiting(ErrorResult& aRv);
 
+  SafeRefPtr<extensions::ExtensionBrowser> AcquireExtensionBrowser();
+
   IMPL_EVENT_HANDLER(install)
   IMPL_EVENT_HANDLER(activate)
 
@@ -395,6 +418,7 @@ class ServiceWorkerGlobalScope final : public WorkerGlobalScope {
   RefPtr<Clients> mClients;
   const nsString mScope;
   RefPtr<ServiceWorkerRegistration> mRegistration;
+  SafeRefPtr<extensions::ExtensionBrowser> mExtensionBrowser;
 };
 
 class WorkerDebuggerGlobalScope final : public WorkerGlobalScopeBase {

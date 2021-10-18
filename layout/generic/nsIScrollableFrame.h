@@ -32,15 +32,15 @@ class nsIScrollPositionListener;
 class nsIFrame;
 class nsPresContext;
 class nsIContent;
-class nsDisplayListBuilder;
 
 namespace mozilla {
-struct ContainerLayerParameters;
 class DisplayItemClip;
+class nsDisplayListBuilder;
+
 namespace layers {
 struct ScrollMetadata;
 class Layer;
-class LayerManager;
+class WebRenderLayerManager;
 }  // namespace layers
 namespace layout {
 class ScrollAnchorContainer;
@@ -55,7 +55,6 @@ class ScrollAnchorContainer;
 class nsIScrollableFrame : public nsIScrollbarMediator {
  public:
   typedef mozilla::CSSIntPoint CSSIntPoint;
-  typedef mozilla::ContainerLayerParameters ContainerLayerParameters;
   typedef mozilla::layers::ScrollSnapInfo ScrollSnapInfo;
   typedef mozilla::layout::ScrollAnchorContainer ScrollAnchorContainer;
   typedef mozilla::ScrollMode ScrollMode;
@@ -84,6 +83,12 @@ class nsIScrollableFrame : public nsIScrollbarMediator {
    * scrollbars (for <input>, basically).
    */
   virtual bool IsForTextControlWithNoScrollbars() const = 0;
+
+  /**
+   * Returns whether we already have anonymous content nodes for all our needed
+   * scrollbar parts (or a superset thereof).
+   */
+  virtual bool HasAllNeededScrollbars() const = 0;
 
   /**
    * Get the overscroll-behavior styles.
@@ -379,7 +384,13 @@ class nsIScrollableFrame : public nsIScrollbarMediator {
    * This basically means that we should allocate resources in the
    * expectation that scrolling is going to happen.
    */
-  virtual bool IsScrollingActive(nsDisplayListBuilder* aBuilder) = 0;
+  virtual bool IsScrollingActive() = 0;
+
+  /**
+   * The same as IsScrollingActive but minimal display ports are not considered
+   * active.
+   */
+  virtual bool IsScrollingActiveNotMinimalDisplayPort() = 0;
 
   /**
    * Returns true if this scroll frame might be scrolled
@@ -387,16 +398,6 @@ class nsIScrollableFrame : public nsIScrollbarMediator {
    */
   virtual bool IsMaybeAsynchronouslyScrolled() = 0;
 
-  /**
-   * Same as the above except doesn't take into account will-change budget,
-   * which means that it can be called during display list building.
-   */
-  virtual bool IsMaybeScrollingActive() const = 0;
-  /**
-   * Call this when the layer(s) induced by active scrolling are being
-   * completely redrawn.
-   */
-  virtual void ResetScrollPositionForLayerPixelAlignment() = 0;
   /**
    * Was the current presentation state for this frame restored from history?
    */
@@ -480,21 +481,19 @@ class nsIScrollableFrame : public nsIScrollbarMediator {
    * Returns the ScrollMetadata contributed by this frame, if there is one.
    */
   virtual mozilla::Maybe<mozilla::layers::ScrollMetadata> ComputeScrollMetadata(
-      mozilla::layers::LayerManager* aLayerManager,
-      const nsIFrame* aContainerReferenceFrame,
-      const mozilla::Maybe<ContainerLayerParameters>& aParameters,
-      const mozilla::DisplayItemClip* aClip) const = 0;
-  /**
-   * Ensure's aLayer is clipped to the display port.
-   */
-  virtual void ClipLayerToDisplayPort(
-      mozilla::layers::Layer* aLayer, const mozilla::DisplayItemClip* aClip,
-      const ContainerLayerParameters& aParameters) const = 0;
+      mozilla::layers::WebRenderLayerManager* aLayerManager,
+      const nsIFrame* aItemFrame,
+      const nsPoint& aOffsetToReferenceFrame) const = 0;
 
   /**
    * Mark the scrollbar frames for reflow.
    */
   virtual void MarkScrollbarsDirtyForReflow() const = 0;
+
+  /**
+   * Invalidate the scrollbar after the marks have been changed.
+   */
+  virtual void InvalidateVerticalScrollbar() const = 0;
 
   virtual void UpdateScrollbarPosition() = 0;
 
@@ -532,7 +531,7 @@ class nsIScrollableFrame : public nsIScrollbarMediator {
    * aSetBase is only allowed to be false if there has been a call with it
    * set to true before on the same paint.
    */
-  virtual bool DecideScrollableLayer(nsDisplayListBuilder* aBuilder,
+  virtual bool DecideScrollableLayer(mozilla::nsDisplayListBuilder* aBuilder,
                                      nsRect* aVisibleRect, nsRect* aDirtyRect,
                                      bool aSetBase) = 0;
 

@@ -41,6 +41,8 @@
 #include "mozilla/PublicSSL.h"  // For psm::InitializeCipherSuite
 
 #include "nsISocketTransportService.h"
+#include "nsDNSService2.h"
+#include "nsNetUtil.h"  // NS_CheckPortSafety
 
 #include <string>
 #include <vector>
@@ -285,6 +287,14 @@ static NrIceCtx::Policy toNrIcePolicy(dom::RTCIceTransportPolicy aPolicy) {
   return NrIceCtx::ICE_POLICY_ALL;
 }
 
+// list of known acceptable ports for webrtc
+int16_t gGoodWebrtcPortList[] = {
+    53,    // Some deplyoments use DNS port to punch through overzealous NATs
+    3478,  // stun or turn
+    5349,  // stuns or turns
+    0,     // Sentinel value: This MUST be zero
+};
+
 static nsresult addNrIceServer(const nsString& aIceUrl,
                                const dom::RTCIceServer& aIceServer,
                                std::vector<NrIceStunServer>* aStunServersOut,
@@ -350,8 +360,25 @@ static nsresult addNrIceServer(const nsString& aIceUrl,
     if (hostPos > 1) /* The username was removed */
       return NS_ERROR_FAILURE;
     path.Mid(host, hostPos, hostLen);
+    // Strip off brackets around IPv6 literals
+    host.Trim("[]");
   }
   if (port == -1) port = (isStuns || isTurns) ? 5349 : 3478;
+
+  // First check the known good ports for webrtc
+  bool goodPort = false;
+  for (int i = 0; !goodPort && gGoodWebrtcPortList[i]; i++) {
+    if (port == gGoodWebrtcPortList[i]) {
+      goodPort = true;
+    }
+  }
+
+  // if not in the list of known good ports for webrtc, check
+  // the generic block list using NS_CheckPortSafety.
+  if (!goodPort) {
+    rv = NS_CheckPortSafety(port, nullptr);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
 
   if (isStuns || isTurns) {
     // Should we barf if transport is set to udp or something?
@@ -448,6 +475,8 @@ static Maybe<NrIceCtx::NatSimulatorConfig> GetNatConfig() {
       "media.peerconnection.nat_simulator.block_tcp", false);
   bool block_udp = Preferences::GetBool(
       "media.peerconnection.nat_simulator.block_udp", false);
+  bool block_tls = Preferences::GetBool(
+      "media.peerconnection.nat_simulator.block_tls", false);
   int error_code_for_drop = Preferences::GetInt(
       "media.peerconnection.nat_simulator.error_code_for_drop", 0);
   nsAutoCString mapping_type;
@@ -456,17 +485,35 @@ static Maybe<NrIceCtx::NatSimulatorConfig> GetNatConfig() {
   nsAutoCString filtering_type;
   (void)Preferences::GetCString(
       "media.peerconnection.nat_simulator.filtering_type", filtering_type);
+  nsAutoCString redirect_address;
+  (void)Preferences::GetCString(
+      "media.peerconnection.nat_simulator.redirect_address", redirect_address);
+  nsAutoCString redirect_targets;
+  (void)Preferences::GetCString(
+      "media.peerconnection.nat_simulator.redirect_targets", redirect_targets);
 
-  if (block_udp || block_tcp || !mapping_type.IsEmpty() ||
-      !filtering_type.IsEmpty()) {
+  if (block_udp || block_tcp || block_tls || !mapping_type.IsEmpty() ||
+      !filtering_type.IsEmpty() || !redirect_address.IsEmpty()) {
     CSFLogDebug(LOGTAG, "NAT filtering type: %s", filtering_type.get());
     CSFLogDebug(LOGTAG, "NAT mapping type: %s", mapping_type.get());
     NrIceCtx::NatSimulatorConfig natConfig;
     natConfig.mBlockUdp = block_udp;
     natConfig.mBlockTcp = block_tcp;
+    natConfig.mBlockTls = block_tls;
     natConfig.mErrorCodeForDrop = error_code_for_drop;
     natConfig.mFilteringType = filtering_type;
     natConfig.mMappingType = mapping_type;
+    if (redirect_address.Length()) {
+      CSFLogDebug(LOGTAG, "Redirect address: %s", redirect_address.get());
+      CSFLogDebug(LOGTAG, "Redirect targets: %s", redirect_targets.get());
+      natConfig.mRedirectAddress = redirect_address;
+      std::stringstream str(redirect_targets.Data());
+      std::string target;
+      while (getline(str, target, ',')) {
+        CSFLogDebug(LOGTAG, "Adding target: %s", target.c_str());
+        natConfig.mRedirectTargets.AppendElement(target);
+      }
+    }
     return Some(natConfig);
   }
   return Nothing();
@@ -505,6 +552,10 @@ nsresult MediaTransportHandlerSTS::CreateIceCtx(
 
         static bool globalInitDone = false;
         if (!globalInitDone) {
+          // Ensure the DNS service is initted for the first time on main
+          DebugOnly<RefPtr<nsIDNSService>> dnsService =
+              RefPtr<nsIDNSService>(nsDNSService::GetXPCOMSingleton());
+          MOZ_ASSERT(dnsService.value);
           mStsThread->Dispatch(
               WrapRunnableNM(&NrIceCtx::InitializeGlobals, GetGlobalConfig()),
               NS_DISPATCH_NORMAL);
@@ -620,14 +671,10 @@ void MediaTransportHandlerSTS::Destroy() {
   }
 
   MOZ_ASSERT(NS_IsMainThread());
-  if (!STSShutdownHandler::Instance()) {
-    CSFLogDebug(LOGTAG, "%s Already shut down. Nothing else to do.", __func__);
-    delete this;
-    return;
+  if (STSShutdownHandler::Instance()) {
+    STSShutdownHandler::Instance()->Deregister(this);
+    Shutdown();
   }
-
-  STSShutdownHandler::Instance()->Deregister(this);
-  Shutdown();
 
   // mIceCtx still has a reference to us via sigslot! We must dispach to STS,
   // and clean up there. However, by the time _that_ happens, we may have
@@ -659,6 +706,8 @@ void MediaTransportHandlerSTS::DestroyFinal() { delete this; }
 
 void MediaTransportHandlerSTS::SetProxyConfig(
     NrSocketProxyConfig&& aProxyConfig) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [this, self = RefPtr<MediaTransportHandlerSTS>(this),
@@ -675,6 +724,8 @@ void MediaTransportHandlerSTS::SetProxyConfig(
 void MediaTransportHandlerSTS::EnsureProvisionalTransport(
     const std::string& aTransportId, const std::string& aUfrag,
     const std::string& aPwd, size_t aComponentCount) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {
@@ -718,6 +769,8 @@ void MediaTransportHandlerSTS::ActivateTransport(
     const nsTArray<uint8_t>& aKeyDer, const nsTArray<uint8_t>& aCertDer,
     SSLKEAType aAuthType, bool aDtlsClient, const DtlsDigestList& aDigests,
     bool aPrivacyRequested) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, keyDer = aKeyDer.Clone(), certDer = aCertDer.Clone(),
@@ -803,6 +856,8 @@ void MediaTransportHandlerSTS::ActivateTransport(
 
 void MediaTransportHandlerSTS::SetTargetForDefaultLocalAddressLookup(
     const std::string& aTargetIp, uint16_t aTargetPort) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {
@@ -818,6 +873,8 @@ void MediaTransportHandlerSTS::SetTargetForDefaultLocalAddressLookup(
 void MediaTransportHandlerSTS::StartIceGathering(
     bool aDefaultRouteOnly, bool aObfuscateHostAddresses,
     const nsTArray<NrIceStunAddr>& aStunAddrs) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, stunAddrs = aStunAddrs.Clone(),
@@ -848,6 +905,8 @@ void MediaTransportHandlerSTS::StartIceGathering(
 
 void MediaTransportHandlerSTS::StartIceChecks(
     bool aIsControlling, const std::vector<std::string>& aIceOptions) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {
@@ -893,6 +952,8 @@ void TokenizeCandidate(const std::string& aCandidate,
 void MediaTransportHandlerSTS::AddIceCandidate(
     const std::string& aTransportId, const std::string& aCandidate,
     const std::string& aUfrag, const std::string& aObfuscatedAddress) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {
@@ -932,6 +993,8 @@ void MediaTransportHandlerSTS::AddIceCandidate(
 }
 
 void MediaTransportHandlerSTS::UpdateNetworkState(bool aOnline) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {
@@ -946,6 +1009,8 @@ void MediaTransportHandlerSTS::UpdateNetworkState(bool aOnline) {
 
 void MediaTransportHandlerSTS::RemoveTransportsExcept(
     const std::set<std::string>& aTransportIds) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {
@@ -986,6 +1051,8 @@ void MediaTransportHandlerSTS::RemoveTransportsExcept(
 
 void MediaTransportHandlerSTS::SendPacket(const std::string& aTransportId,
                                           MediaPacket&& aPacket) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   mInitPromise->Then(
       mStsThread, __func__,
       [this, self = RefPtr<MediaTransportHandlerSTS>(this), aTransportId,
@@ -1176,6 +1243,8 @@ void MediaTransportHandler::OnRtcpStateChange(const std::string& aTransportId,
 
 RefPtr<dom::RTCStatsPromise> MediaTransportHandlerSTS::GetIceStats(
     const std::string& aTransportId, DOMHighResTimeStamp aNow) {
+  MOZ_RELEASE_ASSERT(mInitPromise);
+
   return mInitPromise->Then(
       mStsThread, __func__,
       [=, self = RefPtr<MediaTransportHandlerSTS>(this)]() {

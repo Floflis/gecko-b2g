@@ -67,7 +67,15 @@ static LogModule* GetCspContextLog() {
 #define CSPCONTEXTLOGENABLED() \
   MOZ_LOG_TEST(GetCspContextLog(), mozilla::LogLevel::Debug)
 
-static const uint32_t CSP_CACHE_URI_CUTOFF_SIZE = 512;
+static LogModule* GetCspOriginLogLog() {
+  static LazyLogModule gCspOriginPRLog("CSPOrigin");
+  return gCspOriginPRLog;
+}
+
+#define CSPORIGINLOG(args) \
+  MOZ_LOG(GetCspOriginLogLog(), mozilla::LogLevel::Debug, args)
+#define CSPORIGINLOGENABLED() \
+  MOZ_LOG_TEST(GetCspOriginLogLog(), mozilla::LogLevel::Debug)
 
 #ifdef DEBUG
 /**
@@ -401,6 +409,18 @@ nsCSPContext::AppendPolicy(const nsAString& aPolicyString, bool aReportOnly,
       "did you forget to call setRequestContextWith{Document,Principal}?");
   NS_ENSURE_TRUE(mLoadingPrincipal, NS_ERROR_UNEXPECTED);
   NS_ENSURE_TRUE(mSelfURI, NS_ERROR_UNEXPECTED);
+
+  if (CSPORIGINLOGENABLED()) {
+    nsAutoCString selfURISpec;
+    mSelfURI->GetSpec(selfURISpec);
+    CSPORIGINLOG(("CSP - AppendPolicy"));
+    CSPORIGINLOG((" * selfURI: %s", selfURISpec.get()));
+    CSPORIGINLOG((" * reportOnly: %s", aReportOnly ? "yes" : "no"));
+    CSPORIGINLOG(
+        (" * deliveredViaMetaTag: %s", aDeliveredViaMetaTag ? "yes" : "no"));
+    CSPORIGINLOG(
+        (" * policy: %s\n", NS_ConvertUTF16toUTF8(aPolicyString).get()));
+  }
 
   nsCSPPolicy* policy = nsCSPParser::parseContentSecurityPolicy(
       aPolicyString, mSelfURI, aReportOnly, this, aDeliveredViaMetaTag);
@@ -934,20 +954,18 @@ void nsCSPContext::logToConsole(const char* aName,
 
 /**
  * Strip URI for reporting according to:
- * http://www.w3.org/TR/CSP/#violation-reports
+ * https://w3c.github.io/webappsec-csp/#security-violation-reports
  *
  * @param aURI
- *        The uri to be stripped for reporting
- * @param aSelfURI
- *        The uri of the protected resource
- *        which is needed to enforce the SOP.
- * @return ASCII serialization of the uri to be reported.
+ *        The URI of the blocked resource. In case of a redirect, this it the
+ *        initial URI the request started out with, not the redirected URI.
+ * @return The ASCII serialization of the uri to be reported ignoring
+ *         the ref part of the URI.
  */
-void StripURIForReporting(nsIURI* aURI, nsIURI* aSelfURI,
-                          nsACString& outStrippedURI) {
-  // 1) If the origin of uri is a globally unique identifier (for example,
-  // aURI has a scheme of data, blob, or filesystem), then return the
-  // ASCII serialization of uri’s scheme.
+void StripURIForReporting(nsIURI* aURI, nsACString& outStrippedURI) {
+  // If the origin of aURI is a globally unique identifier (for example,
+  // aURI has a scheme of data, blob, or filesystem), then
+  // return the ASCII serialization of uri’s scheme.
   bool isHttpFtpOrWs =
       (aURI->SchemeIs("http") || aURI->SchemeIs("https") ||
        aURI->SchemeIs("ftp") || aURI->SchemeIs("ws") || aURI->SchemeIs("wss"));
@@ -960,7 +978,7 @@ void StripURIForReporting(nsIURI* aURI, nsIURI* aSelfURI,
     return;
   }
 
-  // Return uri, with any fragment component removed.
+  // Return aURI, with any fragment component removed.
   aURI->GetSpecIgnoringRef(outStrippedURI);
 }
 
@@ -980,7 +998,7 @@ nsresult nsCSPContext::GatherSecurityPolicyViolationEventData(
 
   // document-uri
   nsAutoCString reportDocumentURI;
-  StripURIForReporting(mSelfURI, mSelfURI, reportDocumentURI);
+  StripURIForReporting(mSelfURI, reportDocumentURI);
   CopyUTF8toUTF16(reportDocumentURI, aViolationEventInit.mDocumentURI);
 
   // referrer
@@ -988,17 +1006,9 @@ nsresult nsCSPContext::GatherSecurityPolicyViolationEventData(
 
   // blocked-uri
   if (aBlockedURI) {
-    // in case of blocking a browsing context (frame) we have to report
-    // the final URI in case of a redirect. For subresources we report
-    // the URI before redirects.
-    nsCOMPtr<nsIURI> uriToReport;
-    if (aViolatedDirective.EqualsLiteral("frame-src")) {
-      uriToReport = aBlockedURI;
-    } else {
-      uriToReport = aOriginalURI ? aOriginalURI : aBlockedURI;
-    }
     nsAutoCString reportBlockedURI;
-    StripURIForReporting(uriToReport, mSelfURI, reportBlockedURI);
+    StripURIForReporting(aOriginalURI ? aOriginalURI : aBlockedURI,
+                         reportBlockedURI);
     CopyUTF8toUTF16(reportBlockedURI, aViolationEventInit.mBlockedURI);
   } else {
     CopyUTF8toUTF16(aBlockedString, aViolationEventInit.mBlockedURI);
@@ -1026,7 +1036,7 @@ nsresult nsCSPContext::GatherSecurityPolicyViolationEventData(
     NS_NewURI(getter_AddRefs(sourceURI), aSourceFile);
     if (sourceURI) {
       nsAutoCString spec;
-      sourceURI->GetSpecIgnoringRef(spec);
+      StripURIForReporting(sourceURI, spec);
       CopyUTF8toUTF16(spec, aSourceFile);
     }
     aViolationEventInit.mSourceFile = aSourceFile;

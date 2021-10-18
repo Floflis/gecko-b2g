@@ -60,16 +60,13 @@ export const selectLayoutRender = ({ state = {}, prefs = {}, locale = "" }) => {
     "Hero",
     "HorizontalRule",
     "List",
+    "PrivacyLink",
   ];
 
   const filterArray = [];
 
   if (!prefs["feeds.topsites"]) {
     filterArray.push("TopSites");
-  }
-
-  if (!locale.startsWith("en-")) {
-    filterArray.push("Navigation");
   }
 
   const pocketEnabled =

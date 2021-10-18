@@ -74,9 +74,7 @@ class Call {
 class BluetoothHfpManager : public BluetoothHfpManagerBase,
                             public BluetoothHandsfreeNotificationHandler,
                             public hal::BatteryObserver,
-                            public nsISettingsGetResponse,
-                            public nsISettingsObserver,
-                            public nsISidlDefaultResponse {
+                            public nsISettingsObserver {
   enum {
     MODE_HEADSET = 0x00,
     MODE_NARROWBAND_SPEECH = 0x01,
@@ -85,9 +83,7 @@ class BluetoothHfpManager : public BluetoothHfpManagerBase,
 
  public:
   BT_DECL_HFP_MGR_BASE
-  NS_DECL_NSISETTINGSGETRESPONSE
   NS_DECL_NSISETTINGSOBSERVER
-  NS_DECL_NSISIDLDEFAULTRESPONSE
 
   static const int MAX_NUM_CLIENTS;
 
@@ -114,6 +110,17 @@ class BluetoothHfpManager : public BluetoothHfpManagerBase,
                               bool aSend);
   void HandleIccInfoChanged(uint32_t aClientId);
   void HandleVoiceConnectionChanged(uint32_t aClientId);
+
+  // Handle the volume change of Bluetooth SCO (audio connection)
+  void HandleVolumeChanged(const nsAString& aVolume);
+
+  // Get the battery level of the remote handsfree device
+  int GetDeviceBatteryLevel() const { return mDeviceBatteryLevel; }
+
+  // Handle AT+IPHONEACCEV of "Accessory Design Guidelines for Apple Devices"
+  // Return false if the format of aAtString is illegal
+  bool HandleIphoneAccev(const nsACString& aAtString,
+                         const BluetoothAddress& aBdAddress);
 
   // CDMA-specific functions
   void UpdateSecondNumber(const nsAString& aNumber);
@@ -154,6 +161,10 @@ class BluetoothHfpManager : public BluetoothHfpManagerBase,
   void UnknownAtNotification(const nsACString& aAtString,
                              const BluetoothAddress& aBdAddress) override;
   void KeyPressedNotification(const BluetoothAddress& aBdAddress) override;
+  void BindNotification(const nsACString& aAtString,
+                        const BluetoothAddress& aBdAddress) override;
+  void BievNotification(BluetoothHandsfreeHfIndType aType, int aValue,
+                        const BluetoothAddress& aBdAddr) override;
 
  protected:
   virtual ~BluetoothHfpManager();
@@ -189,12 +200,11 @@ class BluetoothHfpManager : public BluetoothHfpManagerBase,
 
   BluetoothHfpManager();
   bool Init();
+  void Uninit();
 
   void Cleanup();
 
   void HandleShutdown();
-
-  void HandleVolumeChanged(const nsAString& aVolume);
 
   void Notify(const hal::BatteryInformation& aBatteryInfo) override;
 
@@ -239,6 +249,7 @@ class BluetoothHfpManager : public BluetoothHfpManagerBase,
   BluetoothAddress mDeviceAddress;
   nsString mMsisdn;
   nsString mOperatorName;
+  int mDeviceBatteryLevel = -1;
 
   nsTArray<Call> mCurrentCallArray;
   UniquePtr<BluetoothRilListener> mListener;

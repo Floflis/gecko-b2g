@@ -195,7 +195,27 @@ XPCOMUtils.defineLazyModuleGetter(
   "PhoneNumberUtils"
 );
 
+XPCOMUtils.defineLazyServiceGetter(
+  this,
+  "gImsServiceManager",
+  "@mozilla.org/b2g/imsservicemanager;1",
+  "nsIImsServiceManager"
+);
+
 var DEBUG = RIL_DEBUG.DEBUG_RIL;
+function updateDebugFlag() {
+  // Read debug setting from pref
+  let debugPref;
+  try {
+    debugPref =
+      debugPref || Services.prefs.getBoolPref(RIL_DEBUG.PREF_RIL_DEBUG_ENABLED);
+  } catch (e) {
+    debugPref = false;
+  }
+  DEBUG = debugPref || RIL_DEBUG.DEBUG_RIL;
+}
+updateDebugFlag();
+
 function debug(s) {
   dump("MobileConnectionService: " + s + "\n");
 }
@@ -2267,19 +2287,34 @@ MobileConnectionProvider.prototype = {
   },
 
   exitEmergencyCbMode(aCallback) {
-    this._radioInterface.sendWorkerMessage(
-      "exitEmergencyCbMode",
-      null,
-      function(aResponse) {
-        if (aResponse.errorMsg) {
-          aCallback.notifyError(aResponse.errorMsg);
-          return false;
+    if (this._imsRegHandler && this._imsRegHandler.isImsRegistered) {
+      try {
+        let imsEcbm = gImsServiceManager.getEcbm(this._clientId);
+        if (imsEcbm) {
+          imsEcbm.exitEmergencyCallbackMode();
+          aCallback.notifySuccess();
+          return;
         }
-
-        aCallback.notifySuccess();
-        return false;
+      } catch (e) {
+        if (DEBUG) {
+          this._debug("getEcbm failed");
+        }
       }
-    );
+      aCallback.notifyError(RIL.GECKO_ERROR_GENERIC_FAILURE);
+    } else {
+      this._radioInterface.sendWorkerMessage(
+        "sendExitEmergencyCbModeRequest",
+        null,
+        function(aResponse) {
+          if (aResponse.errorMsg) {
+            aCallback.notifyError(aResponse.errorMsg);
+            return;
+          }
+
+          aCallback.notifySuccess();
+        }
+      );
+    }
   },
 
   setRadioEnabled(aEnabled, aCallback) {
@@ -2382,6 +2417,20 @@ MobileConnectionProvider.prototype = {
     aCallback.notifyGetDeviceIdentitiesRequestSuccess(deviceId);
   },
 
+  stopNetworkScan(aCallback) {
+    this._radioInterface.sendWorkerMessage("stopNetworkScan", null, function(
+      aResponse
+    ) {
+      if (aResponse.errorMsg) {
+        aCallback.notifyError(aResponse.errorMsg);
+        return false;
+      }
+
+      aCallback.notifySuccess();
+      return false;
+    });
+  },
+
   initUt() {
     if (!this._imsUt) {
       if (this._imsRegHandler && this._imsRegHandler) {
@@ -2452,13 +2501,20 @@ MobileConnectionProvider.prototype = {
       this._debug(
         "onUtConfigurationUpdateFailed. aId=" +
           aId +
-          " , aReqeust=" +
+          ", aReqeust=" +
           token.reqeust +
-          " , aError=" +
-          aError
+          ", aError.code=" +
+          aError.code +
+          ", aError.extraCode=" +
+          aError.extraCode +
+          ", aError.extraMessage=" +
+          aError.extraMessage
       );
     }
-    this._dispatchNotifyError(token.callback, aError);
+    this._dispatchNotifyError(
+      token.callback,
+      RIL.RIL_IMSCALL_FAILCAUSE_TO_GECKO_CALL_ERROR[aError]
+    );
     delete this._tokenUtMap[aId];
   },
 
@@ -2590,13 +2646,20 @@ MobileConnectionProvider.prototype = {
       this._debug(
         "onCallBarringQueried. aId=" +
           aId +
-          " , aRequest= " +
+          ", aRequest= " +
           token.request +
-          " , aError=" +
-          aError
+          ", aError.code=" +
+          aError.code +
+          ", aError.extraCode=" +
+          aError.extraCode +
+          ", aError.extraMessage=" +
+          aError.extraMessage
       );
     }
-    this._dispatchNotifyError(token.callback, aError);
+    this._dispatchNotifyError(
+      token.callback,
+      RIL.RIL_IMSCALL_FAILCAUSE_TO_GECKO_CALL_ERROR[aError]
+    );
   },
 
   // Helper functions

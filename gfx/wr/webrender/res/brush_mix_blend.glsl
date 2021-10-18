@@ -7,21 +7,47 @@
 
 #include shared,prim_shared,brush
 
-// xy: uv coorinates.
+// UV and bounds for the source image
 varying vec2 v_src_uv;
+flat varying vec4 v_src_uv_sample_bounds;
 
-// xy: uv coorinates.
+// UV and bounds for the backdrop image
 varying vec2 v_backdrop_uv;
+flat varying vec4 v_backdrop_uv_sample_bounds;
 
-flat varying int v_op;
+// Flag to allow perspective interpolation of UV.
+// Packed in to vector to work around bug 1630356.
+flat varying vec2 v_perspective;
+// mix-blend op. Packed in to vector to work around bug 1630356.
+flat varying ivec2 v_op;
 
 #ifdef WR_VERTEX_SHADER
+
+void get_uv(
+    int res_address,
+    vec2 f,
+    ivec2 texture_size,
+    float perspective_f,
+    out vec2 out_uv,
+    out vec4 out_uv_sample_bounds
+) {
+    ImageSource res = fetch_image_source(res_address);
+    vec2 uv0 = res.uv_rect.p0;
+    vec2 uv1 = res.uv_rect.p1;
+
+    vec2 inv_texture_size = vec2(1.0) / vec2(texture_size);
+    f = get_image_quad_uv(res_address, f);
+    vec2 uv = mix(uv0, uv1, f);
+
+    out_uv = uv * inv_texture_size * perspective_f;
+    out_uv_sample_bounds = vec4(uv0 + vec2(0.5), uv1 - vec2(0.5)) * inv_texture_size.xyxy;
+}
 
 void brush_vs(
     VertexInfo vi,
     int prim_address,
-    RectWithSize local_rect,
-    RectWithSize segment_rect,
+    RectWithEndpoint local_rect,
+    RectWithEndpoint segment_rect,
     ivec4 prim_user_data,
     int specific_resource_address,
     mat4 transform,
@@ -29,25 +55,29 @@ void brush_vs(
     int brush_flags,
     vec4 unused
 ) {
-    //Note: this is unsafe for `vi.world_pos.w <= 0.0`
-    vec2 device_pos = vi.world_pos.xy * pic_task.device_pixel_scale / max(0.0, vi.world_pos.w);
-    vec2 backdrop_texture_size = vec2(textureSize(sColor0, 0));
-    vec2 src_texture_size = vec2(textureSize(sColor1, 0));
-    v_op = prim_user_data.x;
+    vec2 f = (vi.local_pos - local_rect.p0) / rect_size(local_rect);
+    float perspective_interpolate = (brush_flags & BRUSH_FLAG_PERSPECTIVE_INTERPOLATION) != 0 ? 1.0 : 0.0;
+    float perspective_f = mix(vi.world_pos.w, 1.0, perspective_interpolate);
+    v_perspective.x = perspective_interpolate;
+    v_op.x = prim_user_data.x;
 
-    PictureTask src_task = fetch_picture_task(prim_user_data.z);
-    vec2 src_device_pos = vi.world_pos.xy * (src_task.device_pixel_scale / max(0.0, vi.world_pos.w));
-    vec2 src_uv = src_device_pos +
-                  src_task.common_data.task_rect.p0 -
-                  src_task.content_origin;
-    v_src_uv = src_uv / src_texture_size;
+    get_uv(
+        prim_user_data.y,
+        f,
+        TEX_SIZE(sColor0).xy,
+        1.0,
+        v_backdrop_uv,
+        v_backdrop_uv_sample_bounds
+    );
 
-    RenderTaskCommonData backdrop_task = fetch_render_task_common_data(prim_user_data.y);
-    float src_to_backdrop_scale = pic_task.device_pixel_scale / src_task.device_pixel_scale;
-    vec2 backdrop_uv = device_pos +
-                       backdrop_task.task_rect.p0 -
-                       src_task.content_origin * src_to_backdrop_scale;
-    v_backdrop_uv = backdrop_uv / backdrop_texture_size;
+    get_uv(
+        prim_user_data.z,
+        f,
+        TEX_SIZE(sColor1).xy,
+        perspective_f,
+        v_src_uv,
+        v_src_uv_sample_bounds
+    );
 }
 #endif
 
@@ -210,8 +240,15 @@ const int MixBlendMode_Color       = 14;
 const int MixBlendMode_Luminosity  = 15;
 
 Fragment brush_fs() {
-    vec4 Cb = texture(sColor0, v_backdrop_uv);
-    vec4 Cs = texture(sColor1, v_src_uv);
+    float perspective_divisor = mix(gl_FragCoord.w, 1.0, v_perspective.x);
+
+    vec2 src_uv = v_src_uv * perspective_divisor;
+    src_uv = clamp(src_uv, v_src_uv_sample_bounds.xy, v_src_uv_sample_bounds.zw);
+
+    vec2 backdrop_uv = clamp(v_backdrop_uv, v_backdrop_uv_sample_bounds.xy, v_backdrop_uv_sample_bounds.zw);
+
+    vec4 Cb = texture(sColor0, backdrop_uv);
+    vec4 Cs = texture(sColor1, src_uv);
 
     // The mix-blend-mode functions assume no premultiplied alpha
     if (Cb.a != 0.0) {
@@ -225,7 +262,14 @@ Fragment brush_fs() {
     // Return yellow if none of the branches match (shouldn't happen).
     vec4 result = vec4(1.0, 1.0, 0.0, 1.0);
 
-    switch (v_op) {
+    // On Android v_op has been packed in to a vector to avoid a driver bug
+    // on Adreno 3xx. However, this runs in to another Adreno 3xx driver bug
+    // where the switch doesn't match any cases. Unpacking the value from the
+    // vec in to a local variable prior to the switch works around this, but
+    // gets optimized away by glslopt. Adding a bitwise AND prevents that.
+    // See bug 1726755.
+    // default: default: to appease angle_shader_validation
+    switch (v_op.x & 0xFF) {
         case MixBlendMode_Multiply:
             result.rgb = Multiply(Cb.rgb, Cs.rgb);
             break;

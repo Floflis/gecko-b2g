@@ -29,6 +29,7 @@
 #include "js/Class.h"
 #include "js/Date.h"
 #include "js/Object.h"  // JS::GetClass
+#include "js/PropertyAndElement.h"  // JS_GetProperty, JS_GetPropertyById, JS_HasOwnProperty, JS_HasOwnPropertyById
 #include "js/StructuredClone.h"
 #include "mozilla/EndianUtils.h"
 #include "mozilla/ErrorResult.h"
@@ -66,8 +67,8 @@ Result<IndexUpdateInfo, nsresult> MakeIndexUpdateInfo(
   indexUpdateInfo.indexId() = aIndexID;
   indexUpdateInfo.value() = aKey;
   if (!aLocale.IsEmpty()) {
-    IDB_TRY_UNWRAP(indexUpdateInfo.localizedValue(),
-                   aKey.ToLocaleAwareKey(aLocale));
+    QM_TRY_UNWRAP(indexUpdateInfo.localizedValue(),
+                  aKey.ToLocaleAwareKey(aLocale));
   }
   return indexUpdateInfo;
 }
@@ -479,7 +480,6 @@ IDBObjectStore::~IDBObjectStore() {
   AssertIsOnOwningThread();
 
   if (mRooted) {
-    mCachedKeyPath.setUndefined();
     mozilla::DropJSObjects(this);
   }
 }
@@ -515,9 +515,9 @@ void IDBObjectStore::AppendIndexUpdateInfo(
       return;
     }
 
-    IDB_TRY_UNWRAP(auto item, MakeIndexUpdateInfo(aIndexID, key, aLocale),
-                   QM_VOID,
-                   [aRv](const nsresult tryResult) { aRv->Throw(tryResult); });
+    QM_TRY_UNWRAP(auto item, MakeIndexUpdateInfo(aIndexID, key, aLocale),
+                  QM_VOID,
+                  [aRv](const nsresult tryResult) { aRv->Throw(tryResult); });
 
     aUpdateInfoArray->AppendElement(std::move(item));
     return;
@@ -581,9 +581,9 @@ void IDBObjectStore::AppendIndexUpdateInfo(
         continue;
       }
 
-      IDB_TRY_UNWRAP(
-          auto item, MakeIndexUpdateInfo(aIndexID, value, aLocale), QM_VOID,
-          [aRv](const nsresult tryResult) { aRv->Throw(tryResult); });
+      QM_TRY_UNWRAP(auto item, MakeIndexUpdateInfo(aIndexID, value, aLocale),
+                    QM_VOID,
+                    [aRv](const nsresult tryResult) { aRv->Throw(tryResult); });
 
       aUpdateInfoArray->AppendElement(std::move(item));
     }
@@ -598,9 +598,9 @@ void IDBObjectStore::AppendIndexUpdateInfo(
       return;
     }
 
-    IDB_TRY_UNWRAP(auto item, MakeIndexUpdateInfo(aIndexID, value, aLocale),
-                   QM_VOID,
-                   [aRv](const nsresult tryResult) { aRv->Throw(tryResult); });
+    QM_TRY_UNWRAP(auto item, MakeIndexUpdateInfo(aIndexID, value, aLocale),
+                  QM_VOID,
+                  [aRv](const nsresult tryResult) { aRv->Throw(tryResult); });
 
     aUpdateInfoArray->AppendElement(std::move(item));
   }
@@ -827,7 +827,7 @@ RefPtr<IDBRequest> IDBObjectStore::AddOrPut(JSContext* aCx,
   commonParams.indexUpdateInfos() = std::move(updateInfos);
 
   // Convert any blobs or mutable files into FileAddInfo.
-  IDB_TRY_UNWRAP(
+  QM_TRY_UNWRAP(
       commonParams.fileAddInfos(),
       TransformIntoNewArrayAbortOnErr(
           cloneWriteInfo.mFiles,
@@ -1378,8 +1378,6 @@ RefPtr<IDBIndex> IDBObjectStore::CreateIndex(
     return nullptr;
   }
 
-  // XXX This didn't use to warn before in case of a error. Should we remove the
-  // warning again?
   const auto checkValid = [](const auto& keyPath) -> Result<KeyPath, nsresult> {
     if (!keyPath.IsValid()) {
       return Err(NS_ERROR_DOM_SYNTAX_ERR);
@@ -1388,11 +1386,11 @@ RefPtr<IDBIndex> IDBObjectStore::CreateIndex(
     return keyPath;
   };
 
-  IDB_TRY_INSPECT(
-      const auto& keyPath,
+  QM_INFOONLY_TRY_UNWRAP(
+      const auto maybeKeyPath,
       ([&aKeyPath, checkValid]() -> Result<KeyPath, nsresult> {
         if (aKeyPath.IsString()) {
-          IDB_TRY_RETURN(
+          QM_TRY_RETURN(
               KeyPath::Parse(aKeyPath.GetAsString()).andThen(checkValid));
         }
 
@@ -1401,10 +1399,15 @@ RefPtr<IDBIndex> IDBObjectStore::CreateIndex(
           return Err(NS_ERROR_DOM_SYNTAX_ERR);
         }
 
-        IDB_TRY_RETURN(
+        QM_TRY_RETURN(
             KeyPath::Parse(aKeyPath.GetAsStringSequence()).andThen(checkValid));
-      })(),
-      nullptr, [&aRv](const auto&) { aRv.Throw(NS_ERROR_DOM_SYNTAX_ERR); });
+      })());
+  if (!maybeKeyPath) {
+    aRv.Throw(NS_ERROR_DOM_SYNTAX_ERR);
+    return nullptr;
+  }
+
+  const auto& keyPath = maybeKeyPath.ref();
 
   if (aOptionalParameters.mMultiEntry && keyPath.IsArray()) {
     aRv.Throw(NS_ERROR_DOM_INVALID_ACCESS_ERR);

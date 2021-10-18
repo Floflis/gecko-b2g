@@ -10,6 +10,10 @@ const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
 
+XPCOMUtils.defineLazyModuleGetters(this, {
+  setTimeout: "resource://gre/modules/Timer.jsm",
+});
+
 XPCOMUtils.defineLazyGetter(this, "log", () => {
   let ConsoleAPI = ChromeUtils.import("resource://gre/modules/Console.jsm", {})
     .ConsoleAPI;
@@ -53,18 +57,18 @@ function registerModulesProtocolHandler() {
 }
 
 /**
- * Find a JSM named like `backgroundtasks/BackgroundTask_${name}.jsm`
- * and return its `runBackgroundTask` function.
+ * Find a JSM named like `backgroundtasks/BackgroundTask_${name}.jsm`,
+ * import it, and return the whole module.
  *
  * When testing, allow to load from `XPCSHELL_TESTING_MODULES_URI`,
  * which is registered at `resource://testing-common`, the standard
  * location for test-only modules.
  *
- * @return {function} `runBackgroundTask` function.
+ * @return {Object} The imported module.
  * @throws NS_ERROR_NOT_AVAILABLE if a background task with the given `name` is
  * not found.
  */
-function findRunBackgroundTask(name) {
+function findBackgroundTaskModule(name) {
   const subModules = [
     "resource:///modules", // App-specific first.
     "resource://gre/modules", // Toolkit/general second.
@@ -79,9 +83,9 @@ function findRunBackgroundTask(name) {
     log.debug(`Looking for background task at URI: ${URI}`);
 
     try {
-      const { runBackgroundTask } = ChromeUtils.import(URI);
+      const taskModule = ChromeUtils.import(URI);
       log.info(`Found background task at URI: ${URI}`);
-      return runBackgroundTask;
+      return taskModule;
     } catch (ex) {
       if (ex.result != Cr.NS_ERROR_FILE_NOT_FOUND) {
         throw ex;
@@ -107,20 +111,35 @@ var BackgroundTasksManager = {
       `Running background task named '${name}' (with ${commandLine.length} arguments)`
     );
 
-    let exitCode = 2;
+    let exitCode = BackgroundTasksManager.EXIT_CODE.NOT_FOUND;
     try {
-      let runBackgroundTask = findRunBackgroundTask(name);
+      let taskModule = findBackgroundTaskModule(name);
       addMarker("BackgroundTasksManager:AfterFindRunBackgroundTask");
 
+      let timeoutSec = Services.prefs.getIntPref(
+        "toolkit.backgroundtasks.defaultTimeoutSec",
+        10 * 60
+      );
+      if (taskModule.backgroundTaskTimeoutSec) {
+        timeoutSec = taskModule.backgroundTaskTimeoutSec;
+      }
+
       try {
-        // TODO: timeout tasks that run too long.
-        exitCode = await runBackgroundTask(commandLine);
+        exitCode = await Promise.race([
+          new Promise(resolve =>
+            setTimeout(() => {
+              log.error(`Background task named '${name}' timed out`);
+              resolve(BackgroundTasksManager.EXIT_CODE.TIMEOUT);
+            }, timeoutSec * 1000)
+          ),
+          taskModule.runBackgroundTask(commandLine),
+        ]);
         log.info(
           `Backgroundtask named '${name}' completed with exit code ${exitCode}`
         );
       } catch (e) {
         log.error(`Backgroundtask named '${name}' threw exception`, e);
-        exitCode = 3;
+        exitCode = BackgroundTasksManager.EXIT_CODE.EXCEPTION;
       }
     } finally {
       addMarker("BackgroundTasksManager:AfterAwaitRunBackgroundTask");
@@ -131,4 +150,53 @@ var BackgroundTasksManager = {
 
     return exitCode;
   },
+};
+
+/**
+ * Background tasks should standard exit code conventions where 0 denotes
+ * success and non-zero denotes failure and/or an error.  In addition, since
+ * background tasks have limited channels to communicate with consumers, the
+ * special values `NOT_FOUND` (integer 2) and `THREW_EXCEPTION` (integer 3) are
+ * distinguished.
+ *
+ * If you extend this to add background task-specific exit codes, use exit codes
+ * greater than 10 to allow for additional shared exit codes to be added here.
+ * Exit codes should be between 0 and 127 to be safe across platforms.
+ */
+BackgroundTasksManager.EXIT_CODE = {
+  /**
+   * The task succeeded.
+   *
+   * The `runBackgroundTask(...)` promise resolved to 0.
+   */
+  SUCCESS: 0,
+
+  /**
+   * The task with the specified name could not be found or imported.
+   *
+   * The corresponding `runBackgroundTask` method could not be found.
+   */
+  NOT_FOUND: 2,
+
+  /**
+   * The task failed with an uncaught exception.
+   *
+   * The `runBackgroundTask(...)` promise rejected with an exception.
+   */
+  EXCEPTION: 3,
+
+  /**
+   * The task took too long and timed out.
+   *
+   * The default timeout is controlled by the pref:
+   * "toolkit.backgroundtasks.defaultTimeoutSec", but tasks can override this
+   * by exporting a non-zero `backgroundTaskTimeoutSec` value.
+   */
+  TIMEOUT: 4,
+
+  /**
+   * The last exit code reserved by this structure.  Use codes larger than this
+   * code for background task-specific exit codes.
+   */
+  LAST_RESERVED: 10,
 };

@@ -28,11 +28,10 @@
 #include "mozilla/Likely.h"
 #include "mozilla/Logging.h"
 #include "mozilla/MacroForEach.h"
-#include "mozilla/Mutex.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/Services.h"
-#include "mozilla/StaticMutex.h"
+#include "mozilla/StaticPrefs_javascript.h"
 #include "mozilla/StaticPrefs_privacy.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/TextEvents.h"
@@ -46,7 +45,7 @@
 #include "nsCOMPtr.h"
 #include "nsComponentManagerUtils.h"
 #include "nsCoord.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsDebug.h"
 #include "nsError.h"
 #include "nsHashKeys.h"
@@ -101,9 +100,8 @@ NS_IMPL_ISUPPORTS(nsRFPService, nsIObserver)
 
 static StaticRefPtr<nsRFPService> sRFPService;
 static bool sInitialized = false;
-nsDataHashtable<KeyboardHashKey, const SpoofingKeyboardCode*>*
+nsTHashMap<KeyboardHashKey, const SpoofingKeyboardCode*>*
     nsRFPService::sSpoofingKeyboardCodes = nullptr;
-static mozilla::StaticMutex sLock;
 
 KeyboardHashKey::KeyboardHashKey(const KeyboardLangs aLang,
                                  const KeyboardRegions aRegion,
@@ -243,7 +241,7 @@ nsresult nsRFPService::RandomMidpoint(long long aClampedTimeUSec,
                                       uint8_t* aSecretSeed /* = nullptr */) {
   nsresult rv;
   const int kSeedSize = 16;
-  static uint8_t* sSecretMidpointSeed = nullptr;
+  static Atomic<uint8_t*> sSecretMidpointSeed;
 
   if (MOZ_UNLIKELY(!aMidpointOut)) {
     return NS_ERROR_INVALID_ARG;
@@ -258,17 +256,6 @@ nsresult nsRFPService::RandomMidpoint(long long aClampedTimeUSec,
    * reasonably performant and should be sufficient for our purposes.
    */
 
-  // If someone has pased in the testing-only parameter, replace our seed with
-  // it
-  if (aSecretSeed != nullptr) {
-    StaticMutexAutoLock lock(sLock);
-
-    delete[] sSecretMidpointSeed;
-
-    sSecretMidpointSeed = new uint8_t[kSeedSize];
-    memcpy(sSecretMidpointSeed, aSecretSeed, kSeedSize);
-  }
-
   // If we don't have a seed, we need to get one.
   if (MOZ_UNLIKELY(!sSecretMidpointSeed)) {
     nsCOMPtr<nsIRandomGenerator> randomGenerator =
@@ -277,21 +264,41 @@ nsresult nsRFPService::RandomMidpoint(long long aClampedTimeUSec,
       return rv;
     }
 
-    if (MOZ_LIKELY(!sSecretMidpointSeed)) {
-      rv =
-          randomGenerator->GenerateRandomBytes(kSeedSize, &sSecretMidpointSeed);
-      if (NS_WARN_IF(NS_FAILED(rv))) {
-        return rv;
-      }
+    uint8_t* temp = nullptr;
+    rv = randomGenerator->GenerateRandomBytes(kSeedSize, &temp);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      return rv;
+    }
+    if (MOZ_UNLIKELY(!sSecretMidpointSeed.compareExchange(nullptr, temp))) {
+      // Some other thread initted this first, never mind!
+      delete[] temp;
     }
   }
 
+  // sSecretMidpointSeed is now set, and invariant. The contents of the buffer
+  // it points to is also invariant, _unless_ this function is called with a
+  // non-null |aSecretSeed|.
+  uint8_t* seed = sSecretMidpointSeed;
+  MOZ_RELEASE_ASSERT(seed);
+
+  // If someone has passed in the testing-only parameter, replace our seed with
+  // it. We do _not_ re-allocate the buffer, since that can lead to UAF below.
+  // The math could still be racy if the caller supplies a new secret seed while
+  // some other thread is calling this function, but since this is arcane
+  // test-only functionality that is used in only one test-case presently, we
+  // put the burden of using this particular footgun properly on the test code.
+  if (MOZ_UNLIKELY(aSecretSeed != nullptr)) {
+    memcpy(seed, aSecretSeed, kSeedSize);
+  }
+
   // Seed and create our random number generator.
-  non_crypto::XorShift128PlusRNG rng(
-      aContextMixin ^ *(uint64_t*)(sSecretMidpointSeed),
-      aClampedTimeUSec ^ *(uint64_t*)(sSecretMidpointSeed + 8));
+  non_crypto::XorShift128PlusRNG rng(aContextMixin ^ *(uint64_t*)(seed),
+                                     aClampedTimeUSec ^ *(uint64_t*)(seed + 8));
 
   // Retrieve the output midpoint value.
+  if (MOZ_UNLIKELY(aResolutionUSec <= 0)) {  // ??? Bug 1718066
+    return NS_ERROR_FAILURE;
+  }
   *aMidpointOut = rng.next() % aResolutionUSec;
 
   return NS_OK;
@@ -607,11 +614,43 @@ void nsRFPService::GetSpoofedUserAgent(nsACString& userAgent,
   // https://developer.mozilla.org/en-US/docs/Web/API/NavigatorID/userAgent
   // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/User-Agent
 
+  // These magic numbers are the lengths of the UA string literals below.
+  // Assume three-digit Firefox version numbers so we have room to grow.
+  size_t preallocatedLength =
+      13 +
+      (isForHTTPHeader ? mozilla::ArrayLength(SPOOFED_HTTP_UA_OS)
+                       : mozilla::ArrayLength(SPOOFED_UA_OS)) -
+      1 + 5 + 3 + 10 + mozilla::ArrayLength(LEGACY_UA_GECKO_TRAIL) - 1 + 9 + 3 +
+      2;
+  userAgent.SetCapacity(preallocatedLength);
+
   uint32_t spoofedVersion = GetSpoofedVersion();
-  const char* spoofedOS = isForHTTPHeader ? SPOOFED_HTTP_UA_OS : SPOOFED_UA_OS;
-  userAgent.Assign(nsPrintfCString(
-      "Mozilla/5.0 (%s; rv:%d.0) Gecko/%s Firefox/%d.0", spoofedOS,
-      spoofedVersion, LEGACY_UA_GECKO_TRAIL, spoofedVersion));
+
+  // "Mozilla/5.0 (%s; rv:%d.0) Gecko/%d Firefox/%d.0"
+  userAgent.AssignLiteral("Mozilla/5.0 (");
+
+  if (isForHTTPHeader) {
+    userAgent.AppendLiteral(SPOOFED_HTTP_UA_OS);
+  } else {
+    userAgent.AppendLiteral(SPOOFED_UA_OS);
+  }
+
+  userAgent.AppendLiteral("; rv:");
+  userAgent.AppendInt(spoofedVersion);
+  userAgent.AppendLiteral(".0) Gecko/");
+
+#if defined(ANDROID)
+  userAgent.AppendInt(spoofedVersion);
+  userAgent.AppendLiteral(".0");
+#else
+  userAgent.AppendLiteral(LEGACY_UA_GECKO_TRAIL);
+#endif
+
+  userAgent.AppendLiteral(" Firefox/");
+  userAgent.AppendInt(spoofedVersion);
+  userAgent.AppendLiteral(".0");
+
+  MOZ_ASSERT(userAgent.Length() <= preallocatedLength);
 }
 
 static const char* gCallbackPrefs[] = {
@@ -681,6 +720,12 @@ void nsRFPService::UpdateRFPPref() {
 
   bool privacyResistFingerprinting =
       StaticPrefs::privacy_resistFingerprinting();
+
+  // set fdlibm pref
+  JS::SetUseFdlibmForSinCosTan(
+      StaticPrefs::javascript_options_use_fdlibm_for_sin_cos_tan() ||
+      privacyResistFingerprinting);
+
   if (privacyResistFingerprinting) {
     PR_SetEnv("TZ=UTC");
   } else if (sInitialized) {
@@ -746,7 +791,7 @@ void nsRFPService::MaybeCreateSpoofingKeyCodes(const KeyboardLangs aLang,
                                                const KeyboardRegions aRegion) {
   if (sSpoofingKeyboardCodes == nullptr) {
     sSpoofingKeyboardCodes =
-        new nsDataHashtable<KeyboardHashKey, const SpoofingKeyboardCode*>();
+        new nsTHashMap<KeyboardHashKey, const SpoofingKeyboardCode*>();
   }
 
   if (KeyboardLang::EN == aLang) {
@@ -786,9 +831,9 @@ void nsRFPService::MaybeCreateSpoofingKeyCodesForEnUS() {
 
   for (const auto& keyboardInfo : spoofingKeyboardInfoTable) {
     KeyboardHashKey key(lang, reg, keyboardInfo.mKeyIdx, keyboardInfo.mKey);
-    MOZ_ASSERT(!sSpoofingKeyboardCodes->Lookup(key),
+    MOZ_ASSERT(!sSpoofingKeyboardCodes->Contains(key),
                "Double-defining key code; fix your KeyCodeConsensus file");
-    sSpoofingKeyboardCodes->Put(key, &keyboardInfo.mSpoofingCode);
+    sSpoofingKeyboardCodes->InsertOrUpdate(key, &keyboardInfo.mSpoofingCode);
   }
 
   sInitialized = true;

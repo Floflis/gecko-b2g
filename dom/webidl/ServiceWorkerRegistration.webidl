@@ -16,6 +16,9 @@ interface ServiceWorkerRegistration : EventTarget {
   readonly attribute ServiceWorker? waiting;
   readonly attribute ServiceWorker? active;
 
+  [Pref="dom.serviceWorkers.navigationPreload.enabled", SameObject]
+  readonly attribute NavigationPreloadManager navigationPreload;
+
   readonly attribute USVString scope;
   [Throws]
   readonly attribute ServiceWorkerUpdateViaCache updateViaCache;
@@ -38,7 +41,7 @@ enum ServiceWorkerUpdateViaCache {
 
 // https://w3c.github.io/push-api/
 partial interface ServiceWorkerRegistration {
-  [Throws, Exposed=(Window,Worker), Pref="dom.push.enabled", Func="nsContentUtils::PushVisible"]
+  [Throws, Exposed=(Window,Worker), Pref="dom.push.enabled", Func="nsContentUtils::PushVisibleForMainThread"]
   readonly attribute PushManager pushManager;
 };
 

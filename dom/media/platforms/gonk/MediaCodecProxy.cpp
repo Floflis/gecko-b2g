@@ -10,7 +10,7 @@
 #include <media/MediaCodecBuffer.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
-#include <media/stagefright/MetaDataBase.h>
+#include <media/stagefright/MediaCodecList.h>
 #include <media/stagefright/MediaErrors.h>
 
 mozilla::LazyLogModule gMediaCodecProxyLog("MediaCodecProxy");
@@ -19,10 +19,10 @@ mozilla::LazyLogModule gMediaCodecProxyLog("MediaCodecProxy");
 
 #define LOG(x, ...)                                      \
   MOZ_LOG(gMediaCodecProxyLog, mozilla::LogLevel::Debug, \
-          ("%p " x, this, ##__VA_ARGS__))
+          ("%p [%s] " x, this, mComponentName.c_str(), ##__VA_ARGS__))
 #define LOGE(x, ...)                                     \
   MOZ_LOG(gMediaCodecProxyLog, mozilla::LogLevel::Error, \
-          ("%p " x, this, ##__VA_ARGS__))
+          ("%p [%s] " x, this, mComponentName.c_str(), ##__VA_ARGS__))
 
 namespace android {
 
@@ -79,24 +79,26 @@ struct MediaCodecInterfaceWrapper {
 
 sp<MediaCodecProxy> MediaCodecProxy::CreateByType(sp<ALooper> aLooper,
                                                   const char* aMime,
-                                                  bool aEncoder) {
-  sp<MediaCodecProxy> codec = new MediaCodecProxy(aLooper, aMime, aEncoder);
+                                                  bool aEncoder,
+                                                  uint32_t aFlags) {
+  sp<MediaCodecProxy> codec =
+      new MediaCodecProxy(aLooper, aMime, aEncoder, aFlags);
   return codec;
 }
 
 MediaCodecProxy::MediaCodecProxy(sp<ALooper> aLooper, const char* aMime,
-                                 bool aEncoder)
+                                 bool aEncoder, uint32_t aFlags)
     : mCodecLooper(aLooper),
       mCodecMime(aMime),
       mCodecEncoder(aEncoder),
-      mPromiseMonitor("MediaCodecProxy::mPromiseMonitor") {
+      mCodecFlags(aFlags) {
   MOZ_ASSERT(mCodecLooper != nullptr, "ALooper should not be nullptr.");
 }
 
 MediaCodecProxy::~MediaCodecProxy() { ReleaseMediaCodec(); }
 
 bool MediaCodecProxy::AllocateAudioMediaCodec() {
-  if (mResourceClient || mCodec.get()) {
+  if (mCodec.get()) {
     return false;
   }
 
@@ -110,64 +112,46 @@ bool MediaCodecProxy::AllocateAudioMediaCodec() {
 
 RefPtr<MediaCodecProxy::CodecPromise>
 MediaCodecProxy::AsyncAllocateVideoMediaCodec() {
-  if (mResourceClient || mCodec.get()) {
+  if (mCodec.get()) {
     return CodecPromise::CreateAndReject(true, __func__);
   }
 
   if (strncasecmp(mCodecMime.get(), "video/", 6) != 0) {
     return CodecPromise::CreateAndReject(true, __func__);
   }
-  // request video codec
-  mozilla::MediaSystemResourceType type =
-      mCodecEncoder ? mozilla::MediaSystemResourceType::VIDEO_ENCODER
-                    : mozilla::MediaSystemResourceType::VIDEO_DECODER;
-  mResourceClient = new mozilla::MediaSystemResourceClient(type);
-  mResourceClient->SetListener(this);
 
-  // MediaCodecProxy::ResourceReserved() will return promise
-  // so make sure promise is set before acquire resource to avoid deadlock
-  // (if promise doesn't exist, can't reject or resolve. video will just hang
-  // there with black screen)
-  RefPtr<CodecPromise> p = nullptr;
-  {
-    mozilla::MonitorAutoLock lock(mPromiseMonitor);
-    p = mCodecPromise.Ensure(__func__);
+  // Create MediaCodec
+  if (!allocateCodec()) {
+    return CodecPromise::CreateAndReject(false, __func__);
   }
-
-  mResourceClient->Acquire();
-
-  return p;
+  return CodecPromise::CreateAndResolve(true, __func__);
 }
 
 void MediaCodecProxy::ReleaseMediaCodec() {
-  // At first, release mResourceClient's resource to prevent a conflict with
-  // mResourceClient's callback.
-  if (mResourceClient) {
-    mResourceClient->ReleaseResource();
-    mResourceClient = nullptr;
-  }
-
-  mozilla::MonitorAutoLock lock(mPromiseMonitor);
-  mCodecPromise.RejectIfExists(true, __func__);
   releaseCodec();
 }
 
 bool MediaCodecProxy::allocateCodec() {
-  if (mCodecLooper == nullptr) {
+  if (!mCodecLooper) {
     return false;
   }
 
-  // Write Lock for mCodec
-  RWLock::AutoWLock awl(mCodecLock);
+  Vector<AString> matchingCodecs;
+  MediaCodecList::findMatchingCodecs(mCodecMime.get(), mCodecEncoder,
+                                     mCodecFlags, &matchingCodecs);
 
   // Create MediaCodec
-  mCodec =
-      MediaCodec::CreateByType(mCodecLooper, mCodecMime.get(), mCodecEncoder);
-  if (mCodec == nullptr) {
-    return false;
+  for (auto& componentName : matchingCodecs) {
+    auto codec = MediaCodec::CreateByComponentName(mCodecLooper, componentName);
+    if (codec) {
+      // Write Lock for mCodec
+      RWLock::AutoWLock awl(mCodecLock);
+      mCodec = codec;
+      mComponentName = componentName;
+      return true;
+    }
   }
-
-  return true;
+  return false;
 }
 
 void MediaCodecProxy::releaseCodec() {
@@ -453,25 +437,6 @@ status_t MediaCodecProxy::getCapability(uint32_t* aCapability) {
   return OK;
 }
 
-// Called on ImageBridge thread
-void MediaCodecProxy::ResourceReserved() {
-  LOG("resourceReserved");
-  mozilla::MonitorAutoLock lock(mPromiseMonitor);
-  // Create MediaCodec
-  if (!allocateCodec()) {
-    mCodecPromise.RejectIfExists(true, __func__);
-    return;
-  }
-  mCodecPromise.ResolveIfExists(true, __func__);
-}
-
-// Called on ImageBridge thread
-void MediaCodecProxy::ResourceReserveFailed() {
-  LOGE("Resource Reserve Failed");
-  mozilla::MonitorAutoLock lock(mPromiseMonitor);
-  mCodecPromise.RejectIfExists(true, __func__);
-}
-
 bool MediaCodecProxy::Prepare() {
   if (start() != OK) {
     LOGE("Couldn't start MediaCodec");
@@ -564,22 +529,8 @@ status_t MediaCodecProxy::Input(const uint8_t* aData, uint32_t aDataSize,
   return err;
 }
 
-MediaBuffer* MediaCodecProxy::CreateMediaBuffer(
-    const sp<MediaCodecBuffer>& aMediaCodecBuffer) {
-  const sp<ABuffer> buffer =
-      new ABuffer(aMediaCodecBuffer->data(), aMediaCodecBuffer->capacity());
-  buffer->setRange(aMediaCodecBuffer->offset(), aMediaCodecBuffer->size());
-  return new MediaBuffer(buffer);
-}
-
-MediaBuffer* MediaCodecProxy::CreateMediaBuffer(
-    const GraphicBuffer* aGraphicBuffer, size_t aSize) {
-  MediaBuffer* buffer = new MediaBuffer(NULL, aSize);
-  buffer->meta_data().setPointer(kKeyGraphicBuffer, (void*)aGraphicBuffer);
-  return buffer;
-}
-
-status_t MediaCodecProxy::Output(MediaBuffer** aBuffer, int64_t aTimeoutUs) {
+status_t MediaCodecProxy::Output(sp<SimpleMediaBuffer>* aBuffer,
+                                 int64_t aTimeoutUs) {
   // Read Lock for mCodec
   {
     RWLock::AutoRLock autolock(mCodecLock);
@@ -604,17 +555,15 @@ status_t MediaCodecProxy::Output(MediaBuffer** aBuffer, int64_t aTimeoutUs) {
     return err;
   }
 
-  MediaBuffer* buffer;
+  sp<SimpleMediaBuffer> buffer = new SimpleMediaBuffer(mOutputBuffers[index]);
   sp<GraphicBuffer> graphicBuffer;
 
   if (getOutputGraphicBufferFromIndex(index, &graphicBuffer) == OK &&
       graphicBuffer != nullptr) {
-    buffer = CreateMediaBuffer(graphicBuffer.get(), size);
+    buffer->SetGraphicBuffer(graphicBuffer);
     mOutputGraphicBuffers.insertAt(graphicBuffer, index);
-  } else {
-    buffer = CreateMediaBuffer(mOutputBuffers.itemAt(index));
   }
-  MetaDataBase& metaData = buffer->meta_data();
+  MetaDataBase& metaData = buffer->MetaData();
   metaData.setInt32(kKeyBufferIndex, index);
   metaData.setInt64(kKeyTime, timeUs);
   *aBuffer = buffer;
@@ -630,9 +579,9 @@ status_t MediaCodecProxy::Output(MediaBuffer** aBuffer, int64_t aTimeoutUs) {
 
 void MediaCodecProxy::ReleaseMediaResources() { ReleaseMediaCodec(); }
 
-void MediaCodecProxy::ReleaseMediaBuffer(MediaBuffer* aBuffer) {
+void MediaCodecProxy::ReleaseMediaBuffer(const sp<SimpleMediaBuffer>& aBuffer) {
   if (aBuffer) {
-    MetaDataBase& metaData = aBuffer->meta_data();
+    MetaDataBase& metaData = aBuffer->MetaData();
     int32_t index;
     metaData.findInt32(kKeyBufferIndex, &index);
 #ifdef DEBUG_BUFFER_USAGE
@@ -640,12 +589,9 @@ void MediaCodecProxy::ReleaseMediaBuffer(MediaBuffer* aBuffer) {
     metaData.findInt64(kKeyTime, &timeUs);
     LOG("ReleaseMediaBuffer time:%lld, index:%d", timeUs, index);
 #endif
-    GraphicBuffer* srcBuffer = nullptr;
-    if (aBuffer->meta_data().findPointer(MediaCodecProxy::kKeyGraphicBuffer,
-                                         (void**)&srcBuffer)) {
+    if (aBuffer->GetGraphicBuffer()) {
       mOutputGraphicBuffers.removeAt(index);
     }
-    aBuffer->release();
     releaseOutputBuffer(index);
   }
 }

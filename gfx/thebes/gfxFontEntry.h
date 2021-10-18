@@ -23,7 +23,7 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/TypedEnumBits.h"
 #include "mozilla/UniquePtr.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsDebug.h"
 #include "nsHashKeys.h"
 #include "nsISupports.h"
@@ -431,6 +431,8 @@ class gfxFontEntry {
 
   bool HasBoldVariableWeight();
   bool HasItalicVariation();
+  bool HasOpticalSize();
+
   void CheckForVariationAxes();
 
   // Set up the entry's weight/stretch/style ranges according to axes found
@@ -473,9 +475,8 @@ class gfxFontEntry {
   nsTArray<gfxFont*> mFontsUsingSVGGlyphs;
   nsTArray<gfxFontFeature> mFeatureSettings;
   nsTArray<gfxFontVariation> mVariationSettings;
-  mozilla::UniquePtr<nsDataHashtable<nsUint32HashKey, bool>> mSupportedFeatures;
-  mozilla::UniquePtr<nsDataHashtable<nsUint32HashKey, hb_set_t*>>
-      mFeatureInputs;
+  mozilla::UniquePtr<nsTHashMap<nsUint32HashKey, bool>> mSupportedFeatures;
+  mozilla::UniquePtr<nsTHashMap<nsUint32HashKey, hb_set_t*>> mFeatureInputs;
 
   // Color Layer font support
   hb_blob_t* mCOLR = nullptr;
@@ -494,6 +495,15 @@ class gfxFontEntry {
   WeightRange mWeightRange = WeightRange(FontWeight(500));
   StretchRange mStretchRange = StretchRange(FontStretch::Normal());
   SlantStyleRange mStyleRange = SlantStyleRange(FontSlantStyle::Normal());
+
+  // Font metrics overrides (as multiples of used font size); negative values
+  // indicate no override to be applied.
+  float mAscentOverride = -1.0;
+  float mDescentOverride = -1.0;
+  float mLineGapOverride = -1.0;
+
+  // Scaling factor to be applied to the font size.
+  float mSizeAdjust = 1.0;
 
   // For user fonts (only), we need to record whether or not weight/stretch/
   // slant variations should be clamped to the range specified in the entry
@@ -519,7 +529,10 @@ class gfxFontEntry {
     // properties to the variation axes (though they can still be
     // explicitly set using font-variation-settings).
     eNonCSSWeight = (1 << 5),
-    eNonCSSStretch = (1 << 6)
+    eNonCSSStretch = (1 << 6),
+
+    // Whether the font has an 'opsz' axis.
+    eOpticalSize = (1 << 7)
   };
   RangeFlags mRangeFlags = RangeFlags::eNoFlags;
 
@@ -640,7 +653,8 @@ class gfxFontEntry {
 
   static tainted_opaque_gr<const void*> GrGetTable(
       rlbox_sandbox_gr& sandbox, tainted_opaque_gr<const void*> aAppFaceHandle,
-      tainted_opaque_gr<unsigned int> aName, tainted_opaque_gr<size_t*> aLen);
+      tainted_opaque_gr<unsigned int> aName,
+      tainted_opaque_gr<unsigned int*> aLen);
   static void GrReleaseTable(rlbox_sandbox_gr& sandbox,
                              tainted_opaque_gr<const void*> aAppFaceHandle,
                              tainted_opaque_gr<const void*> aTableBuffer);
@@ -792,20 +806,7 @@ struct GlobalFontMatch {
   double mMatchDistance = INFINITY;  // metric indicating closest match
 };
 
-// Installation status (base system / langpack / user-installed) may determine
-// whether the font is visible to CSS font-family or src:local() lookups.
-// (Exactly what these mean and how accurate they are may be vary across
-// platforms -- e.g. on Linux there is no clear "base" set of fonts.)
-enum class FontVisibility : uint8_t {
-  Unknown = 0,   // No categorization of families available on this system
-  Base = 1,      // Standard part of the base OS installation
-  LangPack = 2,  // From an optional OS component such as language support
-  User = 3,      // User-installed font (or installed by another app, etc)
-  Hidden = 4,    // Internal system font, should never exposed to users
-  Webfont = 5,   // Webfont defined by @font-face
-  Count = 6,     // Count of values, for IPC serialization
-};
-
+// The actual FontVisibility enum is defined in gfxTypes.h
 namespace IPC {
 template <>
 struct ParamTraits<FontVisibility>
@@ -832,7 +833,7 @@ class gfxFontFamily {
         mCheckForFallbackFaces(false),
         mCheckedForLegacyFamilyNames(false) {}
 
-  const nsCString& Name() { return mName; }
+  const nsCString& Name() const { return mName; }
 
   virtual void LocalizedName(nsACString& aLocalizedName);
   virtual bool HasOtherFamilyNames();
@@ -933,6 +934,8 @@ class gfxFontFamily {
       SetBadUnderlineFonts();
     }
   }
+
+  virtual bool IsSingleFaceFamily() const { return false; }
 
   bool IsBadUnderlineFamily() const { return mIsBadUnderlineFamily; }
   bool CheckForFallbackFaces() const { return mCheckForFallbackFaces; }

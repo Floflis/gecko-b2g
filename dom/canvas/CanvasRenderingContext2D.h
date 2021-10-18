@@ -42,8 +42,8 @@ enum class LayersBackend : int8_t;
 namespace dom {
 class
     HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrImageBitmap;
-typedef HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrImageBitmap
-    CanvasImageSource;
+using CanvasImageSource =
+    HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrImageBitmap;
 class ImageBitmap;
 class ImageData;
 class UTF8StringOrCanvasGradientOrCanvasPattern;
@@ -390,6 +390,7 @@ class CanvasRenderingContext2D final : public nsICanvasRenderingContextInternal,
 
   void DrawWindow(nsGlobalWindowInner& aWindow, double aX, double aY, double aW,
                   double aH, const nsACString& aBgColor, uint32_t aFlags,
+                  nsIPrincipal& aSubjectPrincipal,
                   mozilla::ErrorResult& aError);
 
   // Eventually this should be deprecated. Keeping for now to keep the binding
@@ -421,16 +422,12 @@ class CanvasRenderingContext2D final : public nsICanvasRenderingContextInternal,
   virtual void SetOpaqueValueFromOpaqueAttr(bool aOpaqueAttrValue) override;
   bool GetIsOpaque() override { return mOpaque; }
   NS_IMETHOD Reset() override;
-  already_AddRefed<Layer> GetCanvasLayer(nsDisplayListBuilder* aBuilder,
-                                         Layer* aOldLayer,
-                                         LayerManager* aManager) override;
 
   bool UpdateWebRenderCanvasData(nsDisplayListBuilder* aBuilder,
                                  WebRenderCanvasData* aCanvasData) override;
 
   bool InitializeCanvasRenderer(nsDisplayListBuilder* aBuilder,
                                 CanvasRenderer* aRenderer) override;
-  virtual bool ShouldForceInactiveLayer(LayerManager* aManager) override;
   void MarkContextClean() override;
   void MarkContextCleanForFrameCapture() override;
   bool IsContextCleanForFrameCapture() override;
@@ -514,11 +511,10 @@ class CanvasRenderingContext2D final : public nsICanvasRenderingContextInternal,
                              nsIPrincipal& aSubjectPrincipal,
                              JSObject** aRetval);
 
-  void PutImageData_explicit(int32_t aX, int32_t aY, uint32_t aW, uint32_t aH,
-                             dom::Uint8ClampedArray* aArray, bool aHasDirtyRect,
-                             int32_t aDirtyX, int32_t aDirtyY,
-                             int32_t aDirtyWidth, int32_t aDirtyHeight,
-                             ErrorResult&);
+  void PutImageData_explicit(int32_t aX, int32_t aY, ImageData&,
+                             bool aHasDirtyRect, int32_t aDirtyX,
+                             int32_t aDirtyY, int32_t aDirtyWidth,
+                             int32_t aDirtyHeight, ErrorResult&);
 
   bool CopyBufferProvider(layers::PersistentBufferProvider& aOld,
                           gfx::DrawTarget& aTarget, gfx::IntRect aCopyRect);

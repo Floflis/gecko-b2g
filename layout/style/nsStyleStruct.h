@@ -100,8 +100,6 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleFont {
   mozilla::Length mFontSizeOffset;
   mozilla::StyleFontSizeKeyword mFontSizeKeyword;
 
-  mozilla::StyleGenericFontFamily mGenericID;
-
   // math-depth support (used for MathML scriptlevel)
   int8_t mMathDepth;
   // MathML  mathvariant support
@@ -342,7 +340,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleBackground {
 
   // Return the background color as nscolor.
   nscolor BackgroundColor(const nsIFrame* aFrame) const;
-  nscolor BackgroundColor(mozilla::ComputedStyle* aStyle) const;
+  nscolor BackgroundColor(const mozilla::ComputedStyle* aStyle) const;
 
   // True if this background is completely transparent.
   bool IsTransparent(const nsIFrame* aFrame) const;
@@ -622,8 +620,6 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleOutline {
 
   nsChangeHint CalcDifference(const nsStyleOutline& aNewData) const;
 
-  mozilla::StyleBorderRadius mOutlineRadius;
-
   // This is the specified value of outline-width, but with length values
   // computed to absolute.  mActualOutlineWidth stores the outline-width
   // value used by layout.  (We must store mOutlineWidth for the same
@@ -691,6 +687,20 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleList {
   mozilla::StyleClipRectOrAuto mImageRegion;
   // true in an <ol reversed> scope.
   mozilla::StyleMozListReversed mMozListReversed;
+};
+
+struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStylePage {
+  using StylePageSize = mozilla::StylePageSize;
+  nsStylePage(const nsStylePage& aOther) = default;
+  nsStylePage& operator=(const nsStylePage& aOther) = default;
+  explicit nsStylePage(const mozilla::dom::Document&)
+      : mSize(StylePageSize::Auto()) {}
+
+  static constexpr bool kHasTriggerImageLoads = false;
+  nsChangeHint CalcDifference(const nsStylePage& aNewData) const;
+
+  // page-size property.
+  StylePageSize mSize;
 };
 
 struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStylePosition {
@@ -831,14 +841,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStylePosition {
     if (aCoord.IsLengthPercentage()) {
       return aCoord.AsLengthPercentage().HasPercent();
     }
-
-    if (!aCoord.IsExtremumLength()) {
-      return false;
-    }
-
-    auto keyword = aCoord.AsExtremumLength();
-    return keyword == mozilla::StyleExtremumLength::MozFitContent ||
-           keyword == mozilla::StyleExtremumLength::MozAvailable;
+    return aCoord.IsFitContent() || aCoord.IsMozAvailable();
   }
 
   template <typename SizeOrMaxSize>
@@ -901,14 +904,14 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleText {
   mozilla::StyleRubyPosition mRubyPosition;
   mozilla::StyleTextSizeAdjust mTextSizeAdjust;
   uint8_t mTextCombineUpright;  // NS_STYLE_TEXT_COMBINE_UPRIGHT_*
-  mozilla::StyleControlCharacterVisibility mControlCharacterVisibility;
+  mozilla::StyleMozControlCharacterVisibility mMozControlCharacterVisibility;
   uint8_t mTextEmphasisPosition;  // NS_STYLE_TEXT_EMPHASIS_POSITION_*
   mozilla::StyleTextRendering mTextRendering;
   mozilla::StyleColor mTextEmphasisColor;
   mozilla::StyleColor mWebkitTextFillColor;
   mozilla::StyleColor mWebkitTextStrokeColor;
 
-  mozilla::StyleNonNegativeLengthOrNumber mMozTabSize;
+  mozilla::StyleNonNegativeLengthOrNumber mTabSize;
   mozilla::LengthPercentage mWordSpacing;
   mozilla::StyleLetterSpacing mLetterSpacing;
   mozilla::StyleLineHeight mLineHeight;
@@ -1165,6 +1168,7 @@ struct StyleAnimation {
   dom::FillMode mFillMode;
   StyleAnimationPlayState mPlayState;
   float mIterationCount;  // mozilla::PositiveInfinity<float>() means infinite
+  StyleAnimationTimeline mTimeline;
 };
 
 }  // namespace mozilla
@@ -1200,6 +1204,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleDisplay {
   uint32_t mAnimationFillModeCount;
   uint32_t mAnimationPlayStateCount;
   uint32_t mAnimationIterationCountCount;
+  uint32_t mAnimationTimelineCount;
 
   mozilla::StyleWillChange mWillChange;
   mozilla::StyleDisplay mDisplay;
@@ -1458,7 +1463,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleDisplay {
 
   bool IsPositionedStyle() const {
     return mPosition != mozilla::StylePositionProperty::Static ||
-           (mWillChange.bits & mozilla::StyleWillChangeBits::ABSPOS_CB);
+           (mWillChange.bits & mozilla::StyleWillChangeBits::POSITION);
   }
 
   bool IsAbsolutelyPositionedStyle() const {
@@ -1673,7 +1678,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleTableBorder {
   nscoord mBorderSpacingCol;
   nscoord mBorderSpacingRow;
   mozilla::StyleBorderCollapse mBorderCollapse;
-  uint8_t mCaptionSide;
+  mozilla::StyleCaptionSide mCaptionSide;
   mozilla::StyleEmptyCells mEmptyCells;
 };
 
@@ -1711,7 +1716,12 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleUIReset {
 
   nsChangeHint CalcDifference(const nsStyleUIReset& aNewData) const;
 
-  mozilla::StyleUserSelect mUserSelect;  // [reset](selection-style)
+ private:
+  mozilla::StyleUserSelect mUserSelect;  // Use ComputedStyle::UserSelect()
+
+ public:
+  mozilla::StyleUserSelect ComputedUserSelect() const { return mUserSelect; }
+
   mozilla::StyleScrollbarWidth mScrollbarWidth;
   uint8_t mMozForceBrokenImageIcon;  // (0 if not forcing, otherwise forcing)
   mozilla::StyleImeMode mIMEMode;
@@ -1733,18 +1743,44 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleUI {
   nsChangeHint CalcDifference(const nsStyleUI& aNewData) const;
 
   mozilla::StyleInert mInert;
-  mozilla::StyleUserInput mUserInput;
-  mozilla::StyleUserModify mUserModify;  // (modify-content)
-  mozilla::StyleUserFocus mUserFocus;    // (auto-select)
-  mozilla::StylePointerEvents mPointerEvents;
 
+ private:
+  mozilla::StyleUserInput mUserInput;
+  mozilla::StyleUserModify mUserModify;
+  mozilla::StyleUserFocus mUserFocus;
+  mozilla::StylePointerEvents mPointerEvents;
   mozilla::StyleCursor mCursor;
 
-  mozilla::StyleColorOrAuto mCaretColor;
-  mozilla::StyleScrollbarColor mScrollbarColor;
+ public:
+  bool IsInert() const { return mInert == mozilla::StyleInert::Inert; }
 
-  inline mozilla::StylePointerEvents GetEffectivePointerEvents(
-      nsIFrame* aFrame) const;
+  mozilla::StyleUserInput UserInput() const {
+    return IsInert() ? mozilla::StyleUserInput::None : mUserInput;
+  }
+
+  mozilla::StyleUserModify UserModify() const {
+    return IsInert() ? mozilla::StyleUserModify::ReadOnly : mUserModify;
+  }
+
+  mozilla::StyleUserFocus UserFocus() const {
+    return IsInert() ? mozilla::StyleUserFocus::None : mUserFocus;
+  }
+
+  // This is likely not the getter you want (you probably want
+  // ComputedStyle::PointerEvents().
+  mozilla::StylePointerEvents ComputedPointerEvents() const {
+    return mPointerEvents;
+  }
+
+  const mozilla::StyleCursor& Cursor() const {
+    static mozilla::StyleCursor sAuto{{}, mozilla::StyleCursorKind::Auto};
+    return IsInert() ? sAuto : mCursor;
+  }
+
+  mozilla::StyleColorOrAuto mAccentColor;
+  mozilla::StyleCaretColor mCaretColor;
+  mozilla::StyleScrollbarColor mScrollbarColor;
+  mozilla::StyleColorScheme mColorScheme;
 
   bool HasCustomScrollbars() const { return !mScrollbarColor.IsAuto(); }
 };
@@ -1915,6 +1951,8 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleSVGReset {
 
   mozilla::StyleVectorEffect mVectorEffect;
   mozilla::StyleMaskType mMaskType;
+
+  mozilla::StyleDProperty mD;
 };
 
 struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleEffects {

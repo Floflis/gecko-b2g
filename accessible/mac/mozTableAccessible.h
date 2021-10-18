@@ -49,13 +49,25 @@
 // override
 - (NSString*)moxRole;
 
+// override
+- (void)handleAccessibleEvent:(uint32_t)eventType;
+
 - (BOOL)isLayoutTablePart;
+
+- (void)invalidateLayoutTableCache;
 
 @end
 
 @interface mozTableAccessible : mozTablePartAccessible {
   NSMutableArray* mColContainers;
+  uint32_t mIsLayoutTable;
 }
+
+// local override
+- (BOOL)isLayoutTablePart;
+
+// local override
+- (void)invalidateLayoutTableCache;
 
 - (void)invalidateColumns;
 
@@ -116,6 +128,9 @@
 
 @interface mozOutlineAccessible : mozAccessible
 
+// local override
+- (BOOL)isLayoutTablePart;
+
 // override
 - (NSArray*)moxRows;
 
@@ -158,6 +173,9 @@
 
 // override
 - (NSString*)moxLabel;
+
+// override
+- (id)moxValue;
 
 // override
 - (void)stateChanged:(uint64_t)state isEnabled:(BOOL)enabled;

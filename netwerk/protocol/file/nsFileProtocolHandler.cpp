@@ -94,8 +94,9 @@ nsFileProtocolHandler::ReadURLFile(nsIFile* aFile, nsIURI** aURI) {
   // http://standards.freedesktop.org/desktop-entry-spec/latest/ar01s02.html
   nsAutoCString leafName;
   nsresult rv = aFile->GetNativeLeafName(leafName);
-  if (NS_FAILED(rv) || !StringEndsWith(leafName, ".desktop"_ns))
+  if (NS_FAILED(rv) || !StringEndsWith(leafName, ".desktop"_ns)) {
     return NS_ERROR_NOT_AVAILABLE;
+  }
 
   bool isFile = false;
   rv = aFile->IsFile(&isFile);
@@ -224,7 +225,7 @@ nsFileProtocolHandler::NewFileURI(nsIFile* aFile, nsIURI** aResult) {
   // NOTE: the origin charset is assigned the value of the platform
   // charset by the SetFile method.
   return NS_MutateURI(new nsStandardURL::Mutator())
-      .Apply(NS_MutatorMethod(&nsIFileURLMutator::SetFile, file))
+      .Apply(&nsIFileURLMutator::SetFile, file)
       .Finalize(aResult);
 }
 

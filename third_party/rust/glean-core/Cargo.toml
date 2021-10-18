@@ -3,17 +3,16 @@
 # When uploading crates to the registry Cargo will automatically
 # "normalize" Cargo.toml files for maximal compatibility
 # with all versions of Cargo and also rewrite `path` dependencies
-# to registry (e.g., crates.io) dependencies
+# to registry (e.g., crates.io) dependencies.
 #
-# If you believe there's an error in this file please file an
-# issue against the rust-lang/cargo repository. If you're
-# editing this file be aware that the upstream Cargo.toml
-# will likely look very different (and much more reasonable)
+# If you are reading this file be aware that the original Cargo.toml
+# will likely look very different (and much more reasonable).
+# See Cargo.toml.orig for the original contents.
 
 [package]
 edition = "2018"
 name = "glean-core"
-version = "33.10.2"
+version = "42.0.1"
 authors = ["Jan-Erik Rediger <jrediger@mozilla.com>", "The Glean Team <glean-team@mozilla.com>"]
 include = ["/README.md", "/LICENSE", "/src", "/examples", "/tests", "/Cargo.toml"]
 description = "A modern Telemetry library"
@@ -22,7 +21,7 @@ keywords = ["telemetry"]
 license = "MPL-2.0"
 repository = "https://github.com/mozilla/glean"
 [package.metadata.glean]
-glean-parser = "1.29.0"
+glean-parser = "4.0.0"
 [dependencies.bincode]
 version = "1.2.1"
 
@@ -43,7 +42,7 @@ version = "0.4.8"
 version = "1.4.1"
 
 [dependencies.rkv]
-version = "0.16.0"
+version = "0.17.0"
 default-features = false
 
 [dependencies.serde]
@@ -56,11 +55,14 @@ version = "1.0.44"
 [dependencies.uuid]
 version = "0.8.1"
 features = ["v4"]
+
+[dependencies.zeitstempel]
+version = "0.1.0"
 [dev-dependencies.ctor]
 version = "0.1.12"
 
 [dev-dependencies.env_logger]
-version = "0.7.1"
+version = "0.8.0"
 features = ["termcolor", "atty", "humantime"]
 default-features = false
 
@@ -72,6 +74,8 @@ version = "3.1.0"
 
 [features]
 rkv-safe-mode = []
+[target."cfg(target_os = \"windows\")".dependencies.time]
+version = "0.1.40"
 [badges.circle-ci]
 branch = "main"
 repository = "mozilla/glean"

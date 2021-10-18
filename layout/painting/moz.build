@@ -12,7 +12,7 @@ EXPORTS += [
     "DisplayItemClip.h",
     "DisplayItemClipChain.h",
     "DisplayListClipState.h",
-    "FrameLayerBuilder.h",
+    "HitTestInfo.h",
     "LayerState.h",
     "MatrixStack.h",
     "nsCSSRenderingBorders.h",
@@ -26,6 +26,7 @@ EXPORTS += [
     "RetainedDisplayListBuilder.h",
     "RetainedDisplayListHelpers.h",
     "TransformClipNode.h",
+    "WindowRenderer.h",
 ]
 
 EXPORTS.mozilla += [
@@ -39,7 +40,7 @@ UNIFIED_SOURCES += [
     "DisplayItemClipChain.cpp",
     "DisplayListClipState.cpp",
     "DottedCornerFinder.cpp",
-    "FrameLayerBuilder.cpp",
+    "HitTestInfo.cpp",
     "MaskLayerImageCache.cpp",
     "nsCSSRendering.cpp",
     "nsCSSRenderingBorders.cpp",
@@ -49,6 +50,7 @@ UNIFIED_SOURCES += [
     "nsImageRenderer.cpp",
     "PaintTracker.cpp",
     "RetainedDisplayListBuilder.cpp",
+    "WindowRenderer.cpp",
 ]
 
 include("/ipc/chromium/chromium-config.mozbuild")
@@ -57,6 +59,7 @@ LOCAL_INCLUDES += [
     "/docshell/base",
     "/dom/base",
     "/gfx/2d",
+    "/gfx/cairo/cairo/src",
     "/layout/base",
     "/layout/generic",
     "/layout/style",
@@ -68,7 +71,7 @@ LOCAL_INCLUDES += CONFIG["SKIA_INCLUDES"]
 
 FINAL_LIBRARY = "xul"
 
-CXXFLAGS += CONFIG["MOZ_CAIRO_CFLAGS"]
-
 if CONFIG["CC_TYPE"] in ("clang", "gcc"):
     CXXFLAGS += ["-Wno-error=shadow"]
+
+REQUIRES_UNIFIED_BUILD = True

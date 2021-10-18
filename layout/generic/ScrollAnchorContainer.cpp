@@ -6,9 +6,9 @@
 
 #include "ScrollAnchorContainer.h"
 
-#include "GeckoProfiler.h"
 #include "mozilla/dom/Text.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/ToString.h"
 #include "nsBlockFrame.h"
@@ -20,9 +20,9 @@
 
 using namespace mozilla::dom;
 
+#ifdef DEBUG
 static mozilla::LazyLogModule sAnchorLog("scrollanchor");
 
-#ifdef DEBUG
 #  define ANCHOR_LOG(fmt, ...)                       \
     MOZ_LOG(sAnchorLog, LogLevel::Debug,             \
             ("ANCHOR(%p, %s, root: %d): " fmt, this, \

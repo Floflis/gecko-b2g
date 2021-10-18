@@ -6,8 +6,11 @@
 
 #include "MediaOffloadPlayer.h"
 
+#include "AudioOffloadPlayer.h"
 #include "GonkOffloadPlayer.h"
 #include "MediaTrackGraph.h"
+#include "mozilla/Preferences.h"
+#include "mozilla/StaticPrefs_media.h"
 
 namespace mozilla {
 
@@ -19,10 +22,83 @@ using namespace mozilla::layers;
 #define LOGV(fmt, ...) \
   MOZ_LOG(gMediaDecoderLog, LogLevel::Verbose, (fmt, ##__VA_ARGS__))
 
+static bool CheckOffloadAllowlist(const MediaMIMEType& aMimeType) {
+  nsAutoCString allowlist;
+  Preferences::GetCString("media.offloadplayer.mime.allowlist", allowlist);
+  if (allowlist.IsEmpty()) {
+    return true;
+  }
+
+  for (const nsACString& mime : allowlist.Split(',')) {
+    if (mime == aMimeType.AsString()) {
+      return true;
+    }
+    if (mime == "application/*"_ns && aMimeType.HasApplicationMajorType()) {
+      return true;
+    }
+    if (mime == "audio/*"_ns && aMimeType.HasAudioMajorType()) {
+      return true;
+    }
+    if (mime == "video/*"_ns && aMimeType.HasVideoMajorType()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CanOffloadMedia(nsIURI* aURI, const MediaMIMEType& aMimeType,
+                            bool aIsVideo, bool aIsTransportSeekable) {
+  if (!aIsTransportSeekable) {
+    return false;
+  }
+
+  if (!CheckOffloadAllowlist(aMimeType)) {
+    return false;
+  }
+
+  if (!aIsVideo && !StaticPrefs::media_offloadplayer_audio_enabled()) {
+    return false;
+  }
+
+  if (aIsVideo && !StaticPrefs::media_offloadplayer_video_enabled()) {
+    return false;
+  }
+
+  if ((aURI->SchemeIs("http") || aURI->SchemeIs("https")) &&
+      StaticPrefs::media_offloadplayer_http_enabled()) {
+    return true;
+  }
+
+  if (aURI->SchemeIs("file") || aURI->SchemeIs("blob")) {
+    return true;
+  }
+
+  return false;
+}
+
 /* static */
 RefPtr<MediaOffloadPlayer> MediaOffloadPlayer::Create(
-    MediaFormatReaderInit& aInit, nsIURI* aURI) {
-  return new GonkOffloadPlayer(aInit, aURI);
+    MediaDecoder* aDecoder, MediaFormatReaderInit& aInit, nsIURI* aURI) {
+  const auto& containerType = aDecoder->ContainerType();
+  if (!CanOffloadMedia(aURI, containerType.Type(),
+                       /* aIsVideo = */ aInit.mVideoFrameContainer,
+                       aDecoder->IsTransportSeekable())) {
+    return nullptr;
+  }
+
+  RefPtr<MediaOffloadPlayer> player;
+  if (containerType.Type().AsString() == "audio/mpeg"_ns) {
+    player = new AudioOffloadPlayer(aInit, containerType);
+  } else {
+    player = new GonkOffloadPlayer(aInit, aURI);
+  }
+
+  if (player) {
+    // Release unused already_AddRefed if a player is created.
+    RefPtr<layers::KnowsCompositor> knowsCompositor = aInit.mKnowsCompositor;
+    RefPtr<GMPCrashHelper> crashHelper = aInit.mCrashHelper;
+  }
+  return player;
 }
 
 #define INIT_MIRROR(name, val) \
@@ -117,7 +193,7 @@ RefPtr<ShutdownPromise> MediaOffloadPlayer::Shutdown() {
 
   mCurrentPositionTimer.Reset();
   mDormantTimer.Reset();
-  ResetInternal();
+  ShutdownInternal();
 
   // Disconnect canonicals and mirrors before shutting down our task queue.
   mPlayState.DisconnectIfConnected();
@@ -209,11 +285,7 @@ RefPtr<MediaDecoder::SeekPromise> MediaOffloadPlayer::HandleSeek(
       aVisible ? "user" : "internal", aTarget.GetTime().ToSeconds(),
       aTarget.GetType());
 
-  // If user seeks to a new position, need to exit dormant and fire seek so the
-  // displayed image will be updated.
-  if (aVisible && mVideoFrameContainer) {
-    ExitDormant();
-  }
+  ExitDormant();
 
   // If we are currently seeking or we need to defer seeking, save the job in
   // mPendingSeek. If there is already a pending seek job, reject it and replace
@@ -244,7 +316,7 @@ RefPtr<MediaDecoder::SeekPromise> MediaOffloadPlayer::InvokeSeek(
                      &MediaOffloadPlayer::HandleSeek, aTarget, true);
 }
 
-void MediaOffloadPlayer::FirePendingSeekIfExists() {
+bool MediaOffloadPlayer::FirePendingSeekIfExists() {
   MOZ_ASSERT(OnTaskQueue());
   MOZ_ASSERT(!mCurrentSeek.Exists());
 
@@ -255,7 +327,9 @@ void MediaOffloadPlayer::FirePendingSeekIfExists() {
     mCurrentSeek = std::move(mPendingSeek);
     mPendingSeek = SeekObject();
     SeekInternal(mCurrentSeek.mTarget.ref(), mCurrentSeek.mVisible);
+    return true;
   }
+  return false;
 }
 
 void MediaOffloadPlayer::DispatchSetPlaybackRate(double aPlaybackRate) {
@@ -315,9 +389,6 @@ void MediaOffloadPlayer::EnterDormant() {
   mInDormant = true;
   UpdateCurrentPosition();
   ResetInternal();
-  // This queues a seek job of the current position, and it will be fired when
-  // leaving dormant state.
-  HandleSeek(SeekTarget(mCurrentPosition, SeekTarget::Accurate), false);
 }
 
 void MediaOffloadPlayer::ExitDormant() {
@@ -325,6 +396,11 @@ void MediaOffloadPlayer::ExitDormant() {
   if (mInDormant) {
     LOG("MediaOffloadPlayer::ExitDormant, initializing internal player");
     mInDormant = false;
+    // If there is no pending seek job, set it to current position. It will be
+    // fired after init done.
+    if (!mPendingSeek.Exists()) {
+      HandleSeek(SeekTarget(mCurrentPosition, SeekTarget::Accurate), false);
+    }
     InitInternal();
   }
 }

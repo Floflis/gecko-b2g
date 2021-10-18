@@ -327,6 +327,9 @@ NS_EVENT_MESSAGE(eContentCommandPaste)
 NS_EVENT_MESSAGE(eContentCommandDelete)
 NS_EVENT_MESSAGE(eContentCommandUndo)
 NS_EVENT_MESSAGE(eContentCommandRedo)
+// eContentCommandInsertText tries to insert text with replacing selection
+// in focused editor.
+NS_EVENT_MESSAGE(eContentCommandInsertText)
 NS_EVENT_MESSAGE(eContentCommandPasteTransferable)
 NS_EVENT_MESSAGE(eContentCommandLookUpDictionary)
 // eContentCommandScroll scrolls the nearest scrollable element to the
@@ -382,7 +385,6 @@ NS_EVENT_MESSAGE(eOpen)
 NS_EVENT_MESSAGE(eDeviceOrientation)
 NS_EVENT_MESSAGE(eAbsoluteDeviceOrientation)
 NS_EVENT_MESSAGE(eDeviceMotion)
-NS_EVENT_MESSAGE(eDeviceProximity)
 NS_EVENT_MESSAGE(eUserProximity)
 NS_EVENT_MESSAGE(eDeviceLight)
 #ifdef MOZ_B2G
@@ -458,9 +460,13 @@ NS_EVENT_MESSAGE(eEditorBeforeInput)
 // selection events
 NS_EVENT_MESSAGE(eSelectStart)
 NS_EVENT_MESSAGE(eSelectionChange)
+NS_EVENT_MESSAGE(eSlotChange)
 
 // visibility change
 NS_EVENT_MESSAGE(eVisibilityChange)
+
+// security policy events
+NS_EVENT_MESSAGE(eSecurityPolicyViolation)
 
 // Details element events.
 NS_EVENT_MESSAGE(eToggle)

@@ -17,7 +17,9 @@
 #include "gc/Nursery.h"
 #include "threading/CpuCount.h"
 #include "util/Poison.h"
+#include "vm/GetterSetter.h"
 #include "vm/JSContext.h"
+#include "vm/PropMap.h"
 #include "vm/Runtime.h"
 #include "vm/StringType.h"
 #include "vm/TraceLogging.h"
@@ -35,8 +37,9 @@ using namespace gc;
 
 template <AllowGC allowGC /* = CanGC */>
 JSObject* js::AllocateObject(JSContext* cx, AllocKind kind,
-                             size_t nDynamicSlots, InitialHeap heap,
-                             const JSClass* clasp) {
+                             size_t nDynamicSlots, gc::InitialHeap heap,
+                             const JSClass* clasp,
+                             AllocSite* site /* = nullptr */) {
   MOZ_ASSERT(IsObjectAllocKind(kind));
   size_t thingSize = Arena::thingSize(kind);
 
@@ -46,7 +49,10 @@ JSObject* js::AllocateObject(JSContext* cx, AllocKind kind,
       sizeof(JSObject_Slots0) >= MinCellSize,
       "All allocations must be at least the allocator-imposed minimum size.");
 
-  MOZ_ASSERT_IF(nDynamicSlots != 0, clasp->isNative());
+  MOZ_ASSERT_IF(nDynamicSlots != 0, clasp->isNativeObject());
+
+  MOZ_ASSERT_IF(site && site->initialHeap() == TenuredHeap,
+                heap == TenuredHeap);
 
   // We cannot trigger GC or make runtime assertions when nursery allocation
   // is suppressed, either explicitly or because we are off-thread.
@@ -65,8 +71,12 @@ JSObject* js::AllocateObject(JSContext* cx, AllocKind kind,
   }
 
   if (cx->nursery().isEnabled() && heap != TenuredHeap) {
-    JSObject* obj = rt->gc.tryNewNurseryObject<allowGC>(cx, thingSize,
-                                                        nDynamicSlots, clasp);
+    if (!site) {
+      site = cx->zone()->unknownAllocSite();
+    }
+
+    JSObject* obj = rt->gc.tryNewNurseryObject<allowGC>(
+        cx, thingSize, nDynamicSlots, clasp, site);
     if (obj) {
       return obj;
     }
@@ -87,11 +97,13 @@ JSObject* js::AllocateObject(JSContext* cx, AllocKind kind,
 template JSObject* js::AllocateObject<NoGC>(JSContext* cx, gc::AllocKind kind,
                                             size_t nDynamicSlots,
                                             gc::InitialHeap heap,
-                                            const JSClass* clasp);
+                                            const JSClass* clasp,
+                                            gc::AllocSite* site);
 template JSObject* js::AllocateObject<CanGC>(JSContext* cx, gc::AllocKind kind,
                                              size_t nDynamicSlots,
                                              gc::InitialHeap heap,
-                                             const JSClass* clasp);
+                                             const JSClass* clasp,
+                                             gc::AllocSite* site);
 
 // Attempt to allocate a new JSObject out of the nursery. If there is not
 // enough room in the nursery or there is an OOM, this method will return
@@ -99,7 +111,8 @@ template JSObject* js::AllocateObject<CanGC>(JSContext* cx, gc::AllocKind kind,
 template <AllowGC allowGC>
 JSObject* GCRuntime::tryNewNurseryObject(JSContext* cx, size_t thingSize,
                                          size_t nDynamicSlots,
-                                         const JSClass* clasp) {
+                                         const JSClass* clasp,
+                                         AllocSite* site) {
   MOZ_RELEASE_ASSERT(!cx->isHelperThreadContext());
 
   MOZ_ASSERT(cx->isNurseryAllocAllowed());
@@ -107,7 +120,7 @@ JSObject* GCRuntime::tryNewNurseryObject(JSContext* cx, size_t thingSize,
   MOZ_ASSERT(!cx->zone()->isAtomsZone());
 
   JSObject* obj =
-      cx->nursery().allocateObject(cx, thingSize, nDynamicSlots, clasp);
+      cx->nursery().allocateObject(site, thingSize, nDynamicSlots, clasp);
   if (obj) {
     return obj;
   }
@@ -117,7 +130,8 @@ JSObject* GCRuntime::tryNewNurseryObject(JSContext* cx, size_t thingSize,
 
     // Exceeding gcMaxBytes while tenuring can disable the Nursery.
     if (cx->nursery().isEnabled()) {
-      return cx->nursery().allocateObject(cx, thingSize, nDynamicSlots, clasp);
+      return cx->nursery().allocateObject(site, thingSize, nDynamicSlots,
+                                          clasp);
     }
   }
   return nullptr;
@@ -168,7 +182,8 @@ JSString* GCRuntime::tryNewNurseryString(JSContext* cx, size_t thingSize,
   MOZ_ASSERT(!cx->isNurseryAllocSuppressed());
   MOZ_ASSERT(!cx->zone()->isAtomsZone());
 
-  Cell* cell = cx->nursery().allocateString(cx->zone(), thingSize);
+  AllocSite* site = cx->zone()->unknownAllocSite();
+  Cell* cell = cx->nursery().allocateString(site, thingSize);
   if (cell) {
     return static_cast<JSString*>(cell);
   }
@@ -180,26 +195,24 @@ JSString* GCRuntime::tryNewNurseryString(JSContext* cx, size_t thingSize,
     // other heuristics can disable nursery strings for this zone.
     if (cx->nursery().isEnabled() && cx->zone()->allocNurseryStrings) {
       return static_cast<JSString*>(
-          cx->nursery().allocateString(cx->zone(), thingSize));
+          cx->nursery().allocateString(site, thingSize));
     }
   }
   return nullptr;
 }
 
-template <typename StringAllocT, AllowGC allowGC /* = CanGC */>
-StringAllocT* js::AllocateStringImpl(JSContext* cx, InitialHeap heap) {
-  static_assert(std::is_convertible_v<StringAllocT*, JSString*>,
-                "must be JSString derived");
-
-  AllocKind kind = MapTypeToFinalizeKind<StringAllocT>::kind;
-  size_t size = sizeof(StringAllocT);
+template <AllowGC allowGC /* = CanGC */>
+JSString* js::AllocateStringImpl(JSContext* cx, AllocKind kind, size_t size,
+                                 InitialHeap heap) {
   MOZ_ASSERT(size == Arena::thingSize(kind));
   MOZ_ASSERT(size == sizeof(JSString) || size == sizeof(JSFatInlineString));
+  MOZ_ASSERT(
+      IsNurseryAllocable(kind));  // Atoms are allocated using Allocate().
 
   // Off-thread alloc cannot trigger GC or make runtime assertions.
   if (cx->isNurseryAllocSuppressed()) {
-    StringAllocT* str =
-        GCRuntime::tryNewTenuredThing<StringAllocT, NoGC>(cx, kind, size);
+    JSString* str =
+        GCRuntime::tryNewTenuredThing<JSString, NoGC>(cx, kind, size);
     if (MOZ_UNLIKELY(allowGC && !str)) {
       ReportOutOfMemory(cx);
     }
@@ -213,7 +226,7 @@ StringAllocT* js::AllocateStringImpl(JSContext* cx, InitialHeap heap) {
 
   if (cx->nursery().isEnabled() && heap != TenuredHeap &&
       cx->nursery().canAllocateStrings() && cx->zone()->allocNurseryStrings) {
-    auto* str = static_cast<StringAllocT*>(
+    auto* str = static_cast<JSString*>(
         rt->gc.tryNewNurseryString<allowGC>(cx, size, kind));
     if (str) {
       return str;
@@ -229,8 +242,13 @@ StringAllocT* js::AllocateStringImpl(JSContext* cx, InitialHeap heap) {
     }
   }
 
-  return GCRuntime::tryNewTenuredThing<StringAllocT, allowGC>(cx, kind, size);
+  return GCRuntime::tryNewTenuredThing<JSString, allowGC>(cx, kind, size);
 }
+
+template JSString* js::AllocateStringImpl<NoGC>(JSContext*, AllocKind, size_t,
+                                                InitialHeap);
+template JSString* js::AllocateStringImpl<CanGC>(JSContext*, AllocKind, size_t,
+                                                 InitialHeap);
 
 // Attempt to allocate a new BigInt out of the nursery. If there is not enough
 // room in the nursery or there is an OOM, this method will return nullptr.
@@ -243,7 +261,8 @@ JS::BigInt* GCRuntime::tryNewNurseryBigInt(JSContext* cx, size_t thingSize,
   MOZ_ASSERT(!cx->isNurseryAllocSuppressed());
   MOZ_ASSERT(!cx->zone()->isAtomsZone());
 
-  Cell* cell = cx->nursery().allocateBigInt(cx->zone(), thingSize);
+  AllocSite* site = cx->zone()->unknownAllocSite();
+  Cell* cell = cx->nursery().allocateBigInt(site, thingSize);
   if (cell) {
     return static_cast<JS::BigInt*>(cell);
   }
@@ -255,7 +274,7 @@ JS::BigInt* GCRuntime::tryNewNurseryBigInt(JSContext* cx, size_t thingSize,
     // other heuristics can disable nursery BigInts for this zone.
     if (cx->nursery().isEnabled() && cx->zone()->allocNurseryBigInts) {
       return static_cast<JS::BigInt*>(
-          cx->nursery().allocateBigInt(cx->zone(), thingSize));
+          cx->nursery().allocateBigInt(site, thingSize));
     }
   }
   return nullptr;
@@ -263,7 +282,7 @@ JS::BigInt* GCRuntime::tryNewNurseryBigInt(JSContext* cx, size_t thingSize,
 
 template <AllowGC allowGC /* = CanGC */>
 JS::BigInt* js::AllocateBigInt(JSContext* cx, InitialHeap heap) {
-  AllocKind kind = MapTypeToFinalizeKind<JS::BigInt>::kind;
+  AllocKind kind = MapTypeToAllocKind<JS::BigInt>::kind;
   size_t size = sizeof(JS::BigInt);
   MOZ_ASSERT(size == Arena::thingSize(kind));
 
@@ -307,26 +326,13 @@ template JS::BigInt* js::AllocateBigInt<NoGC>(JSContext* cx,
 template JS::BigInt* js::AllocateBigInt<CanGC>(JSContext* cx,
                                                gc::InitialHeap heap);
 
-#define DECL_ALLOCATOR_INSTANCES(allocKind, traceKind, type, sizedType, \
-                                 bgfinal, nursery, compact)             \
-  template type* js::AllocateStringImpl<type, NoGC>(JSContext * cx,     \
-                                                    InitialHeap heap);  \
-  template type* js::AllocateStringImpl<type, CanGC>(JSContext * cx,    \
-                                                     InitialHeap heap);
-FOR_EACH_NURSERY_STRING_ALLOCKIND(DECL_ALLOCATOR_INSTANCES)
-#undef DECL_ALLOCATOR_INSTANCES
-
-template <typename T, AllowGC allowGC /* = CanGC */>
-T* js::Allocate(JSContext* cx) {
-  static_assert(!std::is_convertible_v<T*, JSObject*>,
-                "must not be JSObject derived");
-  static_assert(
-      sizeof(T) >= MinCellSize,
+template <AllowGC allowGC /* = CanGC */>
+Cell* js::AllocateTenuredImpl(JSContext* cx, gc::AllocKind kind, size_t size) {
+  MOZ_ASSERT(!IsNurseryAllocable(kind));
+  MOZ_ASSERT(size == Arena::thingSize(kind));
+  MOZ_ASSERT(
+      size >= gc::MinCellSize,
       "All allocations must be at least the allocator-imposed minimum size.");
-
-  AllocKind kind = MapTypeToFinalizeKind<T>::kind;
-  size_t thingSize = sizeof(T);
-  MOZ_ASSERT(thingSize == Arena::thingSize(kind));
 
   if (!cx->isHelperThreadContext()) {
     if (!cx->runtime()->gc.checkAllocatorState<allowGC>(cx, kind)) {
@@ -334,15 +340,11 @@ T* js::Allocate(JSContext* cx) {
     }
   }
 
-  return GCRuntime::tryNewTenuredThing<T, allowGC>(cx, kind, thingSize);
+  return GCRuntime::tryNewTenuredThing<Cell, allowGC>(cx, kind, size);
 }
 
-#define DECL_ALLOCATOR_INSTANCES(allocKind, traceKind, type, sizedType, \
-                                 bgFinal, nursery, compact)             \
-  template type* js::Allocate<type, NoGC>(JSContext * cx);              \
-  template type* js::Allocate<type, CanGC>(JSContext * cx);
-FOR_EACH_NONOBJECT_NONNURSERY_ALLOCKIND(DECL_ALLOCATOR_INSTANCES)
-#undef DECL_ALLOCATOR_INSTANCES
+template Cell* js::AllocateTenuredImpl<NoGC>(JSContext*, AllocKind, size_t);
+template Cell* js::AllocateTenuredImpl<CanGC>(JSContext*, AllocKind, size_t);
 
 template <typename T, AllowGC allowGC>
 /* static */
@@ -394,7 +396,7 @@ void GCRuntime::attemptLastDitchGC(JSContext* cx) {
   }
 
   JS::PrepareForFullGC(cx);
-  gc(GC_SHRINK, JS::GCReason::LAST_DITCH);
+  gc(JS::GCOptions::Shrink, JS::GCReason::LAST_DITCH);
   waitBackgroundAllocEnd();
   waitBackgroundFreeEnd();
 
@@ -416,8 +418,6 @@ bool GCRuntime::checkAllocatorState(JSContext* cx, AllocKind kind) {
                     kind == AllocKind::SCOPE);
   MOZ_ASSERT_IF(!cx->zone()->isAtomsZone(),
                 kind != AllocKind::ATOM && kind != AllocKind::FAT_INLINE_ATOM);
-  MOZ_ASSERT_IF(cx->zone()->isSelfHostingZone(),
-                !rt->parentRuntime && !selfHostingZoneFrozen);
   MOZ_ASSERT(!JS::RuntimeHeapIsBusy());
 #endif
 
@@ -479,7 +479,7 @@ TenuredCell* js::gc::AllocateCellInGC(Zone* zone, AllocKind thingKind) {
     AutoEnterOOMUnsafeRegion oomUnsafe;
     cell = GCRuntime::refillFreeListInGC(zone, thingKind);
     if (!cell) {
-      oomUnsafe.crash(ChunkSize, "Failed not allocate new chunk during GC");
+      oomUnsafe.crash(ChunkSize, "Failed to allocate new chunk during GC");
     }
   }
   return cell;
@@ -708,11 +708,41 @@ Arena* GCRuntime::allocateArena(TenuredChunk* chunk, Zone* zone,
 Arena* TenuredChunk::allocateArena(GCRuntime* gc, Zone* zone,
                                    AllocKind thingKind,
                                    const AutoLockGC& lock) {
-  Arena* arena = info.numArenasFreeCommitted > 0 ? fetchNextFreeArena(gc)
-                                                 : fetchNextDecommittedArena();
+  if (info.numArenasFreeCommitted == 0) {
+    commitOnePage(gc);
+    MOZ_ASSERT(info.numArenasFreeCommitted == ArenasPerPage);
+  }
+  MOZ_ASSERT(info.numArenasFreeCommitted > 0);
+  Arena* arena = fetchNextFreeArena(gc);
+
   arena->init(zone, thingKind, lock);
   updateChunkListAfterAlloc(gc, lock);
   return arena;
+}
+
+void TenuredChunk::commitOnePage(GCRuntime* gc) {
+  MOZ_ASSERT(info.numArenasFreeCommitted == 0);
+  MOZ_ASSERT(!info.freeArenasHead);
+  MOZ_ASSERT(info.numArenasFree > 0);
+
+  unsigned offset = findDecommittedPageOffset();
+  info.lastDecommittedPageOffset = offset + 1;
+
+  if (DecommitEnabled()) {
+    MarkPagesInUseSoft(pageAddress(offset), PageSize);
+  }
+
+  size_t arenaIndex = offset * ArenasPerPage;
+  decommittedPages[offset] = false;
+  for (size_t i = 0; i < ArenasPerPage; i++) {
+    arenas[arenaIndex + i].setAsNotAllocated();
+  }
+
+  // numArenasFreeCommitted will be updated in addArenasInPageToFreeList.
+  // No need to update numArenasFree, as the arena is still free, it just
+  // changes from decommitted to committed free. Later fetchNextFreeArena should
+  // update the numArenasFree.
+  addArenasInPageToFreeList(gc, offset);
 }
 
 inline void GCRuntime::updateOnFreeArenaAlloc(const TenuredChunkInfo& info) {
@@ -723,6 +753,7 @@ inline void GCRuntime::updateOnFreeArenaAlloc(const TenuredChunkInfo& info) {
 Arena* TenuredChunk::fetchNextFreeArena(GCRuntime* gc) {
   MOZ_ASSERT(info.numArenasFreeCommitted > 0);
   MOZ_ASSERT(info.numArenasFreeCommitted <= info.numArenasFree);
+  MOZ_ASSERT(info.freeArenasHead);
 
   Arena* arena = info.freeArenasHead;
   info.freeArenasHead = arena->next;
@@ -733,37 +764,21 @@ Arena* TenuredChunk::fetchNextFreeArena(GCRuntime* gc) {
   return arena;
 }
 
-Arena* TenuredChunk::fetchNextDecommittedArena() {
-  MOZ_ASSERT(info.numArenasFreeCommitted == 0);
-  MOZ_ASSERT(info.numArenasFree > 0);
-
-  unsigned offset = findDecommittedArenaOffset();
-  info.lastDecommittedArenaOffset = offset + 1;
-  --info.numArenasFree;
-  decommittedArenas[offset] = false;
-
-  Arena* arena = &arenas[offset];
-  MarkPagesInUseSoft(arena, ArenaSize);
-  arena->setAsNotAllocated();
-
-  return arena;
-}
-
 /*
- * Search for and return the next decommitted Arena. Our goal is to keep
- * lastDecommittedArenaOffset "close" to a free arena. We do this by setting
- * it to the most recently freed arena when we free, and forcing it to
+ * Search for and return the next decommitted page. Our goal is to keep
+ * lastDecommittedPageOffset "close" to a free page. We do this by setting
+ * it to the most recently freed page when we free, and forcing it to
  * the last alloc + 1 when we allocate.
  */
-uint32_t TenuredChunk::findDecommittedArenaOffset() {
+uint32_t TenuredChunk::findDecommittedPageOffset() {
   /* Note: lastFreeArenaOffset can be past the end of the list. */
-  for (unsigned i = info.lastDecommittedArenaOffset; i < ArenasPerChunk; i++) {
-    if (decommittedArenas[i]) {
+  for (unsigned i = info.lastDecommittedPageOffset; i < PagesPerChunk; i++) {
+    if (decommittedPages[i]) {
       return i;
     }
   }
-  for (unsigned i = 0; i < info.lastDecommittedArenaOffset; i++) {
-    if (decommittedArenas[i]) {
+  for (unsigned i = 0; i < info.lastDecommittedPageOffset; i++) {
+    if (decommittedPages[i]) {
       return i;
     }
   }
@@ -817,9 +832,11 @@ TenuredChunk* GCRuntime::pickChunk(AutoLockGCBgAlloc& lock) {
 }
 
 BackgroundAllocTask::BackgroundAllocTask(GCRuntime* gc, ChunkPool& pool)
-    : GCParallelTask(gc),
+    : GCParallelTask(gc, gcstats::PhaseKind::NONE),
       chunkPool_(pool),
-      enabled_(CanUseExtraThreads() && GetCPUCount() >= 2) {}
+      enabled_(CanUseExtraThreads() && GetCPUCount() >= 2) {
+  // This can occur outside GCs so doesn't have a stats phase.
+}
 
 void BackgroundAllocTask::run(AutoLockHelperThreadState& lock) {
   AutoUnlockHelperThreadState unlock(lock);
@@ -872,15 +889,21 @@ void TenuredChunk::init(GCRuntime* gc) {
    */
   decommitAllArenas();
 
+#ifdef DEBUG
+  verify();
+#endif
+
   /* The rest of info fields are initialized in pickChunk. */
 }
 
 void TenuredChunk::decommitAllArenas() {
-  decommittedArenas.SetAll();
-  MarkPagesUnusedSoft(&arenas[0], ArenasPerChunk * ArenaSize);
+  decommittedPages.SetAll();
+  if (DecommitEnabled()) {
+    MarkPagesUnusedSoft(&arenas[0], ArenasPerChunk * ArenaSize);
+  }
 
   info.freeArenasHead = nullptr;
-  info.lastDecommittedArenaOffset = 0;
+  info.lastDecommittedPageOffset = 0;
   info.numArenasFree = ArenasPerChunk;
   info.numArenasFreeCommitted = 0;
 }

@@ -46,7 +46,20 @@ impl State {
 
     #[must_use]
     pub fn closed(&self) -> bool {
-        matches!(self, Self::Closing { .. } | Self::Draining { .. } | Self::Closed(_))
+        matches!(
+            self,
+            Self::Closing { .. } | Self::Draining { .. } | Self::Closed(_)
+        )
+    }
+
+    pub fn error(&self) -> Option<&ConnectionError> {
+        if let Self::Closing { error, .. } | Self::Draining { error, .. } | Self::Closed(error) =
+            self
+        {
+            Some(error)
+        } else {
+            None
+        }
     }
 }
 

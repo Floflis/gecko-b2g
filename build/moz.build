@@ -18,6 +18,9 @@ if CONFIG["OS_ARCH"] == "WINNT":
 else:
     DIRS += ["unix"]
 
+if CONFIG["MOZ_STDCXX_COMPAT"]:
+    DIRS += ["unix/stdc++compat"]
+
 CRAMTEST_MANIFESTS += [
     "tests/cram/cram.ini",
 ]
@@ -68,6 +71,7 @@ if CONFIG["MOZ_APP_BASENAME"]:
         "MOZ_APP_ID",
         "MAR_CHANNEL_ID",
         "MOZ_APP_REMOTINGNAME",
+        "MOZ_CRASHREPORTER_URL",
     ):
         appini_defines[var] = CONFIG[var]
 

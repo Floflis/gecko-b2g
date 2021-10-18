@@ -21,6 +21,7 @@ mod premultiply;
 mod rawtest;
 mod reftest;
 mod test_invalidation;
+mod test_shaders;
 mod wrench;
 mod yaml_frame_reader;
 mod yaml_helper;
@@ -318,7 +319,6 @@ fn make_software_context() -> swgl::Context {
 
 fn make_window(
     size: DeviceIntSize,
-    dp_ratio: Option<f32>,
     vsync: bool,
     events_loop: &Option<winit::EventsLoop>,
     angle: bool,
@@ -342,27 +342,27 @@ fn make_window(
                 .with_dimensions(LogicalSize::new(size.width as f64, size.height as f64));
 
             if angle {
-                let (_window, _context) = angle::Context::with_window(
+                angle::Context::with_window(
                     window_builder, context_builder, events_loop
-                ).unwrap();
+                ).map(|(_window, _context)| {
+                    unsafe {
+                        _context
+                            .make_current()
+                            .expect("unable to make context current!");
+                    }
 
-                unsafe {
-                    _context
-                        .make_current()
-                        .expect("unable to make context current!");
-                }
+                    let gl = match _context.get_api() {
+                        glutin::Api::OpenGl => unsafe {
+                            gl::GlFns::load_with(|symbol| _context.get_proc_address(symbol) as *const _)
+                        },
+                        glutin::Api::OpenGlEs => unsafe {
+                            gl::GlesFns::load_with(|symbol| _context.get_proc_address(symbol) as *const _)
+                        },
+                        glutin::Api::WebGl => unimplemented!(),
+                    };
 
-                let gl = match _context.get_api() {
-                    glutin::Api::OpenGl => unsafe {
-                        gl::GlFns::load_with(|symbol| _context.get_proc_address(symbol) as *const _)
-                    },
-                    glutin::Api::OpenGlEs => unsafe {
-                        gl::GlesFns::load_with(|symbol| _context.get_proc_address(symbol) as *const _)
-                    },
-                    glutin::Api::WebGl => unimplemented!(),
-                };
-
-                WindowWrapper::Angle(_window, _context, gl, sw_ctx)
+                    WindowWrapper::Angle(_window, _context, gl, sw_ctx)
+                }).unwrap()
             } else {
                 let windowed_context = context_builder
                     .build_windowed(window_builder, events_loop)
@@ -423,11 +423,9 @@ fn make_window(
     let gl_version = gl.get_string(gl::VERSION);
     let gl_renderer = gl.get_string(gl::RENDERER);
 
-    let dp_ratio = dp_ratio.unwrap_or(wrapper.hidpi_factor());
     println!("OpenGL version {}, {}", gl_version, gl_renderer);
     println!(
-        "hidpi factor: {} (native {})",
-        dp_ratio,
+        "hidpi factor: {}",
         wrapper.hidpi_factor()
     );
 
@@ -565,7 +563,6 @@ fn main() {
 
     // handle some global arguments
     let res_path = args.value_of("shaders").map(|s| PathBuf::from(s));
-    let dp_ratio = args.value_of("dp_ratio").map(|v| v.parse::<f32>().unwrap());
     let size = args.value_of("size")
         .map(|s| if s == "720p" {
             DeviceIntSize::new(1280, 720)
@@ -582,7 +579,6 @@ fn main() {
             DeviceIntSize::new(w, h)
         })
         .unwrap_or(DeviceIntSize::new(1920, 1080));
-    let zoom_factor = args.value_of("zoom").map(|z| z.parse::<f32>().unwrap());
     let chase_primitive = match args.value_of("chase") {
         Some(s) => {
             match s.find(',') {
@@ -591,7 +587,7 @@ fn main() {
                         .split(',')
                         .map(|s| s.parse::<f32>().unwrap())
                         .collect::<Vec<_>>();
-                    let rect = LayoutRect::new(
+                    let rect = LayoutRect::from_origin_and_size(
                         LayoutPoint::new(items[0], items[1]),
                         LayoutSize::new(items[2], items[3]),
                     );
@@ -636,14 +632,12 @@ fn main() {
 
     let mut window = make_window(
         size,
-        dp_ratio,
         args.is_present("vsync"),
         &events_loop,
         args.is_present("angle"),
         gl_request,
         software,
     );
-    let dp_ratio = dp_ratio.unwrap_or(window.hidpi_factor());
     let dim = window.get_inner_size();
 
     let needs_frame_notifier = ["perf", "reftest", "png", "rawtest", "test_invalidation"]
@@ -661,7 +655,6 @@ fn main() {
         events_loop.as_mut().map(|el| el.create_proxy()),
         res_path,
         !args.is_present("use_unoptimized_shaders"),
-        dp_ratio,
         dim,
         args.is_present("rebuild"),
         args.is_present("no_subpixel_aa"),
@@ -670,7 +663,6 @@ fn main() {
         args.is_present("no_batch"),
         args.is_present("precache"),
         args.is_present("slow_subpixel"),
-        zoom_factor.unwrap_or(1.0),
         chase_primitive,
         dump_shader_source,
         notifier,
@@ -762,11 +754,21 @@ fn main() {
         let second_filename = subargs.value_of("second_filename").unwrap();
         perf::compare(first_filename, second_filename);
         return;
+    } else if let Some(_) = args.subcommand_matches("test_init") {
+        // Wrench::new() unwraps the Renderer initialization, so if
+        // we reach this point then we have initialized successfully.
+        println!("Initialization successful");
+    } else if let Some(_) = args.subcommand_matches("test_shaders") {
+        test_shaders::test_shaders();
     } else {
         panic!("Should never have gotten here! {:?}", args);
     };
 
     wrench.renderer.deinit();
+
+    // On android force-exit the process otherwise it stays running forever.
+    #[cfg(target_os = "android")]
+    process::exit(0);
 }
 
 fn render<'a>(
@@ -849,8 +851,8 @@ fn render<'a>(
                         cursor_position = WorldPoint::new(x as f32, y as f32);
                         wrench.renderer.set_cursor_position(
                             DeviceIntPoint::new(
-                                (cursor_position.x * wrench.device_pixel_ratio).round() as i32,
-                                (cursor_position.y * wrench.device_pixel_ratio).round() as i32,
+                                cursor_position.x.round() as i32,
+                                cursor_position.y.round() as i32,
                             ),
                         );
                         do_render = true;
@@ -912,10 +914,6 @@ fn render<'a>(
 
                             do_frame = true;
                         }
-                        VirtualKeyCode::R => {
-                            wrench.set_page_zoom(ZoomFactor::new(1.0));
-                            do_frame = true;
-                        }
                         VirtualKeyCode::M => {
                             wrench.api.notify_memory_pressure();
                             do_render = true;
@@ -940,22 +938,9 @@ fn render<'a>(
                             let path = PathBuf::from("../captures/wrench");
                             wrench.api.save_capture(path, CaptureBits::all());
                         }
-                        VirtualKeyCode::Add => {
-                            let current_zoom = wrench.get_page_zoom();
-                            let new_zoom_factor = ZoomFactor::new(current_zoom.get() + 0.1);
-                            wrench.set_page_zoom(new_zoom_factor);
-                            do_frame = true;
-                        }
-                        VirtualKeyCode::Subtract => {
-                            let current_zoom = wrench.get_page_zoom();
-                            let new_zoom_factor = ZoomFactor::new((current_zoom.get() - 0.1).max(0.1));
-                            wrench.set_page_zoom(new_zoom_factor);
-                            do_frame = true;
-                        }
                         VirtualKeyCode::X => {
                             let results = wrench.api.hit_test(
                                 wrench.document_id,
-                                None,
                                 cursor_position,
                             );
 

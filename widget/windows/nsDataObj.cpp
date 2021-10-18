@@ -9,10 +9,12 @@
 #include <ole2.h>
 #include <shlobj.h>
 
+#include "nsComponentManagerUtils.h"
 #include "nsDataObj.h"
 #include "nsArrayUtils.h"
 #include "nsClipboard.h"
 #include "nsReadableUtils.h"
+#include "nsICookieJarSettings.h"
 #include "nsITransferable.h"
 #include "nsISupportsPrimitives.h"
 #include "IEnumFE.h"
@@ -24,9 +26,10 @@
 #include "nsEscape.h"
 #include "nsIURL.h"
 #include "nsNetUtil.h"
-#include "mozilla/Services.h"
+#include "mozilla/Components.h"
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/Unused.h"
+#include "nsIObserverService.h"
 #include "nsIOutputStream.h"
 #include "nscore.h"
 #include "nsDirectoryServiceDefs.h"
@@ -39,6 +42,7 @@
 #include "nsMimeTypes.h"
 #include "imgIEncoder.h"
 #include "imgITools.h"
+#include "WinUtils.h"
 
 #include "mozilla/LazyIdleThread.h"
 #include <algorithm>
@@ -70,7 +74,8 @@ nsDataObj::CStream::~CStream() {}
 // helper - initializes the stream
 nsresult nsDataObj::CStream::Init(nsIURI* pSourceURI,
                                   nsContentPolicyType aContentPolicyType,
-                                  nsIPrincipal* aRequestingPrincipal) {
+                                  nsIPrincipal* aRequestingPrincipal,
+                                  nsICookieJarSettings* aCookieJarSettings) {
   // we can not create a channel without a requestingPrincipal
   if (!aRequestingPrincipal) {
     return NS_ERROR_FAILURE;
@@ -78,8 +83,7 @@ nsresult nsDataObj::CStream::Init(nsIURI* pSourceURI,
   nsresult rv;
   rv = NS_NewChannel(getter_AddRefs(mChannel), pSourceURI, aRequestingPrincipal,
                      nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_INHERITS_SEC_CONTEXT,
-                     aContentPolicyType,
-                     nullptr,  // nsICookieJarSettings
+                     aContentPolicyType, aCookieJarSettings,
                      nullptr,  // PerformanceStorage
                      nullptr,  // loadGroup
                      nullptr,  // aCallbacks
@@ -156,7 +160,8 @@ NS_IMETHODIMP nsDataObj::CStream::OnStopRequest(nsIRequest* aRequest,
 // and cancel the operation.
 nsresult nsDataObj::CStream::WaitForCompletion() {
   // We are guaranteed OnStopRequest will get called, so this should be ok.
-  SpinEventLoopUntil([&]() { return mChannelRead; });
+  SpinEventLoopUntil("widget:nsDataObj::CStream::WaitForCompletion"_ns,
+                     [&]() { return mChannelRead; });
 
   if (!mChannelData.Length()) mChannelResult = NS_ERROR_FAILURE;
 
@@ -313,8 +318,14 @@ HRESULT nsDataObj::CreateStream(IStream** outStream) {
       mTransferable->GetRequestingPrincipal();
   MOZ_ASSERT(requestingPrincipal, "can not create channel without a principal");
 
+  // Note that the cookieJarSettings could be null if the data object is for the
+  // image copy. We will fix this in Bug 1690532.
+  nsCOMPtr<nsICookieJarSettings> cookieJarSettings =
+      mTransferable->GetCookieJarSettings();
+
   nsContentPolicyType contentPolicyType = mTransferable->GetContentPolicyType();
-  rv = pStream->Init(sourceURI, contentPolicyType, requestingPrincipal);
+  rv = pStream->Init(sourceURI, contentPolicyType, requestingPrincipal,
+                     cookieJarSettings);
   if (NS_FAILED(rv)) {
     pStream->Release();
     return E_FAIL;
@@ -531,7 +542,7 @@ STDMETHODIMP_(ULONG) nsDataObj::AddRef() {
 }
 
 namespace {
-class RemoveTempFileHelper final : public nsIObserver {
+class RemoveTempFileHelper final : public nsIObserver, public nsINamed {
  public:
   explicit RemoveTempFileHelper(nsIFile* aTempFile) : mTempFile(aTempFile) {
     MOZ_ASSERT(mTempFile);
@@ -561,6 +572,7 @@ class RemoveTempFileHelper final : public nsIObserver {
 
   NS_DECL_ISUPPORTS
   NS_DECL_NSIOBSERVER
+  NS_DECL_NSINAMED
 
  private:
   ~RemoveTempFileHelper() {
@@ -573,7 +585,7 @@ class RemoveTempFileHelper final : public nsIObserver {
   nsCOMPtr<nsITimer> mTimer;
 };
 
-NS_IMPL_ISUPPORTS(RemoveTempFileHelper, nsIObserver);
+NS_IMPL_ISUPPORTS(RemoveTempFileHelper, nsIObserver, nsINamed);
 
 NS_IMETHODIMP
 RemoveTempFileHelper::Observe(nsISupports* aSubject, const char* aTopic,
@@ -598,6 +610,12 @@ RemoveTempFileHelper::Observe(nsISupports* aSubject, const char* aTopic,
     mTempFile->Remove(false);
     mTempFile = nullptr;
   }
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+RemoveTempFileHelper::GetName(nsACString& aName) {
+  aName.AssignLiteral("RemoveTempFileHelper");
   return NS_OK;
 }
 }  // namespace
@@ -1138,7 +1156,7 @@ static bool CreateFilenameFromTextW(nsString& aText, const wchar_t* aExtension,
 
 static bool GetLocalizedString(const char* aName, nsAString& aString) {
   nsCOMPtr<nsIStringBundleService> stringService =
-      mozilla::services::GetStringBundleService();
+      mozilla::components::StringBundle::Service();
   if (!stringService) return false;
 
   nsCOMPtr<nsIStringBundle> stringBundle;
@@ -1483,7 +1501,7 @@ HRESULT nsDataObj::GetText(const nsACString& aDataFlavor, FORMATETC& aFE,
       NS_WARNING("Oh no, couldn't convert unicode to plain text");
       return S_OK;
     }
-  } else if (aFE.cfFormat == nsClipboard::CF_HTML) {
+  } else if (aFE.cfFormat == nsClipboard::GetHtmlClipboardFormat()) {
     // Someone is asking for win32's HTML flavor. Convert our html fragment
     // from unicode to UTF-8 then put it into a format specified by msft.
     NS_ConvertUTF16toUTF8 converter(reinterpret_cast<char16_t*>(data));
@@ -1500,7 +1518,7 @@ HRESULT nsDataObj::GetText(const nsACString& aDataFlavor, FORMATETC& aFE,
       NS_WARNING("Oh no, couldn't convert to HTML");
       return S_OK;
     }
-  } else if (aFE.cfFormat != nsClipboard::CF_CUSTOMTYPES) {
+  } else if (aFE.cfFormat != nsClipboard::GetCustomClipboardFormat()) {
     // we assume that any data that isn't caught above is unicode. This may
     // be an erroneous assumption, but is true so far.
     allocLen += sizeof(char16_t);

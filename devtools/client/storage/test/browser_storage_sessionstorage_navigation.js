@@ -6,7 +6,18 @@
 
 "use strict";
 
+// test without target switching
 add_task(async function() {
+  await testNavigation();
+});
+
+// test with target switching enabled
+add_task(async function() {
+  enableTargetSwitching();
+  await testNavigation();
+});
+
+async function testNavigation() {
   const URL1 = buildURLWithContent(
     "example.com",
     `<h1>example.com</h1>` +
@@ -43,7 +54,20 @@ add_task(async function() {
   await waitUntil(() =>
     isInTree(doc, ["sessionStorage", "http://example.net"])
   );
+
+  ok(
+    !isInTree(doc, ["sessionStorage", "http://example.com"]),
+    "example.com item is not in the tree anymore"
+  );
+
   // check the table for values
   await selectTreeItem(["sessionStorage", "http://example.net"]);
   checkStorageData("foo", "bar");
-});
+
+  info("Check that the sessionStorage node still has the expected label");
+  is(
+    getTreeNodeLabel(doc, ["sessionStorage"]),
+    "Session Storage",
+    "sessionStorage item is properly displayed"
+  );
+}

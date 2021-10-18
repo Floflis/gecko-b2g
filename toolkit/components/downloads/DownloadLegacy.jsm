@@ -14,6 +14,8 @@
 
 "use strict";
 
+const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+
 ChromeUtils.defineModuleGetter(
   this,
   "Downloads",
@@ -270,7 +272,8 @@ DownloadLegacyTransfer.prototype = {
     aTempFile,
     aCancelable,
     aIsPrivate,
-    aDownloadClassification
+    aDownloadClassification,
+    aReferrerInfo
   ) {
     return this._nsITransferInitInternal(
       aSource,
@@ -281,7 +284,8 @@ DownloadLegacyTransfer.prototype = {
       aTempFile,
       aCancelable,
       aIsPrivate,
-      aDownloadClassification
+      aDownloadClassification,
+      aReferrerInfo
     );
   },
 
@@ -296,6 +300,7 @@ DownloadLegacyTransfer.prototype = {
     aCancelable,
     aIsPrivate,
     aDownloadClassification,
+    aReferrerInfo,
     aBrowsingContext,
     aHandleInternally
   ) {
@@ -317,6 +322,7 @@ DownloadLegacyTransfer.prototype = {
       aCancelable,
       aIsPrivate,
       aDownloadClassification,
+      aReferrerInfo,
       userContextId,
       browsingContextId,
       aHandleInternally
@@ -333,6 +339,7 @@ DownloadLegacyTransfer.prototype = {
     aCancelable,
     isPrivate,
     aDownloadClassification,
+    referrerInfo,
     userContextId = 0,
     browsingContextId = 0,
     handleInternally = false
@@ -364,6 +371,7 @@ DownloadLegacyTransfer.prototype = {
         isPrivate,
         userContextId,
         browsingContextId,
+        referrerInfo,
       },
       target: {
         path: aTarget.QueryInterface(Ci.nsIFileURL).file.path,
@@ -380,6 +388,10 @@ DownloadLegacyTransfer.prototype = {
     // it is already canceled, so we need to generate and attach the
     // corresponding error to the download.
     if (aDownloadClassification == Ci.nsITransfer.DOWNLOAD_POTENTIALLY_UNSAFE) {
+      Services.telemetry
+        .getKeyedHistogramById("DOWNLOADS_USER_ACTION_ON_BLOCKED_DOWNLOAD")
+        .add(DownloadError.BLOCK_VERDICT_INSECURE, 0);
+
       serialisedDownload.errorObj = {
         becauseBlockedByReputationCheck: true,
         reputationCheckVerdict: DownloadError.BLOCK_VERDICT_INSECURE,

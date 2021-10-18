@@ -62,14 +62,12 @@ Sntp.prototype = {
   },
 
   isExpired: function isExpired() {
-    // TODO, we are not able to get time change offset now.
-    return true;
-    // let valid = this._cachedOffset != null && this._cachedTimeInMS != null;
-    // if (this._refreshPeriodInMS > 0) {
-    //   valid =
-    //     valid && Date.now() < this._cachedTimeInMS + this._refreshPeriodInMS;
-    // }
-    // return !valid;
+    let valid = this._cachedOffset != null && this._cachedTimeInMS != null;
+    if (this._refreshPeriodInMS > 0) {
+      valid =
+        valid && Date.now() < this._cachedTimeInMS + this._refreshPeriodInMS;
+    }
+    return !valid;
   },
 
   request: function request() {
@@ -85,7 +83,7 @@ Sntp.prototype = {
    * adjust the stored value.
    */
   updateOffset: function updateOffset(offset) {
-    if (this._cachedOffset != null) {
+    if (this._cachedOffset !== null) {
       this._cachedOffset -= offset;
     }
   },
@@ -188,9 +186,9 @@ Sntp.prototype = {
 
     function SNTPListener() {}
     SNTPListener.prototype = {
-      onStartRequest: function onStartRequest(request, context) {},
+      onStartRequest: function onStartRequest(_request) {},
 
-      onStopRequest: function onStopRequest(request, context, status) {
+      onStopRequest: function onStopRequest(_request, status) {
         if (!Components.isSuccessCode(status)) {
           debug("Connection failed");
           this._requesting = false;
@@ -293,6 +291,7 @@ Sntp.prototype = {
       ["udp"],
       this._pools[Math.floor(this._pools.length * Math.random())],
       this._port,
+      null,
       null
     );
 

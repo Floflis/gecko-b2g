@@ -14,6 +14,7 @@
 #include "nsDebug.h"
 #include "nsError.h"
 #include "nsIChannel.h"
+#include "nsIContentProcess.h"
 #include "nsIHttpChannel.h"
 #include "nsIHttpChannelInternal.h"
 #include "nsIHttpHeaderVisitor.h"
@@ -39,6 +40,7 @@
 #include "mozilla/Services.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StoragePrincipalHelper.h"
+#include "mozilla/Telemetry.h"
 #include "mozilla/Unused.h"
 #include "mozilla/dom/ClientIPCTypes.h"
 #include "mozilla/dom/DOMTypes.h"
@@ -49,6 +51,7 @@
 #include "mozilla/dom/RemoteWorkerControllerChild.h"
 #include "mozilla/dom/RemoteWorkerManager.h"  // RemoteWorkerManager::GetRemoteType
 #include "mozilla/dom/ServiceWorkerBinding.h"
+#include "mozilla/extensions/WebExtensionPolicy.h"  // WebExtensionPolicy
 #include "mozilla/ipc/BackgroundChild.h"
 #include "mozilla/ipc/IPCStreamUtils.h"
 #include "mozilla/ipc/URIUtils.h"
@@ -155,7 +158,7 @@ nsresult ServiceWorkerPrivateImpl::Initialize() {
   }
 
   nsCOMPtr<nsICookieJarSettings> cookieJarSettings =
-      net::CookieJarSettings::Create();
+      net::CookieJarSettings::Create(principal);
   MOZ_ASSERT(cookieJarSettings);
 
   net::CookieJarSettings::Cast(cookieJarSettings)->SetPartitionKey(uri);
@@ -194,7 +197,7 @@ nsresult ServiceWorkerPrivateImpl::Initialize() {
   }
 
   auto remoteType = RemoteWorkerManager::GetRemoteType(
-      principal, WorkerType::WorkerTypeService);
+      principal, WorkerKind::WorkerKindService);
   if (NS_WARN_IF(remoteType.isErr())) {
     return remoteType.unwrapErr();
   }
@@ -267,6 +270,15 @@ void ServiceWorkerPrivateImpl::RefreshRemoteWorkerData(
   serviceWorkerData.descriptor() = mOuter->mInfo->Descriptor().ToIPC();
   serviceWorkerData.registrationDescriptor() =
       aRegistration->Descriptor().ToIPC();
+
+  nsCOMPtr<nsIContentProcessProvider> cpp =
+      do_GetService("@mozilla.org/ipc/processselector;1");
+  int pid = 0;
+  if (cpp) {
+    auto scope = aRegistration->Scope();
+    cpp->SuggestServiceWorkerProcess(scope, &pid);
+  }
+  serviceWorkerData.suggestedPid() = pid;
 }
 
 nsresult ServiceWorkerPrivateImpl::SpawnWorkerIfNeeded() {
@@ -279,10 +291,25 @@ nsresult ServiceWorkerPrivateImpl::SpawnWorkerIfNeeded() {
     return NS_OK;
   }
 
+  mServiceWorkerLaunchTimeStart = TimeStamp::Now();
+
   PBackgroundChild* bgChild = BackgroundChild::GetForCurrentThread();
 
   if (NS_WARN_IF(!bgChild)) {
     return NS_ERROR_DOM_INVALID_STATE_ERR;
+  }
+
+  // If the worker principal is an extension principal, then we should not spawn
+  // a worker if there is no WebExtensionPolicy associated to that principal
+  // or if the WebExtensionPolicy is not active.
+  auto* principal = mOuter->mInfo->Principal();
+  if (principal->SchemeIs("moz-extension")) {
+    auto* addonPolicy = BasePrincipal::Cast(principal)->AddonPolicy();
+    if (!addonPolicy || !addonPolicy->Active()) {
+      NS_WARNING(
+          "Trying to wake up a service worker for a disabled webextension.");
+      return NS_ERROR_DOM_INVALID_STATE_ERR;
+    }
   }
 
   RefPtr<ServiceWorkerManager> swm = ServiceWorkerManager::GetInstance();
@@ -292,7 +319,7 @@ nsresult ServiceWorkerPrivateImpl::SpawnWorkerIfNeeded() {
   }
 
   RefPtr<ServiceWorkerRegistrationInfo> regInfo =
-      swm->GetRegistration(mOuter->mInfo->Principal(), mOuter->mInfo->Scope());
+      swm->GetRegistration(principal, mOuter->mInfo->Scope());
 
   if (NS_WARN_IF(!regInfo)) {
     return NS_ERROR_DOM_INVALID_STATE_ERR;
@@ -819,7 +846,8 @@ Result<IPCInternalRequest, nsresult> GetIPCInternalRequest(
 
   nsTArray<HeadersEntry> ipcHeaders;
   HeadersGuardEnum ipcHeadersGuard;
-  internalHeaders->ToIPC(ipcHeaders, ipcHeadersGuard);
+  bool ipcHasXHRPerm;
+  internalHeaders->ToIPC(ipcHeaders, ipcHeadersGuard, ipcHasXHRPerm);
 
   nsAutoCString alternativeDataType;
   if (cacheInfoChannel &&
@@ -843,7 +871,7 @@ Result<IPCInternalRequest, nsresult> GetIPCInternalRequest(
       method, {spec}, ipcHeadersGuard, ipcHeaders, Nothing(), -1,
       alternativeDataType, contentPolicyType, referrer, referrerPolicy,
       requestMode, requestCredentials, cacheMode, requestRedirect, integrity,
-      fragment, principalInfo);
+      fragment, principalInfo, ipcHasXHRPerm);
 }
 
 nsresult MaybeStoreStreamForBackgroundThread(nsIInterceptedChannel* aChannel,
@@ -909,7 +937,8 @@ nsresult ServiceWorkerPrivateImpl::SendFetchEvent(
   ServiceWorkerFetchEventOpArgs args(
       mOuter->mInfo->ScriptSpec(), std::move(request), nsString(aClientId),
       nsString(aResultingClientId),
-      nsContentUtils::IsNonSubresourceRequest(channel));
+      nsContentUtils::IsNonSubresourceRequest(channel),
+      mOuter->mInfo->TestingInjectCancellation());
 
   if (mOuter->mInfo->State() == ServiceWorkerState::Activating) {
     UniquePtr<PendingFunctionalEvent> pendingEvent =
@@ -1073,6 +1102,9 @@ void ServiceWorkerPrivateImpl::CreationFailed() {
   MOZ_ASSERT(mOuter);
   MOZ_ASSERT(mControllerChild);
 
+  Telemetry::AccumulateTimeDelta(Telemetry::SERVICE_WORKER_LAUNCH_TIME_2,
+                                 mServiceWorkerLaunchTimeStart);
+
   Shutdown();
 }
 
@@ -1081,6 +1113,9 @@ void ServiceWorkerPrivateImpl::CreationSucceeded() {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mOuter);
   MOZ_ASSERT(mControllerChild);
+
+  Telemetry::AccumulateTimeDelta(Telemetry::SERVICE_WORKER_LAUNCH_TIME_2,
+                                 mServiceWorkerLaunchTimeStart);
 
   mOuter->RenewKeepAliveToken(ServiceWorkerPrivate::WakeUpReason::Unknown);
 }

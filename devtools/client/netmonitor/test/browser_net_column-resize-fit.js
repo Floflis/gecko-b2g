@@ -14,7 +14,7 @@ add_task(async function() {
     Services.prefs.getCharPref("devtools.netmonitor.visibleColumns")
   );
   // Init network monitor
-  const { tab, monitor } = await initNetMonitor(SIMPLE_URL, {
+  const { monitor } = await initNetMonitor(SIMPLE_URL, {
     requestCount: 1,
   });
   info("Starting test... ");
@@ -23,14 +23,14 @@ add_task(async function() {
 
   // Wait for network events (to have some requests in the table)
   const wait = waitForNetworkEvents(monitor, 1);
-  tab.linkedBrowser.reload();
+  await reloadBrowser();
   await wait;
 
   info("Testing column resize to fit using double-click on draggable resizer");
   const fileHeader = document.querySelector(`#requests-list-file-header-box`);
   const fileColumnResizer = fileHeader.querySelector(".column-resizer");
 
-  await EventUtils.sendMouseEvent({ type: "dblclick" }, fileColumnResizer);
+  EventUtils.sendMouseEvent({ type: "dblclick" }, fileColumnResizer);
 
   // After resize - get fresh prefs for tests.
   let columnsData = JSON.parse(
@@ -47,7 +47,7 @@ add_task(async function() {
   );
 
   // Resizing `transferred` column.
-  await EventUtils.sendMouseEvent(
+  EventUtils.sendMouseEvent(
     { type: "contextmenu" },
     document.querySelector("#requests-list-transferred-button")
   );

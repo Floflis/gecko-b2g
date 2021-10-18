@@ -125,11 +125,26 @@ async function openHelperAppDialog(launcher) {
   return dlg;
 }
 
+/**
+ * Wait for a subdialog event indicating a dialog either opened
+ * or was closed.
+ *
+ * First argument is the browser in which to listen. If a tabbrowser,
+ * we listen to subdialogs for any tab of that browser.
+ */
 async function waitForSubDialog(browser, url, state) {
   let eventStr = state ? "dialogopen" : "dialogclose";
 
-  let tabDialogBox = gBrowser.getTabDialogBox(browser);
-  let dialogStack = tabDialogBox.getTabDialogManager()._dialogStack;
+  let eventTarget;
+
+  // Tabbrowser?
+  if (browser.tabContainer) {
+    eventTarget = browser.tabContainer.ownerDocument.documentElement;
+  } else {
+    // Individual browser. Get its box:
+    let tabDialogBox = browser.ownerGlobal.gBrowser.getTabDialogBox(browser);
+    eventTarget = tabDialogBox.getTabDialogManager()._dialogStack;
+  }
 
   let checkFn;
 
@@ -138,7 +153,7 @@ async function waitForSubDialog(browser, url, state) {
   }
 
   let event = await BrowserTestUtils.waitForEvent(
-    dialogStack,
+    eventTarget,
     eventStr,
     true,
     checkFn
@@ -184,10 +199,13 @@ async function waitForProtocolAppChooserDialog(browser, state) {
   );
 }
 
-async function promiseDownloadFinished(list) {
+async function promiseDownloadFinished(list, stopFromOpening) {
   return new Promise(resolve => {
     list.addView({
       onDownloadChanged(download) {
+        if (stopFromOpening) {
+          download.launchWhenSucceeded = false;
+        }
         info("Download changed!");
         if (download.succeeded || download.error) {
           info("Download succeeded or errored");

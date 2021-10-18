@@ -29,9 +29,7 @@ var BlocklistProxy = {
 
   init() {
     if (!this._uuid) {
-      this._uuid = Cc["@mozilla.org/uuid-generator;1"]
-        .getService(Ci.nsIUUIDGenerator)
-        .generateUUID();
+      this._uuid = Services.uuid.generateUUID();
       Cm.nsIComponentRegistrar.registerFactory(
         this._uuid,
         "",
@@ -61,16 +59,6 @@ var BlocklistProxy = {
   async getAddonBlocklistState(aAddon, aAppVersion, aToolkitVersion) {
     await new Promise(r => setTimeout(r, 150));
     return 0; // STATE_NOT_BLOCKED
-  },
-
-  async getPluginBlocklistState(aPluginTag, aAppVersion, aToolkitVersion) {
-    await new Promise(r => setTimeout(r, 150));
-    return 0; // STATE_NOT_BLOCKED
-  },
-
-  async getPluginBlockURL(aPluginTag) {
-    await new Promise(r => setTimeout(r, 150));
-    return "";
   },
 };
 

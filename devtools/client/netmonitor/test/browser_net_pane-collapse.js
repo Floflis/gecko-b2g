@@ -8,7 +8,7 @@
  */
 
 add_task(async function() {
-  const { tab, monitor } = await initNetMonitor(SIMPLE_URL, {
+  const { monitor } = await initNetMonitor(SIMPLE_URL, {
     requestCount: 1,
   });
   info("Starting test... ");
@@ -18,7 +18,7 @@ add_task(async function() {
   const { Prefs } = windowRequire("devtools/client/netmonitor/src/utils/prefs");
 
   const wait = waitForNetworkEvents(monitor, 1);
-  tab.linkedBrowser.reload();
+  await reloadBrowser();
   await wait;
 
   ok(
@@ -40,7 +40,7 @@ add_task(async function() {
     "The details panel should at this point be visible."
   );
 
-  await EventUtils.sendMouseEvent(
+  EventUtils.sendMouseEvent(
     { type: "click" },
     document.querySelector(".sidebar-toggle")
   );

@@ -12,6 +12,7 @@ use crate::shared_lock::{DeepCloneParams, DeepCloneWithLock};
 use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use crate::str::CssStringWriter;
 use crate::stylesheets::{CssRule, Origin, StylesheetInDocument};
+use crate::stylesheets::layer_rule::LayerName;
 use crate::values::CssUrl;
 use cssparser::SourceLocation;
 use std::fmt::{self, Write};
@@ -57,8 +58,27 @@ impl ImportSheet {
     /// exists.
     pub fn as_sheet(&self) -> Option<&crate::gecko::data::GeckoStyleSheet> {
         match *self {
-            ImportSheet::Sheet(ref s) => Some(s),
+            ImportSheet::Sheet(ref s) => {
+                debug_assert!(!s.hack_is_null());
+                if s.hack_is_null() {
+                    return None;
+                }
+                Some(s)
+            },
             ImportSheet::Pending(_) => None,
+        }
+    }
+
+    /// Returns the media list for this import rule.
+    pub fn media<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> Option<&'a MediaList> {
+        self.as_sheet().and_then(|s| s.media(guard))
+    }
+
+    /// Returns the rule list for this import rule.
+    pub fn rules<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> &'a [CssRule] {
+        match self.as_sheet() {
+            Some(s) => s.rules(guard),
+            None => &[],
         }
     }
 }
@@ -85,69 +105,21 @@ impl DeepCloneWithLock for ImportSheet {
     }
 }
 
-#[cfg(feature = "gecko")]
-impl StylesheetInDocument for ImportSheet {
-    fn origin(&self, _guard: &SharedRwLockReadGuard) -> Origin {
-        match *self {
-            ImportSheet::Sheet(ref s) => s.contents().origin,
-            ImportSheet::Pending(ref p) => p.origin,
-        }
-    }
-
-    fn quirks_mode(&self, _guard: &SharedRwLockReadGuard) -> QuirksMode {
-        match *self {
-            ImportSheet::Sheet(ref s) => s.contents().quirks_mode,
-            ImportSheet::Pending(ref p) => p.quirks_mode,
-        }
-    }
-
-    fn enabled(&self) -> bool {
-        match *self {
-            ImportSheet::Sheet(ref s) => s.enabled(),
-            ImportSheet::Pending(_) => true,
-        }
-    }
-
-    fn media<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> Option<&'a MediaList> {
-        match *self {
-            ImportSheet::Sheet(ref s) => s.media(guard),
-            ImportSheet::Pending(_) => None,
-        }
-    }
-
-    fn rules<'a, 'b: 'a>(&'a self, guard: &'b SharedRwLockReadGuard) -> &'a [CssRule] {
-        match *self {
-            ImportSheet::Sheet(ref s) => s.contents().rules(guard),
-            ImportSheet::Pending(_) => &[],
-        }
-    }
-}
-
 /// A sheet that is held from an import rule.
 #[cfg(feature = "servo")]
 #[derive(Debug)]
 pub struct ImportSheet(pub ::servo_arc::Arc<crate::stylesheets::Stylesheet>);
 
 #[cfg(feature = "servo")]
-impl StylesheetInDocument for ImportSheet {
-    fn origin(&self, guard: &SharedRwLockReadGuard) -> Origin {
-        self.0.origin(guard)
-    }
-
-    fn quirks_mode(&self, guard: &SharedRwLockReadGuard) -> QuirksMode {
-        self.0.quirks_mode(guard)
-    }
-
-    fn enabled(&self) -> bool {
-        self.0.enabled()
-    }
-
-    fn media<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> Option<&'a MediaList> {
+impl ImportSheet {
+    /// Returns the media list for this import rule.
+    pub fn media<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> Option<&'a MediaList> {
         self.0.media(guard)
     }
 
-    fn rules<'a, 'b: 'a>(&'a self, guard: &'b SharedRwLockReadGuard) -> &'a [CssRule] {
-        self.0.rules(guard)
+    /// Returns the rules for this import rule.
+    pub fn rules<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> &'a [CssRule] {
+        self.0.rules()
     }
 }
 
@@ -165,6 +137,30 @@ impl DeepCloneWithLock for ImportSheet {
     }
 }
 
+/// The layer keyword or function in an import rule.
+#[derive(Debug, Clone)]
+pub struct ImportLayer {
+    /// The layer name, or None for an anonymous layer.
+    pub name: Option<LayerName>,
+}
+
+
+impl ToCss for ImportLayer {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        match self.name {
+            None => dest.write_str("layer"),
+            Some(ref name) => {
+                dest.write_str("layer(")?;
+                name.to_css(dest)?;
+                dest.write_char(')')
+            },
+        }
+    }
+}
+
 /// The [`@import`][import] at-rule.
 ///
 /// [import]: https://drafts.csswg.org/css-cascade-3/#at-import
@@ -177,6 +173,9 @@ pub struct ImportRule {
     /// parsing, we don't actually have a Gecko sheet at first, and so the
     /// ImportSheet just has stub behavior until it appears.
     pub stylesheet: ImportSheet,
+
+    /// A `layer()` function name.
+    pub layer: Option<ImportLayer>,
 
     /// The line and column of the rule's source code.
     pub source_location: SourceLocation,
@@ -200,6 +199,7 @@ impl DeepCloneWithLock for ImportRule {
         ImportRule {
             url: self.url.clone(),
             stylesheet: self.stylesheet.deep_clone_with_lock(lock, guard, params),
+            layer: self.layer.clone(),
             source_location: self.source_location.clone(),
         }
     }
@@ -210,14 +210,18 @@ impl ToCssWithGuard for ImportRule {
         dest.write_str("@import ")?;
         self.url.to_css(&mut CssWriter::new(dest))?;
 
-        match self.stylesheet.media(guard) {
-            Some(media) if !media.is_empty() => {
-                dest.write_str(" ")?;
+        if let Some(media) = self.stylesheet.media(guard) {
+            if !media.is_empty() {
+                dest.write_char(' ')?;
                 media.to_css(&mut CssWriter::new(dest))?;
-            },
-            _ => {},
-        };
+            }
+        }
 
-        dest.write_str(";")
+        if let Some(ref layer) = self.layer {
+            dest.write_char(' ')?;
+            layer.to_css(&mut CssWriter::new(dest))?;
+        }
+
+        dest.write_char(';')
     }
 }

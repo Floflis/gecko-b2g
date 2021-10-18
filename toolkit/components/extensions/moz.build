@@ -32,27 +32,18 @@ EXTRA_JS_MODULES += [
     "ExtensionStorageSyncKinto.jsm",
     "ExtensionTelemetry.jsm",
     "ExtensionUtils.jsm",
+    "ExtensionWorkerChild.jsm",
     "FindContent.jsm",
     "MatchURLFilters.jsm",
-    "MessageChannel.jsm",
     "MessageManagerProxy.jsm",
     "NativeManifests.jsm",
     "NativeMessaging.jsm",
-    "onExtensionBrowser.js",
     "PerformanceCounters.jsm",
     "ProxyChannelFilter.jsm",
     "Schemas.jsm",
     "WebNavigation.jsm",
-    "WebNavigationContent.js",
     "WebNavigationFrames.jsm",
 ]
-
-if CONFIG["MOZ_WIDGET_TOOLKIT"] != "android":
-    EXTRA_JS_MODULES += [
-        "profiler_get_symbols.js",
-        "ProfilerGetSymbols-worker.js",
-        "ProfilerGetSymbols.jsm",
-    ]
 
 EXTRA_COMPONENTS += [
     "extensions-toolkit.manifest",
@@ -61,15 +52,23 @@ EXTRA_COMPONENTS += [
 TESTING_JS_MODULES += [
     "ExtensionTestCommon.jsm",
     "ExtensionXPCShellUtils.jsm",
+    "MessageChannel.jsm",
 ]
 
 DIRS += [
     "schemas",
     "storage",
+    "webidl-api",
     "webrequest",
 ]
 
+IPDL_SOURCES += [
+    "PExtensions.ipdl",
+]
+
 XPIDL_SOURCES += [
+    "extIWebNavigation.idl",
+    "mozIExtensionAPIRequestHandling.idl",
     "mozIExtensionProcessScript.idl",
 ]
 
@@ -81,6 +80,8 @@ EXPORTS.mozilla = [
 
 EXPORTS.mozilla.extensions = [
     "DocumentObserver.h",
+    "ExtensionsChild.h",
+    "ExtensionsParent.h",
     "MatchGlob.h",
     "MatchPattern.h",
     "WebExtensionContentScript.h",
@@ -89,8 +90,14 @@ EXPORTS.mozilla.extensions = [
 
 UNIFIED_SOURCES += [
     "ExtensionPolicyService.cpp",
+    "ExtensionsChild.cpp",
+    "ExtensionsParent.cpp",
     "MatchPattern.cpp",
     "WebExtensionPolicy.cpp",
+]
+
+XPCOM_MANIFESTS += [
+    "components.conf",
 ]
 
 FINAL_LIBRARY = "xul"
@@ -116,9 +123,16 @@ XPCSHELL_TESTS_MANIFESTS += [
     "test/xpcshell/xpcshell.ini",
 ]
 
+# Only include tests that requires the WebExtensions WebIDL API bindings
+# in builds where they are enabled (currently only on Nightly builds).
+if CONFIG["MOZ_WEBEXT_WEBIDL_ENABLED"]:
+    XPCSHELL_TESTS_MANIFESTS += ["test/xpcshell/webidl-api/xpcshell.ini"]
+
 SPHINX_TREES["webextensions"] = "docs"
 
 with Files("docs/**"):
     SCHEDULES.exclusive = ["docs"]
 
 include("/ipc/chromium/chromium-config.mozbuild")
+
+REQUIRES_UNIFIED_BUILD = True

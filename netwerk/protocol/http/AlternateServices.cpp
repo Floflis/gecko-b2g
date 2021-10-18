@@ -18,10 +18,12 @@
 #include "nsHttpTransaction.h"
 #include "nsISSLSocketControl.h"
 #include "nsIWellKnownOpportunisticUtils.h"
+#include "mozilla/Atomics.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/dom/PContent.h"
 #include "mozilla/SyncRunnable.h"
 #include "mozilla/net/AltSvcTransactionParent.h"
+#include "mozilla/net/AltSvcTransactionChild.h"
 
 /* RFC 7838 Alternative Services
    http://httpwg.org/http-extensions/opsec.html
@@ -218,11 +220,8 @@ AltSvcMapping::AltSvcMapping(DataStorage* storage, int32_t epoch,
       mUsername(username),
       mPrivate(privateBrowsing),
       mExpiresAt(expiresAt),
-      mValidated(false),
-      mMixedScheme(false),
       mNPNToken(npnToken),
       mOriginAttributes(originAttributes),
-      mSyncOnlyOnSuccess(false),
       mIsHttp3(aIsHttp3) {
   MOZ_ASSERT(NS_IsMainThread());
 
@@ -407,10 +406,7 @@ void AltSvcMapping::Serialize(nsCString& out) {
 
 AltSvcMapping::AltSvcMapping(DataStorage* storage, int32_t epoch,
                              const nsCString& str)
-    : mStorage(storage),
-      mStorageEpoch(epoch),
-      mSyncOnlyOnSuccess(false),
-      mIsHttp3(false) {
+    : mStorage(storage), mStorageEpoch(epoch) {
   mValidated = false;
   nsresult code;
   char separator = ':';
@@ -865,7 +861,9 @@ TransactionObserver::OnStopRequest(nsIRequest* aRequest, nsresult code) {
 }
 
 void AltSvcCache::EnsureStorageInited() {
-  if (mStorage) {
+  static Atomic<bool> initialized(false);
+
+  if (initialized) {
     return;
   }
 
@@ -881,8 +879,10 @@ void AltSvcCache::EnsureStorageInited() {
       return;
     }
 
-    if (NS_FAILED(mStorage->Init(nullptr))) {
+    if (NS_FAILED(mStorage->Init())) {
       mStorage = nullptr;
+    } else {
+      initialized = true;
     }
 
     mStorageEpoch = NowInSeconds();
@@ -1042,6 +1042,17 @@ void AltSvcCache::UpdateAltServiceMapping(
          "still in progress\n",
          this, map, existing.get()));
     return;
+  }
+
+  if (map->IsHttp3()) {
+    bool isDirectOrNoProxy = pi ? pi->IsDirect() : true;
+    if (!isDirectOrNoProxy) {
+      LOG(
+          ("AltSvcCache::UpdateAltServiceMapping %p map %p ignored h3 because "
+           "proxy is in use %p\n",
+           this, map, existing.get()));
+      return;
+    }
   }
 
   // start new validation, but don't overwrite a valid existing mapping unless
@@ -1252,11 +1263,11 @@ void AltSvcCache::ClearAltServiceMappings() {
 nsresult AltSvcCache::GetAltSvcCacheKeys(nsTArray<nsCString>& value) {
   MOZ_ASSERT(NS_IsMainThread());
   if (gHttpHandler->AllowAltSvc() && mStorage) {
-    nsTArray<mozilla::psm::DataStorageItem> items;
+    nsTArray<DataStorageItem> items;
     mStorage->GetAll(&items);
 
     for (const auto& item : items) {
-      value.AppendElement(item.key());
+      value.AppendElement(item.key);
     }
   }
   return NS_OK;
@@ -1302,6 +1313,8 @@ AltSvcOverride::GetAllow1918(bool* allow) {
   *allow = true;
   return NS_OK;
 }
+
+template class AltSvcTransaction<AltSvcTransactionChild>;
 
 NS_IMPL_ISUPPORTS(AltSvcOverride, nsIInterfaceRequestor,
                   nsISpeculativeConnectionOverrider)

@@ -24,6 +24,7 @@
 #include "mozilla/Unused.h"
 #include "mozilla/dom/BrowserBridgeChild.h"
 #include "mozilla/dom/BrowserParent.h"
+#include "mozilla/dom/Document.h"
 #include "mozilla/dom/HTMLFormElement.h"
 #include "mozilla/dom/HTMLTextAreaElement.h"
 #include "mozilla/dom/MouseEventBinding.h"
@@ -36,8 +37,7 @@
 #include "nsContentUtils.h"
 #include "nsFocusManager.h"
 #include "nsIContent.h"
-#include "mozilla/dom/Document.h"
-#include "nsIForm.h"
+#include "nsIContentInlines.h"
 #include "nsIFormControl.h"
 #include "nsINode.h"
 #include "nsISupports.h"
@@ -667,6 +667,11 @@ nsresult IMEStateManager::OnChangeFocusInternal(nsPresContext* aPresContext,
   // Don't call CreateIMEContentObserver() here  because it will be called from
   // the focus event handler of focused editor.
 
+  MOZ_LOG(sISMLog, LogLevel::Debug,
+          ("  OnChangeFocusInternal(), modified IME state for "
+           "sPresContext=0x%p, sContent=0x%p",
+           sPresContext.get(), sContent.get()));
+
   return NS_OK;
 }
 
@@ -695,10 +700,10 @@ bool IMEStateManager::OnMouseButtonEventInEditor(
     nsPresContext* aPresContext, nsIContent* aContent,
     WidgetMouseEvent* aMouseEvent) {
   MOZ_LOG(sISMLog, LogLevel::Info,
-          ("OnMouseButtonEventInEditor(aPresContext=0x%p, "
+          ("OnMouseButtonEventInEditor(aPresContext=0x%p (available: %s), "
            "aContent=0x%p, aMouseEvent=0x%p), sPresContext=0x%p, sContent=0x%p",
-           aPresContext, aContent, aMouseEvent, sPresContext.get(),
-           sContent.get()));
+           aPresContext, GetBoolName(CanHandleWith(aPresContext)), aContent,
+           aMouseEvent, sPresContext.get(), sContent.get()));
 
   if (NS_WARN_IF(!aMouseEvent)) {
     MOZ_LOG(sISMLog, LogLevel::Debug,
@@ -746,12 +751,13 @@ bool IMEStateManager::OnMouseButtonEventInEditor(
 void IMEStateManager::OnClickInEditor(nsPresContext* aPresContext,
                                       nsIContent* aContent,
                                       const WidgetMouseEvent* aMouseEvent) {
-  MOZ_LOG(
-      sISMLog, LogLevel::Info,
-      ("OnClickInEditor(aPresContext=0x%p, aContent=0x%p, aMouseEvent=0x%p), "
-       "sPresContext=0x%p, sContent=0x%p, sWidget=0x%p (available: %s)",
-       aPresContext, aContent, aMouseEvent, sPresContext.get(), sContent.get(),
-       sWidget, GetBoolName(sWidget && !sWidget->Destroyed())));
+  MOZ_LOG(sISMLog, LogLevel::Info,
+          ("OnClickInEditor(aPresContext=0x%p (available: %s), aContent=0x%p, "
+           "aMouseEvent=0x%p), sPresContext=0x%p, sContent=0x%p, sWidget=0x%p "
+           "(available: %s)",
+           aPresContext, GetBoolName(CanHandleWith(aPresContext)), aContent,
+           aMouseEvent, sPresContext.get(), sContent.get(), sWidget,
+           GetBoolName(sWidget && !sWidget->Destroyed())));
 
   if (NS_WARN_IF(!aMouseEvent)) {
     return;
@@ -768,8 +774,12 @@ void IMEStateManager::OnClickInEditor(nsPresContext* aPresContext,
 
   nsCOMPtr<nsIWidget> widget(sWidget);
 
-  MOZ_ASSERT(!sPresContext->GetTextInputHandlingWidget() ||
-             sPresContext->GetTextInputHandlingWidget() == widget);
+#ifdef DEBUG
+  {
+    nsCOMPtr<nsIWidget> tihWidget = sPresContext->GetTextInputHandlingWidget();
+    MOZ_ASSERT(!tihWidget || tihWidget == widget);
+  }
+#endif  // DEBUG
 
   if (!aMouseEvent->IsTrusted()) {
     MOZ_LOG(sISMLog, LogLevel::Debug,
@@ -803,17 +813,55 @@ void IMEStateManager::OnClickInEditor(nsPresContext* aPresContext,
 }
 
 // static
+bool IMEStateManager::IsFocusedContent(const nsPresContext* aPresContext,
+                                       const nsIContent* aFocusedContent) {
+  if (!aPresContext || !sPresContext || aPresContext != sPresContext) {
+    return false;
+  }
+
+  if (sContent == aFocusedContent) {
+    return true;
+  }
+
+  // If sContent is not nullptr, but aFocusedContent is nullptr, it does not
+  // have focus from point of view of IMEStateManager.
+  if (sContent) {
+    return false;
+  }
+
+  // If the caller does not think that nobody has focus, but we know there is
+  // a focused content, the caller must be called with wrong content.
+  if (!aFocusedContent) {
+    return false;
+  }
+
+  // If the aFocusedContent is in design mode, sContent may be nullptr.
+  if (aFocusedContent->IsInDesignMode()) {
+    MOZ_ASSERT(aPresContext == sPresContext && !sContent);
+    return true;
+  }
+
+  // Otherwise, only when aFocusedContent is the root element, it can have
+  // focus, but IMEStateManager::OnChangeFocus is called with nullptr for
+  // aContent if it was not editable.
+  // XXX In this case, should the caller update sContent?
+  return aFocusedContent->IsEditable() &&
+         sPresContext->Document()->GetRootElement() == aFocusedContent;
+}
+
+// static
 void IMEStateManager::OnFocusInEditor(nsPresContext* aPresContext,
                                       nsIContent* aContent,
                                       EditorBase& aEditorBase) {
-  MOZ_LOG(
-      sISMLog, LogLevel::Info,
-      ("OnFocusInEditor(aPresContext=0x%p, aContent=0x%p, aEditorBase=0x%p), "
-       "sPresContext=0x%p, sContent=0x%p, sActiveIMEContentObserver=0x%p",
-       aPresContext, aContent, &aEditorBase, sPresContext.get(), sContent.get(),
-       sActiveIMEContentObserver.get()));
+  MOZ_LOG(sISMLog, LogLevel::Info,
+          ("OnFocusInEditor(aPresContext=0x%p (available: %s), aContent=0x%p, "
+           "aEditorBase=0x%p), sPresContext=0x%p, sContent=0x%p, "
+           "sActiveIMEContentObserver=0x%p",
+           aPresContext, GetBoolName(CanHandleWith(aPresContext)), aContent,
+           &aEditorBase, sPresContext.get(), sContent.get(),
+           sActiveIMEContentObserver.get()));
 
-  if (sPresContext != aPresContext || sContent != aContent) {
+  if (!IsFocusedContent(aPresContext, aContent)) {
     MOZ_LOG(sISMLog, LogLevel::Debug,
             ("  OnFocusInEditor(), "
              "an editor not managed by ISM gets focus"));
@@ -830,17 +878,30 @@ void IMEStateManager::OnFocusInEditor(nsPresContext* aPresContext,
            "the editor is already being managed by sActiveIMEContentObserver"));
       return;
     }
-    DestroyIMEContentObserver();
+    // If the IMEContentObserver has not finished initializing itself yet,
+    // we don't need to recreate it because the following
+    // TryToFlushPendingNotifications call must make it initialized.
+    if (!sActiveIMEContentObserver->IsBeingInitializedFor(aPresContext,
+                                                          aContent)) {
+      DestroyIMEContentObserver();
+    }
   }
 
-  CreateIMEContentObserver(aEditorBase);
+  if (!sActiveIMEContentObserver) {
+    CreateIMEContentObserver(aEditorBase, aContent);
+    if (sActiveIMEContentObserver) {
+      MOZ_LOG(sISMLog, LogLevel::Debug,
+              ("  OnFocusInEditor(), new IMEContentObserver is created (0x%p)",
+               sActiveIMEContentObserver.get()));
+    }
+  }
 
-  // Let's flush the focus notification now.
   if (sActiveIMEContentObserver) {
-    MOZ_LOG(sISMLog, LogLevel::Debug,
-            ("  OnFocusInEditor(), new IMEContentObserver is "
-             "created, trying to flush pending notifications..."));
     sActiveIMEContentObserver->TryToFlushPendingNotifications(false);
+    MOZ_LOG(sISMLog, LogLevel::Debug,
+            ("  OnFocusInEditor(), trying to send pending notifications in "
+             "the active IMEContentObserver (0x%p)...",
+             sActiveIMEContentObserver.get()));
   }
 }
 
@@ -874,11 +935,21 @@ void IMEStateManager::OnEditorDestroying(EditorBase& aEditorBase) {
 
 void IMEStateManager::OnReFocus(nsPresContext* aPresContext,
                                 nsIContent& aContent) {
-  MOZ_LOG(
-      sISMLog, LogLevel::Info,
-      ("OnReFocus(aPresContext=0x%p, aContent=0x%p)", aPresContext, &aContent));
+  MOZ_LOG(sISMLog, LogLevel::Info,
+          ("OnReFocus(aPresContext=0x%p (available: %s), aContent=0x%p), "
+           "sActiveIMEContentObserver=0x%p, sContent=0x%p",
+           aPresContext, GetBoolName(CanHandleWith(aPresContext)), &aContent,
+           sActiveIMEContentObserver.get(), sContent.get()));
 
   if (NS_WARN_IF(!sWidget) || NS_WARN_IF(sWidget->Destroyed())) {
+    return;
+  }
+
+  if (!sActiveIMEContentObserver ||
+      !sActiveIMEContentObserver->IsManaging(aPresContext, &aContent)) {
+    MOZ_LOG(sISMLog, LogLevel::Debug,
+            ("  OnReFocus(), there is no valid IMEContentObserver, so we don't "
+             "manage this. Ignore this"));
     return;
   }
 
@@ -910,14 +981,17 @@ void IMEStateManager::OnReFocus(nsPresContext* aPresContext,
 // static
 void IMEStateManager::UpdateIMEState(const IMEState& aNewIMEState,
                                      nsIContent* aContent,
-                                     EditorBase& aEditorBase) {
+                                     EditorBase& aEditorBase,
+                                     const UpdateIMEStateOptions& aOptions) {
   MOZ_LOG(
       sISMLog, LogLevel::Info,
-      ("UpdateIMEState(aNewIMEState=%s, aContent=0x%p, aEditorBase=0x%p), "
-       "sPresContext=0x%p, sContent=0x%p, sWidget=0x%p (available: %s), "
-       "sActiveIMEContentObserver=0x%p, sIsGettingNewIMEState=%s",
+      ("UpdateIMEState(aNewIMEState=%s, aContent=0x%p, aEditorBase=0x%p, "
+       "aOptions=0x%0x), sPresContext=0x%p (available: %s), sContent=0x%p, "
+       "sWidget=0x%p (available: %s), sActiveIMEContentObserver=0x%p, "
+       "sIsGettingNewIMEState=%s",
        ToString(aNewIMEState).c_str(), aContent, &aEditorBase,
-       sPresContext.get(), sContent.get(), sWidget,
+       aOptions.serialize(), sPresContext.get(),
+       GetBoolName(CanHandleWith(sPresContext)), sContent.get(), sWidget,
        GetBoolName(sWidget && !sWidget->Destroyed()),
        sActiveIMEContentObserver.get(), GetBoolName(sIsGettingNewIMEState)));
 
@@ -977,8 +1051,12 @@ void IMEStateManager::UpdateIMEState(const IMEState& aNewIMEState,
 
   OwningNonNull<nsIWidget> widget(*sWidget);
 
-  MOZ_ASSERT(!sPresContext->GetTextInputHandlingWidget() ||
-             sPresContext->GetTextInputHandlingWidget() == widget);
+#ifdef DEBUG
+  {
+    nsCOMPtr<nsIWidget> tihWidget = sPresContext->GetTextInputHandlingWidget();
+    MOZ_ASSERT(!tihWidget || tihWidget == widget);
+  }
+#endif  // DEBUG
 
   // TODO: Investigate if we could put off to initialize IMEContentObserver
   //       later because a lot of callers need to be marked as
@@ -1014,6 +1092,7 @@ void IMEStateManager::UpdateIMEState(const IMEState& aNewIMEState,
        !sActiveIMEContentObserver->IsManaging(sPresContext, aContent));
 
   bool updateIMEState =
+      aOptions.contains(UpdateIMEStateOption::ForceUpdate) ||
       (widget->GetInputContext().mIMEState.mEnabled != aNewIMEState.mEnabled);
   if (NS_WARN_IF(widget->Destroyed())) {
     MOZ_LOG(
@@ -1022,7 +1101,8 @@ void IMEStateManager::UpdateIMEState(const IMEState& aNewIMEState,
     return;
   }
 
-  if (updateIMEState) {
+  if (updateIMEState &&
+      !aOptions.contains(UpdateIMEStateOption::DontCommitComposition)) {
     // commit current composition before modifying IME state.
     NotifyIME(REQUEST_TO_COMMIT_COMPOSITION, widget, sFocusedIMEBrowserParent);
     if (NS_WARN_IF(widget->Destroyed())) {
@@ -1049,11 +1129,14 @@ void IMEStateManager::UpdateIMEState(const IMEState& aNewIMEState,
     }
   }
 
+  NS_ASSERTION(IsFocusedContent(presContext, aContent),
+               "aContent does not match with sContent");
+
   if (createTextStateManager) {
     // XXX In this case, it might not be enough safe to notify IME of anything.
     //     So, don't try to flush pending notifications of IMEContentObserver
     //     here.
-    CreateIMEContentObserver(aEditorBase);
+    CreateIMEContentObserver(aEditorBase, aContent);
   }
 }
 
@@ -1092,8 +1175,8 @@ IMEState IMEStateManager::GetNewIMEState(nsPresContext* aPresContext,
   if (!aContent) {
     // Even if there are no focused content, the focused document might be
     // editable, such case is design mode.
-    Document* doc = aPresContext->Document();
-    if (doc && doc->HasFlag(NODE_IS_EDITABLE)) {
+    if (aPresContext->Document() &&
+        aPresContext->Document()->IsInDesignMode()) {
       MOZ_LOG(sISMLog, LogLevel::Debug,
               ("  GetNewIMEState() returns IMEEnabled::Enabled because "
                "design mode editor has focus"));
@@ -1103,6 +1186,15 @@ IMEState IMEStateManager::GetNewIMEState(nsPresContext* aPresContext,
             ("  GetNewIMEState() returns IMEEnabled::Disabled because "
              "no content has focus"));
     return IMEState(IMEEnabled::Disabled);
+  }
+
+  // If aContent is in designMode, aContent should be the root node of the
+  // document.
+  if (aContent && aContent->IsInDesignMode()) {
+    MOZ_LOG(sISMLog, LogLevel::Debug,
+            ("  GetNewIMEState() returns IMEEnabled::Enabled because "
+             "a content node in design mode editor has focus"));
+    return IMEState(IMEEnabled::Enabled);
   }
 
   // nsIContent::GetDesiredIMEState() may cause a call of UpdateIMEState()
@@ -1185,8 +1277,12 @@ void IMEStateManager::SetInputContextForChildProcess(
 
   nsCOMPtr<nsIWidget> widget(sWidget);
 
-  MOZ_ASSERT(!sPresContext->GetTextInputHandlingWidget() ||
-             sPresContext->GetTextInputHandlingWidget() == widget);
+#ifdef DEBUG
+  {
+    nsCOMPtr<nsIWidget> tihWidget = sPresContext->GetTextInputHandlingWidget();
+    MOZ_ASSERT(!tihWidget || tihWidget == widget);
+  }
+#endif  // DEBUG
   MOZ_ASSERT(aInputContext.mOrigin == InputContext::ORIGIN_CONTENT);
 
   sActiveChildInputContext = aInputContext;
@@ -1206,16 +1302,16 @@ void IMEStateManager::SetInputContextForChildProcess(
   SetInputContext(widget, aInputContext, aAction);
 }
 
-static bool IsNextFocusableElementTextControl(Element* aInputContent) {
+static bool IsNextFocusableElementTextControl(const Element* aInputContent) {
   nsFocusManager* fm = nsFocusManager::GetFocusManager();
   if (!fm) {
     return false;
   }
   nsCOMPtr<nsIContent> nextContent;
   nsresult rv = fm->DetermineElementToMoveFocus(
-      aInputContent->OwnerDoc()->GetWindow(), aInputContent,
-      nsIFocusManager::MOVEFOCUS_FORWARD, true, false,
-      getter_AddRefs(nextContent));
+      aInputContent->OwnerDoc()->GetWindow(),
+      const_cast<Element*>(aInputContent), nsIFocusManager::MOVEFOCUS_FORWARD,
+      true, false, getter_AddRefs(nextContent));
   if (NS_WARN_IF(NS_FAILED(rv)) || !nextContent) {
     return false;
   }
@@ -1252,9 +1348,35 @@ static bool IsNextFocusableElementTextControl(Element* aInputContent) {
   return !inputElement->ReadOnly();
 }
 
-static void GetActionHint(nsIContent& aContent, nsAString& aActionHint) {
-  // If enterkeyhint is set, we don't infer action hint.
-  if (!aActionHint.IsEmpty()) {
+static void GetInputType(const IMEState& aState, const nsIContent& aContent,
+                         nsAString& aInputType) {
+  if (aContent.IsHTMLElement(nsGkAtoms::input)) {
+    const HTMLInputElement* inputElement =
+        HTMLInputElement::FromNode(&aContent);
+    if (inputElement->HasBeenTypePassword() && aState.IsEditable()) {
+      aInputType.AssignLiteral("password");
+    } else {
+      inputElement->GetType(aInputType);
+    }
+  } else if (aContent.IsHTMLElement(nsGkAtoms::textarea)) {
+    aInputType.Assign(nsGkAtoms::textarea->GetUTF16String());
+  }
+}
+
+static void GetActionHint(const IMEState& aState, const nsIContent& aContent,
+                          nsAString& aActionHint) {
+  MOZ_ASSERT(aContent.IsHTMLElement());
+
+  if (aState.IsEditable() && StaticPrefs::dom_forms_enterkeyhint()) {
+    nsGenericHTMLElement::FromNode(&aContent)->GetEnterKeyHint(aActionHint);
+
+    // If enterkeyhint is set, we don't infer action hint.
+    if (!aActionHint.IsEmpty()) {
+      return;
+    }
+  }
+
+  if (!aContent.IsAnyOfHTMLElements(nsGkAtoms::input, nsGkAtoms::textarea)) {
     return;
   }
 
@@ -1269,8 +1391,9 @@ static void GetActionHint(nsIContent& aContent, nsAString& aActionHint) {
 
   // Get the input content corresponding to the focused node,
   // which may be an anonymous child of the input content.
-  nsIContent* inputContent = aContent.FindFirstNonChromeOnlyAccessContent();
-  if (!inputContent->IsHTMLElement(nsGkAtoms::input)) {
+  MOZ_ASSERT(&aContent == aContent.FindFirstNonChromeOnlyAccessContent());
+  const HTMLInputElement* inputElement = HTMLInputElement::FromNode(aContent);
+  if (!inputElement) {
     return;
   }
 
@@ -1278,37 +1401,34 @@ static void GetActionHint(nsIContent& aContent, nsAString& aActionHint) {
   // return won't submit the form, use "maybenext".
   bool willSubmit = false;
   bool isLastElement = false;
-  nsCOMPtr<nsIFormControl> control(do_QueryInterface(inputContent));
-  if (control) {
-    HTMLFormElement* formElement = control->GetFormElement();
-    // is this a form and does it have a default submit element?
-    if (formElement) {
-      if (formElement->IsLastActiveElement(control)) {
-        isLastElement = true;
-      }
-
-      if (formElement->GetDefaultSubmitElement()) {
-        willSubmit = true;
-        // is this an html form...
-      } else {
-        // ... and does it only have a single text input element ?
-        if (!formElement->ImplicitSubmissionIsDisabled() ||
-            // ... or is this the last non-disabled element?
-            isLastElement) {
-          willSubmit = true;
-        }
-      }
+  HTMLFormElement* formElement = inputElement->GetForm();
+  // is this a form and does it have a default submit element?
+  if (formElement) {
+    if (formElement->IsLastActiveElement(inputElement)) {
+      isLastElement = true;
     }
 
-    if (!isLastElement && formElement) {
-      // If next tabbable content in form is text control, hint should be "next"
-      // even there is submit in form.
-      if (IsNextFocusableElementTextControl(inputContent->AsElement())) {
-        // This is focusable text control
-        // XXX What good hint for read only field?
-        aActionHint.AssignLiteral("maybenext");
-        return;
+    if (formElement->GetDefaultSubmitElement()) {
+      willSubmit = true;
+      // is this an html form...
+    } else {
+      // ... and does it only have a single text input element ?
+      if (!formElement->ImplicitSubmissionIsDisabled() ||
+          // ... or is this the last non-disabled element?
+          isLastElement) {
+        willSubmit = true;
       }
+    }
+  }
+
+  if (!isLastElement && formElement) {
+    // If next tabbable content in form is text control, hint should be "next"
+    // even there is submit in form.
+    if (IsNextFocusableElementTextControl(inputElement)) {
+      // This is focusable text control
+      // XXX What good hint for read only field?
+      aActionHint.AssignLiteral("maybenext");
+      return;
     }
   }
 
@@ -1316,12 +1436,43 @@ static void GetActionHint(nsIContent& aContent, nsAString& aActionHint) {
     return;
   }
 
-  if (control->ControlType() == NS_FORM_INPUT_SEARCH) {
+  if (inputElement->ControlType() == FormControlType::InputSearch) {
     aActionHint.AssignLiteral("search");
     return;
   }
 
   aActionHint.AssignLiteral("go");
+}
+
+static void GetInputmode(const IMEState& aState, const nsIContent& aContent,
+                         nsAString& aInputmode) {
+  if (aState.IsEditable() &&
+      (StaticPrefs::dom_forms_inputmode() ||
+       nsContentUtils::IsChromeDoc(aContent.OwnerDoc()))) {
+    aContent.AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::inputmode,
+                                  aInputmode);
+    if (aContent.IsHTMLElement(nsGkAtoms::input) &&
+        aInputmode.EqualsLiteral("mozAwesomebar")) {
+      if (!nsContentUtils::IsChromeDoc(aContent.OwnerDoc())) {
+        // mozAwesomebar should be allowed only in chrome
+        aInputmode.Truncate();
+      }
+    } else {
+      ToLowerCase(aInputmode);
+    }
+  }
+}
+
+static void GetAutocapitalize(const IMEState& aState,
+                              const nsIContent& aContent,
+                              const InputContext& aInputContext,
+                              nsAString& aAutocapitalize) {
+  if (aContent.IsHTMLElement() && aState.IsEditable() &&
+      StaticPrefs::dom_forms_autocapitalize() &&
+      aInputContext.IsAutocapitalizeSupported()) {
+    nsGenericHTMLElement::FromNode(&aContent)->GetAutocapitalize(
+        aAutocapitalize);
+  }
 }
 
 // static
@@ -1355,49 +1506,15 @@ void IMEStateManager::SetIMEState(const IMEState& aState,
       aPresContext &&
       nsContentUtils::IsInPrivateBrowsing(aPresContext->Document());
 
-  if (aContent && aContent->IsHTMLElement()) {
-    if (aState.IsEditable() && StaticPrefs::dom_forms_enterkeyhint()) {
-      nsGenericHTMLElement::FromNode(aContent)->GetEnterKeyHint(
-          context.mActionHint);
-    }
+  nsIContent* focusedContent =
+      aContent ? aContent->FindFirstNonChromeOnlyAccessContent() : nullptr;
 
-    if (aContent->IsHTMLElement(nsGkAtoms::input)) {
-      HTMLInputElement* inputElement = HTMLInputElement::FromNode(aContent);
-      if (inputElement->HasBeenTypePassword() && aState.IsEditable()) {
-        context.mHTMLInputType.AssignLiteral("password");
-      } else {
-        inputElement->GetType(context.mHTMLInputType);
-      }
-
-      GetActionHint(*aContent, context.mActionHint);
-    } else if (aContent->IsHTMLElement(nsGkAtoms::textarea)) {
-      context.mHTMLInputType.Assign(nsGkAtoms::textarea->GetUTF16String());
-      GetActionHint(*aContent, context.mActionHint);
-    }
-
-    if (aState.IsEditable() &&
-        (StaticPrefs::dom_forms_inputmode() ||
-         nsContentUtils::IsChromeDoc(aContent->OwnerDoc()))) {
-      aContent->AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::inputmode,
-                                     context.mHTMLInputInputmode);
-      if (aContent->IsHTMLElement(nsGkAtoms::input) &&
-          context.mHTMLInputInputmode.EqualsLiteral("mozAwesomebar")) {
-        if (!nsContentUtils::IsChromeDoc(aContent->OwnerDoc())) {
-          // mozAwesomebar should be allowed only in chrome
-          context.mHTMLInputInputmode.Truncate();
-        }
-      } else {
-        // Except to mozAwesomebar, inputmode should be lower case.
-        ToLowerCase(context.mHTMLInputInputmode);
-      }
-    }
-
-    if (aContent->IsHTMLElement() && aState.IsEditable() &&
-        StaticPrefs::dom_forms_autocapitalize() &&
-        context.IsAutocapitalizeSupported()) {
-      nsGenericHTMLElement::FromNode(aContent)->GetAutocapitalize(
-          context.mAutocapitalize);
-    }
+  if (focusedContent && focusedContent->IsHTMLElement()) {
+    GetInputType(aState, *focusedContent, context.mHTMLInputType);
+    GetActionHint(aState, *focusedContent, context.mActionHint);
+    GetInputmode(aState, *focusedContent, context.mHTMLInputInputmode);
+    GetAutocapitalize(aState, *focusedContent, context,
+                      context.mAutocapitalize);
   }
 
   if (aAction.mCause == InputContextAction::CAUSE_UNKNOWN &&
@@ -1471,8 +1588,8 @@ void IMEStateManager::DispatchCompositionEvent(
        GetBoolName(aCompositionEvent->mFlags.mPropagationStopped),
        GetBoolName(aIsSynthesized), aBrowserParent));
 
-  if (!aCompositionEvent->IsTrusted() ||
-      aCompositionEvent->PropagationStopped()) {
+  if (NS_WARN_IF(!aCompositionEvent->IsTrusted()) ||
+      NS_WARN_IF(aCompositionEvent->PropagationStopped())) {
     return;
   }
 
@@ -1832,7 +1949,7 @@ nsresult IMEStateManager::NotifyIME(IMEMessage aMessage,
     return NS_ERROR_INVALID_ARG;
   }
 
-  nsIWidget* widget = aPresContext->GetTextInputHandlingWidget();
+  nsCOMPtr<nsIWidget> widget = aPresContext->GetTextInputHandlingWidget();
   if (NS_WARN_IF(!widget)) {
     MOZ_LOG(sISMLog, LogLevel::Error,
             ("  NotifyIME(), FAILED due to no widget for the "
@@ -1856,11 +1973,17 @@ bool IMEStateManager::IsEditable(nsINode* node) {
 }
 
 // static
-nsINode* IMEStateManager::GetRootEditableNode(nsPresContext* aPresContext,
-                                              nsIContent* aContent) {
+nsINode* IMEStateManager::GetRootEditableNode(const nsPresContext* aPresContext,
+                                              const nsIContent* aContent) {
   if (aContent) {
+    // If the focused content is in design mode, return is composed document
+    // because aContent may be in UA widget shadow tree.
+    if (aContent->IsInDesignMode()) {
+      return aContent->GetComposedDoc();
+    }
+
     nsINode* root = nullptr;
-    nsINode* node = aContent;
+    nsINode* node = const_cast<nsIContent*>(aContent);
     while (node && IsEditable(node)) {
       // If the node has independent selection like <input type="text"> or
       // <textarea>, the node should be the root editable node for aContent.
@@ -1868,6 +1991,8 @@ nsINode* IMEStateManager::GetRootEditableNode(nsPresContext* aPresContext,
       //      returns false.
       // XXX: If somebody adds new editable element which has independent
       //      selection but doesn't own editor, we'll need more checks here.
+      // XXX: If aContent is not in native anonymous subtree, checking
+      //      independent selection must be wrong, see bug 1731005.
       if (node->IsContent() && node->AsContent()->HasIndependentSelection()) {
         return node;
       }
@@ -1876,11 +2001,9 @@ nsINode* IMEStateManager::GetRootEditableNode(nsPresContext* aPresContext,
     }
     return root;
   }
-  if (aPresContext) {
-    Document* document = aPresContext->Document();
-    if (document && document->IsEditable()) {
-      return document;
-    }
+  if (aPresContext && aPresContext->Document() &&
+      aPresContext->Document()->IsInDesignMode()) {
+    return aPresContext->Document();
   }
   return nullptr;
 }
@@ -1911,14 +2034,15 @@ void IMEStateManager::DestroyIMEContentObserver() {
 }
 
 // static
-void IMEStateManager::CreateIMEContentObserver(EditorBase& aEditorBase) {
+void IMEStateManager::CreateIMEContentObserver(EditorBase& aEditorBase,
+                                               nsIContent* aFocusedContent) {
   MOZ_LOG(sISMLog, LogLevel::Info,
-          ("CreateIMEContentObserver(aEditorBase=0x%p), "
+          ("CreateIMEContentObserver(aEditorBase=0x%p, aFocusedContent=0x%p), "
            "sPresContext=0x%p, sContent=0x%p, sWidget=0x%p (available: %s), "
            "sActiveIMEContentObserver=0x%p, "
            "sActiveIMEContentObserver->IsManaging(sPresContext, sContent)=%s",
-           &aEditorBase, sPresContext.get(), sContent.get(), sWidget,
-           GetBoolName(sWidget && !sWidget->Destroyed()),
+           &aEditorBase, aFocusedContent, sPresContext.get(), sContent.get(),
+           sWidget, GetBoolName(sWidget && !sWidget->Destroyed()),
            sActiveIMEContentObserver.get(),
            GetBoolName(sActiveIMEContentObserver
                            ? sActiveIMEContentObserver->IsManaging(sPresContext,
@@ -1964,7 +2088,12 @@ void IMEStateManager::CreateIMEContentObserver(EditorBase& aEditorBase) {
     return;
   }
 
-  MOZ_ASSERT(sPresContext->GetTextInputHandlingWidget() == widget);
+#ifdef DEBUG
+  {
+    nsCOMPtr<nsIWidget> tihWidget = sPresContext->GetTextInputHandlingWidget();
+    MOZ_ASSERT(tihWidget == widget);
+  }
+#endif  // DEBUG
 
   MOZ_LOG(sISMLog, LogLevel::Debug,
           ("  CreateIMEContentObserver() is creating an "
@@ -1977,7 +2106,7 @@ void IMEStateManager::CreateIMEContentObserver(EditorBase& aEditorBase) {
   RefPtr<IMEContentObserver> activeIMEContentObserver(
       sActiveIMEContentObserver);
   OwningNonNull<nsPresContext> presContext(*sPresContext);
-  RefPtr<nsIContent> content = sContent;
+  nsCOMPtr<nsIContent> content = aFocusedContent;
   activeIMEContentObserver->Init(widget, presContext, content, aEditorBase);
 }
 

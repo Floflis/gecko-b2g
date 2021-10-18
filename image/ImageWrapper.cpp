@@ -7,18 +7,17 @@
 #include "mozilla/gfx/2D.h"
 #include "mozilla/RefPtr.h"
 #include "Orientation.h"
+#include "mozilla/image/Resolution.h"
 
 #include "mozilla/MemoryReporting.h"
 
 namespace mozilla {
 
 using dom::Document;
-using gfx::DataSourceSurface;
 using gfx::IntSize;
 using gfx::SamplingFilter;
 using gfx::SourceSurface;
 using layers::ImageContainer;
-using layers::LayerManager;
 
 namespace image {
 
@@ -135,8 +134,8 @@ nsresult ImageWrapper::GetHotspotY(int32_t* aY) {
 NS_IMETHODIMP_(Orientation)
 ImageWrapper::GetOrientation() { return mInnerImage->GetOrientation(); }
 
-NS_IMETHODIMP_(bool)
-ImageWrapper::HandledOrientation() { return mInnerImage->HandledOrientation(); }
+NS_IMETHODIMP_(Resolution)
+ImageWrapper::GetResolution() { return mInnerImage->GetResolution(); }
 
 NS_IMETHODIMP
 ImageWrapper::GetType(uint16_t* aType) { return mInnerImage->GetType(aType); }
@@ -166,31 +165,20 @@ NS_IMETHODIMP_(bool)
 ImageWrapper::WillDrawOpaqueNow() { return mInnerImage->WillDrawOpaqueNow(); }
 
 NS_IMETHODIMP_(bool)
-ImageWrapper::IsImageContainerAvailable(LayerManager* aManager,
+ImageWrapper::IsImageContainerAvailable(WindowRenderer* aRenderer,
                                         uint32_t aFlags) {
-  return mInnerImage->IsImageContainerAvailable(aManager, aFlags);
-}
-
-NS_IMETHODIMP_(already_AddRefed<ImageContainer>)
-ImageWrapper::GetImageContainer(LayerManager* aManager, uint32_t aFlags) {
-  return mInnerImage->GetImageContainer(aManager, aFlags);
-}
-
-NS_IMETHODIMP_(bool)
-ImageWrapper::IsImageContainerAvailableAtSize(LayerManager* aManager,
-                                              const IntSize& aSize,
-                                              uint32_t aFlags) {
-  return mInnerImage->IsImageContainerAvailableAtSize(aManager, aSize, aFlags);
+  return mInnerImage->IsImageContainerAvailable(aRenderer, aFlags);
 }
 
 NS_IMETHODIMP_(ImgDrawResult)
-ImageWrapper::GetImageContainerAtSize(layers::LayerManager* aManager,
+ImageWrapper::GetImageContainerAtSize(WindowRenderer* aRenderer,
                                       const gfx::IntSize& aSize,
                                       const Maybe<SVGImageContext>& aSVGContext,
+                                      const Maybe<ImageIntRegion>& aRegion,
                                       uint32_t aFlags,
                                       layers::ImageContainer** aOutContainer) {
-  return mInnerImage->GetImageContainerAtSize(aManager, aSize, aSVGContext,
-                                              aFlags, aOutContainer);
+  return mInnerImage->GetImageContainerAtSize(aRenderer, aSize, aSVGContext,
+                                              aRegion, aFlags, aOutContainer);
 }
 
 NS_IMETHODIMP_(ImgDrawResult)

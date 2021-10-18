@@ -10,21 +10,17 @@
 #include "nsIURIMutator.h"
 #include "ODoHService.h"
 #include "TRRService.h"
+// Put DNSLogging.h at the end to avoid LOG being overwritten by other headers.
+#include "DNSLogging.h"
+#include "nsNetUtil.h"
 
 namespace mozilla {
 namespace net {
 
-#undef LOG
-#undef LOG_ENABLED
-extern mozilla::LazyLogModule gHostResolverLog;
-#define LOG(args) MOZ_LOG(gHostResolverLog, mozilla::LogLevel::Debug, args)
-#define LOG_ENABLED() \
-  MOZ_LOG_TEST(mozilla::net::gHostResolverLog, mozilla::LogLevel::Debug)
-
 NS_IMETHODIMP
 ODoH::Run() {
   if (!gODoHService) {
-    RecordReason(nsHostRecord::TRR_SEND_FAILED);
+    RecordReason(TRRSkippedReason::TRR_SEND_FAILED);
     FailData(NS_ERROR_FAILURE);
     return NS_OK;
   }
@@ -34,6 +30,7 @@ ODoH::Run() {
     if (NS_SUCCEEDED(gODoHService->UpdateODoHConfig())) {
       gODoHService->AppendPendingODoHRequest(this);
     } else {
+      RecordReason(TRRSkippedReason::ODOH_UPDATE_KEY_FAILED);
       FailData(NS_ERROR_FAILURE);
       return NS_OK;
     }
@@ -63,6 +60,46 @@ nsresult ODoH::CreateQueryURI(nsIURI** aOutURI) {
 
   dnsURI.forget(aOutURI);
   return NS_OK;
+}
+
+void ODoH::HandleTimeout() {
+  // If this request is still in the pending queue, it means we can't get the
+  // ODoHConfigs within the timeout.
+  if (gODoHService->RemovePendingODoHRequest(this)) {
+    RecordReason(TRRSkippedReason::ODOH_KEY_NOT_AVAILABLE);
+  }
+
+  TRR::HandleTimeout();
+}
+
+void ODoH::HandleEncodeError(nsresult aStatusCode) {
+  MOZ_ASSERT(NS_FAILED(aStatusCode));
+
+  DNSPacketStatus status = mPacket->PacketStatus();
+  MOZ_ASSERT(status != DNSPacketStatus::Success);
+
+  if (status == DNSPacketStatus::KeyNotAvailable) {
+    RecordReason(TRRSkippedReason::ODOH_KEY_NOT_AVAILABLE);
+  } else if (status == DNSPacketStatus::KeyNotUsable) {
+    RecordReason(TRRSkippedReason::ODOH_KEY_NOT_USABLE);
+  } else if (status == DNSPacketStatus::EncryptError) {
+    RecordReason(TRRSkippedReason::ODOH_ENCRYPTION_FAILED);
+  } else {
+    MOZ_ASSERT_UNREACHABLE("Unexpected status code.");
+  }
+}
+
+void ODoH::HandleDecodeError(nsresult aStatusCode) {
+  MOZ_ASSERT(NS_FAILED(aStatusCode));
+
+  DNSPacketStatus status = mPacket->PacketStatus();
+  MOZ_ASSERT(status != DNSPacketStatus::Success);
+
+  if (status == DNSPacketStatus::DecryptError) {
+    RecordReason(TRRSkippedReason::ODOH_DECRYPTION_FAILED);
+  }
+
+  TRR::HandleDecodeError(aStatusCode);
 }
 
 }  // namespace net

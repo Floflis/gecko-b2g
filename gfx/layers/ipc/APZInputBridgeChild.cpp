@@ -102,7 +102,7 @@ APZEventResult APZInputBridgeChild::ReceiveInputEvent(InputData& aEvent) {
     }
     default: {
       MOZ_ASSERT_UNREACHABLE("Invalid InputData type.");
-      res.mStatus = nsEventStatus_eConsumeNoDefault;
+      res.SetStatusAsConsumeNoDefault();
       return res;
     }
   }
@@ -115,9 +115,10 @@ void APZInputBridgeChild::ProcessUnhandledEvent(
                             aOutFocusSequenceNumber, aOutLayersId);
 }
 
-void APZInputBridgeChild::UpdateWheelTransaction(LayoutDeviceIntPoint aRefPoint,
-                                                 EventMessage aEventMessage) {
-  SendUpdateWheelTransaction(aRefPoint, aEventMessage);
+void APZInputBridgeChild::UpdateWheelTransaction(
+    LayoutDeviceIntPoint aRefPoint, EventMessage aEventMessage,
+    const Maybe<ScrollableLayerGuid>& aTargetGuid) {
+  SendUpdateWheelTransaction(aRefPoint, aEventMessage, aTargetGuid);
 }
 
 }  // namespace layers

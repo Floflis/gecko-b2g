@@ -5,7 +5,7 @@
 # Shared/common mozharness configuration for Android unit tests.
 #
 # This configuration should be combined with platform-specific mozharness
-# configuration such as androidx86_7_0.py, android_hw, or similar.
+# configuration such as android-x86_64.py, android_hw, or similar.
 
 from __future__ import absolute_import
 import os
@@ -44,7 +44,6 @@ def WebglSuite(name):
 config = {
     "default_actions": [
         "clobber",
-        "setup-avds",
         "download-and-extract",
         "create-virtualenv",
         "start-emulator",
@@ -257,7 +256,7 @@ config = {
                 "--no-slow",
                 "--no-progress",
                 "--format=automation",
-                "--jitflags=all",
+                "--jitflags=%(jittest_flags)s",
                 "--deviceSerial=%(device_serial)s",
             ],
         },
@@ -291,7 +290,6 @@ config = {
         "xpcshell": {
             "run_filename": "remotexpcshelltests.py",
             "testsdir": "xpcshell",
-            "install": False,
             "options": [
                 "--xre-path=%(xre_path)s",
                 "--testing-modules-dir=%(modules_dir)s",
@@ -304,6 +302,7 @@ config = {
                 "--log-errorsummary=%(error_summary_file)s",
                 "--log-tbpl-level=%(log_tbpl_level)s",
                 "--test-plugin-path=none",
+                "--threads=4",
                 "--deviceSerial=%(device_serial)s",
                 "%(xpcshell_extra)s",
             ],

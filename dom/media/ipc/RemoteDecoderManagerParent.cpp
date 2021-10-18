@@ -20,13 +20,9 @@
 #include "mozilla/ipc/Endpoint.h"
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/VideoBridgeChild.h"
+#include "mozilla/layers/VideoBridgeParent.h"
 
 namespace mozilla {
-
-#ifdef XP_WIN
-extern const nsCString GetFoundD3D11BlacklistedDLL();
-extern const nsCString GetFoundD3D9BlacklistedDLL();
-#endif  // XP_WIN
 
 using namespace ipc;
 using namespace layers;
@@ -98,8 +94,10 @@ void RemoteDecoderManagerParent::ShutdownThreads() {
 void RemoteDecoderManagerParent::ShutdownVideoBridge() {
   if (sRemoteDecoderManagerParentThread) {
     RefPtr<Runnable> task = NS_NewRunnableFunction(
-        "RemoteDecoderManagerParent::ShutdownVideoBridge",
-        []() { VideoBridgeChild::Shutdown(); });
+        "RemoteDecoderManagerParent::ShutdownVideoBridge", []() {
+          VideoBridgeParent::Shutdown();
+          VideoBridgeChild::Shutdown();
+        });
     SyncRunnable::DispatchToThread(sRemoteDecoderManagerParentThread, task);
   }
 }

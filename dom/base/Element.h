@@ -31,6 +31,7 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/PseudoStyleType.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/Result.h"
 #include "mozilla/RustCell.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/BorrowedAttrInfo.h"
@@ -45,7 +46,7 @@
 #include "nsAttrValueInlines.h"
 #include "nsCaseTreatment.h"
 #include "nsChangeHint.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 #include "nsDebug.h"
 #include "nsError.h"
 #include "nsGkAtoms.h"
@@ -112,6 +113,7 @@ struct URLValue;
 }  // namespace css
 namespace dom {
 struct CustomElementData;
+struct SetHTMLOptions;
 struct GetAnimationsOptions;
 struct ScrollIntoViewOptions;
 struct ScrollToOptions;
@@ -126,13 +128,14 @@ class DOMMatrixReadOnly;
 class Element;
 class ElementOrCSSPseudoElement;
 class Promise;
+class Sanitizer;
 class ShadowRoot;
 class UnrestrictedDoubleOrKeyframeAnimationOptions;
 template <typename T>
 class Optional;
 enum class CallerType : uint32_t;
 enum class ReferrerPolicy : uint8_t;
-typedef nsDataHashtable<nsRefPtrHashKey<DOMIntersectionObserver>, int32_t>
+typedef nsTHashMap<nsRefPtrHashKey<DOMIntersectionObserver>, int32_t>
     IntersectionObserverList;
 }  // namespace dom
 }  // namespace mozilla
@@ -572,7 +575,7 @@ class Element : public FragmentOrElement {
    *
    * @param aData The custom element data.
    */
-  void SetCustomElementData(CustomElementData* aData);
+  void SetCustomElementData(UniquePtr<CustomElementData> aData);
 
   /**
    * Gets the custom element definition used by web components custom element.
@@ -588,7 +591,7 @@ class Element : public FragmentOrElement {
    *
    * @param aDefinition The custom element definition.
    */
-  void SetCustomElementDefinition(CustomElementDefinition* aDefinition);
+  virtual void SetCustomElementDefinition(CustomElementDefinition* aDefinition);
 
   void SetDefined(bool aSet) {
     if (aSet) {
@@ -705,19 +708,21 @@ class Element : public FragmentOrElement {
   // These will handle setting up script blockers when they notify, so no need
   // to do it in the callers unless desired.  States passed here must only be
   // those in EXTERNALLY_MANAGED_STATES.
-  virtual void AddStates(EventStates aStates) {
+  void AddStates(EventStates aStates) {
     MOZ_ASSERT(!aStates.HasAtLeastOneOfStates(INTRINSIC_STATES),
                "Should only be adding externally-managed states here");
+    EventStates old = mState;
     AddStatesSilently(aStates);
-    NotifyStateChange(aStates);
+    NotifyStateChange(old ^ mState);
   }
-  virtual void RemoveStates(EventStates aStates) {
+  void RemoveStates(EventStates aStates) {
     MOZ_ASSERT(!aStates.HasAtLeastOneOfStates(INTRINSIC_STATES),
                "Should only be removing externally-managed states here");
+    EventStates old = mState;
     RemoveStatesSilently(aStates);
-    NotifyStateChange(aStates);
+    NotifyStateChange(old ^ mState);
   }
-  virtual void ToggleStates(EventStates aStates, bool aNotify) {
+  void ToggleStates(EventStates aStates, bool aNotify) {
     MOZ_ASSERT(!aStates.HasAtLeastOneOfStates(INTRINSIC_STATES),
                "Should only be removing externally-managed states here");
     mState ^= aStates;
@@ -1038,7 +1043,7 @@ class Element : public FragmentOrElement {
     return GetParsedAttr(nsGkAtoms::_class);
   }
 
-#ifdef DEBUG_FRAME_DUMP
+#if defined(DEBUG_FRAME_DUMP) || defined(MOZ_DOM_LIST)
   virtual void List(FILE* out = stdout, int32_t aIndent = 0) const override {
     List(out, aIndent, ""_ns);
   }
@@ -1265,12 +1270,16 @@ class Element : public FragmentOrElement {
                                             ErrorResult& aError);
   bool CanAttachShadowDOM() const;
 
+  enum class DelegatesFocus : bool { No, Yes };
+
   already_AddRefed<ShadowRoot> AttachShadowWithoutNameChecks(
-      ShadowRootMode aMode);
+      ShadowRootMode aMode, DelegatesFocus = DelegatesFocus::No,
+      SlotAssignmentMode aSlotAssignmentMode = SlotAssignmentMode::Named);
 
   // Attach UA Shadow Root if it is not attached.
   enum class NotifyUAWidgetSetup : bool { No, Yes };
-  void AttachAndSetUAShadowRoot(NotifyUAWidgetSetup = NotifyUAWidgetSetup::Yes);
+  void AttachAndSetUAShadowRoot(NotifyUAWidgetSetup = NotifyUAWidgetSetup::Yes,
+                                DelegatesFocus = DelegatesFocus::No);
 
   // Dispatch an event to UAWidgetsChild, triggering construction
   // or onchange callback on the existing widget.
@@ -1381,6 +1390,9 @@ class Element : public FragmentOrElement {
   void SetOuterHTML(const nsAString& aOuterHTML, ErrorResult& aError);
   void InsertAdjacentHTML(const nsAString& aPosition, const nsAString& aText,
                           ErrorResult& aError);
+
+  void SetHTML(const nsAString& aInnerHTML, const SetHTMLOptions& aOptions,
+               ErrorResult& aError);
 
   //----------------------------------------
 
@@ -1646,6 +1658,24 @@ class Element : public FragmentOrElement {
    */
   enum PresContextFor { eForComposedDoc, eForUncomposedDoc };
   nsPresContext* GetPresContext(PresContextFor aFor);
+
+  /**
+   * The method focuses (or activates) element that accesskey is bound to. It is
+   * called when accesskey is activated.
+   *
+   * @param aKeyCausesActivation - if true then element should be activated
+   * @param aIsTrustedEvent - if true then event that is cause of accesskey
+   *                          execution is trusted.
+   * @return an error if the element isn't able to handle the accesskey (caller
+   *         would look for the next element to handle it).
+   *         a boolean indicates whether the focus moves to the element after
+   *         the element handles the accesskey.
+   */
+  MOZ_CAN_RUN_SCRIPT
+  virtual Result<bool, nsresult> PerformAccesskey(bool aKeyCausesActivation,
+                                                  bool aIsTrustedEvent) {
+    return Err(NS_ERROR_NOT_IMPLEMENTED);
+  }
 
  protected:
   /*
@@ -1945,6 +1975,11 @@ class Element : public FragmentOrElement {
    * for adding the actual event listener.
    */
   static nsAtom* GetEventNameForAttr(nsAtom* aAttr);
+
+  /**
+   * Register/unregister this element to accesskey map if it supports accesskey.
+   */
+  virtual void RegUnRegAccessKey(bool aDoReg);
 
  private:
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED

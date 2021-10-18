@@ -149,7 +149,7 @@ mod backend {
 
         if should_delete {
             log::debug!("Need to delete remaining LMDB files.");
-            delete_lmdb_database(&path);
+            delete_lmdb_database(path);
         }
 
         log::debug!("Migration ended. Safe-mode database in {}", path.display());
@@ -209,16 +209,14 @@ impl std::fmt::Debug for Database {
 fn database_size(dir: &Path) -> Option<NonZeroU64> {
     let mut total_size = 0;
     if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_file() {
-                        let path = entry.path();
-                        if let Ok(metadata) = fs::metadata(path) {
-                            total_size += metadata.len();
-                        } else {
-                            continue;
-                        }
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_file() {
+                    let path = entry.path();
+                    if let Ok(metadata) = fs::metadata(path) {
+                        total_size += metadata.len();
+                    } else {
+                        continue;
                     }
                 }
             }
@@ -236,8 +234,23 @@ impl Database {
     ///
     /// It also loads any Lifetime::Ping data that might be
     /// persisted, in case `delay_ping_lifetime_io` is set.
-    pub fn new(data_path: &str, delay_ping_lifetime_io: bool) -> Result<Self> {
-        let path = Path::new(data_path).join("db");
+    pub fn new(data_path: &Path, delay_ping_lifetime_io: bool) -> Result<Self> {
+        #[cfg(all(windows, not(feature = "rkv-safe-mode")))]
+        {
+            // The underlying lmdb wrapper implementation
+            // cannot actually handle non-UTF8 paths on Windows.
+            // It will unconditionally panic if passed one.
+            // See
+            // https://github.com/mozilla/lmdb-rs/blob/df1c2f56e3088f097c719c57b9925ab51e26f3f4/src/environment.rs#L43-L53
+            //
+            // To avoid this, in case we're using LMDB on Windows (that's just testing now though),
+            // we simply error out earlier.
+            if data_path.to_str().is_none() {
+                return Err(crate::Error::utf8_error());
+            }
+        }
+
+        let path = data_path.join("db");
         log::debug!("Database path: {:?}", path.display());
         let file_size = database_size(&path);
 
@@ -283,7 +296,7 @@ impl Database {
     fn open_rkv(path: &Path) -> Result<Rkv> {
         fs::create_dir_all(&path)?;
 
-        let rkv = rkv_new(&path)?;
+        let rkv = rkv_new(path)?;
         migrate(path, &rkv);
 
         log::info!("Database initialized");
@@ -630,7 +643,7 @@ impl Database {
             ping_lifetime_data
                 .write()
                 .expect("Can't access ping lifetime data as writable")
-                .clear();
+                .retain(|metric_id, _| !metric_id.starts_with(storage_name));
         }
 
         self.write_with_store(Lifetime::Ping, |mut writer, store| {
@@ -785,19 +798,103 @@ mod test {
     use crate::tests::new_glean;
     use crate::CommonMetricData;
     use std::collections::HashMap;
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
     fn test_panicks_if_fails_dir_creation() {
-        assert!(Database::new("/!#\"'@#°ç", false).is_err());
+        let path = Path::new("/!#\"'@#°ç");
+        assert!(Database::new(path, false).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_invalid_utf16_panicfree() {
+        use std::ffi::OsString;
+        use std::os::windows::prelude::*;
+
+        // Here the values 0x0066 and 0x006f correspond to 'f' and 'o'
+        // respectively. The value 0xD800 is a lone surrogate half, invalid
+        // in a UTF-16 sequence.
+        let source = [0x0066, 0x006f, 0xD800, 0x006f];
+        let os_string = OsString::from_wide(&source[..]);
+        let os_str = os_string.as_os_str();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(os_str);
+
+        let res = Database::new(&path, false);
+
+        #[cfg(feature = "rkv-safe-mode")]
+        {
+            assert!(
+                res.is_ok(),
+                "Database should succeed at {}: {:?}",
+                path.display(),
+                res
+            );
+        }
+
+        #[cfg(not(feature = "rkv-safe-mode"))]
+        {
+            assert!(
+                res.is_err(),
+                "Database should fail at {}: {:?}",
+                path.display(),
+                res
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_invalid_utf8_panicfree() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Here, the values 0x66 and 0x6f correspond to 'f' and 'o'
+        // respectively. The value 0x80 is a lone continuation byte, invalid
+        // in a UTF-8 sequence.
+        let source = [0x66, 0x6f, 0x80, 0x6f];
+        let os_str = OsStr::from_bytes(&source[..]);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(os_str);
+
+        let res = Database::new(&path, false);
+        assert!(
+            res.is_ok(),
+            "Database should not fail at {}: {:?}",
+            path.display(),
+            res
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_invalid_utf8_panicfree() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Here, the values 0x66 and 0x6f correspond to 'f' and 'o'
+        // respectively. The value 0x80 is a lone continuation byte, invalid
+        // in a UTF-8 sequence.
+        let source = [0x66, 0x6f, 0x80, 0x6f];
+        let os_str = OsStr::from_bytes(&source[..]);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(os_str);
+
+        let res = Database::new(&path, false);
+        assert!(
+            res.is_err(),
+            "Database should not fail at {}: {:?}",
+            path.display(),
+            res
+        );
     }
 
     #[test]
     fn test_data_dir_rkv_inits() {
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-
-        Database::new(&str_dir, false).unwrap();
+        Database::new(dir.path(), false).unwrap();
 
         assert!(dir.path().exists());
     }
@@ -806,8 +903,7 @@ mod test {
     fn test_ping_lifetime_metric_recorded() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-        let db = Database::new(&str_dir, false).unwrap();
+        let db = Database::new(dir.path(), false).unwrap();
 
         assert!(db.ping_lifetime_data.is_none());
 
@@ -843,8 +939,7 @@ mod test {
     fn test_application_lifetime_metric_recorded() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-        let db = Database::new(&str_dir, false).unwrap();
+        let db = Database::new(dir.path(), false).unwrap();
 
         // Attempt to record a known value.
         let test_value = "test-value";
@@ -881,8 +976,7 @@ mod test {
     fn test_user_lifetime_metric_recorded() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-        let db = Database::new(&str_dir, false).unwrap();
+        let db = Database::new(dir.path(), false).unwrap();
 
         // Attempt to record a known value.
         let test_value = "test-value";
@@ -916,8 +1010,7 @@ mod test {
     fn test_clear_ping_storage() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-        let db = Database::new(&str_dir, false).unwrap();
+        let db = Database::new(dir.path(), false).unwrap();
 
         // Attempt to record a known value for every single lifetime.
         let test_storage = "test-storage";
@@ -992,8 +1085,7 @@ mod test {
     fn test_remove_single_metric() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-        let db = Database::new(&str_dir, false).unwrap();
+        let db = Database::new(dir.path(), false).unwrap();
 
         let test_storage = "test-storage-single-lifetime";
         let metric_id_pattern = "telemetry_test.single_metric";
@@ -1049,8 +1141,7 @@ mod test {
     fn test_delayed_ping_lifetime_persistence() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
-        let db = Database::new(&str_dir, true).unwrap();
+        let db = Database::new(dir.path(), true).unwrap();
         let test_storage = "test-storage";
 
         assert!(db.ping_lifetime_data.is_some());
@@ -1160,14 +1251,13 @@ mod test {
     fn test_load_ping_lifetime_data_from_memory() {
         // Init the database in a temporary directory.
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
 
         let test_storage = "test-storage";
         let test_value = "test-value";
         let test_metric_id = "telemetry_test.test_name";
 
         {
-            let db = Database::new(&str_dir, true).unwrap();
+            let db = Database::new(dir.path(), true).unwrap();
 
             // Attempt to record a known value.
             db.record_per_lifetime(
@@ -1206,7 +1296,7 @@ mod test {
         // Now create a new instace of the db and check if data was
         // correctly loaded from rkv to memory.
         {
-            let db = Database::new(&str_dir, true).unwrap();
+            let db = Database::new(dir.path(), true).unwrap();
 
             // Verify that test_value is in memory.
             let data = match &db.ping_lifetime_data {
@@ -1232,11 +1322,75 @@ mod test {
     }
 
     #[test]
+    fn test_delayed_ping_lifetime_clear() {
+        // Init the database in a temporary directory.
+        let dir = tempdir().unwrap();
+        let db = Database::new(dir.path(), true).unwrap();
+        let test_storage = "test-storage";
+
+        assert!(db.ping_lifetime_data.is_some());
+
+        // Attempt to record a known value.
+        let test_value1 = "test-value1";
+        let test_metric_id1 = "telemetry_test.test_name1";
+        db.record_per_lifetime(
+            Lifetime::Ping,
+            test_storage,
+            test_metric_id1,
+            &Metric::String(test_value1.to_string()),
+        )
+        .unwrap();
+
+        {
+            let data = match &db.ping_lifetime_data {
+                Some(ping_lifetime_data) => ping_lifetime_data,
+                None => panic!("Expected `ping_lifetime_data` to exist here!"),
+            };
+            let data = data.read().unwrap();
+            // Verify that test_value1 is in memory.
+            assert!(data
+                .get(&format!("{}#{}", test_storage, test_metric_id1))
+                .is_some());
+        }
+
+        // Clear ping lifetime storage for a storage that isn't test_storage.
+        // Doesn't matter what it's called, just that it isn't test_storage.
+        db.clear_ping_lifetime_storage(&(test_storage.to_owned() + "x"))
+            .unwrap();
+
+        {
+            let data = match &db.ping_lifetime_data {
+                Some(ping_lifetime_data) => ping_lifetime_data,
+                None => panic!("Expected `ping_lifetime_data` to exist here!"),
+            };
+            let data = data.read().unwrap();
+            // Verify that test_value1 is still in memory.
+            assert!(data
+                .get(&format!("{}#{}", test_storage, test_metric_id1))
+                .is_some());
+        }
+
+        // Clear test_storage's ping lifetime storage.
+        db.clear_ping_lifetime_storage(test_storage).unwrap();
+
+        {
+            let data = match &db.ping_lifetime_data {
+                Some(ping_lifetime_data) => ping_lifetime_data,
+                None => panic!("Expected `ping_lifetime_data` to exist here!"),
+            };
+            let data = data.read().unwrap();
+            // Verify that test_value1 is no longer in memory.
+            assert!(data
+                .get(&format!("{}#{}", test_storage, test_metric_id1))
+                .is_none());
+        }
+    }
+
+    #[test]
     fn doesnt_record_when_upload_is_disabled() {
         let (mut glean, dir) = new_glean(None);
 
         // Init the database in a temporary directory.
-        let str_dir = dir.path().display().to_string();
 
         let test_storage = "test-storage";
         let test_data = CommonMetricData::new("category", "name", test_storage);
@@ -1244,7 +1398,7 @@ mod test {
 
         // Attempt to record metric with the record and record_with functions,
         // this should work since upload is enabled.
-        let db = Database::new(&str_dir, true).unwrap();
+        let db = Database::new(dir.path(), true).unwrap();
         db.record(&glean, &test_data, &Metric::String("record".to_owned()));
         db.iter_store_from(
             Lifetime::Ping,
@@ -1327,7 +1481,6 @@ mod test {
     #[test]
     fn empty_data_file() {
         let dir = tempdir().unwrap();
-        let str_dir = dir.path().display().to_string();
 
         // Create database directory structure.
         let database_dir = dir.path().join("db");
@@ -1338,7 +1491,7 @@ mod test {
         let f = fs::File::create(datamdb).expect("create database file");
         drop(f);
 
-        Database::new(&str_dir, false).unwrap();
+        Database::new(dir.path(), false).unwrap();
 
         assert!(dir.path().exists());
     }
@@ -1353,7 +1506,6 @@ mod test {
         #[test]
         fn empty_data_file() {
             let dir = tempdir().unwrap();
-            let str_dir = dir.path().display().to_string();
 
             // Create database directory structure.
             let database_dir = dir.path().join("db");
@@ -1364,7 +1516,7 @@ mod test {
             let f = File::create(safebin).expect("create database file");
             drop(f);
 
-            Database::new(&str_dir, false).unwrap();
+            Database::new(dir.path(), false).unwrap();
 
             assert!(dir.path().exists());
         }
@@ -1372,7 +1524,6 @@ mod test {
         #[test]
         fn corrupted_data_file() {
             let dir = tempdir().unwrap();
-            let str_dir = dir.path().display().to_string();
 
             // Create database directory structure.
             let database_dir = dir.path().join("db");
@@ -1382,7 +1533,7 @@ mod test {
             let safebin = database_dir.join("data.safe.bin");
             fs::write(safebin, "<broken>").expect("write to database file");
 
-            Database::new(&str_dir, false).unwrap();
+            Database::new(dir.path(), false).unwrap();
 
             assert!(dir.path().exists());
         }
@@ -1390,7 +1541,6 @@ mod test {
         #[test]
         fn migration_works_on_startup() {
             let dir = tempdir().unwrap();
-            let str_dir = dir.path().display().to_string();
 
             let database_dir = dir.path().join("db");
             let datamdb = database_dir.join("data.mdb");
@@ -1428,7 +1578,7 @@ mod test {
 
             // First open should migrate the data.
             {
-                let db = Database::new(&str_dir, false).unwrap();
+                let db = Database::new(dir.path(), false).unwrap();
                 let safebin = database_dir.join("data.safe.bin");
                 assert!(safebin.exists(), "safe-mode file should exist");
                 assert!(!datamdb.exists(), "LMDB data should be deleted");
@@ -1448,7 +1598,7 @@ mod test {
 
             // Next open should not re-create the LMDB files.
             {
-                let db = Database::new(&str_dir, false).unwrap();
+                let db = Database::new(dir.path(), false).unwrap();
                 let safebin = database_dir.join("data.safe.bin");
                 assert!(safebin.exists(), "safe-mode file exists");
                 assert!(!datamdb.exists(), "LMDB data should not be recreated");
@@ -1470,7 +1620,6 @@ mod test {
         #[test]
         fn migration_doesnt_overwrite() {
             let dir = tempdir().unwrap();
-            let str_dir = dir.path().display().to_string();
 
             let database_dir = dir.path().join("db");
             let datamdb = database_dir.join("data.mdb");
@@ -1528,7 +1677,7 @@ mod test {
             // First open should try migration and ignore it, because destination is not empty.
             // It also deletes the leftover LMDB database.
             {
-                let db = Database::new(&str_dir, false).unwrap();
+                let db = Database::new(dir.path(), false).unwrap();
                 let safebin = database_dir.join("data.safe.bin");
                 assert!(safebin.exists(), "safe-mode file should exist");
                 assert!(!datamdb.exists(), "LMDB data should be deleted");
@@ -1550,7 +1699,6 @@ mod test {
         #[test]
         fn migration_ignores_broken_database() {
             let dir = tempdir().unwrap();
-            let str_dir = dir.path().display().to_string();
 
             let database_dir = dir.path().join("db");
             let datamdb = database_dir.join("data.mdb");
@@ -1594,7 +1742,7 @@ mod test {
             // First open should try migration and ignore it, because destination is not empty.
             // It also deletes the leftover LMDB database.
             {
-                let db = Database::new(&str_dir, false).unwrap();
+                let db = Database::new(dir.path(), false).unwrap();
                 let safebin = database_dir.join("data.safe.bin");
                 assert!(safebin.exists(), "safe-mode file should exist");
                 assert!(!datamdb.exists(), "LMDB data should be deleted");
@@ -1616,7 +1764,6 @@ mod test {
         #[test]
         fn migration_ignores_empty_database() {
             let dir = tempdir().unwrap();
-            let str_dir = dir.path().display().to_string();
 
             let database_dir = dir.path().join("db");
             let datamdb = database_dir.join("data.mdb");
@@ -1640,7 +1787,7 @@ mod test {
             // safe-mode does not write an empty database to disk.
             // It also deletes the leftover LMDB database.
             {
-                let _db = Database::new(&str_dir, false).unwrap();
+                let _db = Database::new(dir.path(), false).unwrap();
                 let safebin = database_dir.join("data.safe.bin");
                 assert!(!safebin.exists(), "safe-mode file should exist");
                 assert!(!datamdb.exists(), "LMDB data should be deleted");

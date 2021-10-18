@@ -10,11 +10,11 @@
 #include <stdarg.h>
 #include <utility>
 
-#include "jsapi.h"        // for JSErrorNotes, JSErrorReport
 #include "jsfriendapi.h"  // for ScriptEnvironmentPreparer
 
-#include "js/UniquePtr.h"  // for UniquePtr
-#include "js/Utility.h"    // for UniqueTwoByteChars
+#include "js/ErrorReport.h"  // for JSErrorNotes, JSErrorReport
+#include "js/UniquePtr.h"    // for UniquePtr
+#include "js/Utility.h"      // for UniqueTwoByteChars
 
 namespace js {
 
@@ -96,11 +96,11 @@ extern void ReportCompileErrorUTF8(JSContext* cx, ErrorMetadata&& metadata,
  * script.  Returns true if the warning was successfully reported, false if an
  * error occurred.
  */
-extern MOZ_MUST_USE bool ReportCompileWarning(JSContext* cx,
-                                              ErrorMetadata&& metadata,
-                                              UniquePtr<JSErrorNotes> notes,
-                                              unsigned errorNumber,
-                                              va_list* args);
+[[nodiscard]] extern bool ReportCompileWarning(JSContext* cx,
+                                               ErrorMetadata&& metadata,
+                                               UniquePtr<JSErrorNotes> notes,
+                                               unsigned errorNumber,
+                                               va_list* args);
 
 class GlobalObject;
 

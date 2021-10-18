@@ -198,6 +198,15 @@ DrawTargetRecording::~DrawTargetRecording() {
   mRecorder->RecordEvent(RecordedDrawTargetDestruction(ReferencePtr(this)));
 }
 
+void DrawTargetRecording::Link(const char* aDestination, const Rect& aRect) {
+  mRecorder->RecordEvent(RecordedLink(this, aDestination, aRect));
+}
+
+void DrawTargetRecording::Destination(const char* aDestination,
+                                      const Point& aPoint) {
+  mRecorder->RecordEvent(RecordedDestination(this, aDestination, aPoint));
+}
+
 void DrawTargetRecording::FillRect(const Rect& aRect, const Pattern& aPattern,
                                    const DrawOptions& aOptions) {
   EnsurePatternDependenciesStored(aPattern);
@@ -366,12 +375,10 @@ void DrawTargetRecording::DrawSurface(SourceSurface* aSurface,
                                              aSurfOptions, aOptions));
 }
 
-void DrawTargetRecording::DrawDependentSurface(
-    uint64_t aId, const Rect& aDest, const DrawSurfaceOptions& aSurfOptions,
-    const DrawOptions& aOptions) {
+void DrawTargetRecording::DrawDependentSurface(uint64_t aId,
+                                               const Rect& aDest) {
   mRecorder->AddDependentSurface(aId);
-  mRecorder->RecordEvent(
-      RecordedDrawDependentSurface(this, aId, aDest, aSurfOptions, aOptions));
+  mRecorder->RecordEvent(RecordedDrawDependentSurface(this, aId, aDest));
 }
 
 void DrawTargetRecording::DrawSurfaceWithShadow(

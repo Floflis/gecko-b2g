@@ -6,7 +6,7 @@
 
 #include "ScreenshotGrabber.h"
 
-#include "GeckoProfiler.h"
+#include "mozilla/ProfilerMarkers.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
@@ -43,7 +43,6 @@ class ScreenshotGrabberImpl final {
     RefPtr<AsyncReadbackBuffer> mScreenshotBuffer;
     IntSize mScreenshotSize;
     IntSize mWindowSize;
-    uintptr_t mWindowIdentifier;
   };
 
   RefPtr<RenderSource> ScaleDownWindowRenderSourceToSize(
@@ -93,10 +92,8 @@ void ScreenshotGrabber::MaybeProcessQueue() {
 }
 
 void ScreenshotGrabber::NotifyEmptyFrame() {
-#ifdef MOZ_GECKO_PROFILER
   PROFILER_MARKER_UNTYPED("NoCompositorScreenshot because nothing changed",
                           GRAPHICS);
-#endif
 }
 
 void ScreenshotGrabber::Destroy() { mImpl = nullptr; }
@@ -187,8 +184,7 @@ void ScreenshotGrabberImpl::GrabScreenshot(Window& aWindow,
   // until the next frame. If we did it in this frame, we'd block on the GPU.
   mCurrentFrameQueueItem =
       Some(QueueItem{TimeStamp::Now(), std::move(buffer), scaledSize,
-                     windowRenderSource->Size(),
-                     reinterpret_cast<uintptr_t>(static_cast<void*>(this))});
+                     windowRenderSource->Size()});
 }
 
 already_AddRefed<AsyncReadbackBuffer> ScreenshotGrabberImpl::TakeNextBuffer(
@@ -212,8 +208,8 @@ void ScreenshotGrabberImpl::ProcessQueue() {
     }
     for (const auto& item : mQueue) {
       mProfilerScreenshots->SubmitScreenshot(
-          item.mWindowIdentifier, item.mWindowSize, item.mScreenshotSize,
-          item.mTimeStamp, [&item](DataSourceSurface* aTargetSurface) {
+          item.mWindowSize, item.mScreenshotSize, item.mTimeStamp,
+          [&item](DataSourceSurface* aTargetSurface) {
             return item.mScreenshotBuffer->MapAndCopyInto(aTargetSurface,
                                                           item.mScreenshotSize);
           });

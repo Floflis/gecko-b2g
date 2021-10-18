@@ -21,9 +21,6 @@
 #include <string.h>
 #include <utility>
 
-#include "jsapi.h"
-#include "jsfriendapi.h"
-
 #include "builtin/Boolean.h"
 #include "builtin/intl/CommonFunctions.h"
 #include "builtin/intl/LanguageTag.h"
@@ -39,6 +36,7 @@
 #include "vm/PlainObject.h"  // js::PlainObject
 #include "vm/Printer.h"
 #include "vm/StringType.h"
+#include "vm/WellKnownAtom.h"  // js_*_str
 
 #include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"

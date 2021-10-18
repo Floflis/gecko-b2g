@@ -17,8 +17,11 @@
 #include "mozilla/ipc/BackgroundUtils.h"
 #include "mozilla/net/ChannelEventQueue.h"
 #include "SerializedLoadContext.h"
+#include "mozilla/dom/ContentChild.h"
+#include "nsITransportProvider.h"
 
 using namespace mozilla::ipc;
+using mozilla::dom::ContentChild;
 
 namespace mozilla {
 namespace net {
@@ -458,9 +461,23 @@ void WebSocketChannelChild::SetupNeckoTarget() {
 
 NS_IMETHODIMP
 WebSocketChannelChild::AsyncOpen(nsIURI* aURI, const nsACString& aOrigin,
+                                 JS::HandleValue aOriginAttributes,
                                  uint64_t aInnerWindowID,
                                  nsIWebSocketListener* aListener,
-                                 nsISupports* aContext) {
+                                 nsISupports* aContext, JSContext* aCx) {
+  OriginAttributes attrs;
+  if (!aOriginAttributes.isObject() || !attrs.Init(aCx, aOriginAttributes)) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  return AsyncOpenNative(aURI, aOrigin, attrs, aInnerWindowID, aListener,
+                         aContext);
+}
+
+NS_IMETHODIMP
+WebSocketChannelChild::AsyncOpenNative(
+    nsIURI* aURI, const nsACString& aOrigin,
+    const OriginAttributes& aOriginAttributes, uint64_t aInnerWindowID,
+    nsIWebSocketListener* aListener, nsISupports* aContext) {
   LOG(("WebSocketChannelChild::AsyncOpen() %p\n", this));
 
   MOZ_ASSERT(NS_IsMainThread(), "not main thread");
@@ -511,10 +528,11 @@ WebSocketChannelChild::AsyncOpen(nsIURI* aURI, const nsACString& aOrigin,
 
   gNeckoChild->SendPWebSocketConstructor(
       this, browserChild, IPC::SerializedLoadContext(this), mSerial);
-  if (!SendAsyncOpen(uri, nsCString(aOrigin), aInnerWindowID, mProtocol,
-                     mEncrypted, mPingInterval, mClientSetPingInterval,
-                     mPingResponseTimeout, mClientSetPingTimeout, loadInfoArgs,
-                     transportProvider, mNegotiatedExtensions)) {
+  if (!SendAsyncOpen(uri, nsCString(aOrigin), aOriginAttributes, aInnerWindowID,
+                     mProtocol, mEncrypted, mPingInterval,
+                     mClientSetPingInterval, mPingResponseTimeout,
+                     mClientSetPingTimeout, loadInfoArgs, transportProvider,
+                     mNegotiatedExtensions)) {
     return NS_ERROR_UNEXPECTED;
   }
 

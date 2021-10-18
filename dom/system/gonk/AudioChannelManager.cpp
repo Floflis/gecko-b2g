@@ -28,7 +28,7 @@ AudioChannelManager::AudioChannelManager() : mVolumeChannel(-1) {
   hal::RegisterSwitchObserver(hal::SWITCH_HEADPHONES, this);
 }
 
-AudioChannelManager::~AudioChannelManager() {
+void AudioChannelManager::Shutdown() {
   hal::UnregisterSwitchObserver(hal::SWITCH_HEADPHONES, this);
 
   nsCOMPtr<EventTarget> target = do_QueryInterface(GetOwner());
@@ -58,6 +58,41 @@ void AudioChannelManager::Notify(const hal::SwitchEvent& aEvent) {
   mState = Some(aEvent.status());
 
   DispatchTrustedEvent(u"headphoneschange"_ns);
+}
+
+bool AudioChannelManager::Headphones() {
+  // Bug 929139 - Remove the assert check for SWITCH_STATE_UNKNOWN.
+  // If any devices (ex: emulator) didn't have the corresponding sys node for
+  // headset switch state then GonkSwitch will report the unknown state.
+  // So it is possible to get unknown state here.
+  if (mState.isNothing()) {
+    mState = Some(hal::GetCurrentSwitchState(hal::SWITCH_HEADPHONES));
+  }
+  return mState.value() != hal::SWITCH_STATE_OFF &&
+         mState.value() != hal::SWITCH_STATE_UNKNOWN;
+}
+
+void AudioChannelManager::GetHeadphonesStatus(nsAString& aType) {
+  if (mState.isNothing()) {
+    mState = Some(hal::GetCurrentSwitchState(hal::SWITCH_HEADPHONES));
+  }
+  switch (mState.value()) {
+    case hal::SWITCH_STATE_OFF:
+      aType = u"off"_ns;
+      return;
+    case hal::SWITCH_STATE_HEADSET:
+      aType = u"headset"_ns;
+      return;
+    case hal::SWITCH_STATE_HEADPHONE:
+      aType = u"headphone"_ns;
+      return;
+    case hal::SWITCH_STATE_LINEOUT:
+      aType = u"lineout"_ns;
+      return;
+    default:
+      aType = u"unknown"_ns;
+      return;
+  }
 }
 
 void AudioChannelManager::SetVolumeControlChannel(const nsAString& aChannel) {

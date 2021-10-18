@@ -490,6 +490,18 @@ var PushServiceWebSocket = {
       this.credential = new PushCredential();
     }
 
+    // reset adaptive-set value if adaptive mode is disabled
+    if (!this._adaptiveEnabled) {
+      prefs.clearUserPref("pingInterval");
+      // mobile network
+      prefs.clearUserPref("adaptive.mobile");
+      prefs.clearUserPref("pingInterval.mobile");
+      prefs.clearUserPref("adaptive.lastGoodPingInterval.mobile");
+      // wifi network
+      prefs.clearUserPref("pingInterval.wifi");
+      prefs.clearUserPref("adaptive.lastGoodPingInterval.wifi");
+    }
+
     return Promise.resolve();
   },
 
@@ -980,7 +992,7 @@ var PushServiceWebSocket = {
       try {
         // Grab a wakelock before we open the socket to ensure we don't go to
         // sleep before connection the is opened.
-        this._ws.asyncOpen(uri, uri.spec, 0, this._wsListener, null);
+        this._ws.asyncOpen(uri, uri.spec, {}, 0, this._wsListener, null);
         this._acquireWakeLock("WebSocketSetup", this._requestTimeout);
         this._currentState = STATE_WAITING_FOR_WS_START;
       } catch (e) {
@@ -1462,11 +1474,8 @@ var PushServiceWebSocket = {
   },
 
   _generateID() {
-    let uuidGenerator = Cc["@mozilla.org/uuid-generator;1"].getService(
-      Ci.nsIUUIDGenerator
-    );
     // generateUUID() gives a UUID surrounded by {...}, slice them off.
-    return uuidGenerator
+    return Services.uuid
       .generateUUID()
       .toString()
       .slice(1, -1);
@@ -1482,6 +1491,10 @@ var PushServiceWebSocket = {
         // The Push server requires padding.
         pad: true,
       });
+    }
+
+    if (record.scope) {
+      data.scope = record.scope;
     }
 
     return this._sendRequestForReply(record, data).then(record => {
@@ -1686,14 +1699,7 @@ var PushServiceWebSocket = {
       use_webpush: true,
     };
 
-    if (records.length && this._UAID) {
-      // Only send our UAID if we have existing push subscriptions, to
-      // avoid tying a persistent identifier to the connection (bug
-      // 1617136). The push server will issue our client a new UAID in
-      // the `hello` response, which we'll store until either the next
-      // time we reconnect, or the user subscribes to push. Once we have a
-      // push subscription, we'll stop rotating the UAID when we connect,
-      // so that we can receive push messages for them.
+    if (this._UAID) {
       data.uaid = this._UAID;
     }
 
@@ -1743,6 +1749,7 @@ var PushServiceWebSocket = {
     // connection attempt and ping interval counters.
     if (this._currentState == STATE_READY) {
       this._retryFailCount = 0;
+      this._pingIntervalRetryTimes = {};
     }
 
     let doNotHandle = false;

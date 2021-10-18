@@ -209,6 +209,7 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
                 min_rtt,
                 now,
             );
+            debug_assert!(bytes_for_increase > 0);
             // If enough credit has been accumulated already, apply them gradually.
             // If we have sudden increase in allowed rate we actually increase cwnd gently.
             if self.acked_bytes >= bytes_for_increase {
@@ -241,12 +242,12 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
         prev_largest_acked_sent: Option<Instant>,
         pto: Duration,
         lost_packets: &[SentPacket],
-    ) {
+    ) -> bool {
         if lost_packets.is_empty() {
-            return;
+            return false;
         }
 
-        for pkt in lost_packets.iter().filter(|pkt| pkt.ack_eliciting()) {
+        for pkt in lost_packets.iter().filter(|pkt| pkt.cc_in_flight()) {
             assert!(self.bytes_in_flight >= pkt.size);
             self.bytes_in_flight -= pkt.size;
         }
@@ -257,13 +258,14 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
 
         qdebug!([self], "Pkts lost {}", lost_packets.len());
 
-        self.on_congestion_event(lost_packets.last().unwrap());
-        self.detect_persistent_congestion(
+        let congestion = self.on_congestion_event(lost_packets.last().unwrap());
+        let persistent_congestion = self.detect_persistent_congestion(
             first_rtt_sample_time,
             prev_largest_acked_sent,
             pto,
             lost_packets,
         );
+        congestion || persistent_congestion
     }
 
     fn discard(&mut self, pkt: &SentPacket) {
@@ -278,6 +280,14 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
         }
     }
 
+    fn discard_in_flight(&mut self) {
+        self.bytes_in_flight = 0;
+        qlog::metrics_updated(
+            &mut self.qlog,
+            &[QlogMetric::BytesInFlight(self.bytes_in_flight)],
+        );
+    }
+
     fn on_packet_sent(&mut self, pkt: &SentPacket) {
         // Record the recovery time and exit any transient state.
         if self.state.transient() {
@@ -285,7 +295,7 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
             self.state.update();
         }
 
-        if !pkt.ack_eliciting() {
+        if !pkt.cc_in_flight() {
             return;
         }
 
@@ -304,7 +314,6 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
     }
 
     /// Whether a packet can be sent immediately as a result of entering recovery.
-    #[must_use]
     fn recovery_packet(&self) -> bool {
         self.state == State::RecoveryStart
     }
@@ -375,9 +384,9 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
         prev_largest_acked_sent: Option<Instant>,
         pto: Duration,
         lost_packets: &[SentPacket],
-    ) {
+    ) -> bool {
         if first_rtt_sample_time.is_none() {
-            return;
+            return false;
         }
 
         let pc_period = pto * PERSISTENT_CONG_THRESH;
@@ -399,7 +408,7 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
                 start = None;
             }
             last_pn = p.pn;
-            if !p.ack_eliciting() {
+            if !p.cc_in_flight() {
                 // Not interesting, keep looking.
                 continue;
             }
@@ -413,12 +422,13 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
                         &mut self.qlog,
                         &[QlogMetric::CongestionWindow(self.congestion_window)],
                     );
-                    return;
+                    return true;
                 }
             } else {
                 start = Some(p.time_sent);
             }
         }
+        false
     }
 
     #[must_use]
@@ -430,32 +440,36 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
     }
 
     /// Handle a congestion event.
-    fn on_congestion_event(&mut self, last_packet: &SentPacket) {
+    /// Returns true if this was a true congestion event.
+    fn on_congestion_event(&mut self, last_packet: &SentPacket) -> bool {
         // Start a new congestion event if lost packet was sent after the start
         // of the previous congestion recovery period.
-        if self.after_recovery_start(last_packet) {
-            let (cwnd, acked_bytes) = self
-                .cc_algorithm
-                .reduce_cwnd(self.congestion_window, self.acked_bytes);
-            self.congestion_window = max(cwnd, CWND_MIN);
-            self.acked_bytes = acked_bytes;
-            self.ssthresh = self.congestion_window;
-            qinfo!(
-                [self],
-                "Cong event -> recovery; cwnd {}, ssthresh {}",
-                self.congestion_window,
-                self.ssthresh
-            );
-            qlog::metrics_updated(
-                &mut self.qlog,
-                &[
-                    QlogMetric::CongestionWindow(self.congestion_window),
-                    QlogMetric::SsThresh(self.ssthresh),
-                    QlogMetric::InRecovery(true),
-                ],
-            );
-            self.set_state(State::RecoveryStart);
+        if !self.after_recovery_start(last_packet) {
+            return false;
         }
+
+        let (cwnd, acked_bytes) = self
+            .cc_algorithm
+            .reduce_cwnd(self.congestion_window, self.acked_bytes);
+        self.congestion_window = max(cwnd, CWND_MIN);
+        self.acked_bytes = acked_bytes;
+        self.ssthresh = self.congestion_window;
+        qinfo!(
+            [self],
+            "Cong event -> recovery; cwnd {}, ssthresh {}",
+            self.congestion_window,
+            self.ssthresh
+        );
+        qlog::metrics_updated(
+            &mut self.qlog,
+            &[
+                QlogMetric::CongestionWindow(self.congestion_window),
+                QlogMetric::SsThresh(self.ssthresh),
+                QlogMetric::InRecovery(true),
+            ],
+        );
+        self.set_state(State::RecoveryStart);
+        true
     }
 
     #[allow(clippy::unused_self)]
@@ -482,10 +496,11 @@ mod tests {
     };
     use crate::cc::cubic::{Cubic, CUBIC_BETA_USIZE_DIVISOR, CUBIC_BETA_USIZE_QUOTIENT};
     use crate::cc::new_reno::NewReno;
-    use crate::cc::{CongestionControl, CWND_INITIAL_PKTS, MAX_DATAGRAM_SIZE};
+    use crate::cc::{
+        CongestionControl, CongestionControlAlgorithm, CWND_INITIAL_PKTS, MAX_DATAGRAM_SIZE,
+    };
     use crate::packet::{PacketNumber, PacketType};
     use crate::tracking::SentPacket;
-    use crate::CongestionControlAlgorithm;
     use std::convert::TryFrom;
     use std::time::{Duration, Instant};
     use test_fixture::now;

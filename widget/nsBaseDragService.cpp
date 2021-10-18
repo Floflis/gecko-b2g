@@ -32,7 +32,9 @@
 #include "mozilla/MouseEvents.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/ProfilerLabels.h"
 #include "mozilla/SVGImageContext.h"
+#include "mozilla/TextControlElement.h"
 #include "mozilla/Unused.h"
 #include "mozilla/ViewportUtils.h"
 #include "mozilla/dom/BindingDeclarations.h"
@@ -46,7 +48,6 @@
 #include "mozilla/gfx/2D.h"
 #include "nsFrameLoader.h"
 #include "BrowserParent.h"
-#include "GeckoProfiler.h"
 #include "nsIMutableArray.h"
 #include "gfxContext.h"
 #include "gfxPlatform.h"
@@ -64,6 +65,7 @@ nsBaseDragService::nsBaseDragService()
       mOnlyChromeDrop(false),
       mDoingDrag(false),
       mSessionIsSynthesizedForTests(false),
+      mIsDraggingTextInTextControl(false),
       mEndingSession(false),
       mHasImage(false),
       mUserCancelled(false),
@@ -129,16 +131,24 @@ nsBaseDragService::GetNumDropItems(uint32_t* aNumItems) {
 }
 
 //
-// GetSourceDocument
+// GetSourceWindowContext
 //
-// Returns the DOM document where the drag was initiated. This will be
+// Returns the window context where the drag was initiated. This will be
 // nullptr if the drag began outside of our application.
 //
 NS_IMETHODIMP
-nsBaseDragService::GetSourceDocument(Document** aSourceDocument) {
-  *aSourceDocument = mSourceDocument.get();
-  NS_IF_ADDREF(*aSourceDocument);
+nsBaseDragService::GetSourceWindowContext(
+    WindowContext** aSourceWindowContext) {
+  *aSourceWindowContext = mSourceWindowContext.get();
+  NS_IF_ADDREF(*aSourceWindowContext);
+  return NS_OK;
+}
 
+NS_IMETHODIMP
+nsBaseDragService::SetSourceWindowContext(WindowContext* aSourceWindowContext) {
+  // This should only be called in a child process.
+  MOZ_ASSERT(!XRE_IsParentProcess());
+  mSourceWindowContext = aSourceWindowContext;
   return NS_OK;
 }
 
@@ -152,6 +162,26 @@ NS_IMETHODIMP
 nsBaseDragService::GetSourceNode(nsINode** aSourceNode) {
   *aSourceNode = do_AddRef(mSourceNode).take();
   return NS_OK;
+}
+
+void nsBaseDragService::UpdateSource(nsINode* aNewSourceNode,
+                                     Selection* aNewSelection) {
+  MOZ_ASSERT(mSourceNode);
+  MOZ_ASSERT(aNewSourceNode);
+  MOZ_ASSERT(mSourceNode->IsInNativeAnonymousSubtree() ||
+             aNewSourceNode->IsInNativeAnonymousSubtree());
+  MOZ_ASSERT(mSourceDocument == aNewSourceNode->OwnerDoc());
+  mSourceNode = aNewSourceNode;
+  // Don't set mSelection if the session was invoked without selection or
+  // making it becomes nullptr.  The latter occurs when the old frame is
+  // being destroyed.
+  if (mSelection && aNewSelection) {
+    // XXX If the dragging image is created once (e.g., at drag start), the
+    //     image won't be updated unless we notify `DrawDrag` callers.
+    //     However, it must be okay for now to keep using older image of
+    //     Selection.
+    mSelection = aNewSelection;
+  }
 }
 
 NS_IMETHODIMP
@@ -217,6 +247,10 @@ bool nsBaseDragService::IsSynthesizedForTests() {
   return mSessionIsSynthesizedForTests;
 }
 
+bool nsBaseDragService::IsDraggingTextInTextControl() {
+  return mIsDraggingTextInTextControl;
+}
+
 uint32_t nsBaseDragService::GetEffectAllowedForTests() {
   MOZ_ASSERT(mSessionIsSynthesizedForTests);
   return mEffectAllowedForTests;
@@ -257,6 +291,10 @@ nsBaseDragService::InvokeDragSession(
   mTriggeringPrincipal = aPrincipal;
   mCsp = aCsp;
   mSourceNode = aDOMNode;
+  mIsDraggingTextInTextControl =
+      mSourceNode->IsInNativeAnonymousSubtree() &&
+      TextControlElement::FromNodeOrNull(
+          mSourceNode->GetClosestNativeAnonymousSubtreeRootParent());
   mContentPolicyType = aContentPolicyType;
   mEndDragPoint = LayoutDeviceIntPoint(0, 0);
 
@@ -264,7 +302,7 @@ nsBaseDragService::InvokeDragSession(
   // capture. However, this gets in the way of determining drag
   // feedback for things like trees because the event coordinates
   // are in the wrong coord system, so turn off mouse capture.
-  PresShell::ClearMouseCapture(nullptr);
+  PresShell::ClearMouseCapture();
 
   if (mSessionIsSynthesizedForTests) {
     mDoingDrag = true;
@@ -349,6 +387,8 @@ nsBaseDragService::InvokeDragSessionWithImage(
   mImage = aImage;
   mImageOffset = CSSIntPoint(aImageX, aImageY);
   mDragStartData = nullptr;
+  mSourceWindowContext =
+      aDOMNode ? aDOMNode->OwnerDoc()->GetWindowContext() : nullptr;
 
   mScreenPosition.x = aDragEvent->ScreenX(CallerType::System);
   mScreenPosition.y = aDragEvent->ScreenY(CallerType::System);
@@ -399,6 +439,7 @@ nsBaseDragService::InvokeDragSessionWithRemoteImage(
   mImage = nullptr;
   mDragStartData = aDragStartData;
   mImageOffset = CSSIntPoint(0, 0);
+  mSourceWindowContext = mDragStartData->GetSourceWindowContext();
 
   mScreenPosition.x = aDragEvent->ScreenX(CallerType::System);
   mScreenPosition.y = aDragEvent->ScreenY(CallerType::System);
@@ -440,6 +481,7 @@ nsBaseDragService::InvokeDragSessionWithSelection(
   // XXXndeakin this should actually be the deepest node that contains both
   // endpoints of the selection
   nsCOMPtr<nsINode> node = aSelection->GetFocusNode();
+  mSourceWindowContext = node ? node->OwnerDoc()->GetWindowContext() : nullptr;
 
   return InvokeDragSession(node, aPrincipal, aCsp, aCookieJarSettings,
                            aTransferableArray, aActionType,
@@ -547,6 +589,7 @@ nsBaseDragService::EndDragSession(bool aDoneDrag, uint32_t aKeyModifiers) {
 
   mDoingDrag = false;
   mSessionIsSynthesizedForTests = false;
+  mIsDraggingTextInTextControl = false;
   mEffectAllowedForTests = nsIDragService::DRAGDROP_ACTION_UNINITIALIZED;
   mEndingSession = false;
   mCanDrop = false;
@@ -554,6 +597,7 @@ nsBaseDragService::EndDragSession(bool aDoneDrag, uint32_t aKeyModifiers) {
   // release the source we've been holding on to.
   mSourceDocument = nullptr;
   mSourceNode = nullptr;
+  mSourceWindowContext = nullptr;
   mTriggeringPrincipal = nullptr;
   mCsp = nullptr;
   mSelection = nullptr;
@@ -724,9 +768,8 @@ nsresult nsBaseDragService::DrawDrag(nsINode* aDOMNode,
       // otherwise, there was no region so just set the rectangle to
       // the size of the primary frame of the content.
       nsCOMPtr<nsIContent> content = do_QueryInterface(dragNode);
-      nsIFrame* frame = content->GetPrimaryFrame();
-      if (frame) {
-        presLayoutRect = frame->GetRect();
+      if (nsIFrame* frame = content->GetPrimaryFrame()) {
+        presLayoutRect = frame->GetBoundingClientRect();
       }
     }
 

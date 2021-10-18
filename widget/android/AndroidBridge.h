@@ -32,7 +32,7 @@
 #include "mozilla/Types.h"
 #include "mozilla/gfx/Point.h"
 #include "mozilla/jni/Utils.h"
-#include "nsDataHashtable.h"
+#include "nsTHashMap.h"
 
 #include "Units.h"
 
@@ -56,7 +56,7 @@ class NetworkInformation;
 
 // The order and number of the members in this structure must correspond
 // to the attrsAppearance array in GeckoAppShell.getSystemColors()
-typedef struct AndroidSystemColors {
+struct AndroidSystemColors {
   nscolor textColorPrimary;
   nscolor textColorPrimaryInverse;
   nscolor textColorSecondary;
@@ -68,7 +68,8 @@ typedef struct AndroidSystemColors {
   nscolor colorBackground;
   nscolor panelColorForeground;
   nscolor panelColorBackground;
-} AndroidSystemColors;
+  nscolor colorAccent;
+};
 
 class AndroidBridge final {
  public:
@@ -92,9 +93,6 @@ class AndroidBridge final {
   static void DeconstructBridge();
 
   static AndroidBridge* Bridge() { return sBridge; }
-
-  void ContentDocumentChanged(mozIDOMWindowProxy* aDOMWindow);
-  bool IsContentDocumentDisplayed(mozIDOMWindowProxy* aDOMWindow);
 
   bool GetHandlersForURL(const nsAString& aURL,
                          nsIMutableArray* handlersArray = nullptr,
@@ -145,8 +143,6 @@ class AndroidBridge final {
   uint32_t GetScreenOrientation();
   uint16_t GetScreenAngle();
 
-  int GetAPIVersion() { return mAPIVersion; }
-
   nsresult GetProxyForURI(const nsACString& aSpec, const nsACString& aScheme,
                           const nsACString& aHost, const int32_t aPort,
                           nsACString& aResult);
@@ -176,29 +172,12 @@ class AndroidBridge final {
                                              nsAString& aPath);
 
  protected:
-  static nsDataHashtable<nsStringHashKey, nsString> sStoragePaths;
+  static nsTHashMap<nsStringHashKey, nsString> sStoragePaths;
 
   static AndroidBridge* sBridge;
 
   AndroidBridge();
   ~AndroidBridge();
-
-  int mAPIVersion;
-
-  // intput stream
-  jclass jReadableByteChannel;
-  jclass jChannels;
-  jmethodID jChannelCreate;
-  jmethodID jByteBufferRead;
-
-  jclass jInputStream;
-  jmethodID jClose;
-  jmethodID jAvailable;
-
-  jmethodID jCalculateLength;
-
-  // some convinient types to have around
-  jclass jStringClass;
 
   jni::Object::GlobalRef mMessageQueue;
   jfieldID mMessageQueueMessages;

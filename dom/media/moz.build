@@ -100,7 +100,7 @@ if CONFIG["MOZ_WEBRTC"]:
 
 XPIDL_SOURCES += [
     "nsIAudioDeviceInfo.idl",
-    "nsIDOMNavigatorUserMedia.idl",
+    "nsIMediaDevice.idl",
     "nsIMediaManager.idl",
 ]
 
@@ -184,7 +184,6 @@ EXPORTS += [
     "SeekTarget.h",
     "SelfRef.h",
     "SharedBuffer.h",
-    "ThreadPoolCOMListener.h",
     "TimeUnits.h",
     "Tracing.h",
     "VideoFrameContainer.h",
@@ -324,17 +323,6 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gonk":
         "AMRDemuxer.cpp",
     ]
 
-if CONFIG["OS_TARGET"] == "WINNT":
-    EXPORTS.mozilla.audio += [
-        "AudioNotificationReceiver.h",
-        "AudioNotificationSender.h",
-    ]
-    SOURCES += [
-        "AudioNotificationReceiver.cpp",
-        "AudioNotificationSender.cpp",
-        "ThreadPoolCOMListener.cpp",
-    ]
-
 # FIXME: if CONFIG['MOZ_B2G']:
 SOURCES += [
     "MediaPermissionGonk.cpp",
@@ -397,9 +385,13 @@ if CONFIG["COMPILE_ENVIRONMENT"]:
         "!audioipc_server_ffi_generated.h",
     ]
 
-    CbindgenHeader("audioipc_client_ffi_generated.h", inputs=["/media/audioipc/client"])
+    CbindgenHeader(
+        "audioipc_client_ffi_generated.h", inputs=["/third_party/rust/audioipc-client"]
+    )
 
-    CbindgenHeader("audioipc_server_ffi_generated.h", inputs=["/media/audioipc/server"])
+    CbindgenHeader(
+        "audioipc_server_ffi_generated.h", inputs=["/third_party/rust/audioipc-server"]
+    )
 
 include("/ipc/chromium/chromium-config.mozbuild")
 
@@ -411,5 +403,7 @@ if CONFIG["CC_TYPE"] in ("clang", "gcc"):
         "-Wno-error=attributes",
         "-Wno-error=shadow",
     ]
+
+CXXFLAGS += ["-Werror=switch"]
 
 FINAL_LIBRARY = "xul"

@@ -12,24 +12,23 @@ const HIGHLIGHTER_TYPE = "ShapesHighlighter";
 add_task(async function() {
   const env = await openInspectorForURL(TEST_URL);
   const helper = await getHighlighterHelperFor(HIGHLIGHTER_TYPE)(env);
-  const { testActor, inspector } = env;
+  const { inspector } = env;
   const view = selectRuleView(inspector);
   const highlighters = view.highlighters;
-  const config = { inspector, view, highlighters, testActor, helper };
+  const config = { inspector, view, highlighters, helper };
 
   await testPolygonIframeMovePoint(config);
 });
 
 async function testPolygonIframeMovePoint(config) {
-  const { inspector, view, testActor, helper } = config;
+  const { inspector, view, helper } = config;
   const selector = "#polygon";
   const property = "clip-path";
 
   info(`Turn on shapes highlighter for ${selector}`);
   // Get a reference to the highlighter's target node inside the iframe.
-  const highlightedNode = await getNodeFrontInFrame(
-    selector,
-    "#frame",
+  const highlightedNode = await getNodeFrontInFrames(
+    ["#frame", selector],
     inspector
   );
   // Select the nested node so toggling of the shapes highlighter works from the rule view
@@ -44,33 +43,55 @@ async function testPolygonIframeMovePoint(config) {
 
   info("Moving polygon point visible in iframe");
   // Iframe has 10px margin. Element in iframe is 800px by 800px. First point is at 0 0%
+  is(
+    await getClipPathPoint(highlightedNode, 0),
+    "0px 0%",
+    `First point is at 0 0%`
+  );
+
   await mouse.down(10, 10);
   await mouse.move(20, 20);
   await mouse.up();
-  await testActor.reflow();
+  await reflowContentPage();
   await onRuleViewChanged;
 
-  let computedStyle = await highlightedNode.inspectorFront.pageStyle.getComputed(
-    highlightedNode
+  // point moved from y 0 to 10px, 10/800 (iframe height) = 1,25%
+  is(
+    await getClipPathPoint(highlightedNode, 0),
+    "10px 1.25%",
+    `Point moved to 10px 1.25%`
   );
-  let definition = computedStyle["clip-path"].value;
-  ok(definition.includes("10px 1.25%"), "Point moved to 10px 1.25%");
 
   onRuleViewChanged = waitForNEvents(view, "ruleview-changed", 2);
 
-  info("Moving polygon point not visible in iframe");
+  info("Dragging mouse out of the iframe");
+  // Iframe has 10px margin. Element in iframe is 800px by 800px. Second point is at 100px 50%
+  is(
+    await getClipPathPoint(highlightedNode, 1),
+    "100px 50%",
+    `Second point is at 100px 50%`
+  );
+
   await mouse.down(110, 410);
-  await mouse.move(120, 420);
+  await mouse.move(120, 510);
   await mouse.up();
-  await testActor.reflow();
+  await reflowContentPage();
   await onRuleViewChanged;
 
-  computedStyle = await highlightedNode.inspectorFront.pageStyle.getComputed(
-    highlightedNode
+  // The point can't be moved out of the iframe boundary, so we can't really assert the
+  // y point here (as it depends on the horizontal scrollbar size + the shape control point size).
+  ok(
+    (await getClipPathPoint(highlightedNode, 1)).startsWith("110px"),
+    `Point moved to 110px`
   );
-  definition = computedStyle["clip-path"].value;
-  ok(definition.includes("110px 51.25%"), "Point moved to 110px 51.25%");
 
   info(`Turn off shapes highlighter for ${selector}`);
   await toggleShapesHighlighter(view, selector, property, false);
+}
+
+async function getClipPathPoint(node, pointIndex) {
+  const computedStyle = await node.inspectorFront.pageStyle.getComputed(node);
+  const definition = computedStyle["clip-path"].value;
+  const points = definition.replaceAll(/(^polygon\()|(\)$)/g, "").split(", ");
+  return points[pointIndex];
 }

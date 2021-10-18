@@ -9,8 +9,9 @@
 #include <algorithm>  // For std::stable_sort, std::min
 #include <utility>
 
-#include "js/ForOfIterator.h"  // For JS::ForOfIterator
 #include "jsapi.h"             // For most JSAPI
+#include "js/ForOfIterator.h"  // For JS::ForOfIterator
+#include "js/PropertyAndElement.h"  // JS_Enumerate, JS_GetProperty, JS_GetPropertyById
 #include "mozilla/ComputedStyle.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/RangedArray.h"
@@ -232,7 +233,8 @@ nsTArray<Keyframe> KeyframeUtils::GetKeyframesFromObject(
   if (!dom::Document::AreWebAnimationsImplicitKeyframesEnabled(aCx, nullptr) &&
       HasImplicitKeyframeValues(keyframes, aDocument)) {
     keyframes.Clear();
-    aRv.Throw(NS_ERROR_DOM_ANIM_MISSING_PROPS_ERR);
+    aRv.ThrowNotSupportedError(
+        "Animation to or from an underlying value is not yet supported");
   }
 
   return keyframes;
@@ -998,7 +1000,7 @@ static void GetKeyframeListFromPropertyIndexedKeyframe(
   }
 
   // Create a set of keyframes for each property.
-  nsClassHashtable<nsFloatHashKey, Keyframe> processedKeyframes;
+  nsTHashMap<nsFloatHashKey, Keyframe> processedKeyframes;
   for (const PropertyValuesPair& pair : propertyValuesPairs) {
     size_t count = pair.mValues.Length();
     if (count == 0) {
@@ -1010,7 +1012,8 @@ static void GetKeyframeListFromPropertyIndexedKeyframe(
     // but not if the pref for supporting implicit keyframes is disabled.
     if (!StaticPrefs::dom_animations_api_implicit_keyframes_enabled() &&
         count == 1) {
-      aRv.Throw(NS_ERROR_DOM_ANIM_MISSING_PROPS_ERR);
+      aRv.ThrowNotSupportedError(
+          "Animation to or from an underlying value is not yet supported");
       return;
     }
 
@@ -1021,9 +1024,9 @@ static void GetKeyframeListFromPropertyIndexedKeyframe(
       // For single-valued lists, the single value should be added to a
       // keyframe with offset 1.
       double offset = n ? i++ / double(n) : 1;
-      Keyframe* keyframe = processedKeyframes.LookupOrAdd(offset);
-      if (keyframe->mPropertyValues.IsEmpty()) {
-        keyframe->mComputedOffset = offset;
+      Keyframe& keyframe = processedKeyframes.LookupOrInsert(offset);
+      if (keyframe.mPropertyValues.IsEmpty()) {
+        keyframe.mComputedOffset = offset;
       }
 
       Maybe<PropertyValuePair> valuePair =
@@ -1031,14 +1034,15 @@ static void GetKeyframeListFromPropertyIndexedKeyframe(
       if (!valuePair) {
         continue;
       }
-      keyframe->mPropertyValues.AppendElement(std::move(valuePair.ref()));
+      keyframe.mPropertyValues.AppendElement(std::move(valuePair.ref()));
     }
   }
 
   aResult.SetCapacity(processedKeyframes.Count());
-  for (auto iter = processedKeyframes.Iter(); !iter.Done(); iter.Next()) {
-    aResult.AppendElement(std::move(*iter.UserData()));
-  }
+  std::transform(processedKeyframes.begin(), processedKeyframes.end(),
+                 MakeBackInserter(aResult), [](auto& entry) {
+                   return std::move(*entry.GetModifiableData());
+                 });
 
   aResult.Sort(ComputedOffsetComparator());
 

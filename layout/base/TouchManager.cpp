@@ -19,22 +19,20 @@ using namespace mozilla::dom;
 
 namespace mozilla {
 
-nsDataHashtable<nsUint32HashKey, TouchManager::TouchInfo>*
+StaticAutoPtr<nsTHashMap<nsUint32HashKey, TouchManager::TouchInfo>>
     TouchManager::sCaptureTouchList;
 layers::LayersId TouchManager::sCaptureTouchLayersId;
 
 /*static*/
 void TouchManager::InitializeStatics() {
   NS_ASSERTION(!sCaptureTouchList, "InitializeStatics called multiple times!");
-  sCaptureTouchList =
-      new nsDataHashtable<nsUint32HashKey, TouchManager::TouchInfo>;
+  sCaptureTouchList = new nsTHashMap<nsUint32HashKey, TouchManager::TouchInfo>;
   sCaptureTouchLayersId = layers::LayersId{0};
 }
 
 /*static*/
 void TouchManager::ReleaseStatics() {
   NS_ASSERTION(sCaptureTouchList, "ReleaseStatics called without Initialize!");
-  delete sCaptureTouchList;
   sCaptureTouchList = nullptr;
 }
 
@@ -89,8 +87,8 @@ void TouchManager::EvictTouchPoint(RefPtr<Touch>& aTouch,
 /*static*/
 void TouchManager::AppendToTouchList(
     WidgetTouchEvent::TouchArrayBase* aTouchList) {
-  for (auto iter = sCaptureTouchList->Iter(); !iter.Done(); iter.Next()) {
-    RefPtr<Touch>& touch = iter.Data().mTouch;
+  for (const auto& data : sCaptureTouchList->Values()) {
+    const RefPtr<Touch>& touch = data.mTouch;
     touch->mChanged = false;
     aTouchList->AppendElement(touch);
   }
@@ -252,7 +250,7 @@ bool TouchManager::PreHandleEvent(WidgetEvent* aEvent, nsEventStatus* aStatus,
         touch->mMessage = aEvent->mMessage;
         TouchInfo info = {
             touch, GetNonAnonymousAncestor(touch->mOriginalTarget), true};
-        sCaptureTouchList->Put(id, info);
+        sCaptureTouchList->InsertOrUpdate(id, info);
         if (touch->mIsTouchEventSuppressed) {
           // We're going to dispatch touch event. Remove this touch instance if
           // it is suppressed.
@@ -301,7 +299,7 @@ bool TouchManager::PreHandleEvent(WidgetEvent* aEvent, nsEventStatus* aStatus,
 
         info.mTouch = touch;
         // info.mNonAnonymousTarget is still valid from above
-        sCaptureTouchList->Put(id, info);
+        sCaptureTouchList->InsertOrUpdate(id, info);
         // if we're moving from touchstart to touchmove for this touch
         // we allow preventDefault to prevent mouse events
         if (oldTouch->mMessage != touch->mMessage) {
@@ -390,7 +388,7 @@ bool TouchManager::PreHandleEvent(WidgetEvent* aEvent, nsEventStatus* aStatus,
           continue;
         }
         info.mConvertToPointer = false;
-        sCaptureTouchList->Put(id, info);
+        sCaptureTouchList->InsertOrUpdate(id, info);
       }
       break;
     }
@@ -406,8 +404,8 @@ already_AddRefed<nsIContent> TouchManager::GetAnyCapturedTouchTarget() {
   if (sCaptureTouchList->Count() == 0) {
     return result.forget();
   }
-  for (auto iter = sCaptureTouchList->Iter(); !iter.Done(); iter.Next()) {
-    RefPtr<Touch>& touch = iter.Data().mTouch;
+  for (const auto& data : sCaptureTouchList->Values()) {
+    const RefPtr<Touch>& touch = data.mTouch;
     if (touch) {
       EventTarget* target = touch->GetTarget();
       if (target) {

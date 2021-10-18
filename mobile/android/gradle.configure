@@ -98,11 +98,11 @@ def gradle_android_intermediates_folder(build_config):
     )
     buildType = uncapitalize(build_config.geckoview.variant.buildType)
 
-    return "gradle/build/mobile/android/geckoview/intermediates/javac/{}{}/compile{}{}JavaWithJavac/classes".format(
-        productFlavor,
-        capitalize(buildType),
-        capitalize(productFlavor),
-        capitalize(buildType),
+    return (
+        "gradle/build/mobile/android/geckoview/intermediates/javac/{}{}/classes".format(
+            productFlavor,
+            capitalize(buildType),
+        )
     )
 
 
@@ -211,6 +211,30 @@ def gradle_android_api_lint_tasks(build_config):
 
 
 set_config("GRADLE_ANDROID_API_LINT_TASKS", gradle_android_api_lint_tasks)
+
+
+set_config("GRADLE_ANDROID_FORMAT_LINT_FIX_TASKS", ["spotlessJavaApply"])
+
+
+@dependable
+def gradle_android_format_lint_check_tasks():
+    return ["spotlessJavaCheck"]
+
+
+set_config(
+    "GRADLE_ANDROID_FORMAT_LINT_CHECK_TASKS", gradle_android_format_lint_check_tasks
+)
+
+set_config(
+    "GRADLE_ANDROID_FORMAT_LINT_FOLDERS",
+    [
+        "mobile/android/annotations",
+        "mobile/android/geckoview",
+        "mobile/android/geckoview_example",
+        "mobile/android/examples/messaging_example",
+        "mobile/android/examples/port_messaging_example",
+    ],
+)
 
 
 @depends(gradle_android_build_config)
@@ -400,6 +424,7 @@ def gradle_android_dependencies():
 
 @depends(
     gradle_android_api_lint_tasks,
+    gradle_android_format_lint_check_tasks,
     gradle_android_checkstyle_tasks,
     gradle_android_dependencies,
 )
@@ -430,13 +455,14 @@ def gradle_flags(value):
 set_config("GRADLE_FLAGS", gradle_flags)
 
 # Automation will set this to (file:///path/to/local, ...) via the mozconfig.
-# Local developer default is (jcenter, maven.google.com).
+# Local developer default is (maven.google.com).
 option(
     env="GRADLE_MAVEN_REPOSITORIES",
     nargs="+",
     default=(
+        "https://maven.mozilla.org/maven2/",
         "https://maven.google.com/",
-        "https://jcenter.bintray.com/",
+        "https://repo.maven.apache.org/maven2/",
         "https://plugins.gradle.org/m2/",
     ),
     help="Comma-separated URLs of Maven repositories containing Gradle dependencies.",

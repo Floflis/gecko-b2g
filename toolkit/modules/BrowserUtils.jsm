@@ -54,42 +54,6 @@ var BrowserUtils = {
     );
   },
 
-  onBeforeLinkTraversal(originalTarget, linkURI, linkNode, isAppTab) {
-    // Don't modify non-default targets or targets that aren't in top-level app
-    // tab docshells (isAppTab will be false for app tab subframes).
-    if (originalTarget != "" || !isAppTab) {
-      return originalTarget;
-    }
-
-    // External links from within app tabs should always open in new tabs
-    // instead of replacing the app tab's page (Bug 575561)
-    let linkHost;
-    let docHost;
-    try {
-      linkHost = linkURI.host;
-      docHost = linkNode.ownerDocument.documentURIObject.host;
-    } catch (e) {
-      // nsIURI.host can throw for non-nsStandardURL nsIURIs.
-      // If we fail to get either host, just return originalTarget.
-      return originalTarget;
-    }
-
-    if (docHost == linkHost) {
-      return originalTarget;
-    }
-
-    // Special case: ignore "www" prefix if it is part of host string
-    let [longHost, shortHost] =
-      linkHost.length > docHost.length
-        ? [linkHost, docHost]
-        : [docHost, linkHost];
-    if (longHost == "www." + shortHost) {
-      return originalTarget;
-    }
-
-    return "_blank";
-  },
-
   /**
    * Returns true if |mimeType| is text-based, or false otherwise.
    *
@@ -154,6 +118,92 @@ var BrowserUtils = {
       };
       Services.obs.addObserver(observer, topic);
     });
+  },
+
+  isShareableURL(url) {
+    if (!url) {
+      return false;
+    }
+
+    // Disallow sharing URLs with more than 65535 characters.
+    if (url.spec.length > 65535) {
+      return false;
+    }
+
+    let scheme = url.scheme;
+
+    return !(
+      "about" == scheme ||
+      "resource" == scheme ||
+      "chrome" == scheme ||
+      "blob" == scheme ||
+      "moz-extension" == scheme
+    );
+  },
+
+  /**
+   * Extracts linkNode and href for a click event.
+   *
+   * @param event
+   *        The click event.
+   * @return [href, linkNode, linkPrincipal].
+   *
+   * @note linkNode will be null if the click wasn't on an anchor
+   *       element. This includes SVG links, because callers expect |node|
+   *       to behave like an <a> element, which SVG links (XLink) don't.
+   */
+  hrefAndLinkNodeForClickEvent(event) {
+    // We should get a window off the event, and bail if not:
+    let content = event.view || event.composedTarget?.ownerGlobal;
+    if (!content?.HTMLAnchorElement) {
+      return null;
+    }
+    function isHTMLLink(aNode) {
+      // Be consistent with what nsContextMenu.js does.
+      return (
+        (aNode instanceof content.HTMLAnchorElement && aNode.href) ||
+        (aNode instanceof content.HTMLAreaElement && aNode.href) ||
+        aNode instanceof content.HTMLLinkElement
+      );
+    }
+
+    let node = event.composedTarget;
+    while (node && !isHTMLLink(node)) {
+      node = node.flattenedTreeParentNode;
+    }
+
+    if (node) {
+      return [node.href, node, node.ownerDocument.nodePrincipal];
+    }
+
+    // If there is no linkNode, try simple XLink.
+    let href, baseURI;
+    node = event.composedTarget;
+    while (node && !href) {
+      if (
+        node.nodeType == content.Node.ELEMENT_NODE &&
+        (node.localName == "a" ||
+          node.namespaceURI == "http://www.w3.org/1998/Math/MathML")
+      ) {
+        href =
+          node.getAttribute("href") ||
+          node.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+        if (href) {
+          baseURI = node.ownerDocument.baseURIObject;
+          break;
+        }
+      }
+      node = node.flattenedTreeParentNode;
+    }
+
+    // In case of XLink, we don't return the node we got href from since
+    // callers expect <a>-like elements.
+    // Note: makeURI() will throw if aUri is not a valid URI.
+    return [
+      href ? Services.io.newURI(href, null, baseURI).spec : null,
+      null,
+      node && node.ownerDocument.nodePrincipal,
+    ];
   },
 };
 

@@ -122,9 +122,9 @@ mozilla::ipc::IPCResult RemotePrintJobParent::RecvProcessPage(
     return IPC_OK();
   }
 
-  nsTHashtable<nsUint64HashKey> deps;
+  nsTHashSet<uint64_t> deps;
   for (auto i : aDeps) {
-    deps.PutEntry(i);
+    deps.Insert(i);
   }
 
   gfx::CrossProcessPaint::Start(std::move(deps))
@@ -162,11 +162,13 @@ nsresult RemotePrintJobParent::PrintPage(
     return rv;
   }
   if (aFragments) {
-    mPrintTranslator->SetDependentSurfaces(std::move(*aFragments));
+    mPrintTranslator->SetDependentSurfaces(aFragments);
   }
   if (!mPrintTranslator->TranslateRecording(aRecording)) {
+    mPrintTranslator->SetDependentSurfaces(nullptr);
     return NS_ERROR_FAILURE;
   }
+  mPrintTranslator->SetDependentSurfaces(nullptr);
 
   rv = mPrintDeviceContext->EndPage();
   if (NS_WARN_IF(NS_FAILED(rv))) {
